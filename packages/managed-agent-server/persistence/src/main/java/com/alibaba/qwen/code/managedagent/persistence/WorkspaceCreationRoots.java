@@ -83,9 +83,9 @@ final class WorkspaceCreationRoots {
         List<Map<String, Object>> rows = jdbc.query(
                 "SELECT receipt_key, tenant_id, scope_kind, scope_id, idempotency_key, state,"
                         + " result_json FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
-                        + " AND tenant_key = ?",
+                        + " AND tenant_id = ?",
                 (row, index) -> ManagedSchemaRows.read(row), key,
-                ReceiptNamespace.WORKSPACE_CREATE.name(), ManagedSchemaKeys.key(tenant));
+                ReceiptNamespace.WORKSPACE_CREATE.name(), tenant);
         if (rows.size() != 1) {
             return null;
         }

@@ -125,7 +125,7 @@ public final class ManagedSessionStoreModels {
 
     public record AuthorizeLifecycleRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             String kind) {
         public AuthorizeLifecycleRequest(String workspaceId, String writerId, long writerGeneration) {
@@ -135,14 +135,14 @@ public final class ManagedSessionStoreModels {
 
     public record AcquireWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
                     Long leaseMillis) {
     }
 
     public record RenewWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
                     Long leaseMillis,
@@ -152,7 +152,7 @@ public final class ManagedSessionStoreModels {
         }
     }
 
-    public record ActivationRenewal(@NotBlank @Size(max = 512) String activationId,
+    public record ActivationRenewal(@NotBlank @Size(max = 128) String activationId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long epoch,
             @Min(1) @Max(MAX_SAFE_COUNTER) long renewalSeq,
             @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS) long leaseDurationMs) {
@@ -162,7 +162,7 @@ public final class ManagedSessionStoreModels {
     }
 
     /** A recoverable Action wait certified by a clean suspension. */
-    public record ParkedTurn(@NotBlank @Size(max = 144) String promptId,
+    public record ParkedTurn(@NotBlank @Size(max = 64) String promptId,
             @Min(0) @Max(MAX_SAFE_COUNTER) long wakeAt,
             @Min(0) @Max(MAX_SAFE_COUNTER) Long approvalRevision) {
     }
@@ -193,7 +193,7 @@ public final class ManagedSessionStoreModels {
 
     public record SealWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @Valid WakeStamp wake) {
         public SealWriterRequest(String workspaceId, String writerId, long writerGeneration) {
@@ -207,7 +207,7 @@ public final class ManagedSessionStoreModels {
 
     public record QuiesceOwnershipRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
             @NotBlank @Size(max = 144) String instanceId,
@@ -216,13 +216,13 @@ public final class ManagedSessionStoreModels {
 
     public record ReleaseOwnershipRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @Min(1) @Max(MAX_SAFE_COUNTER) long journalRevision,
             @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
             @NotBlank @Size(max = 144) String instanceId,
             @NotBlank @Size(max = 144) String bootId,
-            @NotBlank @Size(max = 512) String operationId,
+            @NotBlank @Size(max = 128) String operationId,
             @NotNull @Valid OwnershipCommitProof commitProof) {
     }
 
@@ -283,7 +283,7 @@ public final class ManagedSessionStoreModels {
 
     public record BlockRecoveryRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotBlank @Pattern(regexp =
                     "BLOCKED_RESOURCE|BLOCKED_WORKSPACE|BLOCKED_EXECUTION")
@@ -309,7 +309,7 @@ public final class ManagedSessionStoreModels {
 
     public record PublishToolResultRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotBlank @Size(max = 512) String resourceId,
             @NotBlank @Size(max = 512) String kind,
@@ -325,7 +325,7 @@ public final class ManagedSessionStoreModels {
 
     public record CommitTransactionRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @Min(0) @Max(MAX_SAFE_COUNTER) long expectedJournalRevision,
             @Min(0) @Max(MAX_SAFE_COUNTER) long expectedCommittedSequence,

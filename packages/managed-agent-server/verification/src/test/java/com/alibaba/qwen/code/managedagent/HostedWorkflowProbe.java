@@ -118,14 +118,11 @@ final class HostedWorkflowProbe implements AutoCloseable {
         String resourceId = record.required("inputRef")
                 .required("resourceId").asText();
         var envelopeRows = jdbc.queryForList(
-                "SELECT resource_key,"
-                        + " CONVERT(inline_bytes USING utf8mb4) AS body FROM"
+                "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
                         + " ma_resource WHERE tenant_id = ? AND session_id"
                         + " = ? AND resource_id = ?", tenant, sessionId,
                 resourceId);
         assertThat(envelopeRows).as("the launch envelope").hasSize(1);
-        String resourceKey = envelopeRows.getFirst().get("resource_key")
-                .toString();
         ObjectNode envelope = (ObjectNode) JSON.readTree(
                 envelopeRows.getFirst().get("body").toString());
         String script = envelope.required("script").asText();
@@ -160,15 +157,15 @@ final class HostedWorkflowProbe implements AutoCloseable {
                 MessageDigest.getInstance("SHA-256").digest(bytes));
         int updated = jdbc.update(
                 "UPDATE ma_resource SET inline_bytes = ?, byte_length = ?,"
-                        + " sha256 = ? WHERE resource_key = ? AND tenant_id = ?"
+                        + " sha256 = ? WHERE tenant_id = ?"
                         + " AND session_id = ? AND resource_id = ?", bytes,
-                bytes.length, shaAfter, resourceKey, tenant, sessionId,
+                bytes.length, shaAfter, tenant, sessionId,
                 resourceId);
         assertThat(updated).as("the envelope row updated").isEqualTo(1);
         var reread = jdbc.queryForList(
                 "SELECT sha256, byte_length FROM ma_resource WHERE"
-                        + " resource_key = ? AND tenant_id = ? AND session_id"
-                        + " = ? AND resource_id = ?", resourceKey, tenant,
+                        + " tenant_id = ? AND session_id"
+                        + " = ? AND resource_id = ?", tenant,
                 sessionId, resourceId);
         assertThat(reread.getFirst().get("sha256").toString())
                 .as("the tamper landed").isEqualTo(shaAfter);

@@ -58,7 +58,8 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
                         + " OR EXISTS(SELECT 1 FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
                         + " AND record_kind = 'DOMAIN' AND runtime_state IS NOT NULL)"
                         + " OR EXISTS(SELECT 1 FROM ma_resource_ref r JOIN ma_resource m"
-                        + " ON m.resource_key = r.resource_key WHERE r.tenant_id = ? AND r.session_id = ?"
+                        + " ON m.tenant_id = r.tenant_id AND m.session_id = r.session_id"
+                        + " AND m.resource_id = r.resource_id WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.owner_kind = 'HOSTED_CLEANUP' AND m.state = 'REFERENCED')",
                 Boolean.class, tenantId, sessionId, tenantId, sessionId, tenantId, sessionId));
     }

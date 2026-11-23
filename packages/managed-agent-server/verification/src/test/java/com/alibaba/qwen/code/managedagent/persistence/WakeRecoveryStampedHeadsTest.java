@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -140,12 +141,12 @@ class WakeRecoveryStampedHeadsTest {
                     .replace("\"source\":\"loop\"", source)
                     .getBytes(StandardCharsets.UTF_8);
             jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                            + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence,"
+                            + " command_ref, transaction_id, operation, command_id, content_digest, first_sequence,"
                             + " last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                             + " record_encoding, record_bytes, byte_length, record_digest, gmt_create)"
                             + " VALUES ('tenant', 'workspace', ?, ?, ?, ?, 'fixture', ?, ?, ?, ?, ?, 1, 'writer', ?,"
                             + " 0, 'identity', ?, ?, ?, 1)",
-                    session, row.get("journal_revision"), row.get("command_key_hash"), row.get("transaction_id"),
+                    session, row.get("journal_revision"), row.get("command_ref"), row.get("transaction_id"),
                     row.get("command_id"), row.get("content_digest"), row.get("first_sequence"),
                     row.get("last_sequence"), row.get("event_count"), "b".repeat(64), bytes, bytes.length,
                     DigestUtils.sha256Hex(bytes));
@@ -175,12 +176,12 @@ class WakeRecoveryStampedHeadsTest {
         byte[] bytes = records.toString().getBytes(StandardCharsets.UTF_8);
         revision++;
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                        + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence,"
+                        + " command_ref, transaction_id, operation, command_id, content_digest, first_sequence,"
                         + " last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                         + " record_encoding, record_bytes, byte_length, record_digest, gmt_create)"
                         + " VALUES ('tenant', 'workspace', 'session', ?, ?, ?, 'fixture', ?, ?, ?, ?, ?, 1, 'writer', ?,"
                         + " 0, 'identity', ?, ?, ?, 1)",
-                revision, DigestUtils.sha256Hex("key-" + revision), "tx-" + revision, "command-" + revision,
+                revision, ManagedIdentityRefs.commandRef("fixture", "command-" + revision), "tx-" + revision, "command-" + revision,
                 "a".repeat(64), firstSequence, sequence, events.length, "b".repeat(64), bytes, bytes.length,
                 DigestUtils.sha256Hex(bytes));
         jdbc.update("UPDATE ma_session_head SET journal_revision = ?, committed_sequence = ?", revision, sequence);

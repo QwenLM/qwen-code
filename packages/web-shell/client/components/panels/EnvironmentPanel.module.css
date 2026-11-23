@@ -19,7 +19,10 @@
   right: 12px;
   z-index: 30;
   width: min(320px, calc(100% - 24px));
-  max-height: calc(100% - 24px);
+  max-height: max(
+    0px,
+    calc(100% - 24px - var(--web-shell-environment-panel-bottom-inset, 0px))
+  );
   margin: 0;
 }
 
