@@ -391,6 +391,18 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'no-edit',
       'inert-edit',
       'hidden-empty',
+      'unacknowledged',
+      'save-failed',
+      'save-unavailable',
+      'stale-acknowledgement',
+      'late-acknowledgement',
+      'hidden-acknowledgement',
+      'draft-only-first-add',
+      'false-save-first-add',
+      'delayed-undo-save',
+      'undo-not-saved',
+      'cold-history-loss',
+      'shared-card-state',
     ] as const)(
       'checks checklist progress and undo persistence: %s',
       async (mode) => {
@@ -402,10 +414,22 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             <input id="new-item"><select id="filter"><option value="all">All</option><option value="open">Open</option><option value="done">Done</option></select>
             <button id="add">Add</button><button id="undo">Undo</button><p id="empty" ${mode === 'hidden-empty' ? 'style="display:none"' : ''}>Empty</p><ul id="items"></ul>
             <script>
-              const key = 'checklist-' + new URL(location.href).searchParams.get('session');
+              const mode = ${JSON.stringify(mode)};
+              const session = new URL(location.href).searchParams.get('session');
+              const key = 'checklist-' + (mode === 'shared-card-state' ? 'fixture-card' : session);
               const saved = JSON.parse(localStorage.getItem(key) || 'null');
+              const bar = frameElement.parentElement.querySelector('[role="status"]');
+              const report = status => {
+                bar.dataset.generatedUiSave = status;
+                bar.textContent = status;
+              };
+              if (mode === 'save-unavailable') report('unavailable');
+              if (mode === 'stale-acknowledgement' && !saved) report('saved');
               let items = saved?.items || [];
-              let history = saved?.history || [];
+              let history = mode === 'cold-history-loss' && !sessionStorage.getItem('checklist-mounted')
+                ? [] : saved?.history || [];
+              sessionStorage.setItem('checklist-mounted', '1');
+              let pendingRenameReceipt = false;
               const byId = id => document.getElementById(id);
               const snapshot = () => JSON.parse(JSON.stringify(items));
               function applyFilter() {
@@ -431,28 +455,73 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   if (${JSON.stringify(mode)} === 'no-edit') byId(slot + '-text').textContent = item.text;
                   else byId(slot + '-text').value = item.text;
                   if (${JSON.stringify(mode)} !== 'inert-edit') {
-                    byId(slot + '-text').onchange = event => { history.push(snapshot()); item.text = event.target.value; render(); };
+                    byId(slot + '-text').onchange = event => { history.push(snapshot()); item.text = event.target.value; commit(); };
                   }
                   byId(slot + '-check').checked = item.done;
-                  byId(slot + '-check').onchange = event => { history.push(snapshot()); item.done = event.target.checked; render(); };
-                  byId(slot + '-delete').onclick = () => { history.push(snapshot()); items.splice(index, 1); render(); };
+                  byId(slot + '-check').onchange = event => { history.push(snapshot()); item.done = event.target.checked; commit(); };
+                  byId(slot + '-delete').onclick = () => { history.push(snapshot()); items.splice(index, 1); commit(); };
                 });
                 applyFilter();
-                localStorage.setItem(key, JSON.stringify({
-                  items: ${JSON.stringify(mode)} === 'progress-loss' ? items.map(item => ({ ...item, done: false })) : items,
-                  history: ${JSON.stringify(mode)} === 'history-loss' ? [] : history,
-                }));
               }
+              function commit(delay = 0) {
+                render();
+                if (mode === 'save-unavailable') return;
+                if (mode === 'hidden-acknowledgement') bar.hidden = !saved && items.length === 1;
+                const announce = mode !== 'unacknowledged' &&
+                  ((mode !== 'stale-acknowledgement' && mode !== 'late-acknowledgement') || saved);
+                const json = JSON.stringify({
+                  items: mode === 'progress-loss' ? items.map(item => ({ ...item, done: false })) : items,
+                  history: mode === 'history-loss' ? [] : history,
+                });
+                if (announce) report('saving');
+                setTimeout(() => {
+                  localStorage.setItem(key, json);
+                  if (announce) report(mode === 'save-failed' ? 'failed' : 'saved');
+                }, delay);
+                if (mode === 'late-acknowledgement' && !saved &&
+                    items.some(item => item.text === 'Agenda (edited)')) {
+                  if (!items.some(item => item.text === 'Notes' && item.done)) {
+                    pendingRenameReceipt = true;
+                  } else if (pendingRenameReceipt) {
+                    // The rename's receipt lands during the final check.
+                    pendingRenameReceipt = false;
+                    report('saving');
+                    setTimeout(() => report('saved'), 150);
+                  }
+                }
+              }
+              byId('new-item').onchange = event => {
+                if (mode === 'draft-only-first-add' && !items.length && event.target.value) {
+                  localStorage.setItem(key, JSON.stringify({ items, history, draft: event.target.value }));
+                  report('saved');
+                }
+              };
               byId('add').onclick = () => {
                 if (${JSON.stringify(mode)} === 'inert-add') return;
-                history.push(snapshot()); items.push({ text: byId('new-item').value, done: false }); byId('new-item').value = ''; render();
+                const first = !items.length;
+                history.push(snapshot());
+                items.push({ text: byId('new-item').value, done: false });
+                byId('new-item').value = '';
+                if (first && (mode === 'draft-only-first-add' || mode === 'false-save-first-add')) {
+                  render();
+                  if (mode === 'false-save-first-add') report('saved');
+                } else commit();
               };
               byId('filter').onchange = applyFilter;
-              byId('undo').onclick = () => { if (history.length) items = history.pop(); render(); };
+              byId('undo').onclick = () => {
+                if (!history.length) return;
+                items = history.pop();
+                if (saved && mode === 'undo-not-saved') render();
+                else commit(saved && mode === 'delayed-undo-save' ? 2500 : 0);
+              };
               render();
             </script>`;
           await context.route('http://acceptance.test/**', async (route) => {
             const url = new URL(route.request().url());
+            if (url.pathname.endsWith('/generated-ui/state/fixture-card')) {
+              await route.fulfill({ json: null });
+              return;
+            }
             await route.fulfill({
               contentType: 'text/html',
               body:
@@ -463,14 +532,15 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                       if (supplied) sessionStorage.setItem('daemon-token', supplied);
                       history.replaceState(null, '', location.pathname + location.search);
                       if (sessionStorage.getItem('daemon-token') === ${JSON.stringify(token)}) {
-                        document.body.insertAdjacentHTML('beforeend', '<iframe name="view" src="/view' + location.search + '"></iframe>');
+                        const session = location.pathname.split('/').pop();
+                        void fetch(location.pathname + '/generated-ui/state/fixture-card');
+                        document.body.insertAdjacentHTML('beforeend', '<div data-testid="mcp-app"><span role="status"></span><iframe name="view" src="/view?session=' + session + '"></iframe></div>');
                       }
                     </script></body>`,
             });
           });
           let starts = 0;
-          let checkedBeforeReload = false;
-          let reopenedAuthenticated = false;
+          let checkedBeforeReload: boolean | undefined;
           const newPage = context.newPage.bind(context);
           vi.spyOn(context, 'newPage').mockImplementation(async () => {
             const reopened = await newPage();
@@ -478,7 +548,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             vi.spyOn(reopened, 'goto').mockImplementation(
               async (url, options) => {
                 const response = await goto(url, options);
-                reopenedAuthenticated =
+                const reopenedAuthenticated =
                   (await reopened.evaluate(() =>
                     sessionStorage.getItem('daemon-token'),
                   )) === token;
@@ -491,20 +561,33 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           });
           const reload = page.reload.bind(page);
           vi.spyOn(page, 'reload').mockImplementation(async (options) => {
-            const card = await waitForCardOn(page, 0);
-            checkedBeforeReload = await card.view
-              .locator('#item-2-check')
-              .isChecked();
+            if (checkedBeforeReload === undefined) {
+              const card = await waitForCardOn(page, 0);
+              checkedBeforeReload =
+                (await card.view.locator('[id$="-check"]:checked').count()) ===
+                1;
+            }
             return reload(options);
+          });
+          const branchSession = vi.fn(async (source: string) => {
+            const sessionId = String(++starts);
+            await page.evaluate(
+              ([sourceId, branchId]) => {
+                const saved = localStorage.getItem('checklist-' + sourceId);
+                if (saved) localStorage.setItem('checklist-' + branchId, saved);
+              },
+              [source, sessionId],
+            );
+            return { sessionId };
           });
           const env = {
             page,
             context,
             cardTimeoutMs: 10_000,
-            daemon: { token },
+            daemon: { token, client: { branchSession } },
             startSession: async () => {
               await page.goto(
-                `http://acceptance.test/?session=${++starts}#token=${token}`,
+                `http://acceptance.test/session/${++starts}#token=${token}`,
               );
             },
             waitForCard: (index: number) => waitForCardOn(page, index),
@@ -529,6 +612,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               'persists-after-reload',
               'persists-after-reopen',
               'repeated-undo',
+              'save-acknowledged',
             ].map((id) => `checklist.${id}`),
           );
           // The reopened tab stays open while it is read, then is closed.
@@ -543,28 +627,59 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             ]) {
               expect(status(id)).toBe('not-applicable');
             }
+            // Nothing persisted and the host showed no outcome.
+            expect(status('save-acknowledged')).toBe('not-applicable');
             return;
           }
           expect(checkedBeforeReload).toBe(true);
-          expect(reopenedAuthenticated).toBe(true);
-          for (const id of ['persists-after-reload', 'persists-after-reopen']) {
-            expect(status(id)).toBe(
-              mode === 'progress-loss' || mode === 'history-loss'
+          const restoresAfterReload =
+            mode !== 'progress-loss' &&
+            mode !== 'history-loss' &&
+            mode !== 'save-unavailable';
+          const persistedUndo =
+            restoresAfterReload && mode !== 'undo-not-saved';
+          expect(status('persists-after-reload')).toBe(
+            restoresAfterReload ? 'pass' : 'fail',
+          );
+          expect(status('persists-after-reopen')).toBe(
+            !restoresAfterReload
+              ? 'not-applicable'
+              : mode === 'undo-not-saved' || mode === 'cold-history-loss'
                 ? 'fail'
                 : 'pass',
-            );
-          }
+          );
           for (const id of [
             'add',
             'check-and-filter',
             'delete',
             'repeated-undo',
-            'isolated-across-sessions',
           ]) {
             expect(status(id)).toBe('pass');
           }
+          expect(status('isolated-across-sessions')).toBe(
+            !persistedUndo
+              ? 'not-applicable'
+              : mode === 'shared-card-state'
+                ? 'fail'
+                : 'pass',
+          );
+          expect(branchSession.mock.calls).toEqual(
+            persistedUndo ? [['1']] : [],
+          );
           expect(status('edit')).toBe(
             mode === 'no-edit' || mode === 'inert-edit' ? 'fail' : 'pass',
+          );
+          expect(status('save-acknowledged')).toBe(
+            mode === 'unacknowledged' ||
+              mode === 'save-failed' ||
+              mode === 'save-unavailable' ||
+              mode === 'stale-acknowledgement' ||
+              mode === 'late-acknowledgement' ||
+              mode === 'hidden-acknowledgement' ||
+              mode === 'draft-only-first-add' ||
+              mode === 'false-save-first-add'
+              ? 'fail'
+              : 'pass',
           );
         } finally {
           await context.close();
