@@ -2912,6 +2912,30 @@ describe('HTTP Managed Session store', () => {
     });
   });
 
+  it('carries a park certificate beside a background hold', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsBackgroundActionParking()).toBe(false);
+    server.backgroundActionParking = true;
+    await stores.assertWritable();
+    expect(stores.supportsBackgroundActionParking()).toBe(true);
+    await session.authority.close({
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+  });
+
   it('sends no wake stamp on a bare seal', async () => {
     const server = new FakeManagedSessionStore();
     server.wakeDispatch = true;
@@ -9776,6 +9800,7 @@ class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   wakeDispatch = false;
   actionParking = false;
+  backgroundActionParking = false;
   readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
   readonly commits: Array<Record<string, unknown>> = [];
@@ -10230,6 +10255,9 @@ class FakeManagedSessionStore {
       activationLeaseRenewal: this.activationLeaseRenewal,
       ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
       ...(this.actionParking ? { actionParking: true } : {}),
+      ...(this.backgroundActionParking
+        ? { backgroundActionParking: true }
+        : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),

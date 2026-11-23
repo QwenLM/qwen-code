@@ -300,6 +300,8 @@ const state = vi.hoisted(() => ({
   root: '',
   wakeDispatch: false,
   actionParking: false,
+  runtimeObservation: false,
+  backgroundActionParking: false,
   wakeStamps: [] as unknown[],
   assertWritable: vi.fn(async () => undefined),
   toolResults: null as DurableToolResultResourceStore | null,
@@ -497,6 +499,8 @@ vi.mock(
       return {
         supportsWakeDispatch: () => state.wakeDispatch,
         supportsActionParking: () => state.actionParking,
+        supportsRuntimeObservation: () => state.runtimeObservation,
+        supportsBackgroundActionParking: () => state.backgroundActionParking,
         journalStore,
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
@@ -48354,6 +48358,62 @@ describe('idle suspension', () => {
       state.approvalSelections.clear();
     }
   });
+
+  // S2 (#18149): a certified background hold seals beside the park
+  // certificate only when the control plane advertises the pair.
+  it.each([true, false])(
+    'parks an approval beside a certified background hold only when the pair is advertised (%s)',
+    async (advertised) => {
+      state.wakeDispatch = true;
+      state.actionParking = true;
+      state.runtimeObservation = true;
+      state.backgroundActionParking = advertised;
+      state.wakeStamps.length = 0;
+      state.approvalSelections.set(SESSION_ID, {
+        mode: 'default',
+        revision: 0,
+      });
+      const cleanup = await import('./hosted-turn-cleanup.js');
+      const certificate = vi
+        .spyOn(cleanup, 'backgroundSuspensionCertificate')
+        .mockResolvedValue(true);
+      mockApprovalTurn();
+      try {
+        const server = await app(true, undefined, true, {
+          idleSuspendMs: 150,
+        });
+        if (!advertised) {
+          const clientId = await promptAndIdleInApproval(server);
+          expect(certificate).toHaveBeenCalled();
+          expect(state.wakeStamps).toEqual([]);
+          expect(statsOf(server).cleanSuspensions).toBe(0);
+          expect(statsOf(server).eligibilityFailures).toBeGreaterThan(0);
+          await endResidentApproval(server, clientId);
+          return;
+        }
+        const clientId = await promptApproval(server);
+        await allowParkedApproval(server, clientId, {
+          driveRuntimeRecovery: true,
+        });
+        expect(state.wakeStamps[0]).toEqual({
+          pending: false,
+          dueAt: 0,
+          backgroundHeld: true,
+          parkedTurn: expect.objectContaining({ promptId: PROMPT_ID }),
+        });
+        expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(
+          1,
+        );
+      } finally {
+        certificate.mockRestore();
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.runtimeObservation = false;
+        state.backgroundActionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
 
   // P0 (#18149): decision delivery sends a Session with no Workspace a plain
   // load, which refuses an unsettled Turn. Such a Session never parks because
