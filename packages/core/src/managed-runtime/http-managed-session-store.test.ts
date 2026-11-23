@@ -2912,6 +2912,60 @@ describe('HTTP Managed Session store', () => {
     });
   });
 
+  it('carries a park certificate beside a background hold', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsBackgroundActionParking()).toBe(false);
+    server.backgroundActionParking = true;
+    await stores.assertWritable();
+    expect(stores.supportsBackgroundActionParking()).toBe(true);
+    await session.authority.close({
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+  });
+
+  it("carries a wake-started Turn's park certificate with its wake claim", async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsWakeActionParking()).toBe(false);
+    server.wakeActionParking = true;
+    await stores.assertWritable();
+    expect(stores.supportsWakeActionParking()).toBe(true);
+    await session.authority.close({
+      pending: true,
+      dueAt: 2345,
+      parkedTurn: {
+        promptId: 'monitor-1:notify:1',
+        wakeAt: 2345,
+        owner: 'wake',
+      },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: true,
+      dueAt: 2345,
+      parkedTurn: {
+        promptId: 'monitor-1:notify:1',
+        wakeAt: 2345,
+        owner: 'wake',
+      },
+    });
+  });
+
   it('sends no wake stamp on a bare seal', async () => {
     const server = new FakeManagedSessionStore();
     server.wakeDispatch = true;
@@ -9776,6 +9830,8 @@ class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   wakeDispatch = false;
   actionParking = false;
+  backgroundActionParking = false;
+  wakeActionParking = false;
   readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
   readonly commits: Array<Record<string, unknown>> = [];
@@ -10230,6 +10286,10 @@ class FakeManagedSessionStore {
       activationLeaseRenewal: this.activationLeaseRenewal,
       ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
       ...(this.actionParking ? { actionParking: true } : {}),
+      ...(this.backgroundActionParking
+        ? { backgroundActionParking: true }
+        : {}),
+      ...(this.wakeActionParking ? { wakeActionParking: true } : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),

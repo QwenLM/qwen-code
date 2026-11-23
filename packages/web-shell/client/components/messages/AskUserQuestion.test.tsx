@@ -1211,6 +1211,118 @@ describe('AskUserQuestion multiple questions', () => {
 });
 
 describe('AskUserQuestion multi-select', () => {
+  it('keeps selected option ids separate from custom text while retaining legacy answers', () => {
+    const structuredRequest: PermissionRequest = {
+      ...multiRequest,
+      rawInput: {
+        questions: [
+          {
+            id: 'notes',
+            question: 'Pick options',
+            header: 'Options',
+            options: [
+              { id: 'dry', label: 'Dry run', description: '' },
+              { id: 'verbose', label: 'Verbose', description: '' },
+            ],
+            multiSelect: true,
+          },
+        ],
+      },
+    };
+    render(undefined, structuredRequest);
+    act(() => optionButtons()[0]!.click());
+    act(() => optionButtons()[2]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Verbose');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => submitButton()!.click());
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      'req-multi',
+      'submit',
+      { '0': 'Dry run, Verbose' },
+      [
+        {
+          questionId: 'notes',
+          value: 'Dry run, Verbose',
+          optionIds: ['dry'],
+          text: 'Verbose',
+        },
+      ],
+    );
+  });
+
+  it('toggles same-labelled and id-colliding options independently', () => {
+    const duplicateLabels: PermissionRequest = {
+      ...multiRequest,
+      rawInput: {
+        questions: [
+          {
+            id: 'q',
+            question: 'Pick options',
+            header: 'Options',
+            options: [
+              { id: 'one', label: 'Same, label', description: '' },
+              { id: 'two', label: 'Same, label', description: 'duplicate' },
+              { id: 'three', label: 'one', description: 'id collision' },
+            ],
+            multiSelect: true,
+          },
+        ],
+      },
+    };
+    render(undefined, duplicateLabels);
+    const options = optionButtons();
+    act(() => options[0]!.click());
+    act(() => options[1]!.click());
+    act(() => options[2]!.click());
+    expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[2]!.getAttribute('aria-pressed')).toBe('true');
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledWith(
+      'req-multi',
+      'submit',
+      { '0': 'Same, label, Same, label, one' },
+      [
+        {
+          questionId: 'q',
+          value: 'Same, label, Same, label, one',
+          optionIds: ['one', 'two', 'three'],
+        },
+      ],
+    );
+  });
+
+  it('retains the legacy three-argument submission when identifiers are incomplete', () => {
+    const partialIds: PermissionRequest = {
+      ...request,
+      rawInput: {
+        questions: [
+          {
+            id: 'color',
+            question: 'Pick a color',
+            header: 'Color',
+            options: [
+              { id: 'red', label: 'Red', description: 'warm' },
+              { label: 'Blue', description: 'cool' },
+            ],
+          },
+        ],
+      },
+    };
+    render(undefined, partialIds);
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', {
+      '0': 'Red',
+    });
+  });
+
   it('describes moving when the empty custom row is focused', () => {
     render(undefined, multiRequest);
     pressKey(optionButtons()[0]!, 'End');
