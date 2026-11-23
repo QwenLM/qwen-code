@@ -459,6 +459,29 @@ describe('ci.yml disk-pressure evidence', () => {
   });
 });
 
+describe('ci.yml linter provisioning proxy', () => {
+  it('scopes the proxy to provisioning on the configured Hangzhou hosts', () => {
+    const proxy = step('Provision linters for real-binary tests').env
+      .HTTPS_PROXY;
+    assert.match(
+      proxy,
+      /runner\.environment == 'self-hosted' && runner\.os == 'Linux'/,
+    );
+    assert.deepEqual(
+      [
+        ...proxy.matchAll(/startsWith\(runner\.name, 'ecs-qwen-(hz\d+)-'\)/g),
+      ].map((match) => match[1]),
+      ['hz7', 'hz8', 'hz9', 'hz10', 'hz11'],
+    );
+    assert.match(proxy, /'http:\/\/127\.0\.0\.1:7890' \|\| ''/);
+    assert.equal(ciJobs.test.env?.HTTPS_PROXY, undefined);
+    assert.equal(
+      step('Run tests and generate reports').env.HTTPS_PROXY,
+      undefined,
+    );
+  });
+});
+
 // The disk floor admits a job on free bytes and inodes; CPU contention is a
 // different axis. The load gate is a backstop against an unrunnable host, not a
 // predictor of the RPC flake that turned green shards red on this pool

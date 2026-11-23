@@ -1314,6 +1314,16 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os != 'Windows' }}"
         timeout-minutes: 5
         continue-on-error: true
+        env:
+          # The host's Git proxy does not apply to the archive downloader.
+          HTTPS_PROXY: >-
+            ${{ runner.environment == 'self-hosted' && runner.os == 'Linux' &&
+            (startsWith(runner.name, 'ecs-qwen-hz7-') ||
+            startsWith(runner.name, 'ecs-qwen-hz8-') ||
+            startsWith(runner.name, 'ecs-qwen-hz9-') ||
+            startsWith(runner.name, 'ecs-qwen-hz10-') ||
+            startsWith(runner.name, 'ecs-qwen-hz11-')) &&
+            'http://127.0.0.1:7890' || '' }}
         run: |-
           node --input-type=module -e '
             import { execSync } from "node:child_process";
