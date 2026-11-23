@@ -1454,9 +1454,20 @@ export function hasUnsupportedShellSyntax(
     }
   }
   let quote = '';
-  // Only an empty token or a bare 1/2 can precede a supported operator.
-  let token: '' | '1' | '2' | undefined = '';
+  // A bare number is an IO descriptor; an ordinary word ends at the operator.
+  let token: '' | '1' | '2' | 'descriptor' | undefined = '';
+  let tokenStart = 0;
+  let tokenHasExpansion = false;
   let redirectTarget: 'pending' | 'word' | undefined;
+  let redirectStart: number | undefined;
+  let retainedFrom = 0;
+  const executableParts: string[] = [];
+  const finishRedirect = (end: number) => {
+    if (redirectStart === undefined) return;
+    executableParts.push(command.slice(retainedFrom, redirectStart));
+    retainedFrom = end;
+    redirectStart = undefined;
+  };
   const comments = new ShellCommentContext();
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
@@ -1469,8 +1480,11 @@ export function hasUnsupportedShellSyntax(
       quote === '"',
     );
     if (comment) {
+      if (redirectTarget === 'word') finishRedirect(index);
       index = comment.end;
       token = '';
+      tokenStart = index + 1;
+      tokenHasExpansion = false;
       if (redirectTarget === 'word') redirectTarget = undefined;
       continue;
     }
@@ -1493,6 +1507,9 @@ export function hasUnsupportedShellSyntax(
         (!quote && /[*?[\]{}]/.test(character)))
     ) {
       return true;
+    }
+    if (character === '$' && !ansiCQuote && quote !== "'" && quote !== "$'") {
+      tokenHasExpansion = true;
     }
     if (character === '\\' && quote !== "'") {
       token = undefined;
@@ -1524,31 +1541,76 @@ export function hasUnsupportedShellSyntax(
     } else if (character === "'" || character === '"') {
       quote = character;
       token = undefined;
-    } else if (/[ \t\n]/.test(character)) {
+    } else if (
+      /[ \t\n;|()]/.test(character) ||
+      (character === '&' && command[index + 1] !== '>')
+    ) {
       token = '';
-      if (redirectTarget === 'word') redirectTarget = undefined;
+      tokenStart = index + 1;
+      tokenHasExpansion = false;
+      if (redirectTarget === 'word') {
+        finishRedirect(index);
+        redirectTarget = undefined;
+      }
     } else if (
       character === '<' ||
       character === '>' ||
       (character === '&' && command[index + 1] === '>')
     ) {
       const supportedDescriptor =
-        character === '>' && (token === '1' || token === '2');
-      if (token !== '' && !supportedDescriptor) return true;
-      const operator = /^(?:&>>?|>>|>\||>&|>|<&|<)/.exec(
+        redirectTarget !== 'word' &&
+        character === '>' &&
+        (token === '1' || token === '2');
+      if (
+        (token !== '' &&
+          token !== undefined &&
+          !supportedDescriptor &&
+          redirectTarget !== 'word') ||
+        tokenHasExpansion ||
+        /^\{[^}]+\}$/.test(command.slice(tokenStart, index)) ||
+        command.startsWith('<<', index) ||
+        command.startsWith('<>', index) ||
+        // The operation tracker does not model every adjacent-word spelling.
+        // Keep explicit file restrictions conservative until it can do so.
+        (restrictFileEffects &&
+          (token === undefined || redirectTarget === 'word'))
+      )
+        return true;
+      finishRedirect(index);
+      redirectStart = index - (supportedDescriptor ? 1 : 0);
+      const operator = /^(?:&>>?|>>|>\||[<>]&-|>&|>|<&|<)/.exec(
         command.slice(index),
       )![0];
       index += operator.length - 1;
-      token = undefined;
-      redirectTarget = 'pending';
+      token = '';
+      tokenStart = index + 1;
+      tokenHasExpansion = false;
+      if (operator.endsWith('&-')) {
+        finishRedirect(index + 1);
+        redirectTarget = undefined;
+      } else {
+        redirectTarget = 'pending';
+      }
     } else {
       token =
-        token === '' && (character === '1' || character === '2')
-          ? character
+        token !== undefined && /[0-9]/.test(character)
+          ? token === '' && (character === '1' || character === '2')
+            ? character
+            : 'descriptor'
           : undefined;
     }
   }
-  return false;
+  finishRedirect(command.length);
+  if (executableParts.length === 0) return false;
+  executableParts.push(command.slice(retainedFrom));
+  // Keep raw argument syntax: an unrelated `{}` or expansion must not hide
+  // the executable behind a leading redirect from the unsupported-form veto.
+  return hasUnsupportedShellSyntax(
+    executableParts.join(' '),
+    depth,
+    restrictFileEffects,
+    homeUnknown,
+  );
 }
 
 function matchesCommandText(pattern: string, command: string): boolean {

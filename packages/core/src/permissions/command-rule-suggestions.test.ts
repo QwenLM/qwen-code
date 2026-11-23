@@ -372,6 +372,8 @@ describe.each([
     'git &>> /tmp/log push origin main',
     'npm install && git <&- push origin main',
     '! git > /tmp/log push origin main',
+    'git>/tmp/protected push origin main',
+    'git >file3>/tmp/protected push origin main',
   ])('reuses the rules offered for %s after reloading', async (command) => {
     const suggested = await suggestCommandRules(command, displayName);
     expect(suggested).not.toHaveProperty('hideAlwaysAllow');
@@ -391,10 +393,8 @@ describe.each([
     'git 3>/tmp/protected push origin main',
     'git 10>/tmp/protected push origin main',
     'git 01>/tmp/protected push origin main',
-    'git>/tmp/protected push origin main',
     'git 0</tmp/protected push origin main',
     'git <> /tmp/protected push origin main',
-    'git >file3>/tmp/protected push origin main',
     'git <<EOF push origin main\ndata\nEOF',
     'for f in *; do echo $f; done',
     'git > *.log push origin main',
@@ -417,14 +417,9 @@ describe.each([
   it.each([
     '3>/tmp/protected',
     '10>/tmp/protected',
-    'junk>/tmp/protected',
     '0</tmp/protected',
     '3</tmp/protected',
-    'junk</tmp/protected',
-    String.raw`junk\ >/tmp/protected`,
     String.raw`foo\ #not-comment 3>/tmp/protected`,
-    'junk\\\t>/tmp/protected',
-    String.raw`junk\ 2>/tmp/protected`,
     String.raw`$'a\'b' 3>/tmp/protected`,
     "$\\\n'a\\'b' 3>/tmp/protected",
     "$\\\n\\\n'a\\'b' 3>/tmp/protected",
@@ -459,6 +454,31 @@ describe.each([
           }),
         ).toBe('deny');
       }
+    },
+  );
+
+  it.each([
+    'junk>/tmp/protected',
+    'junk</tmp/protected',
+    String.raw`junk\ >/tmp/protected`,
+    'junk\\\t>/tmp/protected',
+    String.raw`junk\ 2>/tmp/protected`,
+    '>file3>/tmp/protected',
+    '2>&1>/tmp/protected',
+  ])(
+    'keeps file restrictions for an adjacent redirect after %s',
+    async (suffix) => {
+      const command = `git push origin main ${suffix}`;
+      const allow = [`${displayName}(git *)`];
+      expect(await makeManager(allow).evaluate({ toolName, command })).toBe(
+        'allow',
+      );
+      expect(
+        await makeManager(allow, [
+          'Edit(//tmp/protected)',
+          'Read(//tmp/protected)',
+        ]).evaluate({ toolName, command }),
+      ).not.toBe('allow');
     },
   );
 

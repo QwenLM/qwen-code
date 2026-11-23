@@ -84,7 +84,6 @@ describe('Bash permission syntax views', () => {
     'echo hi > pack?ge.json',
     'echo hi > pack[ae]ge.json',
     'echo hi > "$TARGET"',
-    "bash -c 'echo hi>/tmp/evil'",
   ])(
     'does not hide an unresolved redirect target or wrapper in %j',
     (command) => {
@@ -100,6 +99,11 @@ describe('Bash permission syntax views', () => {
     'echo hi > "pack?ge.json"',
     'echo hi > pack\\[ae\\]ge.json',
     "echo hi > $'pack*.json'",
+    "echo hi>'pack*.json'",
+    'echo hi>"pack?ge.json"',
+    'echo hi>pack\\[ae\\]ge.json',
+    "echo hi>$'pack*.json'",
+    "bash -c 'echo hi>/tmp/evil'",
   ])(
     'keeps literal quoted and escaped redirect targets visible in %j',
     (command) => {

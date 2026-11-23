@@ -30,6 +30,10 @@ When unmodeled syntax or an expanded argument may affect an explicit Read/Edit r
 
 One accepted narrowing is that a saved `Bash(find *)` rule no longer automatically approves an unmodeled `find -exec` callback; that invocation still requires confirmation.
 
+Leading redirections do not hide this execution boundary. The existing quote-aware redirect scan also retains the raw executable text, including argument expansions, braces, comments and command separators, for a separate veto-only check. This check does not require every argument to have a static value. It does not introduce a new allow-matching representation or discard the original redirect restrictions.
+
+An ordinary completed word can be adjacent to a redirect, so `npm test>/dev/null 2>&1` retains the grant and reusable suggestions of its spaced spelling. Bare unsupported descriptor numbers, named descriptor allocation, unresolved targets and expansions adjacent to the operator remain conservative. The file-operation tracker does not yet model every adjacent-word or chained-target spelling; with explicit Read/Edit restrictions those spellings still require confirmation. No new definite file operation is inferred from this guard.
+
 ## Restrictive redirect equivalence
 
 `staticShellCommand` provides a semantic view only for deny/ask matching. Quote removal retains literal-versus-wildcard metadata. Redirect targets then receive limited lexical normalization:
