@@ -7616,7 +7616,7 @@ class QwenAgent implements Agent {
     await this.runInSessionContext(session, async () => {
       const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt(abortReason);
+        await session.cancelPendingPrompt(abortReason, true);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
@@ -18173,7 +18173,7 @@ class QwenAgent implements Agent {
           await replaySessionHistory();
           await options.beforeStartPostReplayServices?.(session);
           await config.getLlmClient().refreshStartupContextReminder();
-          session.installRewriter();
+          session.installMods();
           config.finalizeSessionRestore?.();
           startNonInteractiveOpenAILogHousekeeping(config, settings);
         },
@@ -18329,9 +18329,9 @@ class QwenAgent implements Agent {
         await options.beforeStartPostReplayServices?.(session);
       }
 
-      // Install rewriter AFTER history replay to avoid rewriting historical messages
+      // Install Mods AFTER history replay so they do not hear historical messages
       if (options.deferWorkspaceActivation !== true) {
-        session.installRewriter();
+        session.installMods();
       }
 
       if (options.deferWorkspaceActivation !== true) {
