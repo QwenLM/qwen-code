@@ -3083,7 +3083,7 @@ for (const theme of THEMES) {
       // button and its surviving rows while the excluded row leaves.
       await nav.getByRole('button', { name: /^General/ }).click();
       await expect(
-        page.getByText('Auto-update', { exact: true }),
+        page.getByText('Update Mode', { exact: true }),
       ).toBeVisible();
       await expect(
         page.getByText('Show Timestamps', { exact: true }),
