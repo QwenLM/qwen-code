@@ -183,7 +183,7 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 1. **resolution 互斥按重叠计数（§4.2）。** 冻结拒绝标记是按 Action 的计数，而非存在位：同一 Action 的两个重叠 resolution 在最后一个结束前始终拒绝停靠。
 2. **cleanup 排除复核 journal 序号（§4.3）。** 债务快照取自某个已提交序号；若读取 descriptor 期间序号前进，检查保守地报告有债务，而不是基于过期快照放行挂起。
-3. **staged wake 不是客户端矛盾（§4.4）。** 只有客户端自己声明的 `wake.pending()` 或 background 证书才拒绝停靠证书。Broker 在证书之后写入的 wake-worthy staged 行走既有 staged-wake 路径盖章，并清空停靠字段。
+3. **staged wake 不是客户端矛盾（§4.4）。** 只有客户端自己声明的 `wake.pending()` 才拒绝停靠证书。Broker 在证书之后写入的 wake-worthy staged 行走既有 staged-wake 路径盖章，保留证书但让它立即到期。这两点都由[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md)的 S2 修改：首个增量还会拒绝 background 证书，其 staged-wake 路径会清空停靠字段。
 4. **审批模式变更接纳全匹配的停靠证书（§4.6）。** 停靠 head 是 `SEALED`/`released`，忙碌准入本会在解除停靠之前拒绝变更。只有全匹配证书——seal revision、停靠 prompt、approval revision，且停靠 Turn 是 Session 唯一的活跃工作——获得窄豁免；任何不匹配保持拒绝。
 5. **冷恢复的等待可以再次停靠（§4.7）。** 恢复臂安装与原始等待相同的停靠注册、freeze 覆盖与 finally 注销生命周期，保留原 Action 身份与过期时间；下一次 idle 第二次停靠，之后单次 Allow 仍只执行工具一次。
 6. **digest-match 重放在同事务内解除停靠（§4.6）。** 两条失败投递修复路径（delivery-failed 与 decision-expired）在条件修复 UPDATE 后清除停靠标记，用户已作出的决定不再等到原唤醒期限。
