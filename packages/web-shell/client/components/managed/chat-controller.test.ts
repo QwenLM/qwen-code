@@ -292,20 +292,22 @@ describe('managed chat-controller mappings', () => {
     ]);
     expect(req.rawInput?.questions).toEqual([
       {
+        id: 'env',
         question: 'Target environment?',
         header: 'env',
         options: [
-          { label: 'Dev', description: 'Development cluster' },
-          { label: 'Prod', description: 'Production cluster' },
+          { id: 'dev', label: 'Dev', description: 'Development cluster' },
+          { id: 'prod', label: 'Prod', description: 'Production cluster' },
         ],
         multiSelect: false,
       },
       {
+        id: 'notes',
         question: 'Extra flags?',
         header: 'notes',
         options: [
-          { label: 'Dry run', description: '' },
-          { label: 'Verbose', description: '' },
+          { id: 'dry', label: 'Dry run', description: '' },
+          { id: 'verbose', label: 'Verbose', description: '' },
         ],
         multiSelect: true,
       },
@@ -615,6 +617,140 @@ describe('managed chat-controller mappings', () => {
     expect(
       normalizeManagedQuestionAnswers(noText, [
         { questionId: '0', value: 'Yes, please, rogue' },
+      ]),
+    ).toBeNull();
+  });
+
+  it('keeps structured option ids separate from text and normalizes boundary commas (R1-2 / H2)', () => {
+    const action = questionAction({
+      questions: [
+        {
+          id: 'q',
+          prompt: 'Pick options',
+          required: true,
+          multiple: true,
+          allowText: true,
+          options: [
+            { id: 'dry', label: 'Dry run' },
+            { id: 'verbose', label: 'Verbose' },
+            { id: 'other', label: 'Other,' },
+            { id: 'tight', label: 'Tight,label' },
+          ],
+        },
+      ],
+    });
+    expect(
+      normalizeManagedQuestionAnswers(action, [
+        {
+          questionId: 'q',
+          value: 'Dry run, Verbose',
+          optionIds: ['dry'],
+          text: 'Verbose',
+        },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['dry'], text: 'Verbose' }]);
+    expect(
+      normalizeManagedQuestionAnswers(action, [
+        { questionId: 'q', value: 'Other,' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['other'] }]);
+    expect(
+      normalizeManagedQuestionAnswers(action, [
+        { questionId: 'q', value: 'Tight,label' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['tight'] }]);
+    for (const optionIds of [['unknown'], ['dry', 'dry']]) {
+      expect(
+        normalizeManagedQuestionAnswers(action, [
+          { questionId: 'q', value: 'Dry run', optionIds },
+        ]),
+      ).toBeNull();
+    }
+    expect(
+      normalizeManagedQuestionAnswers(
+        questionAction({
+          questions: [
+            {
+              ...action.questions[0]!,
+              options: [
+                { id: 'same', label: 'One' },
+                { id: 'same', label: 'Two' },
+              ],
+            },
+          ],
+        }),
+        [{ questionId: 'q', value: 'One', optionIds: ['same'] }],
+      ),
+    ).toBeNull();
+    expect(
+      normalizeManagedQuestionAnswers(action, [
+        {
+          questionId: 'q',
+          value: 'Dry run',
+          optionIds: ['dry'],
+          text: 'x'.repeat(MAX_MANAGED_QUESTION_TEXT_LENGTH + 1),
+        },
+      ]),
+    ).toBeNull();
+
+    const single = questionAction({
+      questions: questionAction().questions.filter(
+        (question) => !question.multiple,
+      ),
+    });
+    expect(
+      normalizeManagedQuestionAnswers(single, [
+        {
+          questionId: 'env',
+          value: 'Dev, Prod',
+          optionIds: ['dev', 'prod'],
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      normalizeManagedQuestionAnswers(single, [
+        {
+          questionId: 'env',
+          value: 'Dev, custom',
+          optionIds: ['dev'],
+          text: 'custom',
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      normalizeManagedQuestionAnswers(
+        questionAction({
+          questions: [{ ...action.questions[0]!, allowText: false }],
+        }),
+        [
+          {
+            questionId: 'q',
+            value: 'Dry run',
+            optionIds: ['dry'],
+            text: 'rejected',
+          },
+        ],
+      ),
+    ).toBeNull();
+
+    const optionalAmbiguous = questionAction({
+      questions: [
+        {
+          id: 'q',
+          prompt: 'Optional pick',
+          required: false,
+          multiple: true,
+          allowText: false,
+          options: [
+            { id: 'a', label: 'Same, label' },
+            { id: 'b', label: 'Same, label' },
+          ],
+        },
+      ],
+    });
+    expect(
+      normalizeManagedQuestionAnswers(optionalAmbiguous, [
+        { questionId: 'q', value: 'Same, label' },
       ]),
     ).toBeNull();
   });
@@ -1239,6 +1375,84 @@ describe('createManagedChatController', () => {
     expect(secondQ.admission).toBe('rejected');
     expect(secondQ.outcome).toBeUndefined();
     expect(h.submitQuestion).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let an unrelated dispatch leak old action or turn settlements into a retry (R3-1 / H1)', async () => {
+    const h = createHarness();
+    h.setPendingActions([permissionAction({ actionId: 'act-stale' })]);
+    const held = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(held.promise);
+    const unrelated = h.controller.submit({ text: 'hold dispatch open' });
+
+    await h.controller.respondApproval('act-stale', 'allow');
+    h.emitAction({ actionId: 'act-stale', outcome: 'failed' });
+    const attempt = await h.controller.respondApproval('act-stale', 'allow');
+    expect(attempt.outcome).toBe('unsettled');
+    expect(
+      h.controller.operations.find((operation) => operation.kind === 'approval')
+        ?.state,
+    ).toBe('pending');
+    h.emitAction({ actionId: 'act-stale', outcome: 'resolved' });
+    expect(
+      h.controller.operations.find((operation) => operation.kind === 'approval')
+        ?.state,
+    ).toBe('established');
+
+    h.setPhase('agent_running');
+    h.setActiveTurnId('t-stale');
+    h.submitPrompt.mockResolvedValueOnce({
+      admission: 'accepted',
+      operationId: 'op-stale-submit',
+      turnId: 't-stale',
+    });
+    await h.controller.submit({ text: 'first turn' });
+    const firstCancelTransport = deferred<ManagedTransportAdmission>();
+    h.cancelTurn.mockReturnValueOnce(firstCancelTransport.promise);
+    const firstCancel = h.controller.cancel();
+    h.emitTurn({ turnId: 't-stale', outcome: 'completed' });
+    firstCancelTransport.resolve({ admission: 'accepted' });
+    expect((await firstCancel).outcome).toBe('failed');
+
+    const retryCancel = await h.controller.cancel();
+    expect(retryCancel.outcome).toBe('unsettled');
+    expect(
+      h.controller.operations.find((operation) => operation.kind === 'cancel')
+        ?.state,
+    ).toBe('pending');
+    h.emitTurn({ turnId: 't-stale', outcome: 'cancelled' });
+    expect(
+      h.controller.operations.find((operation) => operation.kind === 'cancel')
+        ?.state,
+    ).toBe('established');
+
+    h.emitOperation({ operationId: 'op-stale-retry', status: 'failed' });
+    h.submitPrompt.mockResolvedValueOnce({
+      admission: 'accepted',
+      operationId: 'op-stale-retry',
+    });
+    const operationRetry = await h.controller.submit({ text: 'new operation' });
+    expect(operationRetry.outcome).toBe('unsettled');
+    h.emitOperation({ operationId: 'op-stale-retry', status: 'completed' });
+    expect(
+      h.controller.operations
+        .filter((operation) => operation.kind === 'submit')
+        .map((operation) => operation.state),
+    ).toEqual(['pending', 'established']);
+
+    held.resolve({ admission: 'rejected' });
+    await unrelated;
+  });
+
+  it('keeps a summary-level cancelling phase while a submit is pending (H3)', async () => {
+    const h = createHarness();
+    h.submitPrompt.mockResolvedValueOnce({
+      admission: 'accepted',
+      operationId: 'op-cancelling',
+      turnId: 't-cancelling',
+    });
+    await h.controller.submit({ text: 'pending while another tab cancels' });
+    h.setPhase('cancelling');
+    expect(h.controller.phase).toBe('cancelling');
   });
 
   it('releases settlement subscriptions on AbortSignal abort and skips subscribing when already aborted', () => {

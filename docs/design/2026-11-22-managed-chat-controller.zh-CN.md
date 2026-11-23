@@ -24,6 +24,9 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
 - **Daemon 遗留 P3 钉子** —— 在 `daemon/useDaemonChatController.test.tsx` 中补齐
   #18091 评审留下的非阻塞 P3 用例，钉住 `!settledDuringSubmit.has(accepted.promptId)`，
   防止在 `submitPrompt` 解析前已结算的 prompt 被错误注入重建后的控制器。
+- **结构化提问交接** —— 经 `QuestionAnswer`、`ChatSurface` 与共享
+  `AskUserQuestion` 卡片传递问题和选项 `id`，同时为既有宿主保留原
+  `Record<string, string>` 答案。
 
 本增量是加法的：尚未切换 `ManagedSessionsPage`。React 绑定 hook
 （`useManagedChatController`）与带视觉前后对比门的 `ManagedSessionsPage` 切换属于
@@ -71,10 +74,13 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   `'unsettled'`）、`subscribeTurnSettlement`（按操作类型投影：回合自行完成使绑定
   的 `cancel` 转为 `'failed'`）或 `subscribeActionSettlement`（`resolved` →
   `'established'`，`expired`/`superseded`/`failed` → `'failed'`）。已终态行永不
-  吸收后续结算；存在在飞派发时，未命中活跃行的 operation 结算按 `operationId` 缓
-  冲，而 turn 与 action 结算（其 id 在 submit 与 cancel 或多次尝试间共享）只要有在
-  飞派发即缓冲，使尚未绑定的在飞 cancel 或重试即使在前序行仍活跃时也能收到结算；
-  operation/action 缓冲在绑定时消费删除，且三者均在所有在飞派发排空时清空。
+  吸收后续结算。operation 只在存在在飞派发时缓冲未命中活跃行的结算；turn 因在
+  submit 的传输响应到达前不知道 `turnId`，也在存在在飞派发时缓冲；action 仅在
+  其 `actionId` 位于 `inFlightActionIds` 时缓冲。operation 与 turn 缓冲记录到达时最新
+  已启动的派发序号，绑定时只有当时已经启动的尝试才能消费，故无关派发不能把旧 turn
+  或 action 证据泄漏给稍后发起的重试。即使共享 `turnId` 的 submit 行仍活跃，尚未绑
+  定的在飞 cancel 仍能消费 turn 结算。operation/action 缓冲在消费时删除，三者均
+  在所有在飞派发排空时清空。
 - **回合作用域取消与按目标保留。** `deps.activeTurnId` 为 `undefined` 时 `cancel()`
   fail-closed 返回 `rejected`（Managed 取消要求 `turnId`）；派发时捕获
   `cancelTarget = deps.activeTurnId`，保留在 `controller.operations` 中的操作目标
@@ -88,19 +94,23 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   入口拒绝。权限动作（`kind !== 'question'`）复用既有
   `toManagedPermissionRequest(action, messages)`；提问动作（`kind === 'question'`）
   经 `toManagedQuestionPermissionRequest` 投影为共享 `AskUserQuestion` 卡片所需的
-  `PermissionRequest`，仅投影 `allow_once` `'submit'` 选项（Managed 提问协议无字符
-  串选项忽略变体，故 `respondApproval` 对提问动作直接 fail-closed 返回 `rejected`）。
-  `respondApproval` 与 `respondQuestion` 对未知或已过期动作 id、非法选项、同一
-  `actionId` 的在飞或活跃非终态决策行（`hasLiveAction`，与 daemon 适配器的
-  `hasLiveDecision` 对齐，既防止同一动作被决策两次又允许终态 `failed` 行重试）、以及
-  非法、有歧义、缺失必填项或超体积上限的回答均 fail-closed 返回 `rejected`
-  （`normalizeManagedQuestionAnswers` 同时接受十进制索引与显式问题 id，单选要求唯
-  一选项命中、多选经按逗号边界的有界 O(k·|options|) DP 要求唯一完整覆盖——对重复选
-  项标签与 `Alpha`+`Beta` 撞 `Alpha, Beta` 的拼接碰撞均 fail-closed 返回 `null`，
-  在切片 3c 传入结构化选项 id 前，自由文本或扁平字符串混合「选项 + 文本」在
-  `allowText: true` 时原样保留为 `text`、`allowText: false` 时拒绝——严格校验
-  `required`、单条 8192 字符上限，并经由 `canonicalQuestionAnswers` 实施规范排序与
-  32 KiB `MAX_MANAGED_QUESTION_ANSWER_BYTES` 上限）。
+  `PermissionRequest`，携带问题和选项 `id` 且仅投影 `allow_once` `'submit'` 选项
+  （Managed 提问协议无字符串选项忽略变体，故 `respondApproval` 对提问动作直接
+  fail-closed 返回 `rejected`）。卡片为既有宿主保留原有
+  `Record<string, string>` 答案参数，在后端 id 可用时额外给出结构化
+  `QuestionAnswer`，将所选 `optionIds` 与自由文本 `text` 分开，即使文本恰等于另
+  一选项的标签或标签带首尾逗号也不混淆。`ChatSurface` 直接转发结构化答案，不
+  再反解标签。`normalizeManagedQuestionAnswers` 严格校验结构化 id、重复值、数量、
+  `allowText`、`required` 和单条文本 8192 字符上限，并经由
+  `canonicalQuestionAnswers` 实施规范排序与 32 KiB
+  `MAX_MANAGED_QUESTION_ANSWER_BYTES` 上限。无 id 的旧调用方仍按单选唯一命中与
+  多选有界 O(k·|options|) DP 处理，比较两侧做同一逗号规范化，对重复标签与
+  `Alpha`+`Beta` 撞 `Alpha, Beta` 的拼接碰撞 fail-closed；仅在
+  `allowText: true` 时，未匹配的扁平字符串 `option, free text` 载荷原样作为
+  `text`。`respondApproval` 与 `respondQuestion` 还对未知或已过期动作 id、非法选
+  项、同一 `actionId` 的在飞或活跃非终态决策行（`hasLiveAction`，与 daemon 适配
+  器的 `hasLiveDecision` 对齐，既防止同一动作被决策两次又允许终态 `failed` 行重
+  试）fail-closed 返回 `rejected`。
 - **快照稳定与生命周期。** `operations` 记忆化为冻结数组，仅在追踪状态变化时重建。
   `deps.signal` 触发 abort 时释放全部结算订阅；构造时若 `deps.signal?.aborted` 已为
   `true` 则同步跳过订阅。
@@ -118,12 +128,20 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
 ## 验证
 
 - `components/managed/chat-capabilities.test.ts` 覆盖空值/`null`/关闭态及全部映射
-  能力键的 one-hot 映射与严格 `terminal === true` 门控。
-- `components/managed/chat-controller.test.ts` 覆盖穷举相态与操作状态映射、实时
+  `ManagedCapabilityKey` 的 one-hot 映射与严格 `terminal === true` 门控。
+- `ChatSurface.test.tsx`、`AskUserQuestion.test.tsx` 与
+  `components/managed/chat-controller.test.ts` 钉住结构化交接，包括选择
+  `Dry run` 的 id 加独立输入的 `Verbose`，且全部既有旧三参数提交保持不变。
+- `components/managed/chat-controller.test.ts` 覆盖穷举相态与操作状态映射、按尝试
+  归属的结算缓冲（含旧 action/turn 证据后重试）、实时
   one-hot 分页透传与 `loadOlder({ force: true })`、权限/提问拆分与投影、提问答案
   归一化与 fail-closed 拒绝、四个意图的准入/结算分离（含提前到达缓冲、
   `recovery_blocked`、派发期 cancel `turnId` 盖章、回合自行完成令 cancel 失败、并发
   重复拦截）、快照引用稳定性与 `AbortSignal` 清理。
+- `components/managed/chat-controller.local-integration.test.tsx` 挂载真实的
+  `ChatSurface`、共享提问卡片与 Managed 控制器，通过 DOM 驱动翻页、选择及
+  自由文本输入并断言精确传输载荷；仅隔离本切片范围外的 daemon 转录与编辑器宿主。
+  Java provider 绑定仍属切片 3b，因此这不是连接真实 Java 服务的测试。
 - `daemon/useDaemonChatController.test.tsx` 补齐钉住
   `!settledDuringSubmit.has(accepted.promptId)` 的 P3 竞态用例。
 - 全套测试绿；web-shell 两个类型项目（`tsconfig.lib.json`、`tsconfig.json`）退出 0；
@@ -135,8 +153,8 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   `useManagedPendingActions` 与 `ManagedAgentProvider` 接入
   `createManagedChatController`。
 - **切片 3c —— `ManagedSessionsPage` 切换至 `ChatSurface`** 并过浏览器级视觉前后
-  对比门（实现双模式首个真实 UI 收敛）。切换前需明确共享 `AskUserQuestion` 卡片是
-  否学习 `required` 与 `allowText`（以及是否改为传递结构化选项 id 而非逗号拼接的标
-  签），使可选题可跳过、`allowText: false` 题目不再展示必然被适配器拒绝的自由文本框。
+  对比门（实现双模式首个真实 UI 收敛）。切换前让共享 `AskUserQuestion` 卡片学习
+  `required` 与 `allowText`，使可选题可跳过、`allowText: false` 题目不再展示必然
+  被适配器拒绝的自由文本框。结构化选项 id 与独立自由文本已由本切片携带。
 - **Daemon 主列切换（2f 其余）**、**ChatPane 收敛（slice 4）**、**状态栈 parity
   （slice 5）** 与 **边界守卫（slice 6）**。

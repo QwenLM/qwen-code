@@ -26,6 +26,9 @@ This slice introduces the pure, dependency-injected Managed adapter core under
   in `daemon/useDaemonChatController.test.tsx`, pinning the
   `!settledDuringSubmit.has(accepted.promptId)` guard so a prompt that settles
   before `submitPrompt` resolves is never seeded into rebuilt controllers.
+- **Structured question hand-off** — carries question and option `id`s through
+  `QuestionAnswer`, `ChatSurface`, and the shared `AskUserQuestion` card, whose
+  existing `Record<string, string>` answers remain available for legacy hosts.
 
 This increment is additive: `ManagedSessionsPage` is not switched yet. The React
 binding hook (`useManagedChatController`) and the `ManagedSessionsPage` switch
@@ -77,13 +80,16 @@ actions, and Java command operations into `SessionChatController`:
   kind: a turn completing on its own fails a bound `cancel`), or
   `subscribeActionSettlement` (`resolved` → `'established'`,
   `expired`/`superseded`/`failed` → `'failed'`). Already-terminal rows never
-  absorb a later settlement; operation settlements that match no active row
-  while a dispatch is in flight are buffered by `operationId`, and turn/action
-  settlements (whose ids are shared across a submit and a cancel, or across
-  attempts) are buffered whenever any dispatch is in flight so an unbound
-  in-flight cancel or retry still receives the settlement even if a prior row
-  was still active. Buffered operation/action entries are consumed on bind, and
-  all three buffers are cleared whenever all in-flight dispatches drain.
+  absorb a later settlement. Operations buffer a settlement with no active row
+  only while a dispatch is in flight; turns buffer while a dispatch is in flight
+  because a submit's `turnId` is unknown until its transport response; actions
+  buffer only while their own `actionId` is in `inFlightActionIds`. Operation
+  and turn buffer entries record the newest dispatch sequence at arrival, and
+  only an attempt already started at that sequence can consume it on bind, so
+  an unrelated dispatch cannot leak old turn or action evidence into a retry. The turn
+  buffer still serves an unbound in-flight cancel even when its shared submit
+  row was active. Buffered operation/action entries are deleted on consumption;
+  all three buffers clear when all in-flight dispatches drain.
 - **Turn-scoped cancel with per-target retention.** `cancel()` fails closed when
   `deps.activeTurnId` is `undefined` (managed cancel requires a `turnId`),
   captures `cancelTarget = deps.activeTurnId` at dispatch time, keeps the
@@ -100,24 +106,28 @@ actions, and Java command operations into `SessionChatController`:
   `toManagedPermissionRequest(action, messages)`. Question actions
   (`kind === 'question'`) project through `toManagedQuestionPermissionRequest`
   into the `PermissionRequest` shape consumed by `ChatSurface`'s shared
-  `AskUserQuestion` card with only the `allow_once` `'submit'` option (the
-  managed question wire format carries no string-option dismiss variant, so
-  `respondApproval` fails closed on question actions). Both `respondApproval`
-  and `respondQuestion` fail closed on unknown or expired action ids, invalid
-  options, in-flight or live non-terminal decision rows for the same `actionId`
+  `AskUserQuestion` card with question and option `id`s and only the
+  `allow_once` `'submit'` option (the managed question wire format carries no
+  string-option dismiss variant, so `respondApproval` fails closed on question
+  actions). The card retains its legacy `Record<string, string>` answer
+  argument for existing hosts and additionally supplies structured
+  `QuestionAnswer`s when backend ids are available, keeping selected
+  `optionIds` separate from free `text`, including text equal to another
+  option's label and labels with boundary commas. `ChatSurface` forwards those
+  structured answers without re-decoding labels. `normalizeManagedQuestionAnswers`
+  strictly validates structured ids, duplicates, cardinality, `allowText`,
+  `required`, and the 8192-char per-answer text limit, then routes through
+  `canonicalQuestionAnswers` for canonical ordering and the 32 KiB
+  `MAX_MANAGED_QUESTION_ANSWER_BYTES` cap. Legacy callers without ids still use
+  unique-match single-select and bounded O(k·|options|) multi-select DP, with
+  identical comma normalization on both comparison sides and fail-closed
+  duplicate-label/join-collision handling (`Alpha` + `Beta` vs `Alpha, Beta`);
+  unmatched flat-string `option, free text` payloads remain verbatim `text`
+  only when `allowText` is true. Both `respondApproval` and `respondQuestion`
+  also fail closed on unknown or expired action ids, invalid options, and
+  in-flight or live non-terminal decision rows for the same `actionId`
   (`hasLiveAction`, matching the daemon adapter's `hasLiveDecision` so an
-  action cannot be decided twice while a terminal `failed` row still permits
-  retry), or invalid/ambiguous/missing required/over-cap question answers
-  (`normalizeManagedQuestionAnswers` accepts both decimal question indices and
-  explicit question ids, requires a unique option match for single-select and a
-  unique full cover via bounded O(k·|options|) DP over comma boundaries for
-  multi-select — failing closed on duplicate option labels and join collisions
-  like `Alpha` + `Beta` vs `Alpha, Beta`, while keeping free text or mixed
-  flat-string `option, free text` payloads verbatim as `text` when `allowText`
-  is true or failing closed when false until slice 3c carries structured option
-  ids — enforces `required`, the 8192-char per-answer text limit, and routes
-  through `canonicalQuestionAnswers` for canonical ordering and the 32 KiB
-  `MAX_MANAGED_QUESTION_ANSWER_BYTES` cap).
+  action cannot be decided twice while a terminal `failed` row permits retry).
 - **Snapshot stability and lifetime.** `operations` is memoized into a frozen
   array rebuilt only when tracked state changes. All settlement subscriptions
   are released when `deps.signal` aborts, and skipped synchronously if
@@ -138,14 +148,25 @@ actions, and Java command operations into `SessionChatController`:
 - `components/managed/chat-capabilities.test.ts` covers empty/null/disabled
   inputs and one-hot mapping for every mapped `ManagedCapabilityKey` plus strict
   `terminal === true` handling.
+- `ChatSurface.test.tsx`, `AskUserQuestion.test.tsx`, and
+  `components/managed/chat-controller.test.ts` pin the structured hand-off,
+  including a selected `Dry run` id plus separately typed `Verbose`, while all
+  pre-existing legacy three-argument submissions remain unchanged.
 - `components/managed/chat-controller.test.ts` covers exhaustive
-  phase/operation-status mappings, live one-hot pagination pass-through +
+  phase/operation-status mappings, attempt-scoped settlement buffering (including
+  old action/turn evidence followed by a retry), live one-hot pagination +
   `loadOlder({ force: true })`, permission/question projection, question answer
   normalization and fail-closed rejections, submit/cancel/approval/question
   admission vs settlement (including buffered early settlements,
   `recovery_blocked`, dispatch-time cancel `turnId` stamping, turn-completed
   cancel failure, concurrent duplicate refusal), snapshot identity stability,
   and `AbortSignal` cleanup.
+- `components/managed/chat-controller.local-integration.test.tsx` mounts the
+  actual `ChatSurface`, shared question card, and Managed controller. It drives
+  navigation, selection, and free-text input through the DOM and asserts the
+  exact transport payload; only the out-of-scope daemon transcript/editor hosts
+  are isolated. The Java provider binding remains slice 3b, so this is not a
+  live Java service test.
 - `daemon/useDaemonChatController.test.tsx` adds the P3 race test pinning
   `!settledDuringSubmit.has(accepted.promptId)`.
 - All tests green; both web-shell type projects (`tsconfig.lib.json`,
@@ -158,10 +179,9 @@ actions, and Java command operations into `SessionChatController`:
   into `createManagedChatController`.
 - **Slice 3c — `ManagedSessionsPage` switch onto `ChatSurface`** with the
   browser before/after visual gate (first real UI convergence across both modes).
-  Before switching, decide whether the shared `AskUserQuestion` card should
-  learn `required` and `allowText` (and optionally carry structured option ids
-  instead of comma-joined labels) so optional questions can be skipped and
-  `allowText: false` questions do not show a free-text input that the adapter
-  rejects.
+  Before switching, teach the shared `AskUserQuestion` card `required` and
+  `allowText` so optional questions can be skipped and `allowText: false`
+  questions do not show a free-text input that the adapter rejects. Structured
+  option ids and separate free text are already carried by this slice.
 - **Daemon main-column switch (rest of 2f)**, **ChatPane convergence (slice 4)**,
   **status-stack parity (slice 5)**, and **boundary guards (slice 6)**.

@@ -173,9 +173,11 @@ export function toManagedQuestionPermissionRequest(
     content: [],
     rawInput: {
       questions: action.questions.map((question) => ({
+        id: question.id,
         question: question.prompt,
         header: question.id,
         options: question.options.map((option) => ({
+          id: option.id,
           label: option.label,
           description: option.description ?? '',
         })),
@@ -201,6 +203,14 @@ type MultiSelectMatch =
   | { readonly kind: 'unique'; readonly optionIds: string[] }
   | { readonly kind: 'ambiguous' }
   | { readonly kind: 'none' };
+
+function normalizeRenderedOption(value: string): string {
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join(', ');
+}
 
 function matchUniqueMultiSelectOptions(
   raw: string,
@@ -234,15 +244,14 @@ function matchUniqueMultiSelectOptions(
   const candidates: Array<{ token: string; spanLen: number; id: string }> = [];
   for (const option of options) {
     const seenTokens = new Set<string>();
-    for (const token of [option.label, option.id]) {
-      const trimmed = token.trim();
-      if (trimmed.length === 0 || seenTokens.has(trimmed)) continue;
-      seenTokens.add(trimmed);
-      const spanLen = trimmed
+    for (const labelOrId of [option.label, option.id]) {
+      const token = normalizeRenderedOption(labelOrId);
+      if (token.length === 0 || seenTokens.has(token)) continue;
+      seenTokens.add(token);
+      const spanLen = token
         .split(',')
         .filter((part) => part.trim().length > 0).length;
-      if (spanLen === 0) continue;
-      candidates.push({ token: trimmed, spanLen, id: option.id });
+      candidates.push({ token, spanLen, id: option.id });
     }
   }
 
@@ -258,7 +267,10 @@ function matchUniqueMultiSelectOptions(
     for (const candidate of candidates) {
       const j = i + candidate.spanLen;
       if (j > k) continue;
-      if (raw.slice(segStarts[i]!, segEnds[j - 1]!) !== candidate.token) {
+      if (
+        normalizeRenderedOption(raw.slice(segStarts[i]!, segEnds[j - 1]!)) !==
+        candidate.token
+      ) {
         continue;
       }
       if (count[j] === 0) {
@@ -298,6 +310,30 @@ export function normalizeManagedQuestionAnswers(
     }
     if (!question) return null;
     if (byQuestionId.has(question.id)) return null;
+
+    if (entry.optionIds !== undefined || entry.text !== undefined) {
+      const optionIds = entry.optionIds ?? [];
+      const optionIdSet = new Set(question.options.map((option) => option.id));
+      const text = entry.text?.trim() ? entry.text : undefined;
+      if (
+        optionIdSet.size !== question.options.length ||
+        new Set(optionIds).size !== optionIds.length ||
+        optionIds.some((id) => !optionIdSet.has(id)) ||
+        (!question.multiple &&
+          (optionIds.length > 1 ||
+            (optionIds.length > 0 && text !== undefined))) ||
+        (text !== undefined && !question.allowText) ||
+        (text !== undefined && text.length > MAX_MANAGED_QUESTION_TEXT_LENGTH)
+      ) {
+        return null;
+      }
+      byQuestionId.set(question.id, {
+        questionId: question.id,
+        ...(optionIds.length > 0 ? { optionIds: [...optionIds] } : {}),
+        ...(text !== undefined ? { text } : {}),
+      });
+      continue;
+    }
 
     const trimmed = entry.value.trim();
     if (trimmed === '') {
@@ -387,6 +423,7 @@ export function normalizeManagedQuestionAnswers(
 
 interface TrackedOperation {
   readonly id: string;
+  readonly sequence: number;
   readonly kind: IntentKind;
   readonly target: IntentTarget;
   state: OperationState;
@@ -421,11 +458,17 @@ export function createManagedChatController(
   const inFlightActionIds = new Set<string>();
   const bufferedOperationSettlement = new Map<
     string,
-    Exclude<OperationState, 'pending'>
+    {
+      readonly state: Exclude<OperationState, 'pending'>;
+      readonly dispatchSequence: number;
+    }
   >();
   const bufferedTurnOutcome = new Map<
     string,
-    ManagedTurnSettlement['outcome']
+    {
+      readonly outcome: ManagedTurnSettlement['outcome'];
+      readonly dispatchSequence: number;
+    }
   >();
   const bufferedActionOutcome = new Map<
     string,
@@ -499,7 +542,10 @@ export function createManagedChatController(
       applyState(entry, next);
     }
     if (!matched && inFlightDispatches > 0) {
-      bufferedOperationSettlement.set(event.operationId, next);
+      bufferedOperationSettlement.set(event.operationId, {
+        state: next,
+        dispatchSequence: seq,
+      });
     }
   };
 
@@ -509,11 +555,14 @@ export function createManagedChatController(
       if (isTerminalOperation(entry.state)) continue;
       applyState(entry, projectTurnOutcomeForKind(entry.kind, event.outcome));
     }
-    // Turn ids are shared across submit and cancel: buffer whenever any
-    // dispatch is in flight so an unbound cancel awaiting transport still
-    // receives the terminal turn outcome even when the submit row was active.
+    // A turn id is unknown until submit's transport response arrives, so tag
+    // the event with the newest dispatch already started. A later attempt
+    // cannot consume settlement evidence that predates its own dispatch.
     if (inFlightDispatches > 0) {
-      bufferedTurnOutcome.set(event.turnId, event.outcome);
+      bufferedTurnOutcome.set(event.turnId, {
+        outcome: event.outcome,
+        dispatchSequence: seq,
+      });
     }
   };
 
@@ -525,9 +574,7 @@ export function createManagedChatController(
       if (isTerminalOperation(entry.state)) continue;
       applyState(entry, next);
     }
-    // Buffer whenever any dispatch is in flight so an unbound decision awaiting
-    // transport still receives the settlement even if a prior row was active.
-    if (inFlightDispatches > 0) {
+    if (inFlightActionIds.has(event.actionId)) {
       bufferedActionOutcome.set(event.actionId, event.outcome);
     }
   };
@@ -565,8 +612,10 @@ export function createManagedChatController(
       admitted: ManagedTransportAdmission,
     ) => void,
   ): Promise<IntentResult> => {
+    const sequence = ++seq;
     const entry: TrackedOperation = {
-      id: `managed-op-${++seq}`,
+      id: `managed-op-${sequence}`,
+      sequence,
       kind,
       target: opTarget,
       state: 'pending',
@@ -613,9 +662,12 @@ export function createManagedChatController(
     if (response.operationId) {
       entry.backendOperationId = response.operationId;
       const buffered = bufferedOperationSettlement.get(response.operationId);
-      if (buffered !== undefined) {
+      if (
+        buffered !== undefined &&
+        entry.sequence <= buffered.dispatchSequence
+      ) {
         bufferedOperationSettlement.delete(response.operationId);
-        applyState(entry, buffered);
+        applyState(entry, buffered.state);
       }
     }
     bindExtra?.(entry, response);
@@ -684,9 +736,15 @@ export function createManagedChatController(
         (entry, response) => {
           if (response.turnId) {
             entry.boundTurnId = response.turnId;
-            const outcome = bufferedTurnOutcome.get(response.turnId);
-            if (outcome !== undefined) {
-              applyState(entry, projectTurnOutcomeForKind('submit', outcome));
+            const buffered = bufferedTurnOutcome.get(response.turnId);
+            if (
+              buffered !== undefined &&
+              entry.sequence <= buffered.dispatchSequence
+            ) {
+              applyState(
+                entry,
+                projectTurnOutcomeForKind('submit', buffered.outcome),
+              );
             }
           }
         },
@@ -706,9 +764,15 @@ export function createManagedChatController(
         () => deps.cancelTurn(cancelTarget),
         (entry) => {
           entry.boundTurnId = cancelTarget;
-          const outcome = bufferedTurnOutcome.get(cancelTarget);
-          if (outcome !== undefined) {
-            applyState(entry, projectTurnOutcomeForKind('cancel', outcome));
+          const buffered = bufferedTurnOutcome.get(cancelTarget);
+          if (
+            buffered !== undefined &&
+            entry.sequence <= buffered.dispatchSequence
+          ) {
+            applyState(
+              entry,
+              projectTurnOutcomeForKind('cancel', buffered.outcome),
+            );
           }
         },
       );
