@@ -114,6 +114,10 @@ import {
   effectiveHistoryEnd,
 } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -1968,14 +1972,20 @@ function copyContentContainer(content: Content): Content {
 
 function copyPartContainer(part: Part): Part {
   const nested = getFunctionResponseParts(part);
-  if (!nested) return { ...part };
-  return {
-    ...part,
-    functionResponse: {
-      ...part.functionResponse,
-      parts: nested.map((inner) => ({ ...inner })),
-    },
-  };
+  const copy = nested
+    ? {
+        ...part,
+        functionResponse: {
+          ...part.functionResponse,
+          parts: nested.map((inner) => ({ ...inner })),
+        },
+      }
+    : { ...part };
+  const recovery = getToolOutputRecovery(part);
+  if (recovery) {
+    setToolOutputRecovery(copy, recovery);
+  }
+  return copy;
 }
 
 function stripThoughtPartsFromContent(content: Content): Content | null {

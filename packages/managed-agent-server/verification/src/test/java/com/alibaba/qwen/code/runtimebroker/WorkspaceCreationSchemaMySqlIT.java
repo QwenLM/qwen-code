@@ -26,24 +26,23 @@ class WorkspaceCreationSchemaMySqlIT {
             var source = database.source();
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
             var jdbc = new JdbcTemplate(source);
-            jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id,"
+            jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_id,"
                     + " harness_session_id, workspace_id, session_id, state,"
                     + " writer_generation, writer_id, writer_lease_until, lease_token_hash,"
                     + " journal_revision, committed_sequence, last_commit_digest, activation_epoch,"
                     + " compacted_through_revision, recovery_status, gmt_create, gmt_modified)"
-                    + " VALUES ('MANAGED_SESSION', ?, ?, 'tenant', 'session', 'workspace', 'session',"
+                    + " VALUES ('MANAGED_SESSION', 'tenant', 'session', 'workspace', 'session',"
                     + " 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 0, 'READY', 1, 1)",
-                    ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"),
                     "a".repeat(64), "b".repeat(64));
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
                     + " workspace_id, session_id, resource_id, kind, schema_version, byte_length,"
                     + " sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
-                    + " VALUES ('resource', 'scope', 'tenant', 'workspace', 'session', 'descriptor',"
+                    + " VALUES ('resource', 'tenant', 'workspace', 'session', 'descriptor',"
                     + " 'hosted-turn-cleanup', 1, 0, ?, 'MYSQL_INLINE', ?, 'published', 'REFERENCED', 1)",
                     org.apache.commons.codec.digest.DigestUtils.sha256Hex(new byte[0]), new byte[0]);
-            jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+            jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                     + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                    + " journal_revision, resource_id, gmt_create) VALUES ('scope', 'JOURNAL',"
+                    + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL',"
                     + " 'owner', 1, 'resource', 'tenant', 'workspace', 'session', 1, 'descriptor', 1)");
             var head = jdbc.queryForMap("SELECT * FROM ma_session_head");
             var reference = jdbc.queryForMap("SELECT * FROM ma_resource_ref");

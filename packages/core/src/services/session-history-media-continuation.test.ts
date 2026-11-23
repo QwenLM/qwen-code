@@ -129,6 +129,75 @@ describe('session history media continuations', () => {
     expect(result).not.toContain('[Recorded media omitted]');
   });
 
+  for (const priorMedia of [false, true]) {
+    it.each(['text', 'call', 'response', 'nested-json'] as const)(
+      `R14 keeps the clean prefix after budget exhaustion in %s with prior media ${priorMedia}`,
+      async (kind) => {
+        const prefix = priorMedia
+          ? '{"inline_data":{"data":"R14_MEDIA_CANARY"}} '
+          : '';
+        const text =
+          prefix +
+          'CLEAN_PREFIX_EVIDENCE steps: ' +
+          Array.from({ length: 5 }, (_, i) => `arr[${i}`).join(' then ') +
+          ' ordinary tail'.repeat(40);
+        const ref = await append(
+          kind === 'response' ? 'tool_result' : 'user',
+          textProjection(kind, text),
+        );
+        const violations: string[] = [];
+        for (const request of [
+          { action: 'list' as const },
+          { action: 'read' as const, ref },
+          { action: 'search' as const, query: 'CLEAN_PREFIX_EVIDENCE' },
+        ]) {
+          const result = await service.query(request, signal);
+          if (!result.includes('CLEAN_PREFIX_EVIDENCE'))
+            violations.push(`${request.action}: clean prefix lost`);
+          if (result.includes('R14_MEDIA_CANARY'))
+            violations.push(`${request.action}: earlier media leaked`);
+          if (request.action === 'read') {
+            expect(JSON.parse(result).entries[0].truncated).toBeUndefined();
+            expect(result).toContain('[Recorded media omitted]');
+          }
+        }
+        expect(violations).toEqual([]);
+      },
+    );
+  }
+
+  it.each(['text', 'call', 'response', 'nested-json'] as const)(
+    'R14 keeps balanced media-free prose intact in %s',
+    async (kind) => {
+      const text =
+        'CLEAN_PREFIX_EVIDENCE steps: ' +
+        Array.from({ length: 5 }, (_, i) => `arr[${i}]`).join(' then ') +
+        ' ordinary tail'.repeat(40) +
+        ' ORDINARY_TAIL_RECOVERY';
+      const part = textProjection(kind, text);
+      const ref = await append(
+        kind === 'response' ? 'tool_result' : 'user',
+        part,
+      );
+      const result = JSON.parse(
+        await service.query({ action: 'read', ref }, signal),
+      );
+      const expected =
+        kind === 'text' || kind === 'nested-json'
+          ? part.text
+          : `read_file\n${JSON.stringify({ output: text, evidence: 'OUTSIDE_JSON_EVIDENCE' })}`;
+      expect(result.entries[0].text).toBe(expected);
+      expect(
+        JSON.parse(
+          await service.query(
+            { action: 'search', query: 'ORDINARY_TAIL_RECOVERY' },
+            signal,
+          ),
+        ).entries,
+      ).toHaveLength(1);
+    },
+  );
+
   const truncatedPayload = 'R13TRUNCATEDCANARY' + 'A'.repeat(12000);
   const encodedContainer = JSON.stringify(
     `{"inline_data":{"mime_type":"image/png","data":"${truncatedPayload}"},` +

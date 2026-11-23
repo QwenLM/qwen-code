@@ -92,8 +92,9 @@ function redactEmbeddedRecordedJson(text: string): string {
   const starts = /\{(?=\s*["}])|\[(?=\s*[{"[\]tfn0-9-])|"/gu;
   const chunks: string[] = [];
   let copied = 0;
+  let unfinishedStart: number | undefined;
   // A malformed enclosing fragment can force retries from inner openings.
-  // Bound that overlapping work and omit the value instead of leaking it.
+  // Bound that work and omit the tail starting at the first unfinished scan.
   let remaining = 4 * text.length;
   for (let start = starts.exec(text); start; start = starts.exec(text)) {
     const isString = start[0] === '"';
@@ -102,7 +103,13 @@ function redactEmbeddedRecordedJson(text: string): string {
     let depth = isString ? 0 : 1;
     let end: number | undefined;
     for (let i = start.index + 1; i < text.length; i++) {
-      if (--remaining < 0) return RECORDED_MEDIA_OMITTED;
+      if (--remaining < 0) {
+        return (
+          chunks.join('') +
+          text.slice(copied, unfinishedStart ?? start.index) +
+          RECORDED_MEDIA_OMITTED
+        );
+      }
       const char = text[i];
       if (inString) {
         if (char === '\\') {
@@ -126,6 +133,7 @@ function redactEmbeddedRecordedJson(text: string): string {
     }
     const fragment = text.slice(start.index, end);
     if (end === undefined) {
+      unfinishedStart ??= start.index;
       if (isString && lastEscape >= 0) {
         const cutEscape =
           text.length - lastEscape <= 5 &&

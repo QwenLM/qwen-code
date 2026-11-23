@@ -189,11 +189,12 @@ export function redactToolCallArgs(
   functionName: string,
   args: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (functionName === ToolNames.STRUCTURED_OUTPUT)
+  const toolName = functionName.trim().toLowerCase();
+  if (toolName === ToolNames.STRUCTURED_OUTPUT)
     return { ...STRUCTURED_OUTPUT_REDACTED_ARGS };
   if (
-    functionName === ToolNames.SESSION_NOTES ||
-    functionName === ToolNames.SESSION_HISTORY
+    toolName === ToolNames.SESSION_NOTES ||
+    toolName === ToolNames.SESSION_HISTORY
   )
     return { __redacted: 'local session context' };
   return args;

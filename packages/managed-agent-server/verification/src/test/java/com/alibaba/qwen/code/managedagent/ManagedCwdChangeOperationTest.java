@@ -1195,10 +1195,9 @@ class ManagedCwdChangeOperationTest {
 
         void insertAction(String sessionId, String actionId,
                 long expiresAtMillis) {
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, record_kind, domain, record_id, tenant_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_key, record_kind, domain, record_id, tenant_id,"
                             + " workspace_id, session_id, action_id, action_version, revision, state, options_json, gmt_create)"
-                            + " VALUES (?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)",
-                    ManagedSessionStore.sessionScopeKey(TENANT, sessionId), ManagedSchemaKeys.key("action", actionId),
+                            + " VALUES (?, 'ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)", ManagedSchemaKeys.key("action", actionId),
                     actionId, TENANT, WS, sessionId, actionId,
                     mapper.valueToTree(java.util.Map.of("expiresAt",
                             expiresAtMillis)).toString());

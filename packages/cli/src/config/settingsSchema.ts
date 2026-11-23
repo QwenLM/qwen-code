@@ -3554,7 +3554,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
+          'Allow the bundled ripgrep binary. When true (the default), a healthy system-level "rg" is preferred and the bundled binary is used only if PATH rg is missing or cannot run. When false, only the system-level "rg" command is used. This setting is only effective when tools.useRipgrep is true.',
         showInDialog: false,
       },
       workflowsEnabled: {

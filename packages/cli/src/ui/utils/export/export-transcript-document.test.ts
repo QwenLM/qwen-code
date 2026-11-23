@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   assertExportTranscriptDocumentV1,
+  assertExportTranscriptDocumentV2,
   classifyPermissionResolutionForExport,
   createExportTranscriptDocumentV1,
+  createExportTranscriptDocumentV2,
 } from './export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from './html-script-data.js';
 import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
@@ -53,6 +55,91 @@ const sessionData = {
 };
 
 describe('ExportTranscriptDocumentV1', () => {
+  it('keeps the persisted trigger source without surrounding metadata', () => {
+    const automaticText =
+      '/loop 5m retain the trigger presentation in an export';
+    const ordinaryText = 'An ordinary human input remains ordinary.';
+    const document = createExportTranscriptDocumentV2(
+      [
+        record('automatic', null, {
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: automaticText }] },
+          systemPayload: { displayText: automaticText, note: CANARY },
+        }),
+        record('ordinary', 'automatic', {
+          message: { role: 'user', parts: [{ text: ordinaryText }] },
+        }),
+        record('goal-runtime', 'ordinary', {
+          subtype: 'goal_runtime',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Continue the goal without a cron label' }],
+          },
+          systemPayload: {
+            displayText: 'Continue the goal without a cron label',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const automatic = document.blocks.find(
+      (block) => block.kind === 'user' && block.text === automaticText,
+    );
+    const ordinary = document.blocks.find(
+      (block) => block.kind === 'user' && block.text === ordinaryText,
+    );
+    const goal = document.blocks.find(
+      (block) =>
+        block.kind === 'user' &&
+        block.text === 'Continue the goal without a cron label',
+    );
+    if (!automatic || !ordinary || !goal) {
+      throw new Error('User projection is missing');
+    }
+    expect(document.schemaVersion).toBe(2);
+    expect(automatic).toMatchObject({ kind: 'user', text: automaticText });
+    const metadata = 'meta' in automatic ? automatic.meta : undefined;
+    expect(metadata).toEqual({ source: 'cron' });
+    expect(goal).not.toHaveProperty('meta');
+    expect(ordinary).not.toHaveProperty('meta');
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(() =>
+      assertExportTranscriptDocumentV2({
+        ...document,
+        blocks: [{ ...automatic, meta: { source: 'cron', timestamp: 1 } }],
+      }),
+    ).toThrow();
+  });
+
+  it('preserves the V1 envelope and rejects newly injected metadata', () => {
+    const automaticText = '/loop keep the legacy export presentation';
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('legacy-cron', null, {
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: automaticText }] },
+          systemPayload: { displayText: automaticText },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const automatic = document.blocks.find(
+      (block) => block.kind === 'user' && block.text === automaticText,
+    );
+    if (!automatic) throw new Error('User projection is missing');
+    expect(document.schemaVersion).toBe(1);
+    expect(automatic).not.toHaveProperty('meta');
+    assertExportTranscriptDocumentV1(document);
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...document,
+        blocks: [{ ...automatic, meta: { source: 'cron' } }],
+      }),
+    ).toThrow();
+  });
+
   it('exports a complete outer transcript while retaining raw internal evidence', () => {
     const results = [
       {

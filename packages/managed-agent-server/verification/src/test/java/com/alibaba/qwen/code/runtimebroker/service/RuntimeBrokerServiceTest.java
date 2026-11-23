@@ -445,6 +445,89 @@ class RuntimeBrokerServiceTest {
         }
     }
 
+    // Phase 3b §4.10: live background work owns the mount. Reclamation must
+    // refuse BEFORE the transport closes any connection, so a suspended
+    // Session's running Shell keeps its stdio servers and its storage.
+    @Test
+    void reclamationRefusesWhileABackgroundExecutionIsLiveWithoutClosingConnections() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            String digest = "sha256:" + "b".repeat(64);
+            fixture.executionRepository.findOrCreate(new ToolExecutionRecord(
+                    "bg-process", "idem-bg-process", saved.getBindingId(), saved.getRuntimeGeneration(),
+                    "holder", "holder", "prompt", "call", digest,
+                    Map.of("sessionId", "holder", "promptId", "prompt", "callId", "call",
+                            "argsDigest", digest, "processOf", "bg", "kind", "shell"),
+                    ToolExecutionRecord.State.PREPARED, null, null,
+                    0L, false, null, null, 0L, 0L, null));
+
+            assertFalse(join(fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true)));
+            assertEquals(0, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+            // The ordinary handback refuses for the same live work, so the
+            // mount stays with the run that still needs it.
+            assertEquals("runtime_session_busy", failure(fixture.service.releaseMount(
+                    "holder", "holder", MOUNT_CLAIM, null)).getCode());
+        }
+    }
+
+    // Without the observation capability nothing else settles a background
+    // row whose run already ended, so reclamation's own observe-only sweep
+    // must settle it before the live-work refusal is decided.
+    @Test
+    void reclamationSettlesAnExitedBackgroundProcessBeforeReclaiming() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, captureVerifier())) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            Map<String, Object> reference = Map.of("sessionId", "holder", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "holder", "holder", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("holder", "holder",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            awaitExecution(fixture.executionRepository, prepared.getExecutionCallId(),
+                    ToolExecutionRecord.State.SETTLED);
+            awaitExecution(fixture.executionRepository, prepared.getExecutionCallId() + ":process",
+                    ToolExecutionRecord.State.PREPARED);
+            Map<String, Object> exitedAnswer = new LinkedHashMap<>();
+            exitedAnswer.put("operationId", "call");
+            exitedAnswer.put("state", "exited");
+            Map<String, Object> evidence = new LinkedHashMap<>();
+            evidence.put("exitCode", 0);
+            evidence.put("exitSignal", null);
+            exitedAnswer.put("evidence", evidence);
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exitedAnswer);
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+
+            assertTrue(join(fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true)));
+            assertEquals(ToolExecutionRecord.State.SETTLED, fixture.executionRepository
+                    .findByExecutionCallId(prepared.getExecutionCallId() + ":process").getState());
+            assertEquals(1, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(1, fixture.transport.releaseMountCalls.get());
+        }
+    }
+
     @Test
     void reclamationSkipsAnOwnerOfAnotherGeneration() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
