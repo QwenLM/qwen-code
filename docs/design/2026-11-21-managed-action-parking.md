@@ -259,6 +259,6 @@ Before enabling, record:
 
 1. Whether parking should get its own shorter delay. With defaults, parking almost never happens (§1.4), and a shorter delay turns more decisions into cold opens. Decided by §7.
 2. Whether long parks should hand back the Turn's Runtime membership, as question waits do.
-3. What to include once cold recovery is extended: Hooks, MCP, child Sessions, wake-started Turns, and team plan approvals.
-4. How to combine the two certificates when a 3b background hold coexists with a parked Turn.
+3. What to include once cold recovery is extended: Hooks, MCP, child Sessions, wake-started Turns, and team plan approvals. Proposed, except for team plan approvals, in the [coverage design](2026-11-22-managed-action-parking-coverage.md).
+4. How to combine the two certificates when a 3b background hold coexists with a parked Turn. Proposed in slice S2 of the [coverage design](2026-11-22-managed-action-parking-coverage.md).
 5. Placement reclamation for parked Sessions on members that have left the pool, the same as open question 1 of the parent design.

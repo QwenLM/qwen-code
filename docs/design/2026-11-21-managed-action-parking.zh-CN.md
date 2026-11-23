@@ -259,6 +259,6 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 1. 是否为停靠单设一个更短的延迟。默认值下停靠几乎不发生（§1.4），而更短的延迟会把更多决定变成冷打开。由 §7 决定。
 2. 长时间停靠期间，是否像提问等待那样交还 Turn 的 Runtime 成员资格。
-3. 冷恢复扩展后再纳入的范围：Hooks、MCP、子 Session、wake 触发的 Turn、团队计划审批。
-4. 与 3b 后台 hold 同时存在时，两种证书如何合并。
+3. 冷恢复扩展后再纳入的范围：Hooks、MCP、子 Session、wake 触发的 Turn、团队计划审批。除团队计划审批外，其余各项的方案见[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md)。
+4. 与 3b 后台 hold 同时存在时，两种证书如何合并。方案见[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md)的 S2 切片。
 5. 已离开池的成员上停靠 Session 的 placement 回收，与父设计的待解决问题 1 相同。
