@@ -26,6 +26,10 @@
 4. Confirm the second conversation can still accept a prompt and persist it.
    Confirm archiving and restoring an idle conversation with no other recorder
    still works.
+5. For an active conversation, hold its archive fence for about 900 ms without
+   changing the transcript. Submit a prompt while the lock is held, release
+   the lock, then submit another prompt. Both records should be persisted in
+   order, with the first as the second record's parent.
 
 The committed core test exercises real storage and a controlled append/archive
 race. A source-based independent subprocess check reproduced the baseline and

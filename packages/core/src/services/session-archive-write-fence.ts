@@ -19,12 +19,14 @@ interface ArchiveWriteLock {
   release(): Promise<void>;
 }
 
+const ARCHIVE_LOCK_STALE_MS = 60_000;
+
 function generationPath(activeTranscript: string): string {
   return `${activeTranscript}.archive-generation`;
 }
 
 function lockOptions(onCompromised: () => void): lockfile.LockOptions {
-  return { realpath: false, stale: 60_000, onCompromised };
+  return { realpath: false, stale: ARCHIVE_LOCK_STALE_MS, onCompromised };
 }
 
 /**
@@ -34,14 +36,33 @@ function lockOptions(onCompromised: () => void): lockfile.LockOptions {
  */
 export async function acquireSessionArchiveWriteLock(
   activeTranscript: string,
+  { retryContention = false } = {},
 ): Promise<ArchiveWriteLock> {
   let compromised = false;
-  const release = await lockfile.lock(generationPath(activeTranscript), {
+  const options = {
     ...lockOptions(() => {
       compromised = true;
     }),
     retries: { retries: 8, factor: 2, minTimeout: 5, maxTimeout: 100 },
-  });
+  };
+  const lockPath = generationPath(activeTranscript);
+  // proper-lockfile can round a new lock's mtime up when probing precision.
+  const deadline = performance.now() + ARCHIVE_LOCK_STALE_MS + 2_000;
+  let release: () => Promise<void>;
+  for (;;) {
+    try {
+      release = await lockfile.lock(lockPath, options);
+      break;
+    } catch (error) {
+      if (
+        !retryContention ||
+        (error as NodeJS.ErrnoException).code !== 'ELOCKED' ||
+        performance.now() >= deadline
+      ) {
+        throw error;
+      }
+    }
+  }
   return {
     assertHeld() {
       if (compromised) throw new SessionWriterLostError();

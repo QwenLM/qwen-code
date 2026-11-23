@@ -2120,6 +2120,7 @@ export class ChatRecordingService {
         } else if (!this.writerLeaseRequired && legacyConversationFile) {
           const lock = await acquireSessionArchiveWriteLock(
             legacyConversationFile,
+            { retryContention: true },
           );
           try {
             lock.assertHeld();

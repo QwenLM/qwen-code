@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
@@ -198,6 +199,39 @@ describe('archive fences legacy transcript writers', () => {
     expect(fs.readFileSync(livePath, 'utf8')).toContain(
       'First prompt while busy',
     );
+    expect(readSessionTitleSidecar(liveTitlePath)?.displayName).toBe(
+      'First prompt while busy',
+    );
+  });
+
+  it('persists queued prompts in order after extended lock contention', async () => {
+    fs.mkdirSync(path.dirname(livePath), { recursive: true });
+    const lock = await acquireSessionArchiveWriteLock(livePath);
+    const writer = recorder();
+    writer.recordUserMessage([{ text: 'First prompt while busy' }]);
+    const flush = writer.flush();
+    void flush.catch(() => {});
+    try {
+      await delay(900);
+      expect(fs.existsSync(livePath)).toBe(false);
+    } finally {
+      await lock.release();
+    }
+    await flush;
+
+    writer.recordUserMessage([{ text: 'Second prompt after release' }]);
+    await writer.flush();
+    const records = fs
+      .readFileSync(livePath, 'utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line) as ChatRecord);
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ parentUuid: null, type: 'user' });
+    expect(records[1]).toMatchObject({
+      parentUuid: records[0]!.uuid,
+      type: 'user',
+    });
     expect(readSessionTitleSidecar(liveTitlePath)?.displayName).toBe(
       'First prompt while busy',
     );
