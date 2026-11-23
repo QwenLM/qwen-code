@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -142,6 +143,32 @@ class ManagedActionStoreTest {
     }
 
     @Test
+    void admittingADecisionUnparksTheSessionsActionTurns() {
+        project("requested", null, 1, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,1234,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
+
+        admit("decision", "digest", response("allow"), 10);
+
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
+    }
+
+    // The Action park guard finds a Turn's requested Action by this column.
+    @Test
+    void projectsTheActionPromptIdentity() {
+        project("requested", null, 1, 1000);
+
+        assertThat(jdbc.queryForMap("SELECT prompt_id FROM ma_session_record WHERE tenant_id=?"
+                + " AND session_id=? AND record_kind='ACTION' AND action_id=?", TENANT, SESSION, ACTION)
+                .get("prompt_id")).isEqualTo("turn");
+    }
+
+    @Test
     void doesNotOverwriteAResponseConfirmedAfterCandidateSelection() {
         project("requested", null, 1, 1000);
         String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
@@ -218,6 +245,10 @@ class ManagedActionStoreTest {
         // The first delivery of the answer failed past its retry budget,
         // with the budget-exempt watermark left over from answered attempts.
         markFailed(operationId, "action_response_delivery_failed", 10, 7);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,1234,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 20);
 
@@ -232,6 +263,10 @@ class ManagedActionStoreTest {
         assertThat(intColumn("budget_exempt_attempt", operationId)).isZero();
         assertThat(stringColumn("receipt_id", operationId)).isNull();
         assertThat(stringColumn("failure_code", operationId)).isNull();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
         // The re-admitted row is deliverable again — no recovery path could
         // see the FAILED/CONFIRMED row.
         assertThat(actions.deliverable(Long.MAX_VALUE))
@@ -317,6 +352,10 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         project("decided", response("allow"), 2, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,9999,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 20);
 
@@ -330,6 +369,10 @@ class ManagedActionStoreTest {
         // The settled row stays out of the outbox: it is terminal, not
         // re-deliverable.
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
     }
 
     // The decision-expired terminal is the same durable lie the digest heal
@@ -346,6 +389,10 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_decision_expired", 10, 0);
         project("decided", response("allow"), 2, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,9999,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 2000);
 
@@ -355,6 +402,10 @@ class ManagedActionStoreTest {
         assertThat(stringColumn("failure_code", operationId)).isNull();
         assertThat(stringColumn("receipt_id", operationId)).isNotNull().isNotEqualTo("rcpt-1");
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
     }
 
     // The re-admission gate keeps the Session check: on a Session that no
@@ -728,10 +779,10 @@ class ManagedActionStoreTest {
         try {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+            jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                             + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                            + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                    ManagedSchemaKeys.key(scope, id), scope, TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
+                            + " VALUES (?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                    ManagedSchemaKeys.key(scope, id), TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
             return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         } catch (java.security.NoSuchAlgorithmException error) {
             throw new IllegalStateException(error);

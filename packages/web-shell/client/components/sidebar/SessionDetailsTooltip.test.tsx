@@ -130,6 +130,235 @@ describe('SessionDetailsTooltip', () => {
     },
   );
 
+  it.each([
+    // The row shows the unread dot instead of the running dot once a turn
+    // completes unread, even if a new prompt is already in flight.
+    [{ hasActivePrompt: true }, 'Finished', 'Running'],
+    [{ activeWorkState: 'active' as const }, 'Finished', 'Active work'],
+    [
+      { activeWorkState: 'unknown' as const },
+      'Finished',
+      'Background activity unknown',
+    ],
+    // The background dot outranks the unread dot on the row.
+    [
+      { hasRunningBackgroundTasks: true },
+      'Background tasks running',
+      'Finished',
+    ],
+    // Unread dot with a turn in flight: the hidden background dot is named
+    // by the suffix, exactly as in the running arm.
+    [
+      { hasActivePrompt: true, hasRunningBackgroundTasks: true },
+      'Finished · Background tasks running',
+      undefined,
+    ],
+    // Blocked states stay pinned above the unread dot.
+    [{ isWaitingForPermission: true }, 'Needs approval', 'Finished'],
+    [{ isWaitingForUserQuestion: true }, 'User input needed', 'Finished'],
+    [{}, 'Finished', 'Idle'],
+  ])(
+    'mirrors the row unread-dot precedence: %s',
+    async (flags, expected, rejected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'status',
+                  workspaceCwd: '/workspace',
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (rejected) expect(details?.textContent).not.toContain(rejected);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    [true, 'Custom · Background tasks running'],
+    [false, 'Custom'],
+  ])(
+    'override label keeps the hidden-background suffix (background=%s)',
+    async (background, expected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'override',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: background,
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+                statusLabel="Custom"
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (!background)
+          expect(details?.textContent).not.toContain(
+            'Background tasks running',
+          );
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('names the background-only arm exactly once', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'background-only',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('Background tasks running');
+      expect(details?.textContent).not.toContain('· Background tasks running');
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    [{ isWaitingForPermission: true }, false, 'Needs approval'],
+    [{ isWaitingForUserQuestion: true }, false, 'User input needed'],
+    [{ hasActivePrompt: true }, false, 'Running'],
+    [{ hasActivePrompt: true }, true, 'Finished'],
+  ])(
+    'composes the background suffix exactly once on every suffixed arm: %s',
+    async (flags, unread, label) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'suffix-count',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: true,
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread={unread}
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(
+          `${label} · Background tasks running`,
+        );
+        expect(
+          (details?.textContent ?? '').split('Background tasks running')
+            .length - 1,
+        ).toBe(1);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('composes the background suffix exactly once under an override label', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'override-count',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+              statusLabel="Custom"
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Custom · Background tasks running',
+      );
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('names background work alongside a running turn', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');

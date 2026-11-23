@@ -506,6 +506,7 @@ export class ProcessTransport implements Transport {
     if (!this.closed && this.childProcess) {
       const { exitCode, signalCode } = this.childProcess;
       if (exitCode !== null || signalCode !== null) {
+        this.finalizeStdinError(exitCode === 0 && signalCode === null);
         this._exitError ??= this.abortController.signal.aborted
           ? new AbortError('Operation aborted')
           : (this.getProcessExitError(exitCode, signalCode) ?? null);

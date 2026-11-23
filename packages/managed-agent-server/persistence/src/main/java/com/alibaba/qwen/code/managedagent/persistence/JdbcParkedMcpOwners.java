@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.ParkedMcpOwners;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
@@ -41,9 +40,8 @@ public final class JdbcParkedMcpOwners implements ParkedMcpOwners {
     @Override
     public Optional<Duration> sealedFor(Owner owner) {
         return jdbc.queryForList("SELECT " + ManagedSchemaTime.SQL_NOW + " - gmt_modified FROM ma_session_head"
-                + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' AND state = 'SEALED'",
-                Long.class, RuntimeAdmissionFences.harnessDrainKey(owner.tenantId()),
-                RuntimeAdmissionFences.harnessDrainKey(owner.harnessSessionId()))
+                + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION' AND state = 'SEALED'",
+                Long.class, owner.tenantId(), owner.harnessSessionId())
                 .stream().findFirst().map(Duration::ofMillis);
     }
 }

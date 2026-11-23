@@ -56,6 +56,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { isAutomaticTriggerSource } from '../utils/automatic-trigger';
 import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
@@ -426,17 +427,17 @@ function mergeCompactToolGroups(
     // Each thought remembers the tool that follows it. Consecutive agents may
     // later render as one row anchored at the first agent; launch narration
     // bound to later agents follows that aggregate row.
-    const thoughts: Array<{
-      content: string;
-      isStreaming?: boolean;
-      beforeToolCallId?: string;
-    }> = [];
+    const thoughts: NonNullable<DaemonToolGroupMessage['thoughts']> = [];
     const thoughtsAwaitingTool: Array<(typeof thoughts)[number]> = [];
     for (const item of run) {
       if (item.role === 'thinking') {
         const thought = {
+          id: item.id,
           content: item.content,
           ...(item.isStreaming === true ? { isStreaming: true } : {}),
+          ...(item.parentToolCallId
+            ? { parentToolCallId: item.parentToolCallId }
+            : {}),
         };
         thoughts.push(thought);
         thoughtsAwaitingTool.push(thought);
@@ -1093,10 +1094,7 @@ function isScheduledTaskMessage(message: {
   role: Message['role'];
   source?: string;
 }): boolean {
-  return (
-    message.role === 'user' &&
-    (message.source === 'cron' || message.source === 'loop')
-  );
+  return message.role === 'user' && isAutomaticTriggerSource(message.source);
 }
 
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat

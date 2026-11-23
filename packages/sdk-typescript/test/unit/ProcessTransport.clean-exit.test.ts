@@ -49,7 +49,7 @@ afterEach(async () => {
 });
 
 describe('ProcessTransport clean child exit', () => {
-  it.each(['waitForExit', 'readMessages'])(
+  it.each(['waitForExit', 'readMessages', 'close'])(
     'accepts an already-exited clean child before close through %s',
     async (consumer) => {
       const { child, transport, stderr } = setup();
@@ -62,6 +62,8 @@ describe('ProcessTransport clean child exit', () => {
         const next = transport.readMessages().next();
         child.stdout.end();
         await expect(next).resolves.toEqual({ done: true, value: undefined });
+      } else if (consumer === 'close') {
+        await expect(transport.close()).resolves.toBeUndefined();
       } else {
         await expect(transport.waitForExit()).resolves.toBeUndefined();
       }
