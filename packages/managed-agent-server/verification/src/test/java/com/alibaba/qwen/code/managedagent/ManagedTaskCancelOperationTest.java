@@ -16,12 +16,9 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,13 +52,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ManagedTaskCancelOperationTest {
     private static final String TENANT = "cancel-tenant";
     private static final String ACTOR_DIGEST = "digest-of-actor";
-    private static final String RUNNING_CHILD = "task_" + "a".repeat(64);
-    private static final String SETTLED_CHILD = "task_" + "b".repeat(64);
-    private static final String AUTOMATION = "task_" + "c".repeat(64);
-    private static final String WORKFLOW = "task_" + "e".repeat(64);
-    private static final String SHELL = "task_" + "f".repeat(64);
-    private static final String MONITOR = "task_" + "9".repeat(64);
-    private static final String DELIVERY = "task_" + "8".repeat(64);
+    private String runningChild;
+    private String settledChild;
+    private String automation;
+    private String workflow;
+    private String shell;
+    private String monitor;
+    private String delivery;
     private final AtomicLong now = new AtomicLong(1_000_000);
     private ManagedAgentStore store;
     private JdbcTemplate jdbc;
@@ -96,91 +93,86 @@ class ManagedTaskCancelOperationTest {
                 ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
-        task(RUNNING_CHILD, "child_run", "child_agent", "running");
-        task(SETTLED_CHILD, "child_run", "child_agent", "completed");
-        task(AUTOMATION, "automation_run", "automation_run", "running");
+        runningChild = task("child_run", "child_agent", "running", "a".repeat(64));
+        settledChild = task("child_run", "child_agent", "completed", "b".repeat(64));
+        automation = task("automation_run", "automation_run", "running", "c".repeat(64));
     }
 
     @Test
     void admitsReplaysAndConflictsByDigest() {
-        OperationAdmission first = begin("key-1", "digest-1", RUNNING_CHILD);
+        OperationAdmission first = begin("key-1", "digest-1", runningChild);
         assertThat(first.replayed()).isFalse();
         OperationRecord operation = first.operation();
         assertThat(operation.kind()).isEqualTo(OperationKind.TASK_CANCEL);
-        assertThat(operation.taskId()).isEqualTo(RUNNING_CHILD);
+        assertThat(operation.taskId()).isEqualTo(runningChild);
         assertThat(operation.state()).isEqualTo("PENDING");
         assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
         assertThat(operation.deliveryState()).isEqualTo("PENDING");
         assertThat(operation.receiptId()).isNull();
 
         OperationAdmission replay = begin("key-1", "digest-1",
-                RUNNING_CHILD);
+                runningChild);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.operation().operationId())
                 .isEqualTo(operation.operationId());
-        refused(() -> begin("key-1", "digest-2", RUNNING_CHILD),
+        refused(() -> begin("key-1", "digest-2", runningChild),
                 HttpStatus.CONFLICT, "idempotency_conflict");
         // Another actor's key is another request: it meets the open
         // operation instead of the first actor's record.
         refused(() -> store.beginTaskCancelOperation(TENANT, sessionId,
-                RUNNING_CHILD, "another-actor", "key-1", "digest-1"),
+                runningChild, "another-actor", "key-1", "digest-1"),
                 HttpStatus.CONFLICT, "session_operation_active");
     }
 
     @Test
     void aRetainedKeyReplaysThroughStateChangesThatRefuseNewRequests() {
-        OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
+        OperationRecord admitted = begin("key-1", "digest-1", runningChild)
                 .operation();
         settle(admitted, TaskCancelOutcome.completed());
         jdbc.update("UPDATE ma_session_record SET"
                 + " task_state = 'cancelled'");
         jdbc.update("UPDATE ma_session SET status = 'CLOSING'");
         OperationAdmission replay = begin("key-1", "digest-1",
-                RUNNING_CHILD);
+                runningChild);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.operation().state()).isEqualTo("COMPLETED");
-        refused(() -> begin("key-2", "digest-2", RUNNING_CHILD),
+        refused(() -> begin("key-2", "digest-2", runningChild),
                 HttpStatus.CONFLICT, "session_not_active");
         jdbc.update("UPDATE ma_session SET status = 'DELETED'");
-        refused(() -> begin("key-2", "digest-2", RUNNING_CHILD),
+        refused(() -> begin("key-2", "digest-2", runningChild),
                 HttpStatus.NOT_FOUND, "session_not_found");
     }
 
     @Test
     void aNewRequestNeedsTheTasksCancelAction() {
-        refused(() -> begin("key-2", "digest-2", SETTLED_CHILD),
+        refused(() -> begin("key-2", "digest-2", settledChild),
                 HttpStatus.CONFLICT, "task_action_unavailable");
         refused(() -> begin("key-3", "digest-3", "task_" + "d".repeat(64)),
                 HttpStatus.NOT_FOUND, "task_not_found");
         for (String state : new String[] {"pending", "waiting", "degraded"}) {
-            jdbc.update("UPDATE ma_session_record SET"
-                    + " task_state = ? WHERE record_key = ?", state,
-                    "a".repeat(64));
+            taskState("child_run", "a".repeat(64), state);
             OperationRecord admitted = begin("key-" + state, "digest-" + state,
-                    RUNNING_CHILD).operation();
+                    runningChild).operation();
             settle(admitted, TaskCancelOutcome.completed());
         }
-        jdbc.update("UPDATE ma_session_record SET"
-                + " task_state = 'recovery_blocked' WHERE record_key = ?",
-                "a".repeat(64));
-        refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
+        taskState("child_run", "a".repeat(64), "recovery_blocked");
+        refused(() -> begin("key-4", "digest-4", runningChild),
                 HttpStatus.CONFLICT, "task_action_unavailable");
     }
 
     @Test
     void anAutomationRunAdmitsCancelAndReplaysAfterSettlement() {
-        OperationRecord admitted = begin("auto-key", "auto-digest", AUTOMATION)
+        OperationRecord admitted = begin("auto-key", "auto-digest", automation)
                 .operation();
         assertThat(admitted.kind()).isEqualTo(OperationKind.TASK_CANCEL);
-        assertThat(admitted.taskId()).isEqualTo(AUTOMATION);
-        refused(() -> begin("auto-key", "other-digest", AUTOMATION),
+        assertThat(admitted.taskId()).isEqualTo(automation);
+        refused(() -> begin("auto-key", "other-digest", automation),
                 HttpStatus.CONFLICT, "idempotency_conflict");
         settle(admitted, TaskCancelOutcome.completed());
-        jdbc.update("UPDATE ma_session_record SET task_state = 'cancelled'"
-                + " WHERE record_key = ?", "c".repeat(64));
-        assertThat(begin("auto-key", "auto-digest", AUTOMATION).operation()
+        taskState("automation_run", "c".repeat(64), "cancelled");
+        assertThat(begin("auto-key", "auto-digest", automation).operation()
                 .operationId()).isEqualTo(admitted.operationId());
-        refused(() -> begin("auto-next", "auto-digest", AUTOMATION),
+        refused(() -> begin("auto-next", "auto-digest", automation),
                 HttpStatus.CONFLICT, "task_action_unavailable");
     }
 
@@ -189,33 +181,29 @@ class ManagedTaskCancelOperationTest {
     // recovery_blocked states refuse, and the retained key replays.
     @Test
     void aWorkflowTaskAdmitsCancelUnderTheSameRule() {
-        task(WORKFLOW, "child_run", "workflow", "running");
+        workflow = task("child_run", "workflow", "running", "e".repeat(64));
         OperationAdmission first = begin("wf-key-1", "wf-digest-1",
-                WORKFLOW);
+                workflow);
         assertThat(first.replayed()).isFalse();
         assertThat(first.operation().kind()).isEqualTo(
                 OperationKind.TASK_CANCEL);
-        assertThat(first.operation().taskId()).isEqualTo(WORKFLOW);
-        assertThat(begin("wf-key-1", "wf-digest-1", WORKFLOW).replayed())
+        assertThat(first.operation().taskId()).isEqualTo(workflow);
+        assertThat(begin("wf-key-1", "wf-digest-1", workflow).replayed())
                 .isTrue();
-        refused(() -> begin("wf-key-1", "wf-digest-2", WORKFLOW),
+        refused(() -> begin("wf-key-1", "wf-digest-2", workflow),
                 HttpStatus.CONFLICT, "idempotency_conflict");
         settle(first.operation(), TaskCancelOutcome.completed());
         for (String state : new String[] {"pending", "waiting",
                 "degraded"}) {
-            jdbc.update("UPDATE ma_session_record SET"
-                    + " task_state = ? WHERE record_key = ?", state,
-                    "e".repeat(64));
-            settle(begin("wf-key-" + state, "wf-digest-" + state, WORKFLOW)
+            taskState("child_run", "e".repeat(64), state);
+            settle(begin("wf-key-" + state, "wf-digest-" + state, workflow)
                     .operation(), TaskCancelOutcome.completed());
         }
         for (String state : new String[] {"completed", "failed",
                 "cancelled", "recovery_blocked"}) {
-            jdbc.update("UPDATE ma_session_record SET"
-                    + " task_state = ? WHERE record_key = ?", state,
-                    "e".repeat(64));
+            taskState("child_run", "e".repeat(64), state);
             refused(() -> begin("wf-key-" + state, "wf-digest-" + state,
-                    WORKFLOW), HttpStatus.CONFLICT,
+                    workflow), HttpStatus.CONFLICT,
                     "task_action_unavailable");
         }
     }
@@ -225,10 +213,12 @@ class ManagedTaskCancelOperationTest {
     // states refuse, and the retained key replays.
     @Test
     void theH3TasksAdmitCancelUnderTheSameRule() {
-        task(SHELL, "child_run", "background_shell", "running");
-        task(MONITOR, "monitor_run", "monitor", "running");
-        for (String taskId : new String[] {SHELL, MONITOR}) {
-            String recordKey = taskId.substring("task_".length());
+        shell = task("child_run", "background_shell", "running", "f".repeat(64));
+        monitor = task("monitor_run", "monitor", "running", "9".repeat(64));
+        for (String[] descriptor : new String[][] {
+                {shell, "child_run", "f".repeat(64)},
+                {monitor, "monitor_run", "9".repeat(64)}}) {
+            String taskId = descriptor[0];
             OperationAdmission first = begin(taskId + "-1", "digest-1",
                     taskId);
             assertThat(first.replayed()).isFalse();
@@ -238,17 +228,13 @@ class ManagedTaskCancelOperationTest {
             settle(first.operation(), TaskCancelOutcome.completed());
             for (String state : new String[] {"pending", "waiting",
                     "degraded"}) {
-                jdbc.update("UPDATE ma_session_record SET"
-                        + " task_state = ? WHERE record_key = ?", state,
-                        recordKey);
+                taskState(descriptor[1], descriptor[2], state);
                 settle(begin(taskId + state, "digest-" + state, taskId)
                         .operation(), TaskCancelOutcome.completed());
             }
             for (String state : new String[] {"completed", "failed",
                     "cancelled", "recovery_blocked"}) {
-                jdbc.update("UPDATE ma_session_record SET"
-                        + " task_state = ? WHERE record_key = ?", state,
-                        recordKey);
+                taskState(descriptor[1], descriptor[2], state);
                 refused(() -> begin(taskId + state, "digest-" + state,
                         taskId), HttpStatus.CONFLICT,
                         "task_action_unavailable");
@@ -260,21 +246,19 @@ class ManagedTaskCancelOperationTest {
     // planned, with no adapter claim — and the retained key replays.
     @Test
     void aDeliveryTaskAdmitsCancelOnlyWhilePending() {
-        task(DELIVERY, "channel_delivery", "channel_delivery", "pending");
-        OperationAdmission first = begin("delivery-1", "digest-1", DELIVERY);
+        delivery = task("channel_delivery", "channel_delivery", "pending", "8".repeat(64));
+        OperationAdmission first = begin("delivery-1", "digest-1", delivery);
         assertThat(first.replayed()).isFalse();
-        assertThat(first.operation().taskId()).isEqualTo(DELIVERY);
+        assertThat(first.operation().taskId()).isEqualTo(delivery);
         settle(first.operation(), TaskCancelOutcome.completed());
         for (String state : new String[] {"running", "waiting", "degraded",
                 "completed", "failed", "cancelled", "recovery_blocked"}) {
-            jdbc.update("UPDATE ma_session_record SET"
-                    + " task_state = ? WHERE record_key = ?", state,
-                    "8".repeat(64));
+            taskState("channel_delivery", "8".repeat(64), state);
             refused(() -> begin("delivery-" + state, "digest-" + state,
-                    DELIVERY), HttpStatus.CONFLICT,
+                    delivery), HttpStatus.CONFLICT,
                     "task_action_unavailable");
         }
-        assertThat(begin("delivery-1", "digest-1", DELIVERY).replayed())
+        assertThat(begin("delivery-1", "digest-1", delivery).replayed())
                 .isTrue();
     }
 
@@ -304,17 +288,16 @@ class ManagedTaskCancelOperationTest {
                         .sessionId());
         String previous = sessionId;
         sessionId = bound;
-        task(RUNNING_CHILD, "child_run", "child_agent", "running");
-        OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
+        runningChild = task("child_run", "child_agent", "running", "a".repeat(64));
+        OperationRecord admitted = begin("key-1", "digest-1", runningChild)
                 .operation();
         settle(admitted, TaskCancelOutcome.completed());
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?,"
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id) VALUES (?,"
                 + " 'storage-1', ?)",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage-1"),
                 TENANT, UUID.randomUUID().toString());
-        assertThat(begin("key-1", "digest-1", RUNNING_CHILD).replayed())
+        assertThat(begin("key-1", "digest-1", runningChild).replayed())
                 .isTrue();
-        assertThatThrownBy(() -> begin("key-2", "digest-2", RUNNING_CHILD))
+        assertThatThrownBy(() -> begin("key-2", "digest-2", runningChild))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class,
                         error -> assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
@@ -323,8 +306,8 @@ class ManagedTaskCancelOperationTest {
 
     @Test
     void oneOpenOperationPerSessionBothWays() {
-        begin("key-1", "digest-1", RUNNING_CHILD);
-        refused(() -> begin("key-2", "digest-2", RUNNING_CHILD),
+        begin("key-1", "digest-1", runningChild);
+        refused(() -> begin("key-2", "digest-2", runningChild),
                 HttpStatus.CONFLICT, "session_operation_active");
         // An open cancel blocks close, archive and delete the same way.
         refused(() -> store.beginOperation(TENANT, sessionId,
@@ -345,7 +328,7 @@ class ManagedTaskCancelOperationTest {
                 try {
                     barrier.await(5, TimeUnit.SECONDS);
                     competition.executeWithoutResult(ignored -> begin(key,
-                            "digest-" + key, RUNNING_CHILD));
+                            "digest-" + key, runningChild));
                     outcomes.add("admitted");
                 } catch (ManagedAgentException error) {
                     outcomes.add(error.getCode());
@@ -367,7 +350,7 @@ class ManagedTaskCancelOperationTest {
 
     @Test
     void aParkedCancelHoldsNoLifecycleHostage() {
-        OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
+        OperationRecord admitted = begin("key-1", "digest-1", runningChild)
                 .operation();
         OperationRecord claimed = claim(admitted);
         assertThat(store.settleTaskCancel(TENANT, sessionId,
@@ -397,7 +380,7 @@ class ManagedTaskCancelOperationTest {
                 .isEmpty();
         assertThat(read(admitted).state()).isEqualTo("RECOVERY_BLOCKED");
         // Not open: a new cancel is admitted, and so is the close.
-        OperationRecord second = begin("key-2", "digest-2", RUNNING_CHILD)
+        OperationRecord second = begin("key-2", "digest-2", runningChild)
                 .operation();
         settle(second, TaskCancelOutcome.completed());
         assertThat(store.beginOperation(TENANT, sessionId,
@@ -429,7 +412,7 @@ class ManagedTaskCancelOperationTest {
 
     @Test
     void settlementWritesTheContractsStateFieldsUnderTheClaim() {
-        OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
+        OperationRecord admitted = begin("key-1", "digest-1", runningChild)
                 .operation();
         assertThat(store.findDeliverableTaskCancels(10))
                 .extracting(OperationTarget::operationId)
@@ -507,21 +490,18 @@ class ManagedTaskCancelOperationTest {
     // reads the committed body's stop request and run line.
     @Test
     void theStopStateReadsTheCommittedBody() {
-        String recordKey = ManagedExtensionProjection.recordKey(sessionId,
-                "child_run", "run-stop");
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, gmt_create) VALUES (?, ?,"
-                        + " 'workspace', ?, 'child_run', 'run-stop', ?, 2,"
-                        + " 'resource-stop', 'child_agent', 'running', 1)", recordKey, TENANT, sessionId, recordKey);
+                        + " operation_id, revision, record_resource_id,"
+                        + " task_kind, task_state, gmt_create) VALUES (?,"
+                        + " 'workspace', ?, 'child_run', 'run-stop', 'op-stop', 2,"
+                        + " 'resource-stop', 'child_agent', 'running', 1)", TENANT, sessionId);
         byte[] body = ("{\"kind\":\"child_agent\",\"stopRequested\":true,"
                 + "\"run\":{\"state\":\"running\"}}")
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'workspace', ?, 'resource-stop', 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSchemaKeys.key(scope, "resource-stop"), TENANT, sessionId, body.length, "c".repeat(64), body);
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, 'workspace', ?, 'resource-stop', 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                TENANT, sessionId, body.length, "c".repeat(64), body);
         JdbcChildResultRelayStore relay = new JdbcChildResultRelayStore(jdbc);
         assertThat(relay.stopState(TENANT, sessionId, "run-stop"))
                 .isEqualTo(new JdbcChildResultRelayStore.StopState(true, false));
@@ -529,18 +509,25 @@ class ManagedTaskCancelOperationTest {
                 .isNull();
     }
 
-    private void task(String taskId, String domain, String kind,
-            String state) {
-        String recordKey = taskId.substring("task_".length());
+    private String task(String domain, String kind, String state,
+            String recordId) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, gmt_create)"
-                        + " VALUES (?, ?, 'workspace', ?, ?, ?, ?, 1, ?,"
+                        + " VALUES (?, 'workspace', ?, ?, ?, ?, 1, ?,"
                         + " ?, ?, 1)",
-                recordKey, TENANT, sessionId, domain, "record-" + recordKey,
-                recordKey, "resource-" + recordKey, kind, state);
+                TENANT, sessionId, domain, recordId,
+                "op-" + recordId, "resource-" + recordId, kind, state);
+        return ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, domain, recordId));
+    }
+
+    private void taskState(String domain, String recordId, String state) {
+        jdbc.update("UPDATE ma_session_record SET task_state = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                state, TENANT, sessionId, domain, recordId);
     }
 
     private OperationAdmission begin(String key, String digest,
