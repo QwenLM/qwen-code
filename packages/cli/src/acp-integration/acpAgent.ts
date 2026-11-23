@@ -166,7 +166,6 @@ import {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
   extractAndStripMeta,
-  listWorkflowSnapshots,
   claimInterruptedWorkflowRuns,
   claimInterruptedWorkflowRun,
   isWorkflowRunId,
@@ -4030,6 +4029,11 @@ class QwenAgent implements Agent {
    * an orphaned live run out from under itself. Pruned as they drain.
    */
   private readonly detachedWorkflowRegistries = new Set<WorkflowRunRegistry>();
+  private readonly workflowRecoveryCompleted = new WeakSet<Session>();
+  private readonly workflowRecoveryInFlight = new Map<
+    string,
+    ReturnType<typeof claimInterruptedWorkflowRuns>
+  >();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -9608,6 +9612,7 @@ class QwenAgent implements Agent {
     includeWorkflows = false,
   ): Promise<ServeSessionTasksStatus> {
     const session = this.sessionOrThrow(sessionId);
+    if (includeWorkflows) await this.recoverInterruptedWorkflows(session);
     return buildSessionTasksStatus(
       sessionId,
       session.getConfig(),
@@ -9615,6 +9620,24 @@ class QwenAgent implements Agent {
       includeWorkflows ? await session.refreshWorkflowHistory() : [],
       { includeWorkflows },
     );
+  }
+
+  private async recoverInterruptedWorkflows(session: Session): Promise<void> {
+    if (this.workflowRecoveryCompleted.has(session)) return;
+    const config = session.getConfig();
+    const directory = config.storage.getWorkflowRunsDir();
+    const recovery =
+      this.workflowRecoveryInFlight.get(directory) ??
+      claimInterruptedWorkflowRuns(config).finally(() => {
+        this.workflowRecoveryInFlight.delete(directory);
+      });
+    this.workflowRecoveryInFlight.set(directory, recovery);
+    try {
+      await recovery;
+      this.workflowRecoveryCompleted.add(session);
+    } catch (error) {
+      debugLogger.debug(`Claiming interrupted workflow runs failed: ${error}`);
+    }
   }
 
   /**
@@ -14398,6 +14421,8 @@ class QwenAgent implements Agent {
               ? getWorkflowTaskMutationKey(config, taskId, 'script')
               : getWorkflowTaskMutationKey(config, taskId);
         if (action === 'delete-history') {
+          // Recovery treats a held mutation lock as a live run.
+          await claimInterruptedWorkflowRun(config, taskId);
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
             async () => {
@@ -18072,15 +18097,6 @@ class QwenAgent implements Agent {
     options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission(this.hostExecutionEngine);
     this.assertHostedSessionIdAvailable(sessionId);
-    // A run the previous daemon process was running when it exited has no
-    // snapshot until something claims it; claimed here, it joins the history
-    // this session lists as a failed run.
-    try {
-      await claimInterruptedWorkflowRuns(config);
-    } catch (error) {
-      debugLogger.debug(`Claiming interrupted workflow runs failed: ${error}`);
-    }
-    const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(
       sessionId,
       config,
@@ -18088,7 +18104,7 @@ class QwenAgent implements Agent {
       settings,
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
-      workflowHistory,
+      undefined,
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
       (deliveries) => this.expireHostedPeerDeliveries(deliveries),
       acpModRowSites(this.clientCapabilities),
