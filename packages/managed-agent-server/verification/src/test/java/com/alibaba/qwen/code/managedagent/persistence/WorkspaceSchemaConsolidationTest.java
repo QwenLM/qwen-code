@@ -100,8 +100,9 @@ class WorkspaceSchemaConsolidationTest {
                     + " context_revision, workspace_config_ref, workspace_policy_ref, creator_actor_key, parent_session_id)"
                     + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', ?, ?, 'root', 1, 'storage', '.', ?, 1, ?, ?, ?, ?)",
                     id, now, now, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
-                    WorkspaceExecutionProfile.POLICY_REF, ("parent".equals(id) ? "actor" : "child:parent")
-                            .getBytes(StandardCharsets.UTF_8), "parent".equals(id) ? null : "parent");
+                    WorkspaceExecutionProfile.POLICY_REF, ("parent".equals(id) ? "actor"
+                            : com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId.of("parent")),
+                    "parent".equals(id) ? null : "parent");
         }
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'root', ?, 'OWNER')",
                 "actor".getBytes(StandardCharsets.UTF_8));
@@ -112,7 +113,8 @@ class WorkspaceSchemaConsolidationTest {
         authority.authorize(child);
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", "tenant", "root");
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'root', ?, 'OWNER')",
-                "child:parent".getBytes(StandardCharsets.UTF_8));
+                com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId.of("parent")
+                        .getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(() -> authority.authorize(child)).isInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
     }
 
@@ -126,7 +128,7 @@ class WorkspaceSchemaConsolidationTest {
         var admitted = store.admit("tenant", "parent", "run", storage, now);
         var original = store.claim(admitted, "original-worker", now, 1000);
         String step = authority.holdForMaintenance(storage, admitted.childWorkspaceId(), original.claimGeneration());
-        String originalHolder = jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class);
+        String originalHolder = jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class);
         assertThat(authority.releaseStaleMaintenance(now + 60_000, 0)).isZero();
         var recovery = new WorkspaceMaintenanceRecovery(jdbc, manager, null);
         var identity = recovery.inspect(storage, admitted.childWorkspaceId(), original.claimGeneration());
@@ -139,11 +141,11 @@ class WorkspaceSchemaConsolidationTest {
         assertThat(jdbc.queryForObject("SELECT maintenance_generation FROM ma_storage_owner", Long.class))
                 .isEqualTo(original.claimGeneration());
         authority.releaseMaintenance(storage, admitted.childWorkspaceId(), original.claimGeneration() + 1, step);
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isEqualTo(originalHolder);
+        assertThat(jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class)).isEqualTo(originalHolder);
         authority.releaseMaintenance(storage, admitted.childWorkspaceId(), original.claimGeneration(), step);
         var replacement = store.claim(admitted, "replacement-worker", now + 1001, 60_000);
         authority.holdForMaintenance(storage, admitted.childWorkspaceId(), replacement.claimGeneration());
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isNotEqualTo(originalHolder);
+        assertThat(jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class)).isNotEqualTo(originalHolder);
     }
 
     @Test
@@ -166,14 +168,14 @@ class WorkspaceSchemaConsolidationTest {
         String second = authority.holdForMaintenance(binding, claimed.childWorkspaceId(), claimed.claimGeneration());
         assertThat(second).isNotEqualTo(first);
         authority.releaseMaintenance(binding, claimed.childWorkspaceId(), claimed.claimGeneration(), first);
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class)).isNotNull();
         var current = new WorkspaceMaintenanceRecovery(jdbc, manager, null).inspect(binding,
                 claimed.childWorkspaceId(), claimed.claimGeneration());
         assertThat(current.get("executionId")).isEqualTo(second);
         assertThat(current.get("state")).isEqualTo("EXECUTING");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE work_kind = 'RECOVERY_EVIDENCE' AND evidence_resource_key IS NOT NULL", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE work_kind = 'RECOVERY_EVIDENCE' AND evidence_resource_ref IS NOT NULL", Integer.class)).isEqualTo(2);
         authority.releaseMaintenance(binding, claimed.childWorkspaceId(), claimed.claimGeneration(), second);
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isNull();
+        assertThat(jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class)).isNull();
     }
 
     @Test
@@ -181,7 +183,9 @@ class WorkspaceSchemaConsolidationTest {
         String owner = WorkspaceOperations.hash("proof-owner");
         byte[] bytes = "proof".getBytes(StandardCharsets.UTF_8);
         String resource = transaction.execute(ignored -> WorkspaceEvidenceResources.publish(jdbc, "tenant", "root", "session", owner, bytes));
-        jdbc.update("UPDATE ma_resource SET deletion_operation_key = ? WHERE resource_key = ?", WorkspaceOperations.hash("delete"), resource);
+        jdbc.update("UPDATE ma_resource SET deletion_operation_ref = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                WorkspaceOperations.key(WorkspaceOperations.Kind.WORKSPACE_RETIREMENT, "tenant", "delete"), "tenant", "session",
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef.decode(resource.getBytes(StandardCharsets.US_ASCII)).get(2));
         assertThatThrownBy(() -> transaction.execute(ignored -> WorkspaceEvidenceResources.publish(jdbc, "tenant", "root", "session", owner, bytes)))
                 .isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> WorkspaceEvidenceResources.read(jdbc, resource, WorkspaceEvidenceResources.digest(bytes)))
@@ -201,13 +205,13 @@ class WorkspaceSchemaConsolidationTest {
             String owner = WorkspaceOperations.hash(operations.key(WorkspaceOperations.Kind.WORKSPACE_OPERATOR_RECOVERY, id), "proof");
             String resource = WorkspaceEvidenceResources.publish(jdbc, "tenant", "root", "session", owner, evidence);
             operations.insertWork(WorkspaceOperations.Kind.WORKSPACE_OPERATOR_RECOVERY, id, "RECOVERY_EVIDENCE",
-                    WorkspaceOperations.hash("execution"), "execution", "session",
-                    WorkspaceOperations.values("evidence_resource_key", resource,
+                    "execution", "session",
+                    WorkspaceOperations.values("evidence_resource_ref", resource,
                             "evidence_sha256", WorkspaceEvidenceResources.digest(evidence)), "COMPLETE");
         });
         var work = operations.findWork(WorkspaceOperations.Kind.WORKSPACE_OPERATOR_RECOVERY, id,
-                "RECOVERY_EVIDENCE", WorkspaceOperations.hash("execution"), false);
-        assertThat(WorkspaceEvidenceResources.read(jdbc, (String) work.get("evidence_resource_key"),
+                "RECOVERY_EVIDENCE", "execution", false);
+        assertThat(WorkspaceEvidenceResources.read(jdbc, (String) work.get("evidence_resource_ref"),
                 (String) work.get("evidence_sha256"))).isEqualTo(evidence);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'OPERATION_WORK'", Integer.class)).isEqualTo(1);
         assertThatThrownBy(() -> transaction.executeWithoutResult(status -> operations.update(

@@ -235,7 +235,7 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 
 ### 可观测性
 
-- Harness：干净挂起次数、可回退放弃次数、闸门保持关闭的失败/结果未知 teardown 及其持续时间和原因、判定未通过次数、冷打开耗时（拆分为 store 恢复和 MCP 重新安装）、`hosted_session_open_busy` 拒绝次数。失败 teardown 不计为干净挂起。
+- Harness：干净挂起次数、可回退放弃次数、闸门保持关闭的失败/结果未知 teardown 及其持续时间和原因、判定未通过次数、冷打开耗时（拆分为 store 恢复和 MCP 重新安装）、`hosted_session_open_busy` 拒绝次数。失败 teardown 不计为干净挂起。这些计数从进程启动起累计，在实例的 `/internal/hosted-harness/v1/metrics` 接口中以 `suspension` 字段返回。
 - 控制面：准入重新 attach、心跳失效、保留下来的恢复快照、池重新选择、清掉过期 attachment 的 wake 激活次数，以及达到上限的等待次数。
 
 ### 故障模式
@@ -274,7 +274,7 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 
 ## 第四阶段：审批停靠
 
-只定义边界。
+只定义边界。实现前设计见[审批停靠](2026-11-21-managed-action-parking.zh-CN.md)；它经 G3 第三步的审批续跑 driver 恢复 Turn，而不是下文所说的 Managed Runtime continue 路径。
 
 - **现状。** 等待工具审批的 Turn 一直在 Harness 中运行，由 `HostedApprovalWaiters` 挂住，尽管 checkpoint 已经记录了 `await_action` 阶段。
 - **目标。** Turn 停在 `await_action`，本次请求结束。审批结果通过现有的 Managed Runtime continue 路径在任意池成员上恢复这个 Turn。

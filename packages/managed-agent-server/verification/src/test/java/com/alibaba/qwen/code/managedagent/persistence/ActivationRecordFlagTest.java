@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -59,11 +59,11 @@ class ActivationRecordFlagTest {
             revision++;
             byte[] bytes = ("{\"operation\":\"" + operation + "\"}\n").getBytes(StandardCharsets.UTF_8);
             jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                    + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence,"
+                    + " command_ref, transaction_id, operation, command_id, content_digest, first_sequence,"
                     + " last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                     + " record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant',"
                     + " 'workspace', 'session', ?, ?, ?, ?, ?, REPEAT('0', 64), 1, 1, 1, 1, 'worker', REPEAT('0', 64),"
-                    + " 1, 'identity', ?, ?, ?, 0)", revision, ManagedSchemaKeys.key("command", Long.toString(revision)),
+                    + " 1, 'identity', ?, ?, ?, 0)", revision, ManagedIdentityRefs.commandRef(operation, "command-" + revision),
                     "transaction-" + revision, operation, "command-" + revision, bytes, bytes.length,
                     JournalStoreRows.sha256(bytes));
             Integer generated = jdbc.queryForObject("SELECT is_activation_record FROM ma_session_journal_tx"

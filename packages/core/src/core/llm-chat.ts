@@ -114,6 +114,10 @@ import {
   effectiveHistoryEnd,
 } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -1956,14 +1960,20 @@ function copyContentContainer(content: Content): Content {
 
 function copyPartContainer(part: Part): Part {
   const nested = getFunctionResponseParts(part);
-  if (!nested) return { ...part };
-  return {
-    ...part,
-    functionResponse: {
-      ...part.functionResponse,
-      parts: nested.map((inner) => ({ ...inner })),
-    },
-  };
+  const copy = nested
+    ? {
+        ...part,
+        functionResponse: {
+          ...part.functionResponse,
+          parts: nested.map((inner) => ({ ...inner })),
+        },
+      }
+    : { ...part };
+  const recovery = getToolOutputRecovery(part);
+  if (recovery) {
+    setToolOutputRecovery(copy, recovery);
+  }
+  return copy;
 }
 
 function stripThoughtPartsFromContent(content: Content): Content | null {
@@ -2512,6 +2522,19 @@ export class LlmChat {
 
   getHistoryReplacementRevision(): number {
     return this.historyReplacementRevision;
+  }
+
+  /**
+   * The per-response output-token limit the send layer last used — clamp,
+   * escalation, or user override. `Turn` reads it when a `MAX_TOKENS` cut
+   * truncates a tool call so the scheduler's rejection can name the budget
+   * (#16417). One send stale is fine: the value is refreshed at every clamp
+   * and every escalation before the retry goes out.
+   */
+  private lastRequestMaxOutputTokens: number | undefined;
+
+  getLastRequestMaxOutputTokens(): number | undefined {
+    return this.lastRequestMaxOutputTokens;
   }
 
   // A promise to represent the current state of the message being sent to the
@@ -4386,6 +4409,7 @@ export class LlmChat {
           contextWindowForClamp,
           promptTokensForClamp,
         );
+        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
         params = {
           ...params,
           config: {
@@ -5646,6 +5670,7 @@ export class LlmChat {
           let recoveryParams: SendMessageParameters = params;
 
           if (shouldEscalateMaxOutputTokens) {
+            self.lastRequestMaxOutputTokens = escalatedLimit;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
@@ -5789,15 +5814,21 @@ export class LlmChat {
             // defensive fallback that never fires in practice.
             const recoveryCeiling =
               recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            const iterationClampedMaxOutputTokens = clampOutputTokensToWindow(
+              recoveryCeiling,
+              contextWindowForClamp,
+              recoveryPromptEstimate,
+            );
+            // Refresh the per-response limit the Turn reads (#16417): a
+            // recovery iteration can end at MAX_TOKENS, and the rejection
+            // must name the limit *this* iteration used, not the one from
+            // before the recovery loop started.
+            self.lastRequestMaxOutputTokens = iterationClampedMaxOutputTokens;
             const iterationParams: SendMessageParameters = {
               ...recoveryParams,
               config: {
                 ...recoveryParams.config,
-                maxOutputTokens: clampOutputTokensToWindow(
-                  recoveryCeiling,
-                  contextWindowForClamp,
-                  recoveryPromptEstimate,
-                ),
+                maxOutputTokens: iterationClampedMaxOutputTokens,
               },
             };
 

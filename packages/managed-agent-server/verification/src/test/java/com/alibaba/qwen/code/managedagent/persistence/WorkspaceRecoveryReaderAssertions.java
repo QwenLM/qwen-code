@@ -51,10 +51,10 @@ public final class WorkspaceRecoveryReaderAssertions {
         jdbc.update("UPDATE ma_tool_execution SET request_digest = 'changed'");
         assertThatThrownBy(() -> reader.publicationReceipt(source, request)).hasMessageContaining("publication_owner_conflict");
         jdbc.update("UPDATE ma_tool_execution SET request_digest = ?", receipt.path("binding").path("requestDigest").asText());
-        byte[] terminal = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE slot_key = X'7465726d696e616c'", byte[].class);
-        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'", new byte[]{1});
+        byte[] terminal = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE slot_key = 'terminal'", byte[].class);
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = 'terminal'", new byte[]{1});
         assertThatThrownBy(() -> reader.publicationObject(source, "pub-1", "terminal")).hasMessageContaining("resource_corrupt");
-        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'", terminal);
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = 'terminal'", terminal);
         assertThat(snapshot(jdbc)).usingRecursiveComparison().isEqualTo(before);
     }
 

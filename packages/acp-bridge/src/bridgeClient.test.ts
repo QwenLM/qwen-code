@@ -1788,7 +1788,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     });
   });
 
-  it('forwards a target workspace and rejects an unusable one', async () => {
+  it('forwards a target workspace and its YOLO requirement', async () => {
     const onCreate = vi.fn(async () => ({
       sessionId: 'sub-11',
       workspaceCwd: '/repos/b',
@@ -1801,6 +1801,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
         completion: 'sent',
         workspace: 'workspace-id',
         workspaceGeneration,
+        requiresYolo: true,
         callerSessionId: 'caller-1',
       }),
     ).resolves.toEqual({ sessionId: 'sub-11', workspaceCwd: '/repos/b' });
@@ -1809,11 +1810,14 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       completion: 'sent',
       workspace: 'workspace-id',
       workspaceGeneration,
+      requiresYolo: true,
       callerSessionId: 'caller-1',
     });
     for (const extra of [
       { workspace: 'workspace-id' },
       { workspaceGeneration },
+      { requiresYolo: true },
+      { workspace: 'workspace-id', workspaceGeneration, requiresYolo: false },
       { workspace: 'workspace-id', workspaceGeneration: '' },
       { workspace: '' },
       { workspace: 7 },
@@ -1833,6 +1837,47 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
           ...extra,
         }),
       ).rejects.toThrow(/workspace/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards an automatic workspace approval requirement', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-auto' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const workspaceGeneration = '5103aa8c-9a6e-4ad6-9b3b-7c765cdcbee5';
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'go',
+        completion: 'first-turn',
+        workspace: 'workspace-id',
+        workspaceGeneration,
+        requiresAutoMode: true,
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-auto' });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'first-turn',
+      workspace: 'workspace-id',
+      workspaceGeneration,
+      requiresAutoMode: true,
+      callerSessionId: 'caller-1',
+    });
+    for (const requiresAutoMode of [
+      false,
+      'true',
+      { requiresAutoMode: true },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'first-turn',
+          workspace: 'workspace-id',
+          workspaceGeneration,
+          requiresAutoMode,
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow('requiresAutoMode');
     }
     expect(onCreate).toHaveBeenCalledTimes(1);
   });

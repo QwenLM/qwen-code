@@ -206,7 +206,10 @@ class ManagedHostedRecoveryRecordsTest {
             return nested;
         };
         for (int i = 0; i < 12; i++) {
-            byte[] root = json.createObjectNode().put("v", version).set("definitionRef", ref).toString().getBytes(StandardCharsets.UTF_8);
+            ObjectNode rootBody = json.createObjectNode().put("v", version);
+            rootBody.set("definitionRef", ref);
+            rootBody.set("continuationRef", ref);
+            byte[] root = rootBody.toString().getBytes(StandardCharsets.UTF_8);
             ManagedHostedRecoveryRecords.validateResource(new ManagedSessionStoreModels.StoredResource(
                     "root-" + i, "managed-action-options", 1, root.length, "b".repeat(64), root),
                     "tenant", "workspace", "session", reader, seen);

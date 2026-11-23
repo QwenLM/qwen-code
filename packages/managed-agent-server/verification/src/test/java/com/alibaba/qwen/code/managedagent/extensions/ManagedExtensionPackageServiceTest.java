@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.extensions;
 
 import com.alibaba.qwen.code.managedagent.adapters.extensions.ManagedExtensionArchiveStore;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.ImportMetadata;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Manifest;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
@@ -18,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -90,6 +92,110 @@ class ManagedExtensionPackageServiceTest {
     protected javax.sql.DataSource dataSource() {
         return new DriverManagerDataSource("jdbc:h2:mem:extensions-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+    }
+
+    @Test
+    void findsLatestPublishedListedPackageWithinScope() throws Exception {
+        String id = "ext_" + UUID.randomUUID();
+        insertPackage("tenant", "workspace", id, 1, "PUBLISHED", true);
+        var latest = insertPackage("tenant", "workspace", id, 2, "PUBLISHED", true);
+        insertPackage("tenant", "workspace", id, 3, "PREPARING", true);
+        insertPackage("tenant", "workspace", id, 4, "PUBLISHED", false);
+        var otherTenant = insertPackage("other-tenant", "workspace", id, 5, "PUBLISHED", true);
+        var otherWorkspace = insertPackage("tenant", "other-workspace", id, 6, "PUBLISHED", true);
+        var repository = repository();
+        var selected = repository.findLatestCatalogPackage("tenant", "workspace", id).orElseThrow();
+        assertThat(selected.pin()).isEqualTo(latest);
+        assertThat(selected.manifest().version()).isEqualTo("2");
+        assertThat(selected.byteLength()).isEqualTo(bytes.length);
+        assertThat(selected.source()).isNull();
+        assertThat(repository.list("tenant", "workspace")).containsExactly(selected);
+        assertThat(repository.findLatestCatalogPackage("other-tenant", "workspace", id).orElseThrow().pin()).isEqualTo(otherTenant);
+        assertThat(repository.findLatestCatalogPackage("tenant", "other-workspace", id).orElseThrow().pin()).isEqualTo(otherWorkspace);
+    }
+
+    @Test
+    void missingCatalogPackageKeepsNotFoundAndScopeIsolation() throws Exception {
+        String id = "ext_" + UUID.randomUUID();
+        var repository = repository();
+        assertThat(repository.findLatestCatalogPackage("tenant", "workspace", id)).isEmpty();
+        insertPackage("tenant", "workspace", id, 1, "PREPARING", true);
+        insertPackage("tenant", "workspace", id, 2, "PUBLISHED", false);
+        assertThat(repository.findLatestCatalogPackage("tenant", "workspace", id)).isEmpty();
+        assertThatThrownBy(() -> service.settings("tenant", "reader", "workspace", id))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("extension_package_not_found");
+                });
+        insertPackage("tenant", "workspace", id, 3, "PUBLISHED", true);
+        assertThat(repository.findLatestCatalogPackage("other-tenant", "workspace", id)).isEmpty();
+        assertThat(repository.findLatestCatalogPackage("tenant", "other-workspace", id)).isEmpty();
+        when(workspaces.accessOf("other-tenant", "reader", "workspace")).thenReturn(WorkspaceAccess.READER);
+        when(workspaces.accessOf("tenant", "reader", "other-workspace")).thenReturn(WorkspaceAccess.READER);
+        assertThatThrownBy(() -> service.settings("other-tenant", "reader", "workspace", id))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("extension_package_not_found"));
+        assertThatThrownBy(() -> service.settings("tenant", "reader", "other-workspace", id))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("extension_package_not_found"));
+    }
+
+    @Test
+    void singlePackageLookupRetainsCatalogLimit() throws Exception {
+        String id = "ext_" + UUID.randomUUID();
+        insertPackage("tenant", "workspace", id, 1, "PUBLISHED", true);
+        var latest = insertPackage("tenant", "workspace", id, 2, "PUBLISHED", true);
+        for (int index = 1; index < 256; index++) {
+            insertPackage("tenant", "workspace", "ext_" + UUID.randomUUID(), 1, "PUBLISHED", true);
+        }
+        insertPackage("tenant", "workspace", "ext_" + UUID.randomUUID(), 1, "PREPARING", true);
+        insertPackage("tenant", "workspace", "ext_" + UUID.randomUUID(), 1, "PUBLISHED", false);
+        insertPackage("other-tenant", "workspace", id, 1, "PUBLISHED", true);
+        insertPackage("tenant", "other-workspace", id, 1, "PUBLISHED", true);
+        var repository = repository();
+        assertThat(repository.list("tenant", "workspace")).hasSize(256);
+        assertThat(repository.findLatestCatalogPackage("tenant", "workspace", id).orElseThrow().pin()).isEqualTo(latest);
+        assertThat(service.settings("tenant", "reader", "workspace", id).settingsRevision()).isZero();
+        String missing = "ext_" + UUID.randomUUID();
+        assertThat(repository.findLatestCatalogPackage("tenant", "workspace", missing)).isEmpty();
+        var overflow = insertPackage("tenant", "workspace", "ext_" + UUID.randomUUID(), 1, "PUBLISHED", true);
+        assertThatThrownBy(() -> repository.list("tenant", "workspace"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("extension_catalog_too_large"));
+        jdbc.update("UPDATE ma_extension_package SET manifest_json = 'invalid' WHERE tenant_id = ? AND workspace_id = ? AND extension_id = ?",
+                "tenant", "workspace", overflow.extensionId());
+        for (String selected : List.of(id, missing)) {
+            assertThatThrownBy(() -> repository.findLatestCatalogPackage("tenant", "workspace", selected))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(409);
+                        assertThat(error.getCode()).isEqualTo("extension_catalog_too_large");
+                    });
+            assertThatThrownBy(() -> service.settings("tenant", "reader", "workspace", selected))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("extension_catalog_too_large"));
+        }
+    }
+
+    @Test
+    void singlePackageOperationsDoNotReadOtherCatalogBodies() throws Exception {
+        var unrelated = insertPackage("tenant", "workspace", "ext_" + UUID.randomUUID(), 1, "PUBLISHED", true);
+        jdbc.update("UPDATE ma_extension_package SET manifest_json = 'invalid', source_json = 'invalid' WHERE tenant_id = ? AND workspace_id = ? AND extension_id = ?",
+                "tenant", "workspace", unrelated.extensionId());
+        String digest = DigestUtils.sha256Hex(bytes);
+        var first = service.publish("tenant", "operator", "workspace", null, digest, "create", manifest, new ByteArrayInputStream(bytes));
+        assertThat(service.settings("tenant", "reader", "workspace", first.extensionId()).settingsRevision()).isZero();
+        assertThat(service.saveSettings("tenant", "operator", "workspace", first.extensionId(), "settings", new SettingsCommand(0, Map.of())).revision())
+                .isEqualTo(1);
+        assertThat(service.publish("tenant", "operator", "workspace", first.extensionId(), digest, "update", manifest, new ByteArrayInputStream(bytes)).revision())
+                .isEqualTo(2);
+        sourceProvider();
+        String metadata = json.writeValueAsString(new ImportMetadata("extension", manifest.target(), digest, 1, null));
+        assertThat(service.importPackage("tenant", "operator", "workspace", first.extensionId(), "import-update", metadata,
+                new ByteArrayInputStream(bytes), bytes.length).revision()).isEqualTo(3);
+        var imported = service.importSource("tenant", "operator", "workspace", "source-1",
+                new SourceImport(new ManagedExtensionSource.Reference("business", "skill", "skill_1", "1"), manifest.target()));
+        var updated = service.importSource("tenant", "operator", "workspace", "source-2",
+                new SourceImport(new ManagedExtensionSource.Reference("business", "skill", "skill_1", "2"), manifest.target()));
+        assertThat(updated.pin().extensionId()).isEqualTo(imported.pin().extensionId());
+        assertThat(updated.pin().packageRevision()).isEqualTo(2);
+        assertThat(repository().findLatestCatalogPackage("tenant", "workspace", updated.pin().extensionId()).orElseThrow().source()).isEqualTo(updated.source());
+        assertThatThrownBy(() -> service.list("tenant", "reader", "workspace")).isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -496,6 +602,15 @@ class ManagedExtensionPackageServiceTest {
                 "target", Map.of("platform", "windows", "arch", "x64"), "components", List.of("skills"))));
         assertThatThrownBy(() -> service.decodeManifest(invalid)).isInstanceOf(ManagedAgentException.class);
         assertThat(new SettingsCommand(0, Map.of("API_KEY", "private-value")).toString()).doesNotContain("private-value");
+    }
+
+    private Pin insertPackage(String tenant, String workspace, String id, long revision, String state, boolean listed) throws Exception {
+        String digest = DigestUtils.sha256Hex(ManagedSchemaKeys.key(tenant, workspace, id, Long.toString(revision)));
+        var version = new Manifest(1, 1, manifest.name(), Long.toString(revision), manifest.target(), manifest.components());
+        jdbc.update("INSERT INTO ma_extension_package (tenant_id, workspace_id, extension_id, package_revision,"
+                        + " package_digest, manifest_json, byte_length, state, is_catalog_listed, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)", tenant, workspace,
+                id, revision, digest, json.writeValueAsString(version), bytes.length, state, listed);
+        return new Pin(id, revision, digest, null);
     }
 
     private ManagedExtensionPackageService service() {

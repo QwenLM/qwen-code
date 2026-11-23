@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
@@ -3746,6 +3747,44 @@ class HarnessCoordinatorTest {
                     .contains("will retry")
                     .contains("failure=HarnessStreamIdleFailure");
         });
+    }
+
+    @Test
+    void aCertifiedActionParkEndsTheDriveWithoutATransientRetry() {
+        AgentStateStore store = boundCancellingStore();
+        TurnRecord running = turn("tenant", "session", "turn", "prompt", "epoch", 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(running));
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(running));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        when(store.parkTurnForAction(eq("tenant"), eq("session"), eq("turn"), anyString()))
+                .thenReturn(true);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot"));
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch");
+        when(stream.next()).thenReturn(null);
+        when(harness.stream("tenant", "session", 1, "epoch")).thenReturn(stream);
+        HarnessCoordinator coordinator = coordinator(store, harness);
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+
+        // The park presents the lease this drive claimed, never the stale row's owner.
+        ArgumentCaptor<String> owner = ArgumentCaptor.forClass(String.class);
+        verify(store).claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                owner.capture(), any(Duration.class));
+        verify(store).parkTurnForAction("tenant", "session", "turn", owner.getValue());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(stream).close();
     }
 
     @org.junit.jupiter.params.ParameterizedTest

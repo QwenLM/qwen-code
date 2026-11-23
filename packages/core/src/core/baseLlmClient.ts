@@ -154,8 +154,8 @@ function estimateResponseSchemaTokens(schema: unknown): number {
  * receiving window (`computeCompactionOutputBudget`, #7960) and re-clamping it
  * here would shrink it against a window it is not going to. The rest pass
  * fixed per-purpose constants — 60–4096, from `sessionTitle`,
- * `toolUseSummary`, `sessionRecap`, `permissions/classifier`,
- * `vision-bridge-service` and `LlmRewriter` — which are not window-budgeted,
+ * `toolUseSummary`, `sessionRecap`, `permissions/classifier` and
+ * `vision-bridge-service` — which are not window-budgeted,
  * so the invariant above is not established for those call sites.
  *
  * An explicit user ceiling — `samplingParams.max_tokens`, else

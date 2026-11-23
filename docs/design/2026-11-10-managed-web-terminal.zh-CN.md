@@ -123,9 +123,18 @@ live 数据，没有幂等重放语义，而且持久化它会把终端打印出
 Session 的下一次生命周期 drain，因为不 sweep hold 的离开 ACTIVE 转换
 尚未枚举存活中继（见「风险与后续」）。
 
-统一本地启动器（`qwen serve --managed`）把 Java 路由挂在 daemon 认证之后；
-其 managed 代理必须同样转发该路由的 WebSocket upgrade。普通 daemon 自己的
-`/terminal` 路由及其 `web_terminal` capability 不变。
+统一本地启动器（`qwen serve --managed`）把 Java 路由挂在 daemon 认证之后，
+并为此本地部署同时启用 `runtime-broker.tool-measurements` 与
+`runtime-broker.web-terminal`。其 managed 代理通过普通 daemon 的唯一 ACP
+upgrade 分发器，在既有 Host 与 Origin 检查之后转发该路由的 WebSocket
+upgrade。此路由自身新增 primary-listener 与 loopback 限制，再于 daemon
+bearer 校验之前接管；这项限制不是已有的共享门禁。在认证场景的非 loopback
+bind 上，本路由仍执行 loopback Host 白名单，并拒绝仅由 `.` 或 `..` 组成的
+session selector。浏览器与上游 relay socket
+共用分发器的关闭清理。Java 独立于 daemon token 消费一次性终端票。由于终端
+依赖该分发器，Managed 本地启动拒绝 `QWEN_SERVE_ACP_HTTP=0`；普通 daemon
+的 ACP 关闭行为不变。独立 Managed Web gateway 复用同一个 relay helper。普通
+daemon 自己的 `/terminal` 路由及其 `web_terminal` capability 不变。
 
 ### 持久 hold 与生命周期
 
@@ -158,8 +167,9 @@ Workspace 上的 OPERATOR 授权。这是一个有意的产品决策：启用终
 接受「被授权的操作者可以在工作区内以 worker 用户身份执行任意命令，
 无需逐命令审批」。只有普通本地 Workspace binding 能启用终端，而那里
 worker 以服务器账户运行、没有容器隔离，因此该 opt-in 授予的是该账户的
-shell 访问。opt-in 默认关闭，且独立于 Shell opt-in，使部署可以启用
-agent Shell 而保持用户终端关闭。
+shell 访问。在统一本地启动器之外，opt-in 默认关闭，且独立于 Shell
+opt-in，使部署可以启用 agent Shell 而保持用户终端关闭。统一本地启动器
+始终启用终端 opt-in，不提供单独的终端关闭选项。
 
 `external-scratch` 与 K1 scratch runtime 拒绝终端准入：它们的契约禁用
 Workspace files 与 Shell，终端继承该拒绝。`hosted-workspace-files/1` 的
@@ -225,9 +235,10 @@ terminal id，因此 detach 的终端被空闲回收而非恢复——与本地�
 - 所有权边界保持不变：控制平面拥有生命周期与持久状态，Broker 拥有执行
   binding，worker 拥有进程。中继是第一条 live 通道，不得在 Java 侧长出
   进程监管。
-- Harness capability digest 是冻结的 binding 输入；在 Session 已放置之后
-  变更它会使既有 binding 全部失效且无解锁路径。因此终端能力只能随协同部署
-  发布，正如 Shell profile 合并所要求的那样。
+- 准入 binding 时必须固定 Harness capability digest。之后改变租户、Workspace id、
+  Workspace generation、canonical cwd 或隔离类别都要求新的 binding。「发布」节的
+  普通本地挂载兼容组是有界例外，并不升级旧 binding 的安全属性；附着终端仍要求
+  处于 READY、未 drain 状态并携带 terminal digest 的 binding。
 - 在 Managed Agent 首个正式版本发布之前，共享 V1 schema 基线原地编辑；
   hold 若需要新列或新表，加入 `V1__managed_schema.sql` 并重建开发 catalog。
   复用现有 execution 表可以连这一步都省掉。
@@ -270,11 +281,14 @@ lost-Runtime 语义。故障用例（attach 期间杀 worker、hold 准入期间
 
 ## 发布
 
-在启用 opt-in 之前协同部署配套的控制平面、Harness 与 Runtime 制品；
-capability digest 变更会使按旧 digest 放置的 binding 失效。终端 opt-in
-默认关闭，且独立于 Shell opt-in。既有 Session 只有在其 runtime 放置到新
-digest 且准入链通过时才获得终端；已保存的 Session 作用域不被改写。不要
-降级仍有活跃 hold 的消费者。
+在启用 opt-in 之前协同部署配套的控制平面、Harness 与 Runtime 制品。
+在普通本地挂载路径上，只要其它已记录的 scope 字段保持不变，既有 binding 在
+ordinary、measured 与 terminal 三种 capability digest 之间保持有效；附着终端仍
+要求 binding 处于 READY、未 drain 状态并携带 terminal digest。在统一本地启动器
+之外，终端 opt-in 默认关闭，且独立于 Shell opt-in；统一本地启动器始终启用终端
+（见「准入与审批模型」）。既有 Session 只有在其 runtime 放置到新 digest 且准入链
+通过时才获得终端；已保存的 Session 作用域不被改写。不要降级仍有活跃 hold 的
+消费者。
 
 ## 风险与后续
 

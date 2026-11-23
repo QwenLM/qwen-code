@@ -125,7 +125,7 @@ public final class ManagedSessionStoreModels {
 
     public record AuthorizeLifecycleRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             String kind) {
         public AuthorizeLifecycleRequest(String workspaceId, String writerId, long writerGeneration) {
@@ -135,14 +135,14 @@ public final class ManagedSessionStoreModels {
 
     public record AcquireWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
                     Long leaseMillis) {
     }
 
     public record RenewWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
                     Long leaseMillis,
@@ -152,7 +152,7 @@ public final class ManagedSessionStoreModels {
         }
     }
 
-    public record ActivationRenewal(@NotBlank @Size(max = 512) String activationId,
+    public record ActivationRenewal(@NotBlank @Size(max = 128) String activationId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long epoch,
             @Min(1) @Max(MAX_SAFE_COUNTER) long renewalSeq,
             @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS) long leaseDurationMs) {
@@ -161,10 +161,44 @@ public final class ManagedSessionStoreModels {
     public record ActivationLease(String activationId, long epoch, long renewalSeq, long expiresAt) {
     }
 
+    /** A recoverable Action wait certified by a clean suspension. */
+    public record ParkedTurn(@NotBlank @Size(max = 64) String promptId,
+            @Min(0) @Max(MAX_SAFE_COUNTER) long wakeAt,
+            @Min(0) @Max(MAX_SAFE_COUNTER) Long approvalRevision) {
+    }
+
+    /**
+     * A clean suspension's wake projection of the committed prefix at
+     * {@code revision}: whether a deliverable wake input remains, and when the
+     * earliest one is due (0 when one is due now).
+     *
+     * <p>{@code backgroundHeld} additionally certifies that every unsettled run
+     * and owed cleanup of this prefix is a verified background hold. Only the
+     * writer can run that per-run evidence check, so the control plane reads the
+     * certificate instead of re-deriving it.
+     */
+    public record WakeStamp(@Min(0) @Max(MAX_SAFE_COUNTER) long revision, boolean pending,
+            @Min(0) @Max(MAX_SAFE_COUNTER) long dueAt, boolean backgroundHeld,
+            @Valid ParkedTurn parkedTurn) {
+        public WakeStamp(long revision, boolean pending, long dueAt) {
+            this(revision, pending, dueAt, false, null);
+        }
+        public WakeStamp(long revision, boolean pending, long dueAt, boolean backgroundHeld) {
+            this(revision, pending, dueAt, backgroundHeld, null);
+        }
+        public WakeStamp(long revision, boolean pending, long dueAt, ParkedTurn parkedTurn) {
+            this(revision, pending, dueAt, false, parkedTurn);
+        }
+    }
+
     public record SealWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
-            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration) {
+            @NotBlank @Size(max = 128) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @Valid WakeStamp wake) {
+        public SealWriterRequest(String workspaceId, String writerId, long writerGeneration) {
+            this(workspaceId, writerId, writerGeneration, null);
+        }
     }
 
     public record OwnershipCommitProof(@Min(0) @Max(MAX_SAFE_COUNTER) long lastCommitSequence,
@@ -173,7 +207,7 @@ public final class ManagedSessionStoreModels {
 
     public record QuiesceOwnershipRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
             @NotBlank @Size(max = 144) String instanceId,
@@ -182,13 +216,13 @@ public final class ManagedSessionStoreModels {
 
     public record ReleaseOwnershipRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @Min(1) @Max(MAX_SAFE_COUNTER) long journalRevision,
             @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
             @NotBlank @Size(max = 144) String instanceId,
             @NotBlank @Size(max = 144) String bootId,
-            @NotBlank @Size(max = 512) String operationId,
+            @NotBlank @Size(max = 128) String operationId,
             @NotNull @Valid OwnershipCommitProof commitProof) {
     }
 
@@ -196,17 +230,56 @@ public final class ManagedSessionStoreModels {
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed, int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease) {
+            boolean replayed, boolean activationLeaseRenewal, ActivationLease activationLease,
+            boolean wakeDispatch, boolean runtimeObservation, boolean actionParking,
+            boolean backgroundActionParking) {
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
-                int supportedStorageVersion) {
+                boolean activationLeaseRenewal, ActivationLease activationLease, boolean wakeDispatch,
+                boolean runtimeObservation) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, supportedStorageVersion, true, null);
+                    activationEpoch, replayed, activationLeaseRenewal, activationLease, wakeDispatch,
+                    runtimeObservation, false, false);
+        }
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
+                boolean activationLeaseRenewal, ActivationLease activationLease, boolean wakeDispatch) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, replayed, activationLeaseRenewal, activationLease, wakeDispatch,
+                    false, false, false);
+        }
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
+                boolean activationLeaseRenewal, ActivationLease activationLease) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, replayed, activationLeaseRenewal, activationLease, false, false, false,
+                    false);
+        }
+        /** Advertises that this control plane consumes seal-time wake stamps. */
+        public WriterGrant withWakeDispatch() {
+            return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
+                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
+                    true, runtimeObservation, actionParking, backgroundActionParking);
+        }
+        /** Advertises that a background Session may suspend behind the pull. */
+        public WriterGrant withRuntimeObservation() {
+            return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
+                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
+                    wakeDispatch, true, actionParking, backgroundActionParking);
+        }
+        /**
+         * Advertises Action parking, including a park sealed beside a
+         * background hold; a Harness sends that pair only on the second bit.
+         */
+        public WriterGrant withActionParking() {
+            return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
+                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
+                    wakeDispatch, runtimeObservation, true, true);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, ManagedStorageVersions.SUPPORTED);
+                    activationEpoch, replayed, true, null);
         }
     }
 
@@ -216,7 +289,7 @@ public final class ManagedSessionStoreModels {
 
     public record BlockRecoveryRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotBlank @Pattern(regexp =
                     "BLOCKED_RESOURCE|BLOCKED_WORKSPACE|BLOCKED_EXECUTION")
@@ -242,7 +315,7 @@ public final class ManagedSessionStoreModels {
 
     public record PublishToolResultRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotBlank @Size(max = 512) String resourceId,
             @NotBlank @Size(max = 512) String kind,
@@ -258,7 +331,7 @@ public final class ManagedSessionStoreModels {
 
     public record CommitTransactionRequest(
             @NotBlank @Size(max = 512) String workspaceId,
-            @NotBlank @Size(max = 512) String writerId,
+            @NotBlank @Size(max = 128) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @Min(0) @Max(MAX_SAFE_COUNTER) long expectedJournalRevision,
             @Min(0) @Max(MAX_SAFE_COUNTER) long expectedCommittedSequence,
@@ -292,17 +365,17 @@ public final class ManagedSessionStoreModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record RestoreHead(String state, int storageVersion,
+    public record RestoreHead(String state, boolean activityDiagnostics,
             long writerGeneration, long journalRevision,
             long committedSequence, String lastCommitDigest,
             long activationEpoch, String latestCheckpointResourceId,
             long compactedThroughRevision, String recoveryStatus,
             String recoveryDetailCode, ActivationLease activationLease) {
-        public RestoreHead(String state, int storageVersion, long writerGeneration, long journalRevision,
+        public RestoreHead(String state, boolean activityDiagnostics, long writerGeneration, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch,
                 String latestCheckpointResourceId, long compactedThroughRevision, String recoveryStatus,
                 String recoveryDetailCode) {
-            this(state, storageVersion, writerGeneration, journalRevision, committedSequence, lastCommitDigest,
+            this(state, activityDiagnostics, writerGeneration, journalRevision, committedSequence, lastCommitDigest,
                     activationEpoch, latestCheckpointResourceId, compactedThroughRevision, recoveryStatus,
                     recoveryDetailCode, null);
         }

@@ -74,6 +74,14 @@ engine must source the witness from evidence, not from the transport promise.
   path, so the in-flight route releases too — and the live set does not grow with
   every answered request. A `failed` decision is not a supersession: it keeps its
   request live so a retry can still establish.
+- `settleDecisionRequest(requestId, witness)` — applies decision evidence to the
+  request's active (non-terminal) approval/question attempt, reusing the same
+  settlement core as `settle`. It exists because the daemon decision event names
+  only the request and can arrive while that attempt's POST is still in flight
+  (its operation id is not bound yet): it freezes approval currency when the
+  evidence arrives and stashes the narrowed witness for dispatch to apply. The
+  correlation is request-level; no active matching attempt is a no-op, so a late
+  event for a finished attempt is not retained. Added in slice 2c.
 - `abandon(operationId)` — gives an attempt whose admission can never be
   confirmed (a thrown transport leaves it `unknown`, which no witness can
   terminalize) an exit: it terminalizes the row as `failed`, never
@@ -110,10 +118,12 @@ lifecycle by lifting it into the kernel then, not by importing `daemon/**`.
 ### Why a separate `settle` entry point
 
 If `dispatch` derived the witness from the transport promise resolving, a fast
-or mocked transport would masquerade as an established effect. Keeping `settle`
-as the only path that can raise a witness makes the invariant structural: the
-transport path literally cannot produce `established`. The negative tests below
-turn red if that boundary is collapsed.
+or mocked transport would masquerade as an established effect. Keeping the
+settlement entry points (`settle` by operation id, and `settleDecisionRequest`
+by request for in-flight decision evidence) as the only paths that can raise a
+witness makes the invariant structural: the transport path literally cannot
+produce `established`. The negative tests below turn red if that boundary is
+collapsed.
 
 ### Why settlement names the attempt
 
@@ -131,6 +141,14 @@ An id the engine invents after the fact authenticates nothing on its own: slice
 just made, so an incoming event names the attempt it belongs to. An event the
 adapter cannot bind stays unverified instead of declaring a new attempt
 complete.
+
+This attempt-id invariant holds for prompt evidence, where the daemon names a
+unique `promptId` per turn. Decision evidence is the documented exception: the
+daemon decision event names only the `requestId` (stable across attempts), so
+`settleDecisionRequest` correlates at the request level — to the request's single
+active attempt — not by attempt id. Replay-safe attempt-level decision
+correlation would require a backend attempt discriminator the daemon does not
+currently emit; see the slice-2c controller design note.
 
 The attempt is recorded **before** the transport runs, for two reasons. Rows
 then sit in dispatch order, and retention — which keeps the latest terminal row

@@ -116,7 +116,7 @@ public class HostedRecoveryWedgeGate {
         temporary = temporary.toRealPath();
         Files.createDirectory(temporary.resolve("runtime"));
 
-        String tenant = "wedge-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         List<Path> workspaces = new ArrayList<>();
         List<String> workspaceIds = List.of("workspace-a", "workspace-b", "workspace-c");
         for (String name : List.of("alpha", "beta", "gamma")) {

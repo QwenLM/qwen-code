@@ -1,12 +1,10 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -82,17 +80,14 @@ class ManagedAgentStoreChildCreationFenceTest {
         // that key proves it evaluates the run's own row and not a
         // physically-near but unrelated record.
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_kind, session_scope_key, record_key, tenant_id,"
+                        + " (record_kind, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES ('DOMAIN', ?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES ('DOMAIN', 'tenant', 'workspace', ?,"
                         + " 'child_run', ?, 'h', 1, ?, 'child_agent', ?,"
                         + " 'session', ?, 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", parent),
-                ManagedExtensionProjection.recordKey(parent, "child_run",
-                        childRunId),
                 parent, childRunId, "resource-" + childRunId, taskState,
                 deliveryState);
     }
@@ -115,7 +110,7 @@ class ManagedAgentStoreChildCreationFenceTest {
         // And no Session row was minted for it: the fence rolls the
         // whole transaction back, never a half-created child.
         assertThat(jdbc.query("SELECT session_id FROM ma_session"
-                        + " WHERE tenant_id = X'74656e616e74' AND parent_child_run_id = X'72756e2d736574746c6564'",
+                        + " WHERE tenant_id = 'tenant' AND parent_child_run_id = 'run-settled'",
                 (result, row) -> result.getString(1))).isEmpty();
     }
 
