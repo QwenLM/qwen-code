@@ -672,7 +672,7 @@ function runGit(args) {
  * clean-tree check, and unlike core.excludesFile no `-c` can neutralize this
  * file, so the gate refuses it instead of reading a steered status.
  */
-export function hasHostileInfoExclude(root) {
+export function inspectInfoExclude(root) {
   const resolved = runGit([
     '-C',
     root,
@@ -687,13 +687,18 @@ export function hasHostileInfoExclude(root) {
     );
   }
   const path = resolved.stdout.trim();
-  if (!existsSync(path)) return false;
-  return readFileSync(path, 'utf8')
+  if (!existsSync(path)) return { path, hostile: false };
+  const hostile = readFileSync(path, 'utf8')
     .split('\n')
     .some((line) => {
       const trimmed = line.trim();
       return trimmed !== '' && !trimmed.startsWith('#');
     });
+  return { path, hostile };
+}
+
+export function hasHostileInfoExclude(root) {
+  return inspectInfoExclude(root).hostile;
 }
 
 function exactCheckoutError(root, context) {
@@ -707,11 +712,12 @@ function exactCheckoutError(root, context) {
   // has no `-c` override, so active patterns there are refused outright
   // rather than read through.
   try {
-    if (hasHostileInfoExclude(root)) {
-      return '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare';
+    const exclude = inspectInfoExclude(root);
+    if (exclude.hostile) {
+      return `${exclude.path} carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare`;
     }
   } catch (error) {
-    return `could not inspect .git/info/exclude: ${error.message}`;
+    return `could not inspect git info/exclude: ${error.message}`;
   }
   // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
   // hide the untracked files this check exists to refuse.
@@ -1399,8 +1405,25 @@ function main(argv) {
         );
       }
       try {
-        mkdirSync(dirname(outPath), { recursive: true });
-        const realParent = realpathSync(dirname(outPath));
+        const parent = dirname(outPath);
+        let existingParent = parent;
+        while (!existsSync(existingParent)) {
+          const next = dirname(existingParent);
+          if (next === existingParent) break;
+          existingParent = next;
+        }
+        const realExisting = realpathSync(existingParent);
+        if (
+          realExisting === realRoot ||
+          realExisting.startsWith(realRoot + sep)
+        ) {
+          return fail(
+            3,
+            `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+          );
+        }
+        mkdirSync(parent, { recursive: true });
+        const realParent = realpathSync(parent);
         if (realParent === realRoot || realParent.startsWith(realRoot + sep)) {
           return fail(
             3,
@@ -1483,6 +1506,10 @@ function main(argv) {
           ? `${JSON.stringify(executionApproval, null, 2)}\n`
           : null,
       },
+      // Best-effort, like the lane: a missing review file means "unknown", so
+      // an earlier prepare's copy must not outlive a failed fetch. Its
+      // replacement or removal participates in the same rollback group as the
+      // authority files.
       {
         path: reviewPath,
         label: 'review snapshot',
@@ -1536,10 +1563,6 @@ function main(argv) {
   }
   if (typeof written === 'number') return written;
   const { contextSha256, reportedContextPath } = written;
-
-  // Best-effort, like the lane: a missing review file means "unknown", so an
-  // earlier prepare's copy must not outlive a failed fetch. Its replacement or
-  // removal participates in the same rollback group as the authority files.
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach

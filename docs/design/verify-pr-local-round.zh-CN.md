@@ -4,7 +4,7 @@
 
 状态：已实现；本次补充下方的计数、守卫、覆盖与署名页脚规则。
 
-兼容性说明（2026-11-22）：当前可执行的执行方式与批准契约见 [verify-pr-execution-preflight](verify-pr-execution-preflight.md)。本文保留基线历史，不再作为当前宿主/VM 命令配方。coordinate prepare 省略 `--execution` 时保留旧 **container** 行为；显式 host/VM 必须按新文档提供批准对象与宿主 context，只有 permalink 的旧 waiver 在没有 `executionApproval` 和匹配快照 digest 时无法通过发布。
+兼容性说明（2026-11-22）：当前可执行的执行方式与批准契约见 [verify-pr-execution-preflight.zh-CN](verify-pr-execution-preflight.zh-CN.md)。本文保留基线历史，不再作为当前宿主/VM 命令配方。coordinate prepare 省略 `--execution` 时保留旧 **container** 行为；显式 host/VM 必须按新文档提供批准对象与宿主 context，只有 permalink 的旧 waiver 在没有 `executionApproval` 和匹配快照 digest 时无法通过发布。
 
 ## 问题
 

@@ -357,6 +357,16 @@ publication.
   order, approval instructions and artifact/checker examples.
 - `docs/design/verify-pr-execution-preflight.md` and
   `docs/design/verify-pr-execution-preflight.zh-CN.md`: this design.
+- `docs/design/verify-pr-watch.md` and
+  `docs/design/verify-pr-watch.zh-CN.md`: watch/registration lifecycle.
+- `docs/design/verify-pr-register-ahead-of-prepare.md` and
+  `docs/design/verify-pr-register-ahead-of-prepare.zh-CN.md`: registration
+  ordering and recovery.
+- `docs/design/verify-pr-local-round.md` and
+  `docs/design/verify-pr-local-round.zh-CN.md`: local-round compatibility.
+- `docs/design/2026-11-14-verify-pr-java-container-recipe.md` and
+  `docs/design/2026-11-14-verify-pr-java-container-recipe.zh-CN.md`: Java
+  container proposal.
 - `.qwen/e2e-tests/verify-pr-execution-preflight.md`: baseline and local E2E
   evidence (git-ignored working artifact).
 
@@ -428,8 +438,9 @@ publication.
   canonical-parent guard is removed. A read-only approval file produces
   controlled exit 3. Checker CLI tests accept genuine VM records for both
   local trust and comment approval and reject no-context/no-digest forms.
-- The stale host context/digest files are removed before each local prepare;
-  a host/VM checker invocation without a current digest fails closed.
+- The previous digest is removed before each local prepare. The transactional
+  writer may preserve the previous `pr.json`, but a host/VM checker invocation
+  without a current digest fails closed.
 - The script fixture suite, formatting, lint, build and typecheck commands
   run after implementation, plus the required bundle and focused E2E probes.
 - A pre-implementation baseline using global `qwen` 0.28.3 documents the

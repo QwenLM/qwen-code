@@ -1226,6 +1226,43 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
+    it('rejects placeholder approval text before creating artifacts', () => {
+      for (const { execution, flag, value } of [
+        {
+          execution: 'host',
+          flag: '--reason',
+          value: '<why this round may run outside a boundary>',
+        },
+        {
+          execution: 'vm',
+          flag: '--attestation',
+          value: '<image, network policy, credential-free mount>',
+        },
+      ]) {
+        const { dir, base, head } = makeRepo();
+        const prepared = command({ execution, trust: true, head });
+        const args = [...prepared.artifactArgs];
+        args[args.indexOf(flag) + 1] = value;
+        const env = installFakeGh(
+          {
+            ...snapshotFor({ base, head }),
+            author: { login: 'maintainer' },
+            isCrossRepository: true,
+          },
+          reviewPages(),
+          {
+            user: { login: 'maintainer' },
+            permissions: { maintainer: { permission: 'maintain' } },
+          },
+        );
+        const result = runPrepare(dir, args, env);
+        expect(result.status, result.stderr).toBe(3);
+        expect(result.stderr).toContain('execution approval:');
+        expect(result.stderr).toContain('still carries a <placeholder>');
+        expect(existsSync(join(dir, 'tmp'))).toBe(false);
+      }
+    });
+
     const failedRetryWitness = (trust) => {
       const { dir, base, head } = makeRepo();
       const prepared = command({

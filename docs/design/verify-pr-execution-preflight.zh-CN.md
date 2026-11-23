@@ -151,7 +151,7 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 - 现有容器夹具测试与边界内门禁套件保持全绿，宿主 coordinate prepare 不增加 observed-marker 要求。
 - watch/re-verification 的注册仍在批准等待之前，等待中被杀会留下现有可恢复标记。本地信任和评论批准两条路径都在无 earlier verdict 时完成 start → 模式回退 → prepare → checker 成功 → complete。匹配的在飞重试保留 nonce。相同 head/round 的替换注册拒绝旧 nonce 或缺失 nonce 对 live 标记和已完成 verdict 的操作，保持新 verdict 和产物不变；正确 nonce 的完成、释放和带 nonce 的 replay 仍成功。head-only release 与明确的 legacy 无 nonce 迁移保留兼容用例。state root A 完成后，在 root B 以相同 head/round 新 start 时拒绝 A 的标记、接受 B 的新标记，并有源码删除红对照。无 nonce 的 legacy 条目明确记录并测试 fresh-marker 迁移。旧持久 prompt 保留容器默认值，而不是丢失已交付 head。
 - 冻结时钟真实 CLI 探针以受控 exit 3 拒绝软链或非目录的时间戳产物父目录，且不在外部写 context/批准；普通同秒重试继续成功，删除规范父目录守卫会让用例转红。只读批准文件产生受控 exit 3。checker CLI 对本地信任与评论批准的真实 VM 记录均接受，对无 context/无 digest 形态均拒绝。
-- 每次本地 prepare 前移除陈旧宿主 context/digest 文件；宿主/VM checker 调用没有当前 digest 时 fail closed。
+- 每次本地 prepare 前移除旧的 digest。事务写入器可能保留旧的 `pr.json`，但宿主/VM checker 调用没有当前 digest 时 fail closed。
 - 实现后运行脚本夹具套件、格式化、lint、build、typecheck，以及规定的 bundle 和定向 E2E 探针。
 - 实现前用全局 `qwen` 0.28.3 记录缺少新选择/预检行为的基线；实现后用本地构建 CLI 与真实脚本验证，不发布评论，也不执行不可信 PR 电池。
 

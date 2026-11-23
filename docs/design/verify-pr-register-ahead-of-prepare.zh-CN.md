@@ -87,15 +87,16 @@ watch prompt 与手动复验步骤均改为（历史提案）：
 标记重试 prepare 并按原轮次完成，无需 release（第 7 轮）；先 release 会使 head 在
 release 与重启之间失去记录，若在该窗口被杀则重新打开静默丢弃。*已死*的轮次用
 `--release --head <H> --round <r> --repo <owner>/<repo>` **并随后重新启动该
-head**（`--start --head <H> --round <r+1> --repo <owner>/<repo>`）再重试 prepare。
-单独 release 不是恢复：`releaseRound` 只写 `releasedHeads` 推序提示——明确不是
+head**（`--start --head <H> --round <r> --repo <owner>/<repo>`）再重试 prepare。
+重启保持同一轮次编号；新的 registrationNonce 才是新鲜度边界。`<r+1>` 仍是评论
+批准的显式可选路径，但必须在 `<r+1>` 重新注册并重新标记。单独 release 不是恢复：`releaseRound` 只写 `releasedHeads` 推序提示——明确不是
 deferral，且无任何动词打印它——故 head 失去记录，而探针游标已越过它，不会再有
 触发投递它（R1-1 第 2 轮）。release 必须与重启成对，正如本文件死轮段落把两者
 成对写出。`--start` 记录 repo 后两者 `--repo` 必填；每个动词都对已记录 repo 拒绝
 省略 `--repo`）。用 `--release` + 重启，**而非** `--complete inconclusive`：
 inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终态（not-covered），
 故两次瞬时 prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。重启后的轮次
-编号（`<r+1>`）即为本轮编号，`--complete` 须重复该值（R3-2）。恢复有非瞬时终止
+编号（`<r>`）即为本轮编号，`--complete` 须重复该值（R3-2）。恢复有非瞬时终止
 分支：若 prepare 因点名的 head 不是本轮注册的 head 而拒绝——前移或 force-push；
 prepare 从实时 `gh pr view` 重取 `headRefOid`、精确相等判定、不含顺序信息——注册的
 head 永远无法 prepare：`--release` 它（带标记的 `--round`）且**不要**重启（R9-1
@@ -136,7 +137,7 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   `--artifact-dir`；`--complete` 命令钉加上 `--artifact-dir <dir>`；**位置**钉
   断言注册句先于每节的 `Then run prepare` 句（watch 用 `<headSha>`、手动用
   `<H>`）；prepare 失败恢复钉断言完整 `--release` 形式带 `--repo` **及重启子句**
-  （`--start … --round <r+1>`；删任一变红）；watch prompt 的 exit-3 死标记条目
+  （`--start … --round <r>`；删任一变红）；watch prompt 的 exit-3 死标记条目
   钉住完整 `--release … --repo` 形式（R2-1）。第 6 轮加按节切片的钉，使共享句在
   一节的副本不为另一节作不在场证明：无 `--artifact-dir` 不变量与重放省略子句各钉
   在本节切片上，错 HEAD 例外（R5-1）与 moved-head 完成重绑定被钉住，通用入口
@@ -217,4 +218,4 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   标记重试 prepare、不 release 来避免此窗口，但死轮恢复仍带该窗口。watch 只在
   head move 时醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
   `--release --head <H> [--round <r>] --repo <owner>/<repo>` **后再重启**
-  （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。
+  （`--start … --round <r>`）——单独 release 会让 head 失去记录。

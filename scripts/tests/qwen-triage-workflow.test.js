@@ -6779,7 +6779,7 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(registerChinese).toContain('**当前契约／迁移说明');
     for (const document of [watchChinese, registerChinese]) {
       const plain = document.replaceAll('**', '');
-      expect(plain).toContain('默认');
+      expect(plain).toContain('不因此新增必填项');
       expect(plain).toContain('从当前');
       expect(plain).toContain('推断');
       expect(plain).toContain('只有确实没有');
@@ -6875,7 +6875,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // copy would strand the marker — reintroducing R17-2). Removing --repo
     // from the sentence reds this whole-form pin.
     expect(manualSlice).toContain(
-      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`',
+      'If prepare fails after `--start` and the round is being abandoned, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`',
     );
     // R1-11: a released registration gets a new nonce, including at the same
     // round; comment approval and container-only recovery stay distinct.
@@ -7041,7 +7041,10 @@ describe('qwen-triage verify hardening round 2', () => {
   it('distinguishes published and successful no-publish completion from abandonment', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).toContain(
-      'After a published comment, complete the registration with that numeric comment ID',
+      'After a published comment, when this round registered (watch rounds and comment-backed rounds), complete the registration with that numeric comment ID',
+    );
+    expect(flat).toContain(
+      'A fresh local-trust round has no marker and no nonce, so it has nothing to `--complete` or `--release`',
     );
     expect(flat).toContain(
       'For a withheld or `--no-publish` report, once this checker succeeds still use `--complete` with the exact same head/round/nonce/state-root and artifact directory, but omit the optional comment ID',
@@ -7054,6 +7057,8 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     const promptStart = verifySkill.indexOf('The prompt consumes the gate');
     const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    expect(promptStart).toBeGreaterThan(-1);
+    expect(promptEnd).toBeGreaterThan(promptStart);
     const prompt = verifySkill
       .slice(promptStart, promptEnd)
       .replace(/\s+/g, ' ');
@@ -7203,7 +7208,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // --release form with --repo (the <headSha> variant; the manual section
     // uses <H>). Removing --repo reds this whole-form pin.
     expect(flat).toContain(
-      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`',
+      'If prepare fails after `--start` and the round is being abandoned, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`',
     );
     // R1-11: after release, even a same-round comment marker must name the
     // new registration; a non-comment container restart asks for no marker.
@@ -7634,21 +7639,21 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(verifySkill).toContain(
       'grep -Eq \'^[0-9a-f]{64}$\' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }',
     );
-    // R5-3: clear only the transient log. The production writer preserves the
-    // previous context/digest authority pair when prepare fails, and this block
-    // exits before digest capture or a checker can use it for the failed round.
+    // R5-3: clear the transient log and the previous digest. The transactional
+    // writer may preserve the previous pr.json, but a stale digest must not
+    // certify a later checker invocation for the failed round.
     const prepareCleanup = verifySkill.match(
       /^\s*rm -f .*prepare\.log.*$/m,
     )?.[0];
     expect(prepareCleanup?.trim()).toBe(
-      'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log',
+      'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256',
     );
-    expect(prepareCleanup).not.toMatch(/pr\.sha256|pr\.json/);
+    expect(prepareCleanup).not.toMatch(/pr\.json/);
     expect(flat).toContain(
-      'transactional writer preserves the previous pr.json/pr.sha256 authority',
+      'transactional writer preserves the previous pr.json on failure',
     );
     expect(flat).toContain(
-      'because this block exits before refreshing the digest or running a checker.',
+      'stale pr.sha256 must not certify a later checker invocation',
     );
     expect(verifySkill).toContain(
       '|| { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }',

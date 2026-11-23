@@ -49,10 +49,12 @@ After a local verification round, whether it will publish or not, run
 `node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>`
 from a checkout the PR cannot write; it applies the
 consistency rules the publisher enforces in CI. After a published comment,
-complete the registration with that numeric comment ID. For a withheld or
+when this round registered (watch rounds and comment-backed rounds), complete
+the registration with that numeric comment ID. For a withheld or
 `--no-publish` report, once this checker succeeds still use `--complete` with
 the exact same head/round/nonce/state-root and artifact directory, but omit the
-optional comment ID. That successful branch preserves `commentId: null`, clears
+optional comment ID. A fresh local-trust round has no marker and no nonce, so
+it has nothing to `--complete` or `--release`. That successful branch preserves `commentId: null`, clears
 the in-flight marker and retains the verdict and local artifacts; do not release
 a successful round merely because no comment was posted.
 
@@ -281,6 +283,9 @@ requirement. The shapes:
   Approved host execution for this verify round.
   ```
 
+  That comment authorizes only this verify round's execution; it is not a PR
+  review, merge approval, or resolution of a review thread.
+
   For a VM use `"mode":"vm"`. Pass its permalink and registration directory
   with `--approval <url> --state-root "<trusted-dir>"`. The directory must be
   absolute and outside the PR clone, and must contain the same in-flight
@@ -290,8 +295,10 @@ requirement. The shapes:
   permission, and requires the marker's mode/head/round/registrationNonce to
   match. A retry of that same in-flight registration may reuse its approval.
   Changing execution modes retains the registration instead of releasing it.
-  After `--complete`, an actual release, or a fresh `--start` in another
-  state root, prepare refuses the old marker before creating new artifacts.
+  After `--complete` or an actual release, prepare refuses the old marker before
+  creating new artifacts. A fresh `--start` in another state root gets a
+  different nonce and cannot reuse the old marker's comment, but it does not
+  release the old root's marker — release it explicitly if it must not be used.
   A release followed by `--start` creates a different nonce even when head
   and round repeat, so it needs a fresh marked approval; do not promise that
   the old comment can be reused after an actual release. A legacy in-flight
@@ -487,11 +494,11 @@ authority to certify the round.
 
    ```bash
    mkdir -p ~/.cache/qwen-verify/pr<n>
-   # Clear only the transient log and gate on prepare's own exit status. Its
-   # transactional writer preserves the previous pr.json/pr.sha256 authority
-   # pair on failure; those stale files cannot certify the failed invocation
-   # because this block exits before refreshing the digest or running a checker.
-   rm -f ~/.cache/qwen-verify/pr<n>/prepare.log
+   # Clear the transient log and the previous digest before prepare. The
+   # transactional writer preserves the previous pr.json on failure, but a
+   # stale pr.sha256 must not certify a later checker invocation for the
+   # failed round.
+   rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256
    cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution container --context-out ~/.cache/qwen-verify/pr<n>/pr.json > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }
    cat ~/.cache/qwen-verify/pr<n>/prepare.log
    # Hold the content digest host-side (outside the clone) so step 7 can bind
@@ -868,6 +875,11 @@ Build the task in this order and stop at the first failure:
    (a residual tracked in #17371). Do not delete another session's live watch to
    make room; the claim guard forbids it.
 
+`<trusted-dir>` is one fixed absolute directory outside the PR clone, chosen
+when the watch is installed and reused by every start, completion, release and
+restart. The helper's default is the trusted clone's main worktree; an older
+default-root invocation keeps omitting `--state-root`.
+
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
 Register the round **first, ahead of prepare** (R17-2), with
@@ -920,7 +932,8 @@ registered `<headSha>` — completing would file that head's evidence under
 round's marker and run neither the battery nor `--complete`. If prepare
 refuses, compare the head it names (the "not PR head …" in its refusal) with
 `<headSha>` — a differing head is the moved-head case below, not a transient
-failure. If prepare fails after `--start`, recover with
+failure. If prepare fails after `--start` and the round is being abandoned,
+recover with
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`,
 then start the head again at the SAME round
 (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"`)
@@ -1232,7 +1245,8 @@ ambiguous rather than verify a guessed PR. Then, in order:
    prepares successfully while this round registered `<H>` — completing would
    file that head's evidence under `<H>`. A differing head is the moved-head
    case below: release this round's marker and run neither the battery nor
-   `--complete`. If prepare fails after `--start`, recover with
+   `--complete`. If prepare fails after `--start` and the round is being
+   abandoned, recover with
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`.
    A release alone leaves the head unregistered and no probe fire will deliver
    it again (`--repo` is required once `--start` recorded it). After the

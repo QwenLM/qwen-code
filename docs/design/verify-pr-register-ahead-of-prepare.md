@@ -110,8 +110,10 @@ original round, with no release (round 7); releasing first would leave the head
 unregistered between the release and a restart, re-opening the silent drop if
 the round is killed in that window. A round that _died_ is recovered by
 `--release --head <H> --round <r> --repo <owner>/<repo>` **and then start the
-head again** (`--start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry
-prepare. A release alone is not a recovery: `releaseRound` files only a
+head again** (`--start --head <H> --round <r> --repo <owner>/<repo>`) and retry
+prepare. The restart keeps the same round number; its new registrationNonce is
+the freshness boundary. `<r+1>` remains an explicit alternative for comment
+approval, but it must be registered and marked at `<r+1>`. A release alone is not a recovery: `releaseRound` files only a
 `releasedHeads` push-order hint — explicitly not a deferral, and printed by no
 verb — so the head is left unregistered, and the probe cursor already advanced
 past it, so no fire delivers it again (R1-1 round 2). The release must be paired
@@ -121,7 +123,7 @@ omitted `--repo` against a recorded repo. Use `--release` + restart, **not**
 `--complete inconclusive`: inconclusive is the only verdict that increments the
 head's retry counter, and the counter's cap is the terminal not-covered state,
 so two transient prepare failures would retire a head no round ever examined
-(R1-5). The restarted round's number (`<r+1>`) becomes this round's number, and
+(R1-5). The restarted round's number (`<r>`) becomes this round's number, and
 `--complete` must repeat that value (R3-2). The recovery has a non-transient
 terminal case: if prepare refuses because the head it names is not the head
 this round registered — moved forward or force-pushed; prepare re-resolves
@@ -183,7 +185,7 @@ existing dead-round recovery (`--release` for a round that died after
   a **positional** pin asserts the registration sentence precedes the
   `Then run prepare` sentence in each section (watch `<headSha>`, manual `<H>`);
   the prepare-failure recovery pin asserts the full `--release` form carries
-  `--repo` **and the restart clause** (`--start … --round <r+1>`; removing
+  `--repo` **and the restart clause** (`--start … --round <r>`; removing
   either reds it); the watch prompt's exit-3 dead-marker bullet is pinned to the
   full `--release … --repo` form (R2-1). Round 6 adds slice-scoped pins so a
   shared sentence's copy in one section is not an alibi for the other: the
@@ -305,5 +307,5 @@ existing dead-round recovery (`--release` for a round that died after
   watch only wakes on head moves, so a killed round on the
   _last_ head still awaits a new move, or a manual
   `--release --head <H> [--round <r>] --repo <owner>/<repo>` **followed by a
-  restart** (`--start … --round <r+1>`) — a release alone leaves the head
+  restart** (`--start … --round <r>`) — a release alone leaves the head
   unregistered.
