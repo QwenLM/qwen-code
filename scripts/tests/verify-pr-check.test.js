@@ -10,9 +10,12 @@ import {
   accessSync,
   chmodSync,
   constants,
+  cpSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -20,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -136,6 +139,32 @@ function makeArtifactDir(files, evidence = []) {
     }
   }
   return dir;
+}
+
+function prepareArtifactWitness(dir, snapshot, root = null) {
+  const pr = snapshot.pr ?? snapshot.number;
+  const name = `pr${pr}-verify-20261123-000000`;
+  const context = JSON.stringify({
+    repo: snapshot.repo,
+    pr,
+    baseRefOid: snapshot.baseRefOid ?? '0'.repeat(40),
+    headRefOid: snapshot.headRefOid,
+  });
+  if (
+    root &&
+    dirname(dirname(dir)) === root &&
+    basename(dir).startsWith(`pr${pr}-verify-`)
+  ) {
+    writeFileSync(join(dir, 'context.json'), context);
+    return { dir, clone: root };
+  }
+  const clone = mkdtempSync(join(tmpdir(), 'verify-pr-prepared-host-'));
+  tmpDirs.push(clone);
+  const prepared = join(clone, 'tmp', name);
+  mkdirSync(dirname(prepared), { recursive: true });
+  cpSync(dir, prepared, { recursive: true });
+  writeFileSync(join(prepared, 'context.json'), context);
+  return { dir: prepared, clone };
 }
 
 describe('checkArtifacts', () => {
@@ -1476,15 +1505,18 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       executionApproval: approval,
     });
     writeFileSync(hostSnapshot, trustedText);
+    const prepared = prepareArtifactWitness(dir, JSON.parse(trustedText));
     const matching = spawnSync(
       process.execPath,
       [
         SCRIPT,
         '--context',
         hostSnapshot,
+        '--context-root',
+        prepared.clone,
         '--context-sha256',
         createHash('sha256').update(trustedText).digest('hex'),
-        dir,
+        prepared.dir,
       ],
       {
         encoding: 'utf8',
@@ -1505,7 +1537,11 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
                 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1234567890',
             })
           : localTrustApproval();
-      const setup = (directoryPr, artifactContext) => {
+      const setup = (
+        directoryPr,
+        artifactContext,
+        artifactRepo = 'QwenLM/qwen-code',
+      ) => {
         const base = mkdtempSync(join(tmpdir(), 'verify-pr-known-pr-'));
         tmpDirs.push(base);
         const clone = join(base, 'clone');
@@ -1530,7 +1566,7 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
           writeFileSync(
             join(dir, 'context.json'),
             JSON.stringify({
-              repo: 'QwenLM/qwen-code',
+              repo: artifactRepo,
               pr: directoryPr,
               baseRefName: 'main',
               headRefName: 'shared-branch',
@@ -1573,6 +1609,46 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
 
       const control = check(setup(42, true));
       expect(control.status, control.stdout).toBe(0);
+      const missingContext = check(setup(42, false));
+      expect(missingContext.status, missingContext.stdout).toBe(1);
+      expect(missingContext.stdout).toContain(
+        'artifact context.json must provide the same repo and PR coordinates',
+      );
+      const coordinateFree = setup(42, true);
+      writeFileSync(join(coordinateFree.dir, 'context.json'), '{}');
+      const noCoordinates = check(coordinateFree);
+      expect(noCoordinates.status, noCoordinates.stdout).toBe(1);
+      expect(noCoordinates.stdout).toContain(
+        'artifact context.json must provide the same repo and PR coordinates',
+      );
+      const invalidPr = setup(42, true);
+      const artifactContext = JSON.parse(
+        readFileSync(join(invalidPr.dir, 'context.json'), 'utf8'),
+      );
+      writeFileSync(
+        join(invalidPr.dir, 'context.json'),
+        JSON.stringify({ ...artifactContext, pr: '43', number: 42 }),
+      );
+      const invalidPrResult = check(invalidPr);
+      expect(invalidPrResult.status, invalidPrResult.stdout).toBe(1);
+      expect(invalidPrResult.stdout).toContain(
+        'artifact context.json must provide the same repo and PR coordinates',
+      );
+      const unnamed = setup(42, true);
+      const unnamedDir = join(unnamed.clone, 'tmp', 'round');
+      renameSync(unnamed.dir, unnamedDir);
+      const unnamedResult = check({ ...unnamed, dir: unnamedDir });
+      expect(unnamedResult.status, unnamedResult.stdout).toBe(1);
+      expect(unnamedResult.stdout).toContain(
+        "does not name a PR in prepare's pr<N>-verify-* form",
+      );
+      for (const artifactRepo of ['fork/qwen-code', 'QwenLM/fork']) {
+        const crossRepo = check(setup(42, true, artifactRepo));
+        expect(crossRepo.status, crossRepo.stdout).toBe(1);
+        expect(crossRepo.stdout).toContain(
+          'artifact context.json identifies another repository',
+        );
+      }
       for (const artifactContext of [false, true]) {
         const cross = check(setup(43, artifactContext));
         expect(cross.status, cross.stdout).toBe(1);
@@ -1593,6 +1669,33 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       }
     },
   );
+
+  it('keeps legacy snapshots outside the new artifact witness requirement', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ repo: 'fork/other', pr: '43', number: 42 }),
+    );
+    const trustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      headRefOid: HEAD,
+    });
+    const hostSnapshot = hostFile('legacy-snapshot.json', trustedText);
+    const result = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        hostSnapshot,
+        '--context-sha256',
+        createHash('sha256').update(trustedText).digest('hex'),
+        dir,
+      ],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+  });
 
   // prepare's snapshot carries `number` (gh's field name), not `pr`, and
   // the slug is added where prepare writes it: the documented invocation
@@ -1713,13 +1816,21 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
         isCrossRepository: true,
         executionApproval: approval,
       });
+      const prepared = prepareArtifactWitness(dir, JSON.parse(trustedText));
       const hostSnapshot = hostFile(
         `host-${approval.source}.json`,
         trustedText,
       );
       const noDigest = spawnSync(
         process.execPath,
-        [SCRIPT, '--context', hostSnapshot, dir],
+        [
+          SCRIPT,
+          '--context',
+          hostSnapshot,
+          '--context-root',
+          prepared.clone,
+          prepared.dir,
+        ],
         {
           encoding: 'utf8',
           env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
@@ -1733,9 +1844,11 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
           SCRIPT,
           '--context',
           hostSnapshot,
+          '--context-root',
+          prepared.clone,
           '--context-sha256',
           createHash('sha256').update(trustedText).digest('hex'),
-          dir,
+          prepared.dir,
         ],
         {
           encoding: 'utf8',
@@ -2328,7 +2441,18 @@ describe('round-10 witnesses', () => {
         }
       }
 
-      const control = check(setup(42, { repo: 'QwenLM/qwen-code', pr: 42 }));
+      const controlFixture = setup(42, {
+        repo: 'QwenLM/qwen-code',
+        pr: 42,
+      });
+      const control = check({
+        ...controlFixture,
+        ...prepareArtifactWitness(
+          controlFixture.dir,
+          { repo: 'QwenLM/qwen-code', pr: 42, headRefOid: HEAD },
+          controlFixture.clone,
+        ),
+      });
       expect(control.status, control.stdout).toBe(0);
       expect(control.stdout).toContain('ok: verdict=merge-ready');
     },
@@ -2878,6 +3002,7 @@ describe('round-14 witnesses', () => {
         executionApproval: commentApproval({ reason: 'why' }),
       });
       writeFileSync(outside, trustedText);
+      const prepared = prepareArtifactWitness(dir, JSON.parse(trustedText));
       const accepted = spawnSync(
         process.execPath,
         [
@@ -2885,10 +3010,10 @@ describe('round-14 witnesses', () => {
           '--context',
           outside,
           '--context-root',
-          root,
+          prepared.clone,
           '--context-sha256',
           createHash('sha256').update(trustedText).digest('hex'),
-          dir,
+          prepared.dir,
         ],
         { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
       );
@@ -3641,9 +3766,20 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
         executionApproval: approval,
       });
       writeFileSync(host, trustedText);
+      const prepared = prepareArtifactWitness(
+        dir,
+        JSON.parse(trustedText),
+        clone,
+      );
 
-      const noDigest = run(['--context', host, '--context-root', clone, dir]);
-      expect(noDigest.status).toBe(1);
+      const noDigest = run([
+        '--context',
+        host,
+        '--context-root',
+        clone,
+        prepared.dir,
+      ]);
+      expect(noDigest.status, noDigest.stdout + noDigest.stderr).toBe(1);
       expect(noDigest.stdout).toMatch(
         /boundary\.json mode waived needs --context-sha256 matching the host snapshot's bytes/,
       );
@@ -3655,9 +3791,9 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
         sha256(trustedText),
         '--context-root',
         clone,
-        dir,
+        prepared.dir,
       ]);
-      expect(control.status).toBe(0);
+      expect(control.status).toBe(0, control.stdout);
     },
   );
 

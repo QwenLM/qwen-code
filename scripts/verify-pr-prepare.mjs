@@ -667,13 +667,26 @@ function runGit(args) {
 }
 
 /**
- * True when `.git/info/exclude` carries active patterns. A fresh clone has
- * only git's commented default there; patterns hide untracked files from the
+ * True when git's info/exclude carries active patterns. A fresh clone has
+ * only the commented default there; patterns hide untracked files from the
  * clean-tree check, and unlike core.excludesFile no `-c` can neutralize this
  * file, so the gate refuses it instead of reading a steered status.
  */
 export function hasHostileInfoExclude(root) {
-  const path = join(root, '.git', 'info', 'exclude');
+  const resolved = runGit([
+    '-C',
+    root,
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-path',
+    'info/exclude',
+  ]);
+  if (resolved.status !== 0 || resolved.stdout.trim() === '') {
+    throw new Error(
+      (resolved.stderr || '').trim() || 'could not resolve git info/exclude',
+    );
+  }
+  const path = resolved.stdout.trim();
   if (!existsSync(path)) return false;
   return readFileSync(path, 'utf8')
     .split('\n')
@@ -693,8 +706,12 @@ function exactCheckoutError(root, context) {
   // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
   // has no `-c` override, so active patterns there are refused outright
   // rather than read through.
-  if (hasHostileInfoExclude(root)) {
-    return '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare';
+  try {
+    if (hasHostileInfoExclude(root)) {
+      return '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare';
+    }
+  } catch (error) {
+    return `could not inspect .git/info/exclude: ${error.message}`;
   }
   // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
   // hide the untracked files this check exists to refuse.
@@ -995,14 +1012,29 @@ function singleLinkFileError(path, label) {
   return null;
 }
 
-function captureWriteRecord(path, label, next) {
-  const record = { path, label, next, previous: null, touched: false };
+function captureWriteRecord(path, label, next, expectedParent = null) {
+  const record = {
+    path,
+    label,
+    next,
+    expectedParent,
+    previous: null,
+    touched: false,
+  };
   const leafError = singleLinkFileError(path, label);
   if (leafError) return { error: leafError };
   try {
     record.parentReal = realpathSync(dirname(path));
   } catch (error) {
     return { error: `could not inspect the ${label} parent: ${error.message}` };
+  }
+  if (
+    record.expectedParent !== null &&
+    record.parentReal !== record.expectedParent
+  ) {
+    return {
+      error: `refusing to write the ${label} through a redirected parent directory: ${path}`,
+    };
   }
   try {
     record.previous = readFileSync(path);
@@ -1020,7 +1052,11 @@ function writeRecordError(record) {
   const leafError = singleLinkFileError(record.path, record.label);
   if (leafError) return leafError;
   try {
-    if (realpathSync(dirname(record.path)) !== record.parentReal) {
+    const parentReal = realpathSync(dirname(record.path));
+    if (
+      parentReal !== record.parentReal ||
+      (record.expectedParent !== null && parentReal !== record.expectedParent)
+    ) {
       return `refusing to write the ${record.label} through a redirected parent directory: ${record.path}`;
     }
   } catch (error) {
@@ -1225,6 +1261,7 @@ function main(argv) {
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
+  let artifactCanonical = null;
   // The tmp/ container is PR-controlled: a PR-committed symlink there would
   // redirect every mkdir/write below before any leaf guard runs (R5-1). Refuse
   // it before anything is created. A fresh clone has no tmp/ — that is fine.
@@ -1250,11 +1287,11 @@ function main(argv) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
   try {
+    artifactCanonical = realpathSync(artifacts);
     if (
       !lstatSync(artifacts).isDirectory() ||
       lstatSync(artifacts).isSymbolicLink() ||
-      realpathSync(artifacts) !==
-        join(realpathSync(tmpDir), basename(artifacts))
+      artifactCanonical !== join(realpathSync(tmpDir), basename(artifacts))
     ) {
       return fail(
         3,
@@ -1428,6 +1465,7 @@ function main(argv) {
       {
         path: artifactContextPath,
         label: 'artifact context',
+        expectedParent: artifactCanonical,
         next: `${JSON.stringify({
           repo: slug,
           pr: context.pr,
@@ -1440,6 +1478,7 @@ function main(argv) {
       {
         path: boundaryPath,
         label: 'execution approval',
+        expectedParent: artifactCanonical,
         next: executionApproval
           ? `${JSON.stringify(executionApproval, null, 2)}\n`
           : null,
@@ -1465,6 +1504,7 @@ function main(argv) {
         item.path,
         item.label,
         item.next,
+        item.expectedParent,
       );
       if (error) return fail(3, error);
       records.push(record);

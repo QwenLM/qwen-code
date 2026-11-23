@@ -10,11 +10,13 @@ import {
   chmodSync,
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -23,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { arePermissionBitsEnforced } from '../../integrations/test-failure-explorer/src/test-utils/permission-bits.ts';
+import { arePermissionBitsEnforced } from '@qwen-code/qwen-code-core/test-utils/permission-bits.js';
 import { executionApprovalErrors } from '../../scripts/verify-pr-check.mjs';
 import {
   GIT_HARDENING,
@@ -1377,7 +1379,10 @@ describe.skipIf(process.platform === 'win32')(
       expect(checked.status, checked.stdout).toBe(0);
     };
 
-    const lateDirtyWitness = async (trust) => {
+    const lateMutationWitness = async (
+      trust,
+      replaceArtifactWithSymlink = false,
+    ) => {
       const { dir, base, head } = makeRepo();
       const prepared = command({
         trust,
@@ -1450,12 +1455,30 @@ describe.skipIf(process.platform === 'win32')(
         }
       };
       let rejected;
+      let redirected = null;
       try {
         await waitFor(`${gate}.paused`);
-        writeFileSync(
-          trackedPath,
-          'changed while review response was paused\n',
-        );
+        if (replaceArtifactWithSymlink) {
+          const scratch = join(dir, 'tmp');
+          const names = readdirSync(scratch).filter((name) =>
+            name.startsWith('pr42-verify-'),
+          );
+          expect(names).toHaveLength(1);
+          const artifact = join(scratch, names[0]);
+          const original = join(makeTmpDir(), 'original-artifact');
+          const target = join(prepared.hostDir, 'redirected-artifact');
+          mkdirSync(target, { recursive: true });
+          writeFileSync(join(target, 'context.json'), 'TARGET CONTEXT\n');
+          writeFileSync(join(target, 'boundary.json'), 'TARGET APPROVAL\n');
+          renameSync(artifact, original);
+          symlinkSync(target, artifact, 'dir');
+          redirected = { artifact, original, target };
+        } else {
+          writeFileSync(
+            trackedPath,
+            'changed while review response was paused\n',
+          );
+        }
         writeFileSync(`${gate}.release`, '');
         rejected = await closed;
       } finally {
@@ -1467,7 +1490,19 @@ describe.skipIf(process.platform === 'win32')(
         writeFileSync(trackedPath, trackedBefore);
       }
       expect(rejected.code, rejected.stderr).toBe(3);
-      expect(rejected.stderr).toMatch(/working tree has uncommitted changes/);
+      expect(rejected.stderr).toMatch(
+        replaceArtifactWithSymlink
+          ? /redirected parent directory/
+          : /working tree has uncommitted changes/,
+      );
+      if (redirected) {
+        expect(
+          readFileSync(join(redirected.target, 'context.json'), 'utf8'),
+        ).toBe('TARGET CONTEXT\n');
+        expect(
+          readFileSync(join(redirected.target, 'boundary.json'), 'utf8'),
+        ).toBe('TARGET APPROVAL\n');
+      }
       expect(existsSync(join(prepared.hostDir, 'pr.json'))).toBe(false);
       expect(existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json'))).toBe(
         false,
@@ -1476,8 +1511,10 @@ describe.skipIf(process.platform === 'win32')(
       if (existsSync(scratch)) {
         for (const entry of readdirSync(scratch)) {
           if (!entry.startsWith('pr42-verify-')) continue;
-          expect(existsSync(join(scratch, entry, 'boundary.json'))).toBe(false);
-          expect(existsSync(join(scratch, entry, 'context.json'))).toBe(false);
+          const artifact = join(scratch, entry);
+          if (lstatSync(artifact).isSymbolicLink()) continue;
+          expect(existsSync(join(artifact, 'boundary.json'))).toBe(false);
+          expect(existsSync(join(artifact, 'context.json'))).toBe(false);
         }
       }
       if (statePath) {
@@ -1485,6 +1522,10 @@ describe.skipIf(process.platform === 'win32')(
         expect(existsSync(`${statePath}.lock`)).toBe(false);
       }
 
+      if (redirected) {
+        rmSync(redirected.artifact);
+        renameSync(redirected.original, redirected.artifact);
+      }
       const control = runPrepare(dir, prepared.artifactArgs, env);
       expect(control.status, control.stderr).toBe(0);
       if (statePath) expect(existsSync(`${statePath}.lock`)).toBe(false);
@@ -1495,7 +1536,16 @@ describe.skipIf(process.platform === 'win32')(
       { name: 'comment', trust: false },
     ])(
       'revalidates the exact clean checkout after the last response for $name',
-      async ({ trust }) => lateDirtyWitness(trust),
+      async ({ trust }) => lateMutationWitness(trust),
+      20000,
+    );
+
+    it.each([
+      { name: 'local-trust', trust: true },
+      { name: 'comment', trust: false },
+    ])(
+      'rechecks the artifact canonical parent after the last response for $name',
+      async ({ trust }) => lateMutationWitness(trust, true),
       20000,
     );
 
@@ -3814,6 +3864,41 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     rmSync(join(dir, 'hidden.ts'));
     const clean = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(clean.status).toBe(0);
+  });
+
+  it('refuses patterns in the common exclude used by a linked worktree', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const linked = join(makeTmpDir(), 'linked-checkout');
+    execFileSync(
+      'git',
+      ['-C', dir, 'worktree', 'add', '--detach', linked, head],
+      { env: gitEnv },
+    );
+    const commonExclude = execFileSync(
+      'git',
+      [
+        '-C',
+        linked,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        'info/exclude',
+      ],
+      { env: gitEnv, encoding: 'utf8' },
+    ).trim();
+    writeFileSync(commonExclude, 'hidden.ts\n');
+    writeFileSync(join(linked, 'hidden.ts'), 'export {};\n');
+    const status = spawnSync('git', gitStatusArgs(linked), {
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    expect(status.stdout, status.stderr).toBe('');
+
+    const result = runPrepare(linked, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('.git/info/exclude');
+    expect(existsSync(join(realpathSync(linked), 'tmp'))).toBe(false);
   });
 
   // git status trusts the index: skip-worktree / assume-unchanged entries

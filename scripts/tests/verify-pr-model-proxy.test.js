@@ -1297,12 +1297,29 @@ describe('local container recipe pins', () => {
       // such pre-filter: the complete block was already selected above.
       const executableBoundary = async (source) => {
         const text = foldContinuations(source).trim();
-        const directProgram =
+        const executionWrappers = new Set([
+          'command',
+          'env',
+          'eval',
+          'exec',
+          'nice',
+          'nohup',
+          'sudo',
+          'ruby',
+          'python',
+          'python3',
+          'time',
+        ]);
+        const literalName = (value) =>
+          value?.replaceAll('\\', '').replace(/["']/g, '').split('/').at(-1);
+        const firstToken = /^[^\s;|&()]+/.exec(text)?.[0];
+        const literalFirstCommand = literalName(firstToken);
+        const directProgram = (source) =>
           /^(?:"[^"\r\n]+"|'[^'\r\n]+'|(?![-@A-Z])[^\s;|&()]+)\s+(?:-|\/(?=\S)|\.\/)/.test(
-            text,
+            source,
           ) ||
           /^(?:\/[^\s;|&()]+\.(?:sh|bash)|\.\/[^\s;|&()]+\.(?:sh|bash))(?=\s|$)/.test(
-            text,
+            source,
           );
         const compoundControl =
           /^(?:if|while|until)\s+[^;\r\n]+;\s*(?:then|do)(?=\s|$)/.test(text) ||
@@ -1310,7 +1327,7 @@ describe('local container recipe pins', () => {
         const checks = [
           /^gate:/,
           /^(?:NODE_OPTIONS\s*=|alias\s|function\s|node\s*\(\s*\))/,
-          /^command\s+(?:-|["'$/]|(?:node|qwen)(?=\s|$))/,
+          /^command\s+(?:-|["'$/`]|(?:node|qwen)(?=\s|$))/,
           /^\/(?:[A-Za-z0-9_.-]+\/)+(?:env|nice|sudo)(?=\s|$)/,
           /^(?:env|nice|sudo|exec|eval|sh|cd|touch|cat|echo|grep|printf|sed|cp|rm|mkdir|chmod|kill|docker|python3?|true)(?=\s|$)/,
           /^read\s+(?:-|[A-Z_][A-Z0-9_]*(?:\s|$))/,
@@ -1330,15 +1347,42 @@ describe('local container recipe pins', () => {
           /(?:^|[;&|]\s*)python3(?=\s|$)/,
           /^(?=[A-Za-z_$/'"\\`])\S+\s+(?:(?:-e|--eval)(?=\s|$)|["']?\S+\.[cm]?js(?=\s|$))/,
         ];
+        const wrapperArguments = firstToken
+          ? text.slice(firstToken.length).trimStart()
+          : '';
+        const literalFollowingCommand = literalName(
+          /^[^\s;|&()]+/.exec(wrapperArguments)?.[0],
+        );
+        const hasFollowingProgram =
+          wrapperArguments.startsWith("$'") ||
+          directProgram(wrapperArguments) ||
+          nodeProgramBoundary(wrapperArguments) ||
+          executionWrappers.has(literalFollowingCommand) ||
+          checks.some((check) => check.test(wrapperArguments));
+        const literalWrapper =
+          literalFirstCommand !== 'command' &&
+          (executionWrappers.has(literalFirstCommand) ||
+            /^\$'.*'$/.test(firstToken ?? ''));
+        // A wrapper-looking word followed by a copula is prose, not a command.
+        if (literalWrapper && /^(?:is|are|was|were)\b/.test(wrapperArguments)) {
+          return false;
+        }
+        const wrappedProgram = literalWrapper && hasFollowingProgram;
+        const commandExecution =
+          literalFirstCommand === 'command' && hasFollowingProgram;
         if (
+          wrappedProgram ||
+          commandExecution ||
           nodeProgramBoundary(text) ||
-          directProgram ||
+          directProgram(text) ||
           compoundControl ||
           checks.some((check) => check.test(text))
         ) {
           return true;
         }
-        if (!/\b(?:exec|eval|env|nice|sudo|ruby|python3?)\b/.test(text)) {
+        if (
+          !/\b(?:exec|eval|env|nice|nohup|sudo|ruby|python3?|time)\b/.test(text)
+        ) {
           return false;
         }
         let tree;
@@ -1365,18 +1409,30 @@ describe('local container recipe pins', () => {
               node.childForFieldName('name'),
               text,
             );
-            if (!name) return;
-            const args = argumentNodes(node);
-            const basename = name.split('/').at(-1);
-            if (['exec', 'eval'].includes(name) && args.length > 0) {
-              found = true;
+            if (!name) {
+              const rawName = node.childForFieldName('name')?.text;
+              if (
+                rawName &&
+                (rawName.startsWith("$'") ||
+                  (!/[$`]/.test(rawName) &&
+                    executionWrappers.has(
+                      rawName
+                        .replaceAll('\\', '')
+                        .replace(/["']/g, '')
+                        .split('/')
+                        .at(-1),
+                    )))
+              ) {
+                found = true;
+              }
               return;
             }
+            const args = argumentNodes(node);
+            const basename = name.split('/').at(-1);
             if (
               args.length > 0 &&
-              ['env', 'nice', 'sudo', 'ruby', 'python', 'python3'].includes(
-                basename,
-              )
+              (['exec', 'eval'].includes(name) ||
+                executionWrappers.has(basename))
             ) {
               found = true;
               return;
@@ -3119,6 +3175,17 @@ describe('local container recipe pins', () => {
       '"/usr/bin/node" -e \'console.log(1)\'',
       "env node -e 'console.log(1)'",
       'sudo node /tmp/arbitrary.js',
+      "time node -e 'console.log(1)'",
+      "nohup node -e 'console.log(1)'",
+      String.raw`\time node -e 'console.log(1)'`,
+      "command time node -e 'console.log(1)'",
+      String.raw`command nod\e -e 'console.log(1)'`,
+      "command `echo node` -e 'console.log(1)'",
+      "$'time' node -e 'console.log(1)'",
+      String.raw`$'t\151me' node -e 'console.log(1)'`,
+      String.raw`$'/usr/bin/t\151me' node -e 'console.log(1)'`,
+      String.raw`$'noh\165p' node -e 'console.log(1)'`,
+      String.raw`t\ime node -e 'console.log(1)'`,
       '/tmp/node /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim',
     ];
     for (const hostile of interpreterHostiles) {
@@ -3243,6 +3310,9 @@ describe('local container recipe pins', () => {
     for (const prose of [
       'The prose word node does not execute anything; arbitrary-helper.js is only a filename.',
       'node is the runtime cited by this sentence, not an invocation.',
+      'time is their scarcest resource.',
+      'nohup is not a shell keyword in this sentence.',
+      'env is their deployment target.',
       'For details see verify-pr-check.mjs \\\nwhen discussing reports.',
     ]) {
       expect(

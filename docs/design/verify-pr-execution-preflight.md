@@ -196,6 +196,12 @@ existing complete/release commands but must be released and restarted before a
 new comment approval can authorize execution. This cooperative final check is
 not an OS sandbox against a caller that bypasses prepare and executes PR code.
 
+Both exact-tree passes resolve Git's actual `info/exclude` with `git rev-parse
+--path-format=absolute --git-path info/exclude`, rather than assuming it lives
+under `.git/info/exclude`. This includes the common exclude of a linked
+worktree, so that file cannot hide untracked files from status. Failure to
+resolve or read the exclude also refuses preparation.
+
 ## Recording and publication
 
 Prepare validates the current checkout before writing as it does today. On a
@@ -235,11 +241,22 @@ cross-identifying artifact context cannot change that host identity. For this
 comparison the artifact ROOT must itself be a real directory, not a symlink or
 other non-directory; an alias named for the approved PR must not hide a
 different target. The operator must pass the resolved artifact directory path.
+For a round carrying this host-held `executionApproval`, publication also
+requires a `pr<N>-verify-*` directory and a readable artifact `context.json`
+whose repo and PR coordinates match the host snapshot. A missing, malformed
+or conflicting witness is refused; it never substitutes for the host
+snapshot. Legacy context records without this field are not subject to this
+additional witness requirement.
+
 Before any context or approval file is written, the time-stamped artifact directory must
 be a real directory, not a symbolic link or other file, whose fully canonical
 path is exactly the expected direct child of the real `tmp/` directory. An
 ordinary same-second retry still reuses that existing real directory; a
-redirect or non-directory exits 3 without writing into its target. Artifact
+redirect or non-directory exits 3 without writing into its target. The
+canonical artifact parent is retained with each transaction record and compared
+again when records are captured, written and restored. A directory replaced by
+a symlink while the final review response is paused is refused before the
+write group is committed. Artifact
 `context.json` must likewise be absent or a single-link regular file, so a
 symlink or hard link cannot overwrite its origin. `--context-out` containment
 uses the canonical PR-clone root and the canonical parent directory after that

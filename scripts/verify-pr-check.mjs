@@ -1635,6 +1635,37 @@ function main(argv) {
     );
   }
   if (contextPath && coordinates) {
+    const preflightBound = trustedSnapshot?.executionApproval !== undefined;
+    if (preflightBound) {
+      const artifactContextText = readIfExists(join(dir, 'context.json'));
+      let artifactCoordinates = null;
+      if (artifactContextText !== null && artifactContextText !== UNREADABLE) {
+        try {
+          const artifactSnapshot = JSON.parse(artifactContextText);
+          artifactCoordinates = coordinatesFrom({
+            repo: artifactSnapshot?.repo,
+            pr: artifactSnapshot?.pr,
+          });
+        } catch {
+          // An unusable artifact-only context supplies no trusted coordinates.
+        }
+      }
+      if (!artifactCoordinates) {
+        result.errors.push(
+          'artifact context.json must provide the same repo and PR coordinates as the host-held execution approval; a missing, unreadable, malformed, or coordinate-free artifact context cannot witness the PR round',
+        );
+      } else if (
+        artifactCoordinates.owner.toLowerCase() !==
+          coordinates.owner.toLowerCase() ||
+        artifactCoordinates.repo.toLowerCase() !==
+          coordinates.repo.toLowerCase() ||
+        artifactCoordinates.number !== coordinates.number
+      ) {
+        result.errors.push(
+          `artifact context.json identifies another repository or PR (${artifactCoordinates.owner}/${artifactCoordinates.repo}#${artifactCoordinates.number}), which conflicts with the trusted host snapshot for ${coordinates.owner}/${coordinates.repo}#${coordinates.number}; the artifact context is only a consistency witness, not an independent source of approval`,
+        );
+      }
+    }
     let realArtifactDirectory = false;
     try {
       const rootStat = lstatSync(resolve(dir));
@@ -1646,6 +1677,10 @@ function main(argv) {
     if (!realArtifactDirectory) {
       result.errors.push(
         `artifact directory ${dir} must be a real directory, not a symbolic link or other non-directory, when --context supplies trusted PR coordinates; pass the resolved artifact directory path`,
+      );
+    } else if (preflightBound && !dirPrNumber) {
+      result.errors.push(
+        `artifact directory ${basename(resolve(dir))} does not name a PR in prepare's pr<N>-verify-* form; a host-held execution approval cannot be assigned to an unrelated round directory`,
       );
     } else if (dirPrNumber && Number(dirPrNumber) !== coordinates.number) {
       result.errors.push(
