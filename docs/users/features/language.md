@@ -103,6 +103,29 @@ Any language name works. The LLM will be instructed to respond in that language.
 ~/.qwen/output-language.md
 ```
 
+## Display Translation
+
+Display translation leaves the model's language alone and translates what you read. With `general.displayLanguage` set to `zh-CN` (Simplified Chinese) or `en` (English), completed replies and the thoughts you open are shown in that language. This works in the Ink and OpenTUI terminals and in the Web Shell.
+
+```json
+{
+  "general": { "displayLanguage": "zh-CN" }
+}
+```
+
+You can also set **Language: Display Translation** in `/settings` or in the Web Shell's settings. It applies to sessions started after the change. It needs neither experimental Mods nor a trusted workspace.
+
+- **Only the display changes.** The model still works in its own language. The stored conversation, what the model reads in later turns, `/copy` and the Web Shell's copy buttons keep the original.
+- **Some blocks are left as they are.** A block that is already in the target language, or that is only code, is not translated.
+- **Translation waits for a block to finish.** A reply block shows its original text while it streams and switches to the translation once it is complete. A thought is translated when you open it, so a thought that stays collapsed costs nothing.
+- **Each translation is a model call.** Every translated block and opened thought costs one call to the [fast model](../configuration/settings.md#fastmodel), or to the session's model when none is set. A fast model without thinking keeps each translation inside the 30 seconds a row may take. A block whose call runs out of time, fails or returns an incomplete translation keeps its original text. A reload or a second Web Shell tab reuses the translations, but a resumed session translates the rows it shows again.
+- **The text goes to the fast model's provider.** Each translated block is sent to the fast model's endpoint. If your fast model uses a different provider than your session model, that provider receives the text.
+- **Some views stay in the original.** Tool output, collapsed thinking rows, subagent views, exported transcripts and headless output are not translated. Ink translates only with its virtualized history (`ui.useTerminalBuffer`, on by default). With history in the terminal scrollback, a printed row cannot change.
+- **Some sessions turn it off.** Like installed Mods, it does not run with `disableAllHooks`, managed hooks, bare mode, safe mode or a sandbox.
+- **The thought translate button goes away.** In the Web Shell, a translated thought no longer shows its translate button.
+
+Display translation runs as a built-in [Mod](../extension/mods.md) after any Mods you install. A Mod of yours that rewrites replies or thoughts therefore has its result translated.
+
 ## Configuration
 
 ### Via Settings Dialog

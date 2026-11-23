@@ -69,6 +69,18 @@ describe('AcpModSession', () => {
       AcpModSession.create(config, settings(false), 'acp-1', client),
     ).toBeUndefined();
     expect(mocks.host).toBeUndefined();
+    // The display translation alone starts them.
+    mocks.initialize.mockResolvedValue();
+    expect(
+      AcpModSession.create(
+        config,
+        {
+          merged: { general: { displayLanguage: 'en' } },
+        } as unknown as LoadedSettings,
+        'acp-1',
+        client,
+      ),
+    ).toBeInstanceOf(AcpModSession);
   });
 
   it("sends each log line under the session's ACP id", async () => {

@@ -348,4 +348,128 @@ describe('Mod rows through the daemon', () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 240_000);
+
+  it('translates reply and thinking rows with the display language alone', async ({
+    skip,
+  }) => {
+    skip(process.platform === 'win32', 'requires the POSIX daemon harness');
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-mod-rows-'));
+    const workspace = path.join(root, 'workspace');
+    const home = path.join(root, 'home');
+    const qwenHome = path.join(home, '.qwen');
+    for (const directory of [workspace, qwenHome])
+      mkdirSync(directory, { recursive: true });
+    // No extension and no experimental Mods.
+    json(path.join(qwenHome, 'settings.json'), {
+      general: { enableAutoUpdate: false },
+      memory: E2E_MEMORY_SETTINGS_DEFAULTS,
+      model: { skipNextSpeakerCheck: true },
+      ui: { enableFollowupSuggestions: false },
+      telemetry: { enabled: false },
+      security: {
+        folderTrust: { enabled: false },
+        auth: { selectedType: 'openai' },
+      },
+    });
+    const translations: string[] = [];
+    const fakeModel = await startFakeOpenAIServer(async ({ body }) => {
+      const messages = JSON.stringify(body['messages'] ?? []);
+      if (messages.includes('into Simplified Chinese')) {
+        const text = messages.includes('Plan the answer.')
+          ? '先规划答案。'
+          : '答案一';
+        translations.push(text);
+        return { content: `${text}\n[QWEN_DISPLAY_END]` };
+      }
+      if (body['stream'] !== true) return { content: '{}' };
+      return {
+        reasoningChunks: ['Plan ', 'the answer.'],
+        content: 'Answer 1',
+      };
+    });
+    const env = {
+      HOME: home,
+      USERPROFILE: home,
+      QWEN_HOME: qwenHome,
+      QWEN_SANDBOX: 'false',
+      QWEN_CODE_NO_RELAUNCH: 'true',
+      QWEN_CODE_DISABLE_UPDATE_CHECK: '1',
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: fakeModel.baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+      NO_PROXY: '127.0.0.1,localhost',
+      no_proxy: '127.0.0.1,localhost',
+    };
+    let daemon: SpawnedDaemon | undefined;
+    try {
+      daemon = await spawnDaemon({
+        workspaceCwd: workspace,
+        bootTimeoutMs: 60_000,
+        env,
+      });
+      const { client } = daemon;
+      expect(
+        await client.setWorkspaceSetting(
+          'user',
+          'general.displayLanguage',
+          'zh-CN',
+        ),
+      ).toMatchObject({ requiresRestart: true });
+      const session = await client.createOrAttachSession({
+        workspaceCwd: workspace,
+        sessionScope: 'thread',
+      });
+      const asked = { clientId: session.clientId };
+      expect(
+        (
+          await client.prompt(
+            session.sessionId,
+            { prompt: [{ type: 'text', text: 'Hello' }] },
+            AbortSignal.timeout(60_000),
+            session.clientId,
+          )
+        ).stopReason,
+      ).toBe('end_turn');
+
+      const reply = {
+        component: 'AssistantMessage',
+        props: { text: 'Answer 1', isFirstOfReply: true },
+      };
+      expect(
+        await client.askSessionModRow(session.sessionId, reply, asked),
+      ).toEqual({
+        status: 'answered',
+        props: { text: '答案一', isFirstOfReply: true },
+      });
+      expect(
+        await client.askSessionModRow(
+          session.sessionId,
+          { component: 'Thinking', props: { text: 'Plan the answer.' } },
+          asked,
+        ),
+      ).toEqual({ status: 'answered', props: { text: '先规划答案。' } });
+      // A reply already in Chinese is drawn as it is, with no model call.
+      expect(
+        await client.askSessionModRow(
+          session.sessionId,
+          {
+            component: 'AssistantMessage',
+            props: { text: '已经是中文的回答', isFirstOfReply: true },
+          },
+          asked,
+        ),
+      ).toEqual({ status: 'answered' });
+      // Another client is answered from the session's cache.
+      expect(await client.askSessionModRow(session.sessionId, reply)).toEqual({
+        status: 'answered',
+        props: { text: '答案一', isFirstOfReply: true },
+      });
+      expect(translations).toEqual(['答案一', '先规划答案。']);
+    } finally {
+      await daemon?.dispose();
+      await fakeModel.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 240_000);
 });

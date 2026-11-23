@@ -446,6 +446,7 @@ import {
   type AcpModTurn,
   parseAcpModRow,
 } from './acp-mod-session.js';
+import { modsWanted } from '../../services/display-translation-mod.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
@@ -5742,7 +5743,7 @@ export class Session implements SessionContext {
     // without them keeps none, whatever the settings say later.
     return {
       status:
-        !this.modsInstalled && this.settings.merged.experimental?.mods
+        !this.modsInstalled && modsWanted(this.settings)
           ? 'unanswered'
           : 'unhooked',
     };

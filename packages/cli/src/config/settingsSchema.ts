@@ -744,6 +744,24 @@ const SETTINGS_SCHEMA = {
           'or set a specific language.',
         showInDialog: true,
       },
+      displayLanguage: {
+        type: 'enum',
+        label: 'Language: Display Translation',
+        category: 'General',
+        requiresRestart: true,
+        default: 'off',
+        description:
+          "Show the model's replies and opened thoughts translated into this language in the terminal and the Web Shell. " +
+          'The model answers as usual; the stored conversation, what the model reads and copied text keep the original. ' +
+          'Each translated block costs one call to the fast model, or the session model when none is set. ' +
+          'Works without installing anything or turning on experimental features.',
+        showInDialog: true,
+        options: [
+          { value: 'off', label: 'Off' },
+          { value: 'zh-CN', label: 'Simplified Chinese' },
+          { value: 'en', label: 'English' },
+        ],
+      },
       terminalBell: {
         type: 'boolean',
         label: 'Terminal Bell Notification',

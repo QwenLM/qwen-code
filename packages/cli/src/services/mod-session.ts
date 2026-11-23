@@ -37,6 +37,7 @@ import {
   MOD_MAX_BYTES,
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
+  ModPlugin,
   ModCommandPresentation,
   ModLog,
   ModPromptSubmit,
@@ -77,6 +78,12 @@ import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
 import { completeModModel, modModelUsage } from './mod-model.js';
 import { ModRows } from './mod-rows.js';
+import {
+  displayTranslationPlugin,
+  displayTranslationTarget,
+  drawsTranslatedRows,
+  type DisplayTranslationTarget,
+} from './display-translation-mod.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 
 const logger = createDebugLogger('MODS');
@@ -175,6 +182,7 @@ export class ModSession implements ICommandLoader {
   private readonly mods: Array<{
     id: string;
     name: string;
+    builtIn?: true;
   }> = [];
   private runtime?: ModRuntime;
   private toolQueue: Promise<unknown> = Promise.resolve();
@@ -279,6 +287,12 @@ export class ModSession implements ICommandLoader {
     private readonly config: Config,
     private readonly output: ModOutput,
     private readonly optionScopes: readonly unknown[] = [],
+    // Installed Mods load with `experimental.mods`; the built-in display
+    // translation loads with its own setting.
+    private readonly sources: {
+      extensions: boolean;
+      translation?: DisplayTranslationTarget;
+    } = { extensions: true },
   ) {
     this.sessionId = config.getSessionId();
     allowTelemetryListener(1);
@@ -295,12 +309,21 @@ export class ModSession implements ICommandLoader {
     settings: LoadedSettings,
     output: ModOutput,
   ): ModSession | undefined {
-    return settings.merged.experimental?.mods
-      ? new ModSession(config, output, [
-          settings.systemDefaults.settings.pluginConfigs,
-          settings.user.settings.pluginConfigs,
-          settings.system.settings.pluginConfigs,
-        ])
+    const extensions = settings.merged.experimental?.mods === true;
+    // Only a host that draws rows has rows to translate.
+    const translation =
+      'surface' in output ? displayTranslationTarget(settings) : undefined;
+    return extensions || translation
+      ? new ModSession(
+          config,
+          output,
+          [
+            settings.systemDefaults.settings.pluginConfigs,
+            settings.user.settings.pluginConfigs,
+            settings.system.settings.pluginConfigs,
+          ],
+          { extensions, translation },
+        )
       : undefined;
   }
 
@@ -327,7 +350,6 @@ export class ModSession implements ICommandLoader {
     return (
       this.config.isInteractive() === Boolean(this.terminal) &&
       this.config.getExperimentalZedIntegration() === this.acp &&
-      this.config.isTrustedFolder() &&
       !this.config.getDisableAllHooks() &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode() &&
@@ -335,13 +357,22 @@ export class ModSession implements ICommandLoader {
       !this.config.getExecutionEnvironmentFactory() &&
       !this.config.getHookSystem()?.isManaged() &&
       !this.config.getSandbox() &&
-      !this.config.isSessionAgentSession()
+      !this.config.isSessionAgentSession() &&
+      (this.mods.every((mod) => mod.builtIn) || this.extensionsAllowed())
     );
+  }
+
+  // Installed Mods run third-party code; the built-in one runs Qwen Code's.
+  private extensionsAllowed(): boolean {
+    return this.config.isTrustedFolder();
   }
 
   async initialize(signal: AbortSignal): Promise<void> {
     if (this.closing) throw new Error('Mod session is closed.');
-    if (!this.allowed()) {
+    if (
+      !this.allowed() ||
+      (!this.sources.translation && !this.extensionsAllowed())
+    ) {
       if (this.mods.length) {
         await this.close();
         throw new Error('Mods are no longer permitted in this session.');
@@ -356,13 +387,18 @@ export class ModSession implements ICommandLoader {
 
   private async load(signal: AbortSignal): Promise<void> {
     const sites = (this.sites = this.host?.sites?.() ?? []);
+    const translation =
+      this.sources.translation && drawsTranslatedRows(sites)
+        ? displayTranslationPlugin(this.sources.translation)
+        : undefined;
+    let builtInOnly = false;
     try {
       const candidates = [];
-      for (const extension of this.config
-        .getExtensions()
-        .filter(
-          (item) => item.isActive && item.format !== 'agent-plugins-v1',
-        )) {
+      for (const extension of (this.sources.extensions &&
+      this.extensionsAllowed()
+        ? this.config.getExtensions()
+        : []
+      ).filter((item) => item.isActive && item.format !== 'agent-plugins-v1')) {
         signal.throwIfAborted();
         try {
           const source = await loadModSource(extension.path);
@@ -439,28 +475,32 @@ export class ModSession implements ICommandLoader {
           ),
         }));
       const ordered = orderModPlugins(mods);
-      if (ordered.length) {
+      if (ordered.length || translation) {
+        builtInOnly = !ordered.length;
         this.runtime = await ModRuntime.createGroup(
-          ordered.map(
-            ({
-              extension,
-              source,
-              options,
-              toolDialect,
-              unsupportedEvents,
-            }) => ({
-              id: extension.id,
-              name: extension.name,
-              source: {
-                root: source!.root,
-                entry: source!.entry,
-                source: source!.source,
-              },
-              options,
-              toolDialect,
-              unsupportedEvents,
-            }),
-          ),
+          ordered
+            .map(
+              ({
+                extension,
+                source,
+                options,
+                toolDialect,
+                unsupportedEvents,
+              }): ModPlugin => ({
+                id: extension.id,
+                name: extension.name,
+                source: {
+                  root: source!.root,
+                  entry: source!.entry,
+                  source: source!.source,
+                },
+                options,
+                toolDialect,
+                unsupportedEvents,
+              }),
+            )
+            // Innermost, so it translates what the other Mods drew.
+            .concat(translation ?? []),
           this.config.getTargetDir(),
           (entry, plugin) => {
             if (this.commandSignal?.aborted || this.toolSignal?.aborted) return;
@@ -503,6 +543,15 @@ export class ModSession implements ICommandLoader {
             id: extension.id,
             name: extension.name,
           })),
+          ...(translation
+            ? [
+                {
+                  id: translation.id,
+                  name: translation.name,
+                  builtIn: true as const,
+                },
+              ]
+            : []),
         );
         // The first render runs after session.start.
         this.requestRender();
@@ -510,6 +559,12 @@ export class ModSession implements ICommandLoader {
     } catch (error) {
       await this.runtime?.dispose();
       this.mods.length = 0;
+      // The translation alone failing leaves the session untranslated.
+      if (builtInOnly && !signal.aborted) {
+        this.runtime = undefined;
+        logger.warn(`Display translation did not start: ${String(error)}`);
+        return;
+      }
       throw error;
     }
   }
@@ -1384,10 +1439,12 @@ export class ModSession implements ICommandLoader {
 
   private active(): boolean {
     const extensions = this.config.getExtensions();
-    return this.mods.every((mod) =>
-      extensions.some(
-        (extension) => extension.id === mod.id && extension.isActive,
-      ),
+    return this.mods.every(
+      (mod) =>
+        mod.builtIn ||
+        extensions.some(
+          (extension) => extension.id === mod.id && extension.isActive,
+        ),
     );
   }
 

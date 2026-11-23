@@ -29,6 +29,7 @@ import type {
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { ModSession, type ModTurn } from '../../services/mod-session.js';
+import { modsWanted } from '../../services/display-translation-mod.js';
 
 const debugLogger = createDebugLogger('MODS');
 
@@ -172,7 +173,7 @@ export class AcpModSession {
     client: ModLogNotifier,
     sites: readonly ModRenderSite[] = [],
   ): AcpModSession | undefined {
-    return settings.merged.experimental?.mods
+    return modsWanted(settings)
       ? new AcpModSession(config, settings, sessionId, client, sites)
       : undefined;
   }

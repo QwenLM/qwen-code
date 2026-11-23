@@ -1301,6 +1301,12 @@ Chinese, in the Ink and OpenTUI terminals and the Web Shell. It rewrites the
 `$.model.complete`. The stored conversation, what the session model reads in
 the main conversation, `/copy` and the Web Shell's copy buttons keep the original.
 
+For Simplified Chinese or English you do not need this Mod: the
+[`general.displayLanguage`](../features/language.md#display-translation)
+setting runs the same translation as a built-in Mod, without
+`experimental.mods`. The example shows how such a Mod is built, and is a
+starting point for other languages or your own prompt.
+
 ```text
 zh-display/
   .claude-plugin/plugin.json
@@ -1339,8 +1345,8 @@ function mostlyChinese(text) {
   const fencedCode =
     /^ {0,3}((`|~)\2{2,})(?!\2)[^\n]*\n[\s\S]*?^ {0,3}\1\2*[ \t]*$/gm;
   const prose = text.replace(fencedCode, '').replace(/`[^`\n]*`/g, '');
-  const letters = prose.match(/[A-Za-z一-鿿]/g) ?? [];
-  const han = letters.filter((letter) => letter >= '一').length;
+  const letters = prose.match(/[A-Za-z\u4e00-\u9fff]/g) ?? [];
+  const han = letters.filter((letter) => letter >= '\u4e00').length;
   return han * 2 >= letters.length;
 }
 
