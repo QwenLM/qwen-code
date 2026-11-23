@@ -668,6 +668,38 @@ describe('persisted artifact library', () => {
     expect(err.snapshotSize).toBe(stats.size);
     expect(err.maxBytes).toBe(4 * 1024);
     expect(err.measuredBytes).toBeGreaterThan(4 * 1024);
+    expect(err.measuredBytes).toBeLessThan(128 * 1024);
+  });
+
+  it('rejects an oversized unterminated cross-chunk line at the reader tail', async () => {
+    await seed();
+    await fs.appendFile(
+      file,
+      JSON.stringify({
+        uuid: 'giant-unterminated-line',
+        parentUuid: 'assistant-1',
+        sessionId: id,
+        cwd,
+        timestamp: stamp,
+        version: '0.25.3',
+        type: 'tool_result',
+        message: { role: 'user', parts: [{ text: 'h'.repeat(192 * 1024) }] },
+      }),
+    );
+    setSessionTranscriptMaxLineBytesForTest(64 * 1024);
+
+    let caught: unknown;
+    try {
+      await service.readSessionArtifactSnapshot(id);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+    const err = caught as SessionTranscriptTooLargeError;
+    expect(err.dimension).toBe('line');
+    expect(err.maxBytes).toBe(64 * 1024);
+    expect(err.measuredBytes).toBeGreaterThan(4 * 1024);
+    expect(err.measuredBytes).toBeLessThan(128 * 1024);
   });
 
   it('refuses legacy mutation of a managed-owned transcript', async () => {

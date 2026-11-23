@@ -610,6 +610,7 @@ export function sendBridgeError(
       ...(err.measuredBytes !== undefined
         ? { measuredBytes: err.measuredBytes }
         : {}),
+      ...(err.retryable !== undefined ? { retryable: err.retryable } : {}),
     });
     return;
   }
@@ -1341,6 +1342,7 @@ export function sendBridgeError(
           maxBytes?: number;
           dimension?: string;
           measuredBytes?: number;
+          retryable?: boolean;
         };
         res.status(413).json({
           error: errorMessage(err),
@@ -1355,6 +1357,9 @@ export function sendBridgeError(
             : {}),
           ...(typeof d.measuredBytes === 'number'
             ? { measuredBytes: d.measuredBytes }
+            : {}),
+          ...(typeof d.retryable === 'boolean'
+            ? { retryable: d.retryable }
             : {}),
         });
         return;

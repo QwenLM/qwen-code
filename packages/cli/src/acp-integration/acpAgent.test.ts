@@ -21967,6 +21967,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('sessionTurnStatus forwards detailed transient transcript limits', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage: vi.fn().mockRejectedValue(
+            Object.assign(
+              new SessionTranscriptTooLargeError(sessionId, 400, 200),
+              {
+                dimension: 'index',
+                measuredBytes: 250,
+                retryable: true,
+              },
+            ),
+          ),
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: 'prompt-1',
+      }),
+    ).rejects.toMatchObject({
+      code: -32011,
+      data: {
+        errorKind: 'transcript_too_large',
+        sessionId,
+        snapshotSize: 400,
+        maxBytes: 200,
+        dimension: 'index',
+        measuredBytes: 250,
+        retryable: true,
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('resolves sessionTurnStatus settings per request, not from the this.settings cache', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
@@ -25221,11 +25274,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('qwen/status/session/transcript maps oversized snapshots to structured errors', async () => {
     const settings = makeCoreSettings();
-    const readPage = vi
-      .fn()
-      .mockRejectedValue(
+    const readPage = vi.fn().mockRejectedValue(
+      Object.assign(
         new SessionTranscriptTooLargeError(VALID_SESSION_ID, 300, 200),
-      );
+        {
+          dimension: 'index',
+          measuredBytes: 320000,
+          retryable: true,
+        },
+      ),
+    );
     vi.mocked(SessionTranscriptReader).mockImplementation(
       () =>
         ({
@@ -25245,6 +25303,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessionId: VALID_SESSION_ID,
         snapshotSize: 300,
         maxBytes: 200,
+        dimension: 'index',
+        measuredBytes: 320000,
+        retryable: true,
       },
     });
     expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {

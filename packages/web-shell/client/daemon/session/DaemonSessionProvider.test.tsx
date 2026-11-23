@@ -18896,6 +18896,56 @@ describe('DaemonSessionProvider', () => {
     expect(eventsCalls).toBe(1);
   });
 
+  it('retries a memory-pressure 413 rather than dropping the session', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const memoryPressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'large-session',
+        dimension: 'index',
+        measuredBytes: 128 * 1024 * 1024,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* memoryPressureEvents() {
+          eventsCalls += 1;
+          if (eventsCalls === 1) throw memoryPressure;
+          yield* [];
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBeGreaterThan(1);
+    expect(connection?.missingSession).not.toBe(true);
+  });
+
   it('keeps a plain 409 conflict error retriable (not terminal)', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,

@@ -1271,6 +1271,7 @@ function mapSessionRestoreRequestError(
       ...(error.measuredBytes !== undefined
         ? { measuredBytes: error.measuredBytes }
         : {}),
+      ...(error.retryable !== undefined ? { retryable: error.retryable } : {}),
     });
   }
   if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -11043,6 +11044,15 @@ class QwenAgent implements Agent {
               sessionId,
               snapshotSize: error.snapshotSize,
               maxBytes: error.maxBytes,
+              ...(error.dimension !== 'snapshot'
+                ? { dimension: error.dimension }
+                : {}),
+              ...(error.measuredBytes !== undefined
+                ? { measuredBytes: error.measuredBytes }
+                : {}),
+              ...(error.retryable !== undefined
+                ? { retryable: error.retryable }
+                : {}),
             });
           }
           if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -11163,6 +11173,15 @@ class QwenAgent implements Agent {
               sessionId,
               snapshotSize: error.snapshotSize,
               maxBytes: error.maxBytes,
+              ...(error.dimension !== 'snapshot'
+                ? { dimension: error.dimension }
+                : {}),
+              ...(error.measuredBytes !== undefined
+                ? { measuredBytes: error.measuredBytes }
+                : {}),
+              ...(error.retryable !== undefined
+                ? { retryable: error.retryable }
+                : {}),
             });
           }
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -14741,6 +14760,15 @@ class QwenAgent implements Agent {
                 sessionId,
                 snapshotSize: error.snapshotSize,
                 maxBytes: error.maxBytes,
+                ...(error.dimension !== 'snapshot'
+                  ? { dimension: error.dimension }
+                  : {}),
+                ...(error.measuredBytes !== undefined
+                  ? { measuredBytes: error.measuredBytes }
+                  : {}),
+                ...(error.retryable !== undefined
+                  ? { retryable: error.retryable }
+                  : {}),
               });
             }
             if (error instanceof SessionTranscriptPageTooLargeError) {

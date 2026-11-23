@@ -2604,6 +2604,11 @@ export interface DaemonArtifactLibraryMemberError {
   status: number;
   code: string;
   message: string;
+  snapshotSize?: number;
+  maxBytes?: number;
+  dimension?: 'snapshot' | 'line' | 'index' | 'replay' | 'artifact_library';
+  measuredBytes?: number;
+  retryable?: boolean;
 }
 
 export interface DaemonWorkspaceArtifactLibraryResult {

@@ -905,9 +905,11 @@ const GeneratedUiScopeContext = createContext<
  * 404/410 (session-not-found) leave the requested session disconnected instead
  * of silently creating a replacement empty session.
  *
- * 413 (`transcript_too_large` / `transcript_page_too_large`) will not resolve
- * on its own; retrying loops forever, clears the visible error, and repeatedly
- * cold-spawns ACP workers.
+ * Most 413 responses will not resolve on their own; blindly retrying loops
+ * forever, clears the visible error, and repeatedly cold-spawn ACP
+ * workers. An explicitly retryable memory-pressure error is the exception:
+ * reopening after the daemon has headroom is safe, while the deterministic
+ * oversized-input cases remain terminal.
  */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([
@@ -7297,6 +7299,16 @@ function bumpSessionEventSignals(
 function isTerminalSessionHttpError(error: unknown): boolean {
   if (isSessionArchivedHttpError(error)) return true;
   const status = extractHttpStatus(error);
+  if (
+    status === 413 &&
+    error instanceof DaemonHttpError &&
+    error.body &&
+    typeof error.body === 'object' &&
+    'retryable' in error.body &&
+    error.body['retryable'] === true
+  ) {
+    return false;
+  }
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
 }
 

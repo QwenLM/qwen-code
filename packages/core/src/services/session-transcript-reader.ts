@@ -117,7 +117,7 @@ export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 1024 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_LINE_BYTES = 32 * 1024 * 1024;
-export const SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES = 128 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
@@ -163,6 +163,7 @@ export type SessionTranscriptLimitDimension =
 export class SessionTranscriptTooLargeError extends Error {
   readonly dimension: SessionTranscriptLimitDimension;
   readonly measuredBytes?: number;
+  readonly retryable?: boolean;
 
   constructor(
     readonly sessionId: string,
@@ -171,6 +172,7 @@ export class SessionTranscriptTooLargeError extends Error {
     details?: {
       dimension?: SessionTranscriptLimitDimension;
       measuredBytes?: number;
+      retryable?: boolean;
     },
   ) {
     const dimension = details?.dimension ?? 'snapshot';
@@ -184,6 +186,9 @@ export class SessionTranscriptTooLargeError extends Error {
     this.dimension = dimension;
     if (measuredBytes !== undefined) {
       this.measuredBytes = measuredBytes;
+    }
+    if (details?.retryable !== undefined) {
+      this.retryable = details.retryable;
     }
   }
 }
@@ -785,6 +790,7 @@ const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
 let indexCacheOversizedMaxBytesForTest: number | undefined;
 let maxIndexEstimateBytesForTest: number | undefined;
+let availableHeapBudgetForTest: number | undefined;
 let maxLineBytesForTest: number | undefined;
 let maxAllReplayBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
@@ -2646,10 +2652,15 @@ async function buildIndex(params: {
     0,
     getHeapStatistics().heap_size_limit - buildHeapUsedStart,
   );
+  const remainingHeapBudget =
+    availableHeapBudgetForTest ??
+    Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
+  const heapHeadroomLimited = remainingHeapBudget < maxIndexEstimateBytes;
   const maxIndexBuildBytes = Math.min(
     maxIndexEstimateBytes,
-    Math.max(64 * 1024, Math.floor(availableHeapBytes / 2)),
+    remainingHeapBudget,
   );
+  const heapLimitDetails = heapHeadroomLimited ? { retryable: true } : {};
   let estimatedIndexBytes =
     INDEX_ENTRY_BASE_BYTES +
     INDEX_CONTAINER_BASE_BYTES * 7 +
@@ -2744,19 +2755,27 @@ async function buildIndex(params: {
             );
           }
           // The cache estimate intentionally stays unchanged. For the hard
-          // build ceiling, account for the real heap as well — short-record
-          // retention can cost materially more than the estimate on some
-          // runtimes, and estimation alone must not free a 1 GiB heap.
-          estimatedIndexBytes = Math.max(
-            estimatedIndexBytes,
-            process.memoryUsage().heapUsed - buildHeapUsedStart,
-          );
+          // build ceiling, periodically sample real heap growth as well —
+          // short-record retention can cost materially more than the estimate
+          // on some runtimes, and estimation alone must not free a 1 GiB heap.
+          // Always sample the first record so a depleted process cannot admit
+          // a build even if there are fewer than 1024 records.
+          if ((sequence & 1023) === 1) {
+            estimatedIndexBytes = Math.max(
+              estimatedIndexBytes,
+              process.memoryUsage().heapUsed - buildHeapUsedStart,
+            );
+          }
           if (estimatedIndexBytes > maxIndexBuildBytes) {
             throw new SessionTranscriptTooLargeError(
               sessionId,
               snapshotSize,
               maxIndexBuildBytes,
-              { dimension: 'index', measuredBytes: estimatedIndexBytes },
+              {
+                dimension: 'index',
+                measuredBytes: estimatedIndexBytes,
+                ...heapLimitDetails,
+              },
             );
           }
         }
@@ -2908,7 +2927,11 @@ async function buildIndex(params: {
       sessionId,
       snapshotSize,
       maxIndexBuildBytes,
-      { dimension: 'index', measuredBytes: finalEstimatedBytes },
+      {
+        dimension: 'index',
+        measuredBytes: finalEstimatedBytes,
+        ...heapLimitDetails,
+      },
     );
   }
 
@@ -3764,7 +3787,10 @@ export class SessionTranscriptReader {
         ? undefined
         : snapshot.lastUserPromptAt;
     }
-    if (stats.size > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) return undefined;
+    // Preserve the base O(1) behavior of session-list enrichment on very
+    // large transcripts. Restore/paging reads use the expanded limit below;
+    // prompt timestamps are optional metadata, not worth an entire index scan.
+    if (stats.size > 256 * 1024 * 1024) return undefined;
     const pending = (async (): Promise<LastUserPromptSnapshot> => {
       let index: TranscriptIndex;
       try {
@@ -3775,6 +3801,14 @@ export class SessionTranscriptReader {
           lastUpdated,
         });
       } catch (error) {
+        if (
+          error instanceof SessionTranscriptTooLargeError &&
+          error.retryable === true
+        ) {
+          // Memory available to this process may change. Do not retain a
+          // missing prompt timestamp until the session file is rewritten.
+          throw error;
+        }
         if (
           (error instanceof EmptySessionTranscriptError ||
             error instanceof SessionTranscriptTooLargeError ||
@@ -5378,6 +5412,7 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   indexCacheMaxBytesForTest = undefined;
   indexCacheOversizedMaxBytesForTest = undefined;
   maxIndexEstimateBytesForTest = undefined;
+  availableHeapBudgetForTest = undefined;
   maxLineBytesForTest = undefined;
   maxAllReplayBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
@@ -5426,6 +5461,12 @@ export function setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
 ): void {
   indexCacheOversizedMaxBytesForTest = maxBytes;
   pruneCache();
+}
+
+export function setSessionTranscriptAvailableHeapBudgetForTest(
+  maxBytes: number | undefined,
+): void {
+  availableHeapBudgetForTest = maxBytes;
 }
 
 export function setSessionTranscriptMaxIndexEstimateBytesForTest(
