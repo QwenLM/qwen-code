@@ -484,6 +484,7 @@ import {
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import {
+  CJK_AT_TERMINATOR_CHARS,
   getSlashCommandFirstToken,
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
@@ -2463,7 +2464,10 @@ export async function fireSessionPermissionDeniedForAutoMode(
   }
 }
 
-const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
+const AT_TOKEN_RE = new RegExp(
+  `@([^\\s,;!?()[\\]{}${CJK_AT_TERMINATOR_CHARS}]+)`,
+  'g',
+);
 
 function collectExtensionMentionRefs(
   text: string,

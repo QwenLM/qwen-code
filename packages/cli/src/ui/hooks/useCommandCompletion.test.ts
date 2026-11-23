@@ -295,6 +295,105 @@ describe('useCommandCompletion', () => {
         });
       });
 
+      it('should trigger AT completion after CJK text or fullwidth punctuation and stop at fullwidth punctuation', async () => {
+        const first = renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest('请看@READ'),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: true,
+              pattern: 'READ',
+            }),
+          );
+        });
+        first.unmount();
+
+        const second = renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest('（@READ）', 6),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: true,
+              pattern: 'READ',
+            }),
+          );
+        });
+        second.unmount();
+
+        const third = renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest('请看 @README.md，帮我'),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+        third.unmount();
+
+        const fourth = renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest('请看 @README.md\u3000帮我'),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+        fourth.unmount();
+
+        const fifth = renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest('icon@2x.png'),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+        fifth.unmount();
+      });
+
       it('should correctly identify the completion context with multiple @ symbols', async () => {
         const text = '@file1 @file2';
         const cursorOffset = 3; // @fi|le1 @file2
@@ -1145,6 +1244,64 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe(
         '@src/file1.txt is a good file',
       );
+    });
+
+    it('should not append a trailing space before closing fullwidth punctuation', async () => {
+      setupMocks({
+        atSuggestions: [{ label: 'src/', value: 'src/', isDirectory: true }],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('（@sr）', 4);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('（@src/）');
+    });
+
+    it('should still append a trailing space for regular file completions before fullwidth punctuation', async () => {
+      setupMocks({
+        atSuggestions: [{ label: 'README.md', value: 'README.md' }],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('（@READ）', 6);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('（@README.md ）');
     });
 
     it('should preserve existing space after directory completions at mid-line cursor', async () => {

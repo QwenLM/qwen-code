@@ -74,6 +74,29 @@ describe('extractAtPathCommands', () => {
       'src/notes.md',
     ]);
   });
+
+  it('terminates @ paths at fullwidth CJK punctuation while preserving Chinese filenames and ASCII punctuation prefixes', () => {
+    expect(extractAtPathCommands('请看 @README.md，帮我解释')).toEqual([
+      'README.md',
+    ]);
+    expect(extractAtPathCommands('请看@说明.md，解释一下')).toEqual([
+      '说明.md',
+    ]);
+    expect(extractAtPathCommands('（@README.md）和【@src/a.ts】')).toEqual([
+      'README.md',
+      'src/a.ts',
+    ]);
+    expect(extractAtPathCommands('@a.md、@b.md；@c.md。')).toEqual([
+      'a.md',
+      'b.md',
+      'c.md',
+    ]);
+    expect(extractAtPathCommands('see (@x.md) and ,@y.md')).toEqual([
+      'x.md',
+      'y.md',
+    ]);
+    expect(extractAtPathCommands('@don’t.md')).toEqual(['don’t.md']);
+  });
 });
 
 describe('handleAtCommand', () => {
@@ -1324,6 +1347,33 @@ describe('handleAtCommand', () => {
         ],
         shouldProceed: true,
       });
+    });
+
+    it('should read files delimited by fullwidth punctuation and CJK text directly before @', async () => {
+      const readmeContent = 'README content';
+      const cnContent = '中文说明内容';
+      const asciiParenContent = 'ASCII paren file';
+      await createTestFile(path.join(testRootDir, 'README.md'), readmeContent);
+      await createTestFile(path.join(testRootDir, '说明.md'), cnContent);
+      await createTestFile(path.join(testRootDir, 'x.md'), asciiParenContent);
+
+      const result = await handleAtCommand({
+        query:
+          '请看@README.md，再看看（@说明.md）和(@x.md)！发给 user@example.com',
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 412,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.filesRead).toEqual(['README.md', '说明.md', 'x.md']);
+      expect(JSON.stringify(result.processedQuery)).toContain(readmeContent);
+      expect(JSON.stringify(result.processedQuery)).toContain(cnContent);
+      expect(JSON.stringify(result.processedQuery)).toContain(
+        asciiParenContent,
+      );
+      expect(JSON.stringify(result.processedQuery)).toContain('example.com');
     });
 
     it.skipIf(process.platform === 'win32')(

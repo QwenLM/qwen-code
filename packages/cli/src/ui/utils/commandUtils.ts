@@ -53,16 +53,46 @@ export const CodePage = {
 
 export type CodePage = (typeof CodePage)[keyof typeof CodePage];
 /**
+ * Fullwidth / CJK punctuation characters that terminate an `@path` token
+ * (mirroring ASCII sentence terminators) and can immediately precede `@`
+ * without a space (e.g. `（@README.md）`, `@a.md、@b.md`).
+ */
+export const CJK_AT_TERMINATOR_CHARS =
+  '，。、；：！？（）【】「」『』《》［］｛｝';
+
+export const CJK_AT_TERMINATOR_RE = new RegExp(`[${CJK_AT_TERMINATOR_CHARS}]`);
+
+const AT_TRIGGER_PREFIX_CLASS = `\\s${CJK_AT_TERMINATOR_CHARS}\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}`;
+
+const AT_COMMAND_START_RE = new RegExp(
+  `(?:^|[${AT_TRIGGER_PREFIX_CLASS}])@`,
+  'u',
+);
+
+const AT_TRIGGER_PREFIX_CHAR_RE = new RegExp(
+  `^[${AT_TRIGGER_PREFIX_CLASS}]$`,
+  'u',
+);
+
+/**
+ * Checks whether a single code point can immediately precede `@` to start an
+ * `@` command (whitespace, CJK/fullwidth punctuation, or CJK script letters).
+ * ASCII word/punctuation characters (such as `a.b@example.com` or `icon@2x.png`)
+ * return false.
+ */
+export const isAtTriggerPrefixChar = (char: string): boolean =>
+  AT_TRIGGER_PREFIX_CHAR_RE.test(char);
+
+/**
  * Checks if a query string potentially represents an '@' command.
- * It triggers if the query starts with '@' or contains '@' preceded by whitespace
- * and followed by a non-whitespace character.
+ * It triggers if the query starts with '@' or contains '@' preceded by
+ * whitespace, CJK/fullwidth punctuation, or CJK text.
  *
  * @param query The input query string.
  * @returns True if the query looks like an '@' command, false otherwise.
  */
 export const isAtCommand = (query: string): boolean =>
-  // Check if starts with @ OR has a space, then @
-  query.startsWith('@') || /\s@/.test(query);
+  AT_COMMAND_START_RE.test(query);
 
 const SLASH_PATH_SEPARATOR_RE = /[/\\]/;
 

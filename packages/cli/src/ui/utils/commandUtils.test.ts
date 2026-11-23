@@ -10,6 +10,7 @@ import type { spawn, SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   isAtCommand,
+  isAtTriggerPrefixChar,
   isSlashCommand,
   copyToClipboard,
   getUrlOpenCommand,
@@ -100,6 +101,21 @@ describe('commandUtils', () => {
     it('should return false when @ is not preceded by whitespace', () => {
       expect(isAtCommand('hello@file')).toBe(false);
       expect(isAtCommand('text@path')).toBe(false);
+      expect(isAtCommand('a.b@example.com')).toBe(false);
+      expect(isAtCommand('icon@2x.png')).toBe(false);
+      expect(isAtCommand('请看\\@README.md')).toBe(false);
+    });
+
+    it('should return true when @ immediately follows CJK text or fullwidth punctuation', () => {
+      expect(isAtCommand('请看@README.md')).toBe(true);
+      expect(isAtCommand('（@README.md）')).toBe(true);
+      expect(isAtCommand('文件：@说明.md')).toBe(true);
+      expect(isAtCommand('これ@README.md')).toBe(true);
+      expect(isAtCommand('テスト@README.md')).toBe(true);
+      expect(isAtCommand('이것@README.md')).toBe(true);
+      expect(isAtCommand('𠀀@README.md')).toBe(true);
+      expect(isAtTriggerPrefixChar('请')).toBe(true);
+      expect(isAtTriggerPrefixChar('abc请')).toBe(false);
     });
   });
 

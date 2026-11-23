@@ -105,6 +105,8 @@ describe('detectCompletionTarget AT queries', () => {
     ['@😀file.ts', '😀file.ts'],
     ['😀😀 @src/𠮷file.ts', 'src/𠮷file.ts'],
     ['😀 @src/😀file.ts', 'src/😀file.ts'],
+    ['请看@README.md', 'README.md'],
+    ['（@说明.md', '说明.md'],
   ])('uses the complete file query from %s', (text, query) => {
     const cursor = Array.from(text).length;
     expect(detectCompletionTarget([text], 0, cursor, text, cursor)).toEqual({
@@ -131,6 +133,87 @@ describe('detectCompletionTarget AT queries', () => {
       false,
     );
     expect(applied.line).toBe('😀 @😀done.ts tail');
+  });
+
+  it('stops AT completion at fullwidth punctuation and ignores email/asset suffixes', () => {
+    const wrapped = '（@READ）';
+    expect(detectCompletionTarget([wrapped], 0, 6, wrapped, 6)).toEqual({
+      mode: CompletionMode.AT,
+      query: 'READ',
+      start: 2,
+      end: 6,
+    });
+    const afterComma = '请看 @README.md，帮我';
+    const len = Array.from(afterComma).length;
+    expect(
+      detectCompletionTarget([afterComma], 0, len, afterComma, len),
+    ).toBeNull();
+    const afterFullwidthSpace = '请看 @README.md\u3000帮我';
+    const fwLen = Array.from(afterFullwidthSpace).length;
+    expect(
+      detectCompletionTarget(
+        [afterFullwidthSpace],
+        0,
+        fwLen,
+        afterFullwidthSpace,
+        fwLen,
+      ),
+    ).toBeNull();
+    const dirTarget = detectCompletionTarget(['（@sr）'], 0, 4, '（@sr）', 4)!;
+    const appliedDir = applyCompletion(
+      '（@sr）',
+      dirTarget,
+      { label: 'src/', value: 'src/', isDirectory: true },
+      false,
+    );
+    expect(appliedDir).toEqual({ line: '（@src/）', cursorCol: 6 });
+    expect(
+      detectCompletionTarget(
+        [appliedDir.line],
+        0,
+        appliedDir.cursorCol,
+        appliedDir.line,
+        appliedDir.cursorCol,
+      ),
+    ).toEqual({
+      mode: CompletionMode.AT,
+      query: 'src/',
+      start: 2,
+      end: 6,
+    });
+    const fileTarget = detectCompletionTarget(
+      ['（@READ）'],
+      0,
+      6,
+      '（@READ）',
+      6,
+    )!;
+    expect(
+      applyCompletion(
+        '（@READ）',
+        fileTarget,
+        { label: 'README.md', value: 'README.md', isDirectory: false },
+        false,
+      ),
+    ).toEqual({ line: '（@README.md ）', cursorCol: 12 });
+    expect(
+      detectCompletionTarget(
+        ['a.b@example.com'],
+        0,
+        'a.b@example.com'.length,
+        'a.b@example.com',
+        'a.b@example.com'.length,
+      ),
+    ).toBeNull();
+    expect(
+      detectCompletionTarget(
+        ['icon@2x.png'],
+        0,
+        'icon@2x.png'.length,
+        'icon@2x.png',
+        'icon@2x.png'.length,
+      ),
+    ).toBeNull();
   });
 });
 
