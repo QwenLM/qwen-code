@@ -43,6 +43,11 @@ import {
   type SessionListLoad,
 } from './persisted-session-list-cache.js';
 import { laterActivityTimestamp } from './activity-timestamp.js';
+import {
+  projectTempDirFor,
+  resolveDetachedBackgroundWork,
+  type DetachedBackgroundWork,
+} from './detached-work-liveness.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import {
@@ -642,6 +647,7 @@ async function enrichGoalSidecars(
 }
 
 /**
+/**
  * Teardown flush codes: `flushPromptTerminals` publishes an `error` terminal
  * with one of these codes for every still-pending prompt when the daemon
  * shuts down, the agent channel exits, or the session is closed/killed. The
@@ -707,6 +713,46 @@ async function enrichPromptContinuation(
       bySessionId.set(sessionId, { ...summary, needsContinuation: true });
     }
   }
+}
+
+/**
+ * Attaches settled detached-work verdicts to their rows; rows with no signal
+ * stay untouched. Shared by the whole-list and catalog-page paths.
+ */
+function applyDetachedVerdicts<T extends { sessionId: string }>(
+  rows: Map<string, T>,
+  verdicts: ReadonlyMap<string, DetachedBackgroundWork>,
+): void {
+  for (const [sessionId, detachedBackgroundWork] of verdicts) {
+    const row = rows.get(sessionId);
+    if (row) {
+      rows.set(sessionId, { ...row, detachedBackgroundWork });
+    }
+  }
+}
+
+/**
+ * Attaches the detached background-shell signal (#17819) to persisted-only
+ * summaries — sessions with no live entry, whose owning runtime cannot be
+ * asked about its background work anymore. Best-effort: the resolver
+ * degrades every probe failure to "no signal".
+ */
+async function enrichDetachedBackgroundWork(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  liveSessionIds: ReadonlySet<string>,
+  workspaceCwd: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const candidates = [...bySessionId.keys()].filter(
+    (sessionId) => !liveSessionIds.has(sessionId),
+  );
+  if (candidates.length === 0) return;
+  const verdicts = await resolveDetachedBackgroundWork({
+    sessionIds: candidates,
+    projectTempDir: projectTempDirFor(workspaceCwd),
+    signal,
+  });
+  applyDetachedVerdicts(bySessionId, verdicts);
 }
 
 function toSummary(item: {
@@ -782,6 +828,11 @@ function mergeLiveSessionSummary(
   ) {
     delete merged.needsContinuation;
   }
+  // A live entry means this daemon owns the session, so the in-memory
+  // `hasRunningBackgroundTasks` is authoritative for its background work;
+  // the persisted sidecar's detached-shell signal (if any was attached
+  // before the merge) would double-report and must not survive.
+  delete merged.detachedBackgroundWork;
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history. The sidecar is
   // the append-only binding-time record (last = latest — the order the badge
@@ -986,9 +1037,11 @@ async function enrichCatalogPage(
   liveRows: readonly BridgeSessionSummary[],
   service: SessionService,
   archiveState: SessionArchiveState,
+  workspaceCwd: string,
   signal?: AbortSignal,
 ): Promise<void> {
   const selectedIds = new Set(page.map((session) => session.sessionId));
+  const liveIds = new Set(liveRows.map((live) => live.sessionId));
   const detailsById = new Map<string, BridgeSessionSummary>();
   for (const { sessionId } of page) {
     const stored = persistedById.get(sessionId);
@@ -1001,6 +1054,21 @@ async function enrichCatalogPage(
       );
     }
   }
+  // Detached-shell signal for persisted rows this page shows without a live
+  // entry (#17819). TTL-cached and probe-capped in the resolver, so repeated
+  // page fetches stay cheap; live rows are excluded — for them the in-memory
+  // signal is authoritative and the replayed merge below drops the field.
+  const detachedVerdicts = await resolveDetachedBackgroundWork({
+    sessionIds: page
+      .filter(
+        (session) =>
+          !liveIds.has(session.sessionId) && detailsById.has(session.sessionId),
+      )
+      .map((session) => session.sessionId),
+    projectTempDir: projectTempDirFor(workspaceCwd),
+    signal,
+  });
+  applyDetachedVerdicts(detailsById, detachedVerdicts);
   // Replay live merges on the enriched rows. The selected summaries keep
   // their organization, sort keys, and cursor identity.
   for (const live of liveRows) {
@@ -1023,6 +1091,8 @@ async function enrichCatalogPage(
     if (details.artifactCount !== undefined)
       session.artifactCount = details.artifactCount;
     if (details.goal !== undefined) session.goal = details.goal;
+    if (details.detachedBackgroundWork !== undefined)
+      session.detachedBackgroundWork = details.detachedBackgroundWork;
   }
 }
 
@@ -1530,6 +1600,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     liveRows,
     sessionService,
     archiveState,
+    workspaceCwd,
     readOptions.signal,
   );
   return {
@@ -1743,6 +1814,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
     liveRows,
     sessionService,
     archiveState,
+    workspaceCwd,
     readOptions.signal,
   );
   return {
@@ -1960,15 +2032,35 @@ async function listWorkspaceSessionsForResponseInRuntime(
     archiveState,
     readOptions.signal,
   );
+  // Live ids are known before the probe: live rows never need the detached
+  // signal (their in-memory state is authoritative), so skip probing them
+  // entirely. The merge below still drops the field as a race backstop for
+  // rows that turn live between this snapshot and the merge (#17819).
+  const mergingLive =
+    archiveState !== 'archived' && readOptions.mergeLive !== false;
+  const preProbeLive = mergingLive
+    ? bridge
+        .listWorkspaceSessions(workspaceCwd)
+        .filter((session) => !isHiddenCatalogSource(session.sourceType))
+    : [];
+  await enrichDetachedBackgroundWork(
+    bySessionId,
+    new Set(preProbeLive.map((session) => session.sessionId)),
+    workspaceCwd,
+    readOptions.signal,
+  );
   readOptions.signal?.throwIfAborted();
 
-  if (archiveState === 'archived' || readOptions.mergeLive === false) {
+  if (!mergingLive) {
     const sessions = [...bySessionId.values()];
     const nextCursor =
       persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
     return { sessions, nextCursor };
   }
 
+  // Re-read after the probe await: a session that turned live while the
+  // disk probe was in flight must still merge into its fresh authoritative
+  // state instead of keeping a probe-settled field (#17819).
   const liveSessions = bridge
     .listWorkspaceSessions(workspaceCwd)
     .filter((session) => !isHiddenCatalogSource(session.sourceType));

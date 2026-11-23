@@ -44,12 +44,9 @@ Goals:
 
 Out of scope (recorded as follow-ups, not silently dropped):
 
-- Sessions that are no longer live (closed, reclaimed, or after a daemon
-  restart) while a detached background shell keeps running. The shell registry
-  is in-memory, so no `hasRunningBackgroundTasks` reaches the client at all.
-  Evidence: a remote session whose shell pid had been alive ~26h was absent
-  from live-state and carried no background field in the catalog. Tracked in
-  #17819.
+- ~~Sessions that are no longer live (closed, reclaimed, or after a daemon
+  restart) while a detached background shell keeps running.~~ Moved into scope
+  by the detached background-shell extension below (#17819).
 - Re-grading the Session Overview panel's cards. A background-only session
   still reads `idle` there, which keeps the panel's sort order and displayed
   status unchanged; its two destructive card actions are gated separately (see
@@ -138,6 +135,51 @@ active (updated from blue in #18072 so blue stays reserved for
 completed-unread sessions), amber for background-only, blue for
 completed-unread.
 
+## Detached background shells (#17819)
+
+The first out-of-scope item above became its own extension. A session whose
+owning CLI process died can leave `running` shell sidecars behind — the
+registry settles them on graceful exit only, so a hard kill orphans both the
+process and the report. For such a row the in-memory signal does not exist,
+and deleting it looks like harmless cleanup while a shell is still running
+(#17819).
+
+The daemon resolves the signal best-effort while building the catalog:
+
+- The session list probes each persisted-only row's
+  `<projectTempDir>/background-shells/<sessionId>/shell-*.status` sidecars
+  (`detached-work-liveness.ts` in the serve layer). A `running` or `cancelled`
+  claim, or a `failed` claim with a process token, reads as running when the
+  Linux PID namespace and process-start token match a live process. An exited process or
+  a different process reusing that PID in the same namespace clears the claim.
+  Legacy records without identity, inaccessible or malformed records, and
+  unsupported probes read as `unknown`.
+- The verdict lands on the summary as `detachedBackgroundWork`: `'running'`,
+  `'unknown'`, or absent (no sidecars, or every running claim disproven).
+  Live entries never carry it: the in-memory `hasRunningBackgroundTasks` is
+  authoritative for a session this daemon owns, and the live merge drops the
+  persisted signal.
+- Probe results are cached for 45 s (absent verdicts included). Each request
+  checks up to 100 uncached sessions, 128 directory entries per session, and
+  16 KiB per file. An open catalog with persisted rows reconciles every 60 s
+  even when the live catalog version has not changed.
+
+The client treats the two grades differently, mirroring the existing
+`unknown` policy:
+
+- `running` joins `hasLiveWork` and `sessionBlocksDelete` as a third term.
+  It is not the attached runtime's work, so it blocks delete on any row —
+  that is precisely the row shape whose delete looks like cleanup — and
+  disables archive. The row renders the amber background marker under
+  `data-web-shell-session-background-running="detached"`.
+- `unknown` renders a hollow, muted, non-pulsing dot
+  (`data-web-shell-session-background-unknown`, tooltip
+  `background.detachedUnknown`) and blocks nothing — a hint, not knowledge
+  of work, exactly like the `unknown` active-work grade. In the delete
+  dialog the row stays tickable. The hint shows `delete.mayStillBeRunning`
+  while the selection contains an unknown row, with errors and active delete
+  progress taking precedence.
+
 ## Design decisions and rationale
 
 - **No new icon or badge.** The row already has a busy marker; widening its
@@ -167,6 +209,21 @@ completed-unread.
   row is not `.runningSession`, so hovering anywhere on the row reveals the
   action overlay; `.sessionRow:hover:not(.runningSession) .sessionLoading` joins
   the existing marker-hiding rule so the spinner never sits under the buttons.
+- **Best-effort, never an error.** The detached resolver runs inside the
+  session list response path, so every probe failure degrades to `unknown` or
+  to "no detached work" rather than failing the request.
+- **Capture the OS identity on registration.** A promoted shell may have
+  started long before the registry records its wall-clock `startTime`. Keep
+  the original Linux process-start token and PID namespace on subsequent
+  writes. `cancelled` is written before cancellation is requested, so those
+  claims also require a process probe.
+- **`unknown` still does not block.** Folding it into the predicates would
+  block delete on every row probed on a platform without a start-time source
+  (macOS, Windows) — those failure modes are environmental, not evidence of
+  work.
+- **Merge keeps live priority.** A session live in this daemon gets its
+  background state from the registries; stacking the sidecar signal on top
+  would double-report and could outlive the session's own state.
 
 ## Constraints and risks
 
@@ -184,6 +241,10 @@ completed-unread.
 - The busy marker shares the meta slot's trailing position with the branch /
   worktree icon, so a background-only row now shows the spinner instead of that
   icon — the same tradeoff a row with a running turn already makes.
+- The detached extension adds two keys in English and Simplified Chinese:
+  `background.detachedUnknown` (the hollow dot's tooltip) and
+  `delete.mayStillBeRunning` (the delete dialog's advisory). Other locales
+  fall back to the English strings, as with any untranslated key.
 
 ## Validation
 
@@ -258,11 +319,21 @@ row. No page errors.
    session starts running again. The running dot's `!completedUnread` guard is
    defensive for the render-before-effect transient, with the
    unread-over-running leg pinned at hover level by the tooltip matrix.
+7. A persisted-only session with a verified-running detached shell shows the
+   amber background marker and refuses delete in the sidebar row and the
+   delete dialog, and refuses archive, exactly as if the in-memory signal
+   had been set.
+8. A persisted-only session with an unverifiable detached shell shows the
+   hollow unknown marker, keeps delete offered everywhere, and names the
+   unknown status in the delete dialog's hint while an unknown row is selected.
+   The hint expires once the grade clears or the last unknown row is deselected.
+9. A live session never carries `detachedBackgroundWork`, even when stale
+   sidecars exist on disk.
+10. After a detached shell exits, a Web Shell left open clears the running
+    marker on its next slow catalog reconciliation after the probe cache
+    expires.
 
 ## Open questions / follow-ups
 
-- Non-live sessions with a still-running detached background shell remain
-  unmarked; fixing that needs a daemon-side liveness source (status file plus
-  pid check) and a bounded scan cost. Tracked separately.
 - Whether the amber marker should eventually carry a task count. The session
   summary has no count today, so this would need a protocol field.

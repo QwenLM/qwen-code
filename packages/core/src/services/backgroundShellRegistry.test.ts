@@ -33,6 +33,11 @@ import {
 import { escapeXml } from '../utils/xml.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
+vi.mock('../utils/process-liveness.js', () => ({
+  readProcStartToken: vi.fn((pid: number) => `boot-x:${pid * 10}`),
+  readPidNamespaceId: vi.fn(() => 4026532501),
+}));
+
 /**
  * Builds the expected `<output-file>` element with the same
  * `stripDisplayControlChars` + `escapeXml` pipeline the registry applies.
@@ -966,6 +971,23 @@ describe('BackgroundShellRegistry', () => {
       expect(status['startTime']).toBe(new Date(1000).toISOString());
       expect(typeof status['updatedAt']).toBe('string');
       expect(status['exitCode']).toBeUndefined();
+    });
+
+    it('records process identity tokens for a known pid on register', () => {
+      const e = makeDirEntry({ shellId: 'ident', pid: 4242 });
+      reg.register(e);
+      const status = readStatus(e.statusPath);
+      expect(status['procStart']).toBe('boot-x:42420');
+      expect(status['pidNs']).toBe(4026532501);
+    });
+
+    it('omits identity tokens when the pid is unknown at register', () => {
+      const e = makeDirEntry({ shellId: 'noident' });
+      reg.register(e);
+      const status = readStatus(e.statusPath);
+      expect(status['pid']).toBeUndefined();
+      expect(status['procStart']).toBeUndefined();
+      expect(status['pidNs']).toBeUndefined();
     });
 
     it.each<[string, (r: BackgroundShellRegistry) => void, object]>([

@@ -324,8 +324,18 @@ export function DeleteSessionDialog({
     refusedRow && blocksDelete(refusedRow)
       ? refusedRow.sessionId === currentSessionId
         ? t('delete.cannotCurrent')
-        : t('sidebar.deleteRunningDisabled')
+        : refusedRow.detachedBackgroundWork === 'running'
+          ? t('delete.detachedRunningDisabled')
+          : t('sidebar.deleteRunningDisabled')
       : null;
+  const advisoryText = filtered.some(
+    (s) =>
+      s.detachedBackgroundWork === 'unknown' &&
+      selectedIds.has(s.sessionId) &&
+      !blocksDelete(s),
+  )
+    ? t('delete.mayStillBeRunning')
+    : null;
   const hasSelection = selectedIds.size > 0;
   const canDelete = !deleting && !loading && deletableSelectedIds.length > 0;
 
@@ -356,15 +366,15 @@ export function DeleteSessionDialog({
             outcome ||
             message ||
             refusalText ||
-            (deleting
-              ? t('delete.deleting')
-              : loading
-                ? t('common.loading')
-                : hasSelection
-                  ? t('delete.selected', { count: selectedIds.size })
-                  : filterQuery
-                    ? t('delete.matches', { count: filtered.length })
-                    : '')}
+            (deleting && t('delete.deleting')) ||
+            advisoryText ||
+            (loading
+              ? t('common.loading')
+              : hasSelection
+                ? t('delete.selected', { count: selectedIds.size })
+                : filterQuery
+                  ? t('delete.matches', { count: filtered.length })
+                  : '')}
         </span>
       </div>
 

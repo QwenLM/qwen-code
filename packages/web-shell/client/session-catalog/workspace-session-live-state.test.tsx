@@ -258,6 +258,58 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests);
     expect(listGroups).not.toHaveBeenCalled();
     expect(container.textContent).toBe('true:true:no-group');
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests);
+  });
+
+  it('discovers and clears detached work on slow catalog refreshes without a version change', async () => {
+    getLiveState.mockResolvedValue({ ...liveState(1), sessions: [] });
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    listSessions.mockResolvedValue({
+      sessions: [
+        { ...sessionPage().sessions[0]!, detachedBackgroundWork: 'running' },
+      ],
+    } satisfies DaemonSessionListPage);
+
+    await act(async () => vi.advanceTimersByTimeAsync(59_999));
+    expect(listSessions).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(
+      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
+    ).toBe('running');
+
+    listSessions.mockResolvedValue(sessionPage());
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(listSessions).toHaveBeenCalledTimes(3);
+    expect(
+      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
+    ).toBeUndefined();
+  });
+
+  it('lets a newly live session supersede a retained detached work observation', async () => {
+    getLiveState.mockResolvedValue({ ...liveState(1), sessions: [] });
+    listSessions.mockResolvedValue({
+      sessions: [
+        { ...sessionPage().sessions[0]!, detachedBackgroundWork: 'running' },
+      ],
+    } satisfies DaemonSessionListPage);
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    expect(
+      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
+    ).toBe('running');
+
+    getLiveState.mockResolvedValue(liveState(1));
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS),
+    );
+    expect(listSessions).toHaveBeenCalledTimes(1);
+    expect(
+      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
+    ).toBeUndefined();
   });
 
   it('does not rescan the catalog for prompt admission, and rate-limits unusable-watermark completions', async () => {

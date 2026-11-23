@@ -120,6 +120,7 @@ const sessionCatalogController = {
   // These tests render pages straight from listWorkspaceSessions, so the
   // store-owned pin toggle has no loaded catalog pages to patch.
   toggleSessionPinned: vi.fn(),
+  peekSessionSummary: vi.fn(),
 };
 
 const workspace = {

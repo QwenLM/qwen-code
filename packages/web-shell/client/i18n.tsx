@@ -1864,6 +1864,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.usage.dailySessionsSub': 'active session counts per day',
   'delete.cannotCurrent':
     'Cannot delete the current session while it is running.',
+  'delete.mayStillBeRunning':
+    'This session may still have background tasks running — status unknown.',
+  'delete.detachedRunningDisabled':
+    'Detached background work is still running for this session — wait for it to exit or cancel it before deleting.',
   'delete.action': 'Delete',
   'delete.deleted': 'Session deleted.',
   'delete.deletedCount': (v) => `${v?.count ?? 0} session(s) deleted.`,
@@ -2920,6 +2924,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'background.result': 'Background result',
   'background.agent': 'Background agent',
   'background.running': 'Background tasks running',
+  'background.detachedUnknown': 'May still be running — status unknown',
   'background.task': 'Background task',
   'background.peer': 'Cross-session message',
   'background.details': 'View details',

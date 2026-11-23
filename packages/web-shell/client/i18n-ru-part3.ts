@@ -19,6 +19,10 @@ export const RU_PART3: Record<
   'daemon.usage.dailySessionsSub': 'активные сессии по дням',
   'delete.cannotCurrent':
     'Нельзя удалить текущую сессию, пока она выполняется.',
+  'delete.mayStillBeRunning':
+    'В этой сессии всё ещё могут выполняться фоновые задачи — статус неизвестен.',
+  'delete.detachedRunningDisabled':
+    'Фоновая задача этой сессии всё ещё выполняется отдельно — дождитесь её завершения или отмените её перед удалением.',
   'delete.action': 'Удалить',
   'delete.deleted': 'Сессия удалена.',
   'delete.deletedCount': (v) =>

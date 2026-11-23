@@ -42,6 +42,7 @@ const sessionCatalogController = {
   refreshWorkspace: vi.fn(),
   renamed: vi.fn(),
   toggleSessionPinned: vi.fn(),
+  peekSessionSummary: vi.fn(),
 };
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({

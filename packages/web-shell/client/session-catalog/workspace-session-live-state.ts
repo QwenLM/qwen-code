@@ -28,6 +28,7 @@ export const SESSION_LIVE_STATE_ERROR_RETRY_MS = 30_000;
  */
 export const SESSION_LIVE_STATE_STALE_AFTER_FAILURES = 3;
 export const SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS = 10_000;
+const PERSISTED_SESSION_REFRESH_MS = 60_000;
 
 interface WorkspacePollState {
   workspaceCwd: string;
@@ -385,9 +386,16 @@ export function useWorkspaceSessionLiveState(
       const bypassReconcileRetry =
         bypassRetry || state.interactiveRefreshRequested;
       state.interactiveRefreshRequested = false;
+      // Detached shell observations come from the catalog and can change
+      // without a catalog version bump. Check only subscribed history at a
+      // slower cadence, including rows not probed by the last catalog read.
+      const persistedSessionRefreshDue =
+        Date.now() - state.lastReconcileAt >= PERSISTED_SESSION_REFRESH_MS &&
+        catalogStore.hasSubscribedPersistedSessions(state.workspaceCwd);
       if (
         !state.reconcileRequested &&
         !state.invalidationRequested &&
+        !persistedSessionRefreshDue &&
         versionsEqual(state.acceptedVersion, live.catalogVersion)
       ) {
         finish();

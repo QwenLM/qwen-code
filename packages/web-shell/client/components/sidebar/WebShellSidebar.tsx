@@ -276,6 +276,7 @@ function SelectableSessionRow({
       | 'hasActivePrompt'
       | 'activeWorkState'
       | 'hasRunningBackgroundTasks'
+      | 'detachedBackgroundWork'
     >,
   ) => void;
 }) {
@@ -285,6 +286,7 @@ function SelectableSessionRow({
     hasActivePrompt,
     activeWorkState,
     hasRunningBackgroundTasks,
+    detachedBackgroundWork,
   } = session;
   useEffect(() => {
     onRefresh(identity, {
@@ -292,6 +294,7 @@ function SelectableSessionRow({
       hasActivePrompt,
       activeWorkState,
       hasRunningBackgroundTasks,
+      detachedBackgroundWork,
     });
   }, [
     identity,
@@ -299,6 +302,7 @@ function SelectableSessionRow({
     hasActivePrompt,
     activeWorkState,
     hasRunningBackgroundTasks,
+    detachedBackgroundWork,
     onRefresh,
   ]);
   const label = getSessionLabel(session);
@@ -1966,6 +1970,7 @@ export function WebShellSidebar({
         | 'hasActivePrompt'
         | 'activeWorkState'
         | 'hasRunningBackgroundTasks'
+        | 'detachedBackgroundWork'
       >,
     ) => {
       setSelectedSessions((previous) => {
@@ -1976,7 +1981,8 @@ export function WebShellSidebar({
             selected.hasActivePrompt === state.hasActivePrompt &&
             selected.activeWorkState === state.activeWorkState &&
             selected.hasRunningBackgroundTasks ===
-              state.hasRunningBackgroundTasks)
+              state.hasRunningBackgroundTasks &&
+            selected.detachedBackgroundWork === state.detachedBackgroundWork)
         )
           return previous;
         return new Map(previous).set(identity, { ...selected, ...state });
@@ -4368,7 +4374,33 @@ export function WebShellSidebar({
     if (!deleteCandidate) return;
     const sessionId = deleteCandidate.sessionId;
     const sessionIdentity = getIdentityForSession(deleteCandidate);
-    if (!canDeleteSession(deleteCandidate)) {
+    // Re-check the guard against the live catalog row: the candidate was
+    // captured when the dialog opened, and a catalog refresh since then may
+    // have settled a detached-running verdict on this row that must not be
+    // bypassed by confirming a stale snapshot (#17819). The catalog cache is
+    // read first — it spans every registered query (main, pinned, archived,
+    // paginated history pages) and picks the most recently updated snapshot,
+    // so a fresh history page beats a stale main-list copy of the same row.
+    // The pool lists stay as a fallback, then the captured candidate.
+    const latestRow =
+      sessionCatalogController.peekSessionSummary(
+        sessionId,
+        getSessionWorkspaceCwd(deleteCandidate),
+      ) ??
+      [
+        sessions,
+        archivedSessions,
+        pinnedSessions,
+        secondaryActiveSessions,
+        secondaryPinnedSessions,
+        secondaryArchivedSessions,
+      ]
+        .flat()
+        .find(
+          (session) => getIdentityForSession(session) === sessionIdentity,
+        ) ??
+      deleteCandidate;
+    if (!canDeleteSession(latestRow)) {
       setDeleteCandidate(null);
       return;
     }
@@ -4430,8 +4462,15 @@ export function WebShellSidebar({
     onError,
     onSessionsDeleted,
     primaryWorkspaceCwd,
+    archivedSessions,
+    getSessionWorkspaceCwd,
+    pinnedSessions,
     resolveSessionWorkspaceScope,
+    secondaryActiveSessions,
+    secondaryArchivedSessions,
+    secondaryPinnedSessions,
     sessionCatalogController,
+    sessions,
     setSessionBusy,
     t,
     workspace.client,
@@ -5925,8 +5964,19 @@ export function WebShellSidebar({
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = hasLiveWork(session);
+      // Detached grades (#17819): a persisted session whose shell sidecars
+      // report a verified-running shell reads like background work; an
+      // unverifiable one gets its own muted marker and blocks nothing.
+      const detachedBackgroundRunning =
+        !session.hasActivePrompt &&
+        session.detachedBackgroundWork === 'running';
+      const detachedBackgroundUnknown =
+        !session.hasActivePrompt &&
+        session.detachedBackgroundWork === 'unknown' &&
+        !session.hasRunningBackgroundTasks;
       const backgroundRunning =
-        !session.hasActivePrompt && session.hasRunningBackgroundTasks;
+        (!session.hasActivePrompt && session.hasRunningBackgroundTasks) ||
+        detachedBackgroundRunning;
       // The status dot is prompt-gated, so a turn in flight hides the background
       // dot. The busy marker must not be: it is the only place left that can
       // still say this row is running background work.
@@ -6003,7 +6053,11 @@ export function WebShellSidebar({
         : isCurrent && running
           ? t('sidebar.currentDeleteDisabled')
           : deleteBlocked
-            ? t('sidebar.deleteRunningDisabled')
+            ? // Detached work outlives the delete path: removal would not
+              // stop it, so the tooltip must not claim it would (#17819).
+              session.detachedBackgroundWork === 'running'
+              ? t('delete.detachedRunningDisabled')
+              : t('sidebar.deleteRunningDisabled')
             : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       // Archived sessions cannot load into a split pane (they leave an empty
@@ -6153,10 +6207,24 @@ export function WebShellSidebar({
                   styles.sessionStatusDot,
                   styles.sessionBackgroundRunning,
                 )}
-                data-web-shell-session-background-running
+                data-web-shell-session-background-running={
+                  session.hasRunningBackgroundTasks ? true : 'detached'
+                }
                 role="img"
                 aria-label={t('background.running')}
                 title={t('background.running')}
+              />
+            )}
+            {!liveStarting && detachedBackgroundUnknown && (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionBackgroundUnknown,
+                )}
+                data-web-shell-session-background-unknown
+                role="img"
+                aria-label={t('background.detachedUnknown')}
+                title={t('background.detachedUnknown')}
               />
             )}
             {!liveStarting && session.hasActivePrompt && !completedUnread ? (

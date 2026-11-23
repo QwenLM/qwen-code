@@ -26,6 +26,8 @@ import {
   listWorkspaceSessionsForResponse,
   searchWorkspaceSessionsForResponse,
 } from './session-list.js';
+import { getProjectHash } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { resetDetachedWorkProbeCache } from './detached-work-liveness.js';
 
 // Mid-scan abort harness: the wrapper aborts the caller's signal as the
 // second async sidecar read starts, deterministically landing the abort
@@ -57,6 +59,32 @@ vi.mock(
     };
   },
 );
+
+// Detached-shell probe harness: keeps the real resolver (real sidecar
+// reads, TTL cache) but injects the pid verdict so tests are deterministic
+// across platforms.
+const detachedHarness = vi.hoisted(() => ({
+  inspector: undefined as
+    | import('./detached-work-liveness.js').ProcessInspector
+    | undefined,
+}));
+
+vi.mock('./detached-work-liveness.js', async (importOriginal) => {
+  const mod =
+    await importOriginal<typeof import('./detached-work-liveness.js')>();
+  return {
+    ...mod,
+    resolveDetachedBackgroundWork: async (
+      options: Parameters<typeof mod.resolveDetachedBackgroundWork>[0],
+    ) =>
+      mod.resolveDetachedBackgroundWork({
+        ...options,
+        ...(detachedHarness.inspector
+          ? { inspector: detachedHarness.inspector }
+          : {}),
+      }),
+  };
+});
 
 describe('merged session catalog pagination', () => {
   let directory: string;
@@ -1840,5 +1868,193 @@ describe('worktree sidecar enrichment (R3-1)', () => {
       baseCommit: 'legacy-sha',
       baseBranch: 'main',
     });
+  });
+});
+
+describe('detached background-shell enrichment (#17819)', () => {
+  let directory: string;
+  let workspaceCwd: string;
+  let runtimeBaseDir: string;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'session-detached-'));
+    workspaceCwd = path.join(directory, 'workspace');
+    runtimeBaseDir = path.join(directory, 'runtime');
+    await fs.mkdir(workspaceCwd);
+  });
+
+  afterEach(async () => {
+    detachedHarness.inspector = undefined;
+    resetDetachedWorkProbeCache();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  const sessionIdFor = (index: number) =>
+    `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+
+  async function persistSession(sessionId: string): Promise<void> {
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    const file = path.join(chats, `${sessionId}.jsonl`);
+    await fs.writeFile(
+      file,
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+  }
+
+  async function writeShellSidecar(
+    sessionId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    // Mirrors projectTempDirFor, pinned to this test's runtime root: the
+    // helper runs OUTSIDE the resolved-runtime scope the list call uses.
+    const shellDir = path.join(
+      runtimeBaseDir,
+      'tmp',
+      getProjectHash(workspaceCwd),
+      'background-shells',
+      sessionId,
+    );
+    await fs.mkdir(shellDir, { recursive: true });
+    await fs.writeFile(
+      path.join(shellDir, 'shell-bg_01.status'),
+      JSON.stringify(payload),
+    );
+  }
+
+  // A factory, not a constant: describe-level evaluation would read
+  // workspaceCwd before beforeEach assigns it.
+  const runningSidecar = () => ({
+    id: 'bg_01',
+    status: 'running',
+    command: 'npm run dev',
+    cwd: workspaceCwd,
+    pid: 4321,
+    startTime: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+    updatedAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+  });
+
+  it('marks a persisted-only session whose shell pid is alive', async () => {
+    const sessionId = sessionIdFor(1);
+    await persistSession(sessionId);
+    await writeShellSidecar(sessionId, runningSidecar());
+    detachedHarness.inspector = () => 'alive-verified';
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.detachedBackgroundWork).toBe('running');
+  });
+
+  it('keeps a live session free of the detached signal', async () => {
+    // The session is both persisted and live in this daemon: the in-memory
+    // signal is authoritative and the sidecar-derived verdict must be
+    // dropped by the merge, not stacked on top of it.
+    const sessionId = sessionIdFor(1);
+    await persistSession(sessionId);
+    await writeShellSidecar(sessionId, runningSidecar());
+    detachedHarness.inspector = () => 'alive-verified';
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => [
+        {
+          sessionId,
+          workspaceCwd,
+          createdAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+          clientCount: 1,
+          hasActivePrompt: false,
+          hasRunningBackgroundTasks: false,
+        } as BridgeSessionSummary,
+      ]),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.detachedBackgroundWork).toBeUndefined();
+    expect(row?.hasRunningBackgroundTasks).toBe(false);
+  });
+
+  it('stays silent when every running pid is provably dead', async () => {
+    const sessionId = sessionIdFor(1);
+    await persistSession(sessionId);
+    await writeShellSidecar(sessionId, runningSidecar());
+    detachedHarness.inspector = () => 'dead';
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.detachedBackgroundWork).toBeUndefined();
+  });
+
+  it('projects the unknown grade for an unverifiable pid', async () => {
+    const sessionId = sessionIdFor(1);
+    await persistSession(sessionId);
+    await writeShellSidecar(sessionId, runningSidecar());
+    detachedHarness.inspector = () => 'alive-unverified';
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.detachedBackgroundWork).toBe('unknown');
+  });
+
+  it('enriches the organized view page as well', async () => {
+    const sessionId = sessionIdFor(1);
+    await persistSession(sessionId);
+    await writeShellSidecar(sessionId, runningSidecar());
+    detachedHarness.inspector = () => 'alive-verified';
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { view: 'organized', group: 'all' },
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.detachedBackgroundWork).toBe('running');
   });
 });

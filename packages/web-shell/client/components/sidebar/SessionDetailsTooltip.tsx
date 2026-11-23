@@ -125,6 +125,12 @@ export function SessionDetailsTooltip({
   const backgroundSuffix = session.hasRunningBackgroundTasks
     ? ` · ${t('background.running')}`
     : '';
+  const detachedBackgroundStatus =
+    session.detachedBackgroundWork === 'running'
+      ? t('background.running')
+      : session.detachedBackgroundWork === 'unknown'
+        ? t('background.detachedUnknown')
+        : undefined;
   const status = session.isWaitingForPermission
     ? `${t('sessionsOverview.status.needsApproval')}${backgroundSuffix}`
     : session.isWaitingForUserQuestion
@@ -139,7 +145,8 @@ export function SessionDetailsTooltip({
               ? t('sidebar.activeWork')
               : session.activeWorkState === 'unknown'
                 ? t('sidebar.activityUnknown')
-                : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
+                : (detachedBackgroundStatus ??
+                  `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`);
 
   useEffect(() => {
     return () => {

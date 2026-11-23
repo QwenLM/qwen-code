@@ -11,11 +11,18 @@ import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
  * confirmation all read this predicate, so they cannot disagree about what
  * "still working" means.
  *
+ * `detachedBackgroundWork === 'running'` counts here too: it is the
+ * sidecar-derived signal for a session whose owning runtime is gone
+ * (#17819). Closing it would not kill the orphaned process, but the work it
+ * advertises is still running and the user deserves the same caution.
+ *
  * Deliberately narrower than the side-task archive gate, which also fails
  * closed on the `unknown` and `unsupported` grades: this predicate answers
  * "is work known to be running", and an unreported grade is not knowledge of
  * work. Folding that rule in here would block archive and delete on every
- * session whose child has gone quiet — a different policy decision.
+ * session whose child has gone quiet — a different policy decision. The
+ * detached grade reads the same way: `unknown` renders the "may still be
+ * running" hint but never blocks.
  *
  * `hasRunningBackgroundTasks` is cleared to undefined for any row missing from
  * live-state, so it is read as `=== true`. A `!== false` test would block the
@@ -25,7 +32,8 @@ export function hasLiveWork(session: DaemonSessionSummary): boolean {
   return (
     session.hasActivePrompt === true ||
     session.activeWorkState === 'active' ||
-    session.hasRunningBackgroundTasks === true
+    session.hasRunningBackgroundTasks === true ||
+    session.detachedBackgroundWork === 'running'
   );
 }
 
@@ -33,10 +41,12 @@ export function hasLiveWork(session: DaemonSessionSummary): boolean {
  * Whether Delete must be refused for this session.
  *
  * Background work blocks any row: the delete route has no idle guard, so
- * confirming would kill work the row advertises. Other live work blocks only
- * the session this client is attached to, whose runtime the delete tears down
- * (#12619); a turn running in some other session stays deletable, which is the
- * policy the sidebar row already applies.
+ * confirming would kill work the row advertises — including the detached
+ * sidecar signal (#17819), which is precisely the row shape whose delete
+ * looks like harmless cleanup while a process is still running. Other live
+ * work blocks only the session this client is attached to, whose runtime the
+ * delete tears down (#12619); a turn running in some other session stays
+ * deletable, which is the policy the sidebar row already applies.
  *
  * `isCurrent` is supplied by the caller rather than derived here, because each
  * surface has its own notion of it: the sidebar compares workspace-qualified
@@ -50,6 +60,7 @@ export function sessionBlocksDelete(
 ): boolean {
   return (
     session.hasRunningBackgroundTasks === true ||
+    session.detachedBackgroundWork === 'running' ||
     (isCurrent && hasLiveWork(session))
   );
 }

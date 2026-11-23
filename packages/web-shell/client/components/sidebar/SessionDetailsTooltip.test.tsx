@@ -83,6 +83,14 @@ describe('SessionDetailsTooltip', () => {
     // cannot catch an unconditional composition, so this row also rejects it.
     [{ hasActivePrompt: true, hasRunningBackgroundTasks: false }, 'Running'],
     [
+      {
+        hasActivePrompt: true,
+        hasRunningBackgroundTasks: false,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Running',
+    ],
+    [
       { isWaitingForPermission: true, hasRunningBackgroundTasks: true },
       'Needs approval · Background tasks running',
     ],
@@ -92,8 +100,16 @@ describe('SessionDetailsTooltip', () => {
     ],
     [{ activeWorkState: 'active' as const }, 'Active work'],
     [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
+    [
+      { detachedBackgroundWork: 'running' as const },
+      'Background tasks running',
+    ],
+    [
+      { detachedBackgroundWork: 'unknown' as const },
+      'May still be running — status unknown',
+    ],
   ])(
-    'prioritizes blocked states over an active prompt: %s',
+    'shows the appropriate live or detached work status for %s',
     async (flags, expected) => {
       vi.useFakeTimers();
       const container = document.createElement('div');
@@ -121,6 +137,7 @@ describe('SessionDetailsTooltip', () => {
         await openDetails(container);
         const details = document.querySelector('[role="dialog"]');
         expect(details?.textContent).toContain(expected);
+        expect(details?.textContent).not.toContain('Idle');
         if (expected !== 'Running')
           expect(details?.textContent).not.toContain('Running');
         if (flags.hasRunningBackgroundTasks === false)

@@ -1855,6 +1855,9 @@ export const ZH: Messages = {
   'daemon.usage.dailySessionsTitle': '会话',
   'daemon.usage.dailySessionsSub': '每日活跃会话数',
   'delete.cannotCurrent': '当前会话正在运行，无法删除。',
+  'delete.mayStillBeRunning': '该会话可能仍有后台任务在运行，状态未知。',
+  'delete.detachedRunningDisabled':
+    '该会话仍有分离的后台任务在运行，请等待其退出或先手动取消后再删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',
   'delete.deletedCount': (v) => `已删除 ${v?.count ?? 0} 个会话。`,
@@ -2815,6 +2818,7 @@ export const ZH: Messages = {
   'background.result': '后台结果',
   'background.agent': '后台智能体',
   'background.running': '后台任务执行中',
+  'background.detachedUnknown': '可能仍在运行，状态未知',
   'background.task': '后台任务',
   'background.peer': '跨会话消息',
   'background.details': '查看详情',

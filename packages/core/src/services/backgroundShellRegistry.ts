@@ -26,6 +26,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { openSyncNoFollow } from '../utils/no-follow-open.js';
 import {
+  readPidNamespaceId,
+  readProcStartToken,
+} from '../utils/process-liveness.js';
+import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
@@ -194,6 +198,23 @@ export interface ShellTask extends TaskBase {
   cwd: string;
   /** OS pid once spawned; absent if registration happens before spawn. */
   pid?: number;
+  /**
+   * Process identity token captured at `register()` time while the fresh
+   * child is guaranteed alive (`"<bootId>:<procStartTicks>"`, Linux procfs
+   * only — see `readProcStartToken`). Written into the `.status` sidecar so
+   * the daemon's detached-shell liveness probe can confirm a surviving pid
+   * is still the original shell rather than a reused one (#17819). Absent
+   * on platforms without procfs, or when the pid is unknown at
+   * registration.
+   */
+  procStart?: string;
+  /**
+   * pid-namespace id captured alongside {@link ShellTask.procStart} (Linux
+   * only — see `readPidNamespaceId`), so a sidecar left behind can be told
+   * apart from a foreign container's records sharing the same runtime
+   * directory (#17819).
+   */
+  pidNs?: number;
   status: BackgroundShellStatus;
   /** Exit code on `completed`. */
   exitCode?: number;
@@ -347,6 +368,18 @@ export class BackgroundShellRegistry {
     // is the turn that ends up waiting for it.
     entry.sourceTurnId =
       getInvocationContext()?.promptId ?? promptIdContext.getStore();
+    // Capture the process identity token while the fresh child is
+    // guaranteed alive. This is the only moment that can observe it:
+    // later status writes happen at exit, when the pid is already gone.
+    // Both spawn paths set `pid` before `register()`, so a running
+    // sidecar left behind by a hard kill always carries the token on
+    // Linux; the daemon's liveness probe relies on it (#17819).
+    if (entry.pid !== undefined) {
+      const procStart = readProcStartToken(entry.pid);
+      if (procStart !== null) entry.procStart = procStart;
+      const pidNs = readPidNamespaceId();
+      if (pidNs !== null) entry.pidNs = pidNs;
+    }
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
     this.fireRegister(entry);
@@ -480,6 +513,8 @@ export class BackgroundShellRegistry {
       updatedAt: new Date().toISOString(),
     };
     if (entry.pid !== undefined) payload['pid'] = entry.pid;
+    if (entry.procStart !== undefined) payload['procStart'] = entry.procStart;
+    if (entry.pidNs !== undefined) payload['pidNs'] = entry.pidNs;
     if (entry.endTime !== undefined) {
       payload['endTime'] = new Date(entry.endTime).toISOString();
     }
