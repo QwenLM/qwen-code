@@ -372,6 +372,10 @@ describe('Mod rows through the daemon', () => {
       },
     });
     const translations: string[] = [];
+    let releaseResponse!: () => void;
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
     const fakeModel = await startFakeOpenAIServer(async ({ body }) => {
       const messages = JSON.stringify(body['messages'] ?? []);
       if (messages.includes('into Simplified Chinese')) {
@@ -382,9 +386,13 @@ describe('Mod rows through the daemon', () => {
         return { content: `${text}\n[QWEN_DISPLAY_END]` };
       }
       if (body['stream'] !== true) return { content: '{}' };
+      if (messages.includes('Reply in Chinese'))
+        return { content: '已经是中文的回答' };
       return {
         reasoningChunks: ['Plan ', 'the answer.'],
-        content: 'Answer 1',
+        contentChunks: ['Answer ', '1'],
+        holdAfterChunks: 1,
+        holdUntil: responseGate,
       };
     });
     const env = {
@@ -421,16 +429,58 @@ describe('Mod rows through the daemon', () => {
         sessionScope: 'thread',
       });
       const asked = { clientId: session.clientId };
-      expect(
-        (
-          await client.prompt(
-            session.sessionId,
-            { prompt: [{ type: 'text', text: 'Hello' }] },
-            AbortSignal.timeout(60_000),
-            session.clientId,
+      const replyStarted = (async () => {
+        for await (const event of client.subscribeEvents(session.sessionId, {
+          lastEventId: 0,
+          signal: AbortSignal.timeout(30_000),
+        })) {
+          if (
+            normalizeDaemonEvent(event).some(
+              (update) =>
+                update.type === 'assistant.text.delta' &&
+                update.text === 'Answer ',
+            )
           )
-        ).stopReason,
-      ).toBe('end_turn');
+            return;
+        }
+        throw new Error('Missing the first reply chunk');
+      })();
+      const prompt = client.prompt(
+        session.sessionId,
+        { prompt: [{ type: 'text', text: 'Hello' }] },
+        AbortSignal.timeout(60_000),
+        session.clientId,
+      );
+      const thought = {
+        component: 'Thinking',
+        props: { text: 'Plan the answer.' },
+      };
+      const translatedThought = {
+        status: 'answered',
+        props: { text: '先规划答案。' },
+      };
+      try {
+        await replyStarted;
+        // The main reply is still streaming. Its completed thought is visible
+        // and eligible before the completed response has been persisted.
+        expect(
+          await client.askSessionModRow(session.sessionId, thought, asked),
+        ).toEqual(translatedThought);
+        expect(
+          await client.askSessionModRow(
+            session.sessionId,
+            {
+              component: 'AssistantMessage',
+              props: { text: 'Answer ', isFirstOfReply: true },
+            },
+            asked,
+          ),
+        ).toEqual({ status: 'unanswered' });
+      } finally {
+        releaseResponse();
+        await prompt.catch(() => {});
+      }
+      expect((await prompt).stopReason).toBe('end_turn');
 
       const reply = {
         component: 'AssistantMessage',
@@ -443,13 +493,32 @@ describe('Mod rows through the daemon', () => {
         props: { text: '答案一', isFirstOfReply: true },
       });
       expect(
+        await client.askSessionModRow(session.sessionId, thought, asked),
+      ).toEqual(translatedThought);
+      expect(
         await client.askSessionModRow(
           session.sessionId,
-          { component: 'Thinking', props: { text: 'Plan the answer.' } },
+          {
+            component: 'AssistantMessage',
+            props: {
+              text: 'Text absent from this transcript.',
+              isFirstOfReply: true,
+            },
+          },
           asked,
         ),
-      ).toEqual({ status: 'answered', props: { text: '先规划答案。' } });
+      ).toEqual({ status: 'unanswered' });
       // A reply already in Chinese is drawn as it is, with no model call.
+      expect(
+        (
+          await client.prompt(
+            session.sessionId,
+            { prompt: [{ type: 'text', text: 'Reply in Chinese' }] },
+            AbortSignal.timeout(60_000),
+            session.clientId,
+          )
+        ).stopReason,
+      ).toBe('end_turn');
       expect(
         await client.askSessionModRow(
           session.sessionId,
@@ -461,11 +530,45 @@ describe('Mod rows through the daemon', () => {
         ),
       ).toEqual({ status: 'answered' });
       // Another client is answered from the session's cache.
-      expect(await client.askSessionModRow(session.sessionId, reply)).toEqual({
+      const second = await client.loadSession(session.sessionId, {
+        workspaceCwd: workspace,
+      });
+      expect(second.clientId).not.toBe(session.clientId);
+      expect(
+        await client.askSessionModRow(session.sessionId, reply, {
+          clientId: second.clientId,
+        }),
+      ).toEqual({
         status: 'answered',
         props: { text: '答案一', isFirstOfReply: true },
       });
-      expect(translations).toEqual(['答案一', '先规划答案。']);
+      expect(translations).toEqual(['先规划答案。', '答案一']);
+
+      // A new live owner can still verify rows from the persisted transcript.
+      await client.closeSession(session.sessionId, second.clientId);
+      const restored = await client.loadSession(session.sessionId, {
+        workspaceCwd: workspace,
+        historyPageSize: 200,
+      });
+      expect(
+        await client.askSessionModRow(restored.sessionId, reply, {
+          clientId: restored.clientId,
+        }),
+      ).toEqual({
+        status: 'answered',
+        props: { text: '答案一', isFirstOfReply: true },
+      });
+      expect(
+        await client.askSessionModRow(restored.sessionId, thought, {
+          clientId: restored.clientId,
+        }),
+      ).toEqual(translatedThought);
+      expect(translations).toEqual([
+        '先规划答案。',
+        '答案一',
+        '答案一',
+        '先规划答案。',
+      ]);
     } finally {
       await daemon?.dispose();
       await fakeModel.close();

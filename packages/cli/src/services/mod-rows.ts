@@ -12,11 +12,15 @@ import { stableJson } from '@qwen-code/qwen-code-core/services/execution-environ
 
 /** Props to draw, undefined to keep the original, or null when skipped. */
 export type ModRowRender = (
-  input: ModRenderInput,
+  input: ModRowInput,
+  wanted: () => boolean,
 ) => Promise<ModRenderInput['props'] | undefined | null>;
 
+/** Authorization from the host, never part of the Mod render event. */
+export type ModRowInput = ModRenderInput & { translationAllowed?: boolean };
+
 interface Row {
-  input: ModRenderInput;
+  input: ModRowInput;
   key: string;
   answerKey?: string;
   answer?: ModRenderInput['props'];
@@ -31,16 +35,16 @@ interface Row {
 // Rows answered and no longer shown are kept for a remount up to this many.
 const KEPT_ROWS = 1_000;
 
-const rowId = (input: ModRenderInput) =>
-  `${input.component}\0${input.requestId}`;
+const rowId = (input: ModRowInput) =>
+  `${input.component}\0${input.requestId}\0${input.translationAllowed !== false}`;
 
-const rowKey = (input: ModRenderInput) =>
+const rowKey = (input: ModRowInput) =>
   stableJson({ ...input, viewport: undefined });
 
 /**
  * The transcript rows a terminal asks the Mods to draw. Each row renders once
- * per input, one at a time, so a slow hook holds the session's other Mod
- * dispatches up behind one row, never behind every row waiting to be drawn.
+ * per input, one at a time. Installed Mod hooks hold the session's other
+ * Mod dispatches up behind at most one row.
  * A row no longer shown leaves the queue; its answer is kept for a remount.
  */
 export class ModRows {
@@ -49,7 +53,7 @@ export class ModRows {
   private running = false;
 
   constructor(
-    // Runs a task in the session's dispatch queue.
+    // Starts a task when no other row is rendering.
     private readonly schedule: (task: () => Promise<void>) => void,
     private readonly render: ModRowRender,
   ) {}
@@ -58,7 +62,7 @@ export class ModRows {
    * Shows a row: renders it unless its answer for this input is known, and
    * calls `listener` when the answer changes. Returns the release.
    */
-  watch(input: ModRenderInput, listener: () => void): () => void {
+  watch(input: ModRowInput, listener: () => void): () => void {
     const id = rowId(input);
     const key = rowKey(input);
     let row = this.rows.get(id);
@@ -90,7 +94,7 @@ export class ModRows {
    * or to none if the render failed or did not finish.
    */
   ask(
-    input: ModRenderInput,
+    input: ModRowInput,
     signal: AbortSignal,
   ): Promise<{ props?: ModRenderInput['props'] } | undefined> {
     const id = rowId(input);
@@ -117,7 +121,7 @@ export class ModRows {
   }
 
   /** The props a row draws with, once its hooks answered its input. */
-  get(input: ModRenderInput): ModRenderInput['props'] | undefined {
+  get(input: ModRowInput): ModRenderInput['props'] | undefined {
     const row = this.rows.get(rowId(input));
     return row?.answer && row.answerKey === rowKey(input)
       ? row.answer
@@ -171,23 +175,31 @@ export class ModRows {
     if (!row || id === undefined) return;
     const ready = row;
     const readyId = id;
+    const wanted = () =>
+      this.rows.get(readyId) === ready && ready.listeners.size > 0;
     this.running = true;
     this.schedule(async () => {
       try {
-        // The session queue may have waited while the row was hidden or cleared.
-        if (this.rows.get(readyId) !== ready || !ready.listeners.size) return;
+        // A row can be hidden or cleared while it waits.
+        if (!wanted()) return;
         const { input, key } = ready;
         // An invalidate while it renders asks for this row once more.
         ready.stale = false;
         let result: Awaited<ReturnType<ModRowRender>>;
         try {
-          result = await this.render(input);
+          result = await this.render(
+            input,
+            () => wanted() && ready.key === key,
+          );
         } catch {
           result = null;
         }
         // A row cleared away while it rendered keeps no answer.
         if (this.rows.get(readyId) === ready) {
-          if (result === null && input.surface === 'desktop') {
+          if (
+            result === null &&
+            (input.surface === 'desktop' || !ready.listeners.size)
+          ) {
             // The next client request can retry, including after invalidation.
             ready.stale = true;
             for (const settled of [...ready.settles]) settled(false);

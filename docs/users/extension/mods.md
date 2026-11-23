@@ -1303,8 +1303,8 @@ the main conversation, `/copy` and the Web Shell's copy buttons keep the origina
 
 For Simplified Chinese or English you do not need this Mod: the
 [`general.displayLanguage`](../features/language.md#display-translation)
-setting runs the same translation as a built-in Mod, without
-`experimental.mods`. The example shows how such a Mod is built, and is a
+setting provides built-in display translation without `experimental.mods`.
+The example shows how such a Mod is built, and is a
 starting point for other languages or your own prompt.
 
 ```text

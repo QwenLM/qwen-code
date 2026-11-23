@@ -14,6 +14,7 @@ import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { GenerateContentResponse } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ModAcpHost, ModTurn } from '../../services/mod-session.js';
+import { AcpDisplayTranslationRows } from './acp-display-translation-rows.js';
 import {
   ACP_MODS_FAILED,
   AcpModSession,
@@ -40,6 +41,7 @@ vi.mock('../../services/mod-session.js', () => ({
         flushLogs: mocks.flushLogs,
         startTurn: mocks.startTurn,
         syncSession: mocks.syncSession,
+        canTranslateRow: () => false,
         askRow: mocks.askRow,
         close: mocks.close,
       };
@@ -50,6 +52,77 @@ vi.mock('../../services/mod-session.js', () => ({
 const settings = (mods: boolean) =>
   ({ merged: { experimental: { mods } } }) as unknown as LoadedSettings;
 const config = {} as Config;
+
+it('drops live translation rows when a session clears without a recorder', async () => {
+  let sessionId = 'before-clear';
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => sessionId,
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  const attempt = {};
+  rows.observe('A completed model reply.', 'AssistantMessage', attempt);
+  rows.settleAttempt(attempt, true);
+  const isAuthorized = await rows.authorize(
+    'AssistantMessage',
+    'A completed model reply.',
+  );
+  expect(isAuthorized?.()).toBe(true);
+
+  sessionId = 'after-clear';
+  expect(isAuthorized?.()).toBe(false);
+  await expect(
+    rows.authorize('AssistantMessage', 'A completed model reply.'),
+  ).resolves.toBeUndefined();
+});
+
+it('keeps persisted prefixes untranslated until the full live continuation ends', async () => {
+  const readActiveTranscriptChain = vi.fn().mockResolvedValue([
+    {
+      uuid: 'earlier',
+      parentUuid: null,
+      sessionId: 'session',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'assistant',
+      message: { role: 'model', parts: [{ text: 'An earlier reply.' }] },
+    },
+    {
+      uuid: 'prefix',
+      parentUuid: 'earlier',
+      sessionId: 'session',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'assistant',
+      message: { role: 'model', parts: [{ text: 'First half' }] },
+    },
+  ]);
+  const recorder = {
+    getBranchGeneration: () => 1,
+    getTranscriptCursor: () => ({ recordId: 'prefix' }),
+    readActiveTranscriptChain,
+  };
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => 'session',
+    getChatRecordingService: () => recorder,
+  } as unknown as Config);
+  const attempt = {};
+  rows.observe('First half', 'AssistantMessage', attempt);
+  await expect(
+    rows.authorize('AssistantMessage', 'First half'),
+  ).resolves.toBeUndefined();
+  expect(readActiveTranscriptChain).not.toHaveBeenCalled();
+
+  const earlier = await rows.authorize('AssistantMessage', 'An earlier reply.');
+  expect(earlier?.()).toBe(true);
+  rows.observe(' and remainder.', 'AssistantMessage', attempt);
+  await expect(
+    rows.authorize('AssistantMessage', 'First half'),
+  ).resolves.toBeUndefined();
+  rows.settleAttempt(attempt, true);
+  const completed = await rows.authorize(
+    'AssistantMessage',
+    'First half and remainder.',
+  );
+  expect(completed?.()).toBe(true);
+});
 
 describe('AcpModSession', () => {
   afterEach(() => {
@@ -139,6 +212,7 @@ describe('AcpModSession', () => {
       'AssistantMessage',
       props,
       expect.any(AbortSignal),
+      false,
     );
     await expect(mods.askRow('Pane', {})).resolves.toEqual({
       status: 'unhooked',
@@ -148,6 +222,7 @@ describe('AcpModSession', () => {
       'Thinking',
       { text: 'Hm' },
       expect.any(AbortSignal),
+      false,
     );
     for (const [component, bad] of [
       [7, props],

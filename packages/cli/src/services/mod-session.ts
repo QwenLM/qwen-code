@@ -26,6 +26,7 @@ import { ModStore } from '@qwen-code/qwen-code-core/mods/store.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   ENGINE_NODE,
+  invalidRenderText,
   type ModBandInput,
   type ModRenderElement,
   type ModRenderInput,
@@ -37,7 +38,6 @@ import {
   MOD_MAX_BYTES,
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
-  ModPlugin,
   ModCommandPresentation,
   ModLog,
   ModPromptSubmit,
@@ -77,11 +77,11 @@ import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
 import { completeModModel, modModelUsage } from './mod-model.js';
-import { ModRows } from './mod-rows.js';
+import { ModRows, type ModRowInput } from './mod-rows.js';
 import {
-  displayTranslationPlugin,
   displayTranslationTarget,
   drawsTranslatedRows,
+  translateDisplayText,
   type DisplayTranslationTarget,
 } from './display-translation-mod.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
@@ -182,7 +182,6 @@ export class ModSession implements ICommandLoader {
   private readonly mods: Array<{
     id: string;
     name: string;
-    builtIn?: true;
   }> = [];
   private runtime?: ModRuntime;
   private toolQueue: Promise<unknown> = Promise.resolve();
@@ -272,14 +271,14 @@ export class ModSession implements ICommandLoader {
   };
   // Who hears the Mods adopt another session.
   private readonly sessionListeners = new Set<() => void>();
-  // The transcript rows the Mods draw, one render at a time in the queue.
+  // Only installed hooks join the dispatch queue. Translation waits outside it.
   private readonly rows = new ModRows(
     (task) => {
-      this.toolQueue = this.toolQueue
-        .then(task)
-        .catch((error) => logger.debug(`Mod ui.render: ${String(error)}`));
+      void task().catch((error) =>
+        logger.debug(`Mod ui.render: ${String(error)}`),
+      );
     },
-    (input) => this.renderRow(input),
+    (input, wanted) => this.renderRow(input, wanted),
   );
   private unregisterCleanup: () => void;
 
@@ -287,8 +286,7 @@ export class ModSession implements ICommandLoader {
     private readonly config: Config,
     private readonly output: ModOutput,
     private readonly optionScopes: readonly unknown[] = [],
-    // Installed Mods load with `experimental.mods`; the built-in display
-    // translation loads with its own setting.
+    // Installed Mods and display translation have separate opt-ins.
     private readonly sources: {
       extensions: boolean;
       translation?: DisplayTranslationTarget;
@@ -346,7 +344,7 @@ export class ModSession implements ICommandLoader {
       : 0;
   }
 
-  private allowed(): boolean {
+  private permitsMods(): boolean {
     return (
       this.config.isInteractive() === Boolean(this.terminal) &&
       this.config.getExperimentalZedIntegration() === this.acp &&
@@ -357,21 +355,21 @@ export class ModSession implements ICommandLoader {
       !this.config.getExecutionEnvironmentFactory() &&
       !this.config.getHookSystem()?.isManaged() &&
       !this.config.getSandbox() &&
-      !this.config.isSessionAgentSession() &&
-      (this.mods.every((mod) => mod.builtIn) || this.extensionsAllowed())
+      !this.config.isSessionAgentSession()
     );
   }
 
-  // Installed Mods run third-party code; the built-in one runs Qwen Code's.
-  private extensionsAllowed(): boolean {
-    return this.config.isTrustedFolder();
+  // Workspace trust gates installed Mods, which run third-party code.
+  private allowed(): boolean {
+    return this.permitsMods() && this.config.isTrustedFolder();
   }
 
   async initialize(signal: AbortSignal): Promise<void> {
     if (this.closing) throw new Error('Mod session is closed.');
     if (
-      !this.allowed() ||
-      (!this.sources.translation && !this.extensionsAllowed())
+      !this.permitsMods() ||
+      ((this.mods.length > 0 || !this.sources.translation) &&
+        !this.config.isTrustedFolder())
     ) {
       if (this.mods.length) {
         await this.close();
@@ -387,18 +385,14 @@ export class ModSession implements ICommandLoader {
 
   private async load(signal: AbortSignal): Promise<void> {
     const sites = (this.sites = this.host?.sites?.() ?? []);
-    const translation =
-      this.sources.translation && drawsTranslatedRows(sites)
-        ? displayTranslationPlugin(this.sources.translation)
-        : undefined;
-    let builtInOnly = false;
+    if (!this.sources.extensions || !this.config.isTrustedFolder()) return;
     try {
       const candidates = [];
-      for (const extension of (this.sources.extensions &&
-      this.extensionsAllowed()
-        ? this.config.getExtensions()
-        : []
-      ).filter((item) => item.isActive && item.format !== 'agent-plugins-v1')) {
+      for (const extension of this.config
+        .getExtensions()
+        .filter(
+          (item) => item.isActive && item.format !== 'agent-plugins-v1',
+        )) {
         signal.throwIfAborted();
         try {
           const source = await loadModSource(extension.path);
@@ -475,32 +469,28 @@ export class ModSession implements ICommandLoader {
           ),
         }));
       const ordered = orderModPlugins(mods);
-      if (ordered.length || translation) {
-        builtInOnly = !ordered.length;
+      if (ordered.length) {
         this.runtime = await ModRuntime.createGroup(
-          ordered
-            .map(
-              ({
-                extension,
-                source,
-                options,
-                toolDialect,
-                unsupportedEvents,
-              }): ModPlugin => ({
-                id: extension.id,
-                name: extension.name,
-                source: {
-                  root: source!.root,
-                  entry: source!.entry,
-                  source: source!.source,
-                },
-                options,
-                toolDialect,
-                unsupportedEvents,
-              }),
-            )
-            // Innermost, so it translates what the other Mods drew.
-            .concat(translation ?? []),
+          ordered.map(
+            ({
+              extension,
+              source,
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }) => ({
+              id: extension.id,
+              name: extension.name,
+              source: {
+                root: source!.root,
+                entry: source!.entry,
+                source: source!.source,
+              },
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }),
+          ),
           this.config.getTargetDir(),
           (entry, plugin) => {
             if (this.commandSignal?.aborted || this.toolSignal?.aborted) return;
@@ -543,15 +533,6 @@ export class ModSession implements ICommandLoader {
             id: extension.id,
             name: extension.name,
           })),
-          ...(translation
-            ? [
-                {
-                  id: translation.id,
-                  name: translation.name,
-                  builtIn: true as const,
-                },
-              ]
-            : []),
         );
         // The first render runs after session.start.
         this.requestRender();
@@ -559,12 +540,6 @@ export class ModSession implements ICommandLoader {
     } catch (error) {
       await this.runtime?.dispose();
       this.mods.length = 0;
-      // The translation alone failing leaves the session untranslated.
-      if (builtInOnly && !signal.aborted) {
-        this.runtime = undefined;
-        logger.warn(`Display translation did not start: ${String(error)}`);
-        return;
-      }
       throw error;
     }
   }
@@ -817,6 +792,24 @@ export class ModSession implements ICommandLoader {
     return () => this.sessionListeners.delete(listener);
   };
 
+  private rowTranslationTarget(
+    component: ModRenderSite,
+  ): DisplayTranslationTarget | undefined {
+    return this.sources.translation && drawsTranslatedRows([component])
+      ? this.sources.translation
+      : undefined;
+  }
+
+  canTranslateRow(component: ModRenderSite): boolean {
+    return (
+      this.sites.includes(component) &&
+      this.rowTranslationTarget(component) !== undefined &&
+      !this.closing &&
+      this.sessionId === this.config.getSessionId() &&
+      this.permitsMods()
+    );
+  }
+
   /**
    * Shows a transcript row the Mods may draw, calling `listener` when what it
    * draws changes. Returns the release, or undefined where no hook hears the
@@ -831,7 +824,8 @@ export class ModSession implements ICommandLoader {
       this.closing ||
       sessionId !== this.sessionId ||
       !this.sites.includes(input.component) ||
-      !this.runtime?.renderHooksFor(input.component).length ||
+      (!this.runtime?.renderHooksFor(input.component).length &&
+        !this.rowTranslationTarget(input.component)) ||
       Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2
     )
       return undefined;
@@ -841,22 +835,27 @@ export class ModSession implements ICommandLoader {
   /**
    * Asks once for a row a remote client draws: `unhooked` where no hook hears
    * its site, `unanswered` when the ask ended first, and otherwise the props
-   * its hooks rewrote, if they did. The same props are the same row, so a
-   * reload or a second client is answered from the first answer.
+   * its hooks rewrote, if they did. Answers are reused when both the props and
+   * the host's authorization to translate them match.
    */
   async askRow(
     component: ModRenderSite,
     props: ModRenderInput['props'],
     signal: AbortSignal,
+    translationAllowed = false,
   ): Promise<ModRowAnswer> {
     const surface = this.host?.surface;
+    const hasHooks = this.runtime?.renderHooksFor(component).length;
+    const target = this.rowTranslationTarget(component);
     if (
       surface !== 'desktop' ||
       !this.sites.includes(component) ||
-      !this.runtime?.renderHooksFor(component).length
+      (!hasHooks && !target)
     )
       return { status: 'unhooked' };
     if (this.closing) return { status: 'unanswered' };
+    const translate = translationAllowed && target !== undefined;
+    if (!hasHooks && !translate) return { status: 'unanswered' };
     const input = {
       surface,
       component,
@@ -869,7 +868,10 @@ export class ModSession implements ICommandLoader {
     // Too large to hand the hooks whole: drawn as it is.
     if (Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2)
       return { status: 'answered' };
-    const answer = await this.rows.ask(input, signal);
+    const answer = await this.rows.ask(
+      { ...input, translationAllowed: translate },
+      signal,
+    );
     return !answer
       ? { status: 'unanswered' }
       : answer.props
@@ -902,35 +904,68 @@ export class ModSession implements ICommandLoader {
   }
 
   private async renderRow(
-    input: ModRenderInput,
+    { translationAllowed = true, ...input }: ModRowInput,
+    wanted: () => boolean,
   ): Promise<ModRenderInput['props'] | undefined | null> {
     const runtime = this.runtime;
     const generation = this.toolGeneration.signal;
-    if (
-      !runtime ||
-      this.closing ||
-      generation.aborted ||
-      this.sessionId !== this.config.getSessionId() ||
-      !this.allowed() ||
-      !this.active()
-    )
-      return null;
-    const signal = AbortSignal.any([
-      this.lifetime.signal,
-      generation,
-      // Provider I/O pauses the runtime's dispatch clock.
-      AbortSignal.timeout(ROW_RENDER_TIMEOUT_MS),
-    ]);
-    try {
-      const { props, notes } = await runtime.render(input, signal);
-      signal.throwIfAborted();
-      for (const note of notes) logger.debug(note);
-      return !props || stableJson(props) === stableJson(input.props)
-        ? undefined
-        : props;
-    } finally {
-      this.flushLogs();
+    const canRender = () =>
+      !this.closing &&
+      !generation.aborted &&
+      this.sessionId === this.config.getSessionId() &&
+      this.permitsMods();
+    const startRender = () =>
+      AbortSignal.any([
+        this.lifetime.signal,
+        generation,
+        // Provider I/O pauses the runtime's dispatch clock.
+        AbortSignal.timeout(ROW_RENDER_TIMEOUT_MS),
+      ]);
+    let signal: AbortSignal | undefined;
+    let props = input.props;
+    if (runtime?.renderHooksFor(input.component).length) {
+      const render = this.toolQueue.then(async () => {
+        if (
+          !wanted() ||
+          !canRender() ||
+          !this.config.isTrustedFolder() ||
+          !this.active()
+        )
+          return null;
+        const rowSignal = (signal = startRender());
+        try {
+          const reply = await runtime.render(input, rowSignal);
+          rowSignal.throwIfAborted();
+          for (const note of reply.notes) logger.debug(note);
+          return reply.props ?? input.props;
+        } finally {
+          this.flushLogs();
+        }
+      });
+      this.toolQueue = render.catch(() => {});
+      const rendered = await render;
+      if (!rendered) return null;
+      props = rendered;
     }
+    if (!canRender()) return null;
+    const target =
+      translationAllowed && this.rowTranslationTarget(input.component);
+    if (target && 'text' in props) {
+      if (!wanted()) return null;
+      const text = await translateDisplayText(
+        props.text,
+        target,
+        (request, modelSignal) =>
+          runOutsideAgentContext(() =>
+            completeModModel(this.config, request, modelSignal),
+          ),
+        (signal ??= startRender()),
+      );
+      if (!canRender()) return null;
+      if (text !== undefined && !invalidRenderText(text))
+        props = { ...props, text };
+    }
+    return stableJson(props) === stableJson(input.props) ? undefined : props;
   }
 
   toolCall(onRepeat: () => void): ModToolCall | undefined {
@@ -1439,12 +1474,10 @@ export class ModSession implements ICommandLoader {
 
   private active(): boolean {
     const extensions = this.config.getExtensions();
-    return this.mods.every(
-      (mod) =>
-        mod.builtIn ||
-        extensions.some(
-          (extension) => extension.id === mod.id && extension.isActive,
-        ),
+    return this.mods.every((mod) =>
+      extensions.some(
+        (extension) => extension.id === mod.id && extension.isActive,
+      ),
     );
   }
 

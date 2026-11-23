@@ -23,19 +23,30 @@ import {
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import type {
-  ModRenderInput,
+  ModAssistantMessageInput,
   ModRenderSite,
+  ModThinkingInput,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { ModSession, type ModTurn } from '../../services/mod-session.js';
-import { modsWanted } from '../../services/display-translation-mod.js';
+import {
+  displayTranslationTarget,
+  drawsTranslatedRows,
+  modsWanted,
+} from '../../services/display-translation-mod.js';
+import { AcpDisplayTranslationRows } from './acp-display-translation-rows.js';
 
 const debugLogger = createDebugLogger('MODS');
 
 // The rows a client may draw, with the kind of each prop a row is asked with.
-const ROW_PROPS: Partial<
-  Record<ModRenderSite, Record<string, 'string' | 'boolean'>>
+type AcpModRow = Pick<
+  ModAssistantMessageInput | ModThinkingInput,
+  'component' | 'props'
+>;
+const ROW_PROPS: Record<
+  AcpModRow['component'],
+  Record<string, 'string' | 'boolean'>
 > = {
   AssistantMessage: { text: 'string', isFirstOfReply: 'boolean' },
   Thinking: { text: 'string' },
@@ -60,16 +71,15 @@ export function acpModRowSites(
 export function parseAcpModRow(
   component: unknown,
   props: unknown,
-): { component: ModRenderSite; props: ModRenderInput['props'] } | undefined {
+): AcpModRow | undefined {
   if (typeof component !== 'string')
     throw RequestError.invalidParams(
       { errorKind: 'invalid_mod_row' },
       'Invalid Mod row component',
     );
-  const kinds = Object.hasOwn(ROW_PROPS, component)
-    ? ROW_PROPS[component as ModRenderSite]
-    : undefined;
-  if (!kinds) return undefined;
+  if (!Object.hasOwn(ROW_PROPS, component)) return undefined;
+  const site = component as AcpModRow['component'];
+  const kinds = ROW_PROPS[site];
   if (
     typeof props !== 'object' ||
     props === null ||
@@ -86,8 +96,8 @@ export function parseAcpModRow(
       `Invalid ${component} row props`,
     );
   return {
-    component: component as ModRenderSite,
-    props: props as ModRenderInput['props'],
+    component: site,
+    props: props as AcpModRow['props'],
   };
 }
 
@@ -129,6 +139,7 @@ export interface ModLogNotifier {
  */
 export class AcpModSession {
   private readonly session: ModSession;
+  private readonly translationRows?: AcpDisplayTranslationRows;
   private readonly loading: Promise<void>;
   private failure?: string;
 
@@ -139,6 +150,9 @@ export class AcpModSession {
     client: ModLogNotifier,
     sites: readonly ModRenderSite[],
   ) {
+    if (displayTranslationTarget(settings) && drawsTranslatedRows(sites)) {
+      this.translationRows = new AcpDisplayTranslationRows(config);
+    }
     const send = (plugin: string, text: string) =>
       void client
         .extNotification(MOD_LOG_NOTIFICATION, { sessionId, plugin, text })
@@ -200,7 +214,31 @@ export class AcpModSession {
     const signal = AbortSignal.timeout(ROW_ASK_TIMEOUT_MS);
     if (!(await settled(this.loading, signal))) return { status: 'unanswered' };
     if (this.failure !== undefined) return { status: 'unhooked' };
-    return this.session.askRow(row.component, row.props, signal);
+    const isAuthorized = this.session.canTranslateRow(row.component)
+      ? await this.translationRows?.authorize(row.component, row.props.text)
+      : undefined;
+    return this.session.askRow(
+      row.component,
+      row.props,
+      signal,
+      isAuthorized?.() === true,
+    );
+  }
+
+  observeModelText(text: string, thought: boolean, attempt: object): void {
+    const component = thought ? 'Thinking' : 'AssistantMessage';
+    if (this.session.canTranslateRow(component)) {
+      this.translationRows?.observe(text, component, attempt);
+    }
+  }
+
+  settleModelText(attempt: object, completed: boolean): void {
+    this.translationRows?.settleAttempt(attempt, completed);
+  }
+
+  rememberCompletedReply(text: string): void {
+    if (this.session.canTranslateRow('AssistantMessage'))
+      this.translationRows?.rememberCompleted('AssistantMessage', text);
   }
 
   /**

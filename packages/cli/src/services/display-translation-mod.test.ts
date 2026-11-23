@@ -4,24 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   ModModelCompleteInput,
   ModModelCompleteResult,
-  ModLog,
 } from '@qwen-code/qwen-code-core/mods/types.js';
-import type {
-  ModAssistantMessageInput,
-  ModThinkingInput,
-} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
-  displayTranslationPlugin,
   displayTranslationTarget,
   drawsTranslatedRows,
   modsWanted,
-  type DisplayTranslationTarget,
+  translateDisplayText,
 } from './display-translation-mod.js';
 
 const usage = {
@@ -44,10 +37,11 @@ describe('display translation settings', () => {
     expect(displayTranslationTarget(settings({ displayLanguage: 'en' }))).toBe(
       'en',
     );
-    for (const displayLanguage of ['off', 'fr', 'zh', undefined])
+    for (const displayLanguage of ['off', 'fr', 'zh', undefined]) {
       expect(
         displayTranslationTarget(settings({ displayLanguage })),
       ).toBeUndefined();
+    }
     expect(displayTranslationTarget(settings(undefined))).toBeUndefined();
   });
 
@@ -64,165 +58,192 @@ describe('display translation settings', () => {
   });
 });
 
-describe('the built-in display translation Mod', () => {
-  const runtimes: ModRuntime[] = [];
-  const logs: ModLog[] = [];
-
-  afterEach(async () => {
-    await Promise.all(runtimes.splice(0).map((runtime) => runtime.dispose()));
-    logs.length = 0;
+describe('translateDisplayText', () => {
+  const signal = new AbortController().signal;
+  const answered = (text: string): ModModelCompleteResult => ({
+    isAnswered: true,
+    text,
+    usage,
   });
-
-  async function create(
-    target: DisplayTranslationTarget,
-    answer: (input: ModModelCompleteInput) => ModModelCompleteResult = (
-      input,
-    ) => ({
-      isAnswered: true,
-      text: `[${input.prompt}]${END}\n`,
-      usage,
-    }),
-  ) {
-    const complete = vi.fn(async (input: ModModelCompleteInput) =>
-      answer(input),
+  const answer = (translated: string) =>
+    vi.fn(async (_input: ModModelCompleteInput, _signal: AbortSignal) =>
+      answered(translated + END),
     );
-    const runtime = await ModRuntime.createGroup(
-      [displayTranslationPlugin(target)],
-      '/workspace',
-      (log) => logs.push(log),
-      new AbortController().signal,
-      undefined,
-      'desktop',
-      '1.0.0',
-      undefined,
-      undefined,
-      { sites: ['AssistantMessage', 'Thinking'], invalidate: () => {} },
-      false,
-      undefined,
-      complete,
-    );
-    runtimes.push(runtime);
-    const drawn = async (input: ModAssistantMessageInput | ModThinkingInput) =>
-      (
-        (await runtime.render(input, new AbortController().signal)).props as
-          | { text?: string }
-          | undefined
-      )?.text;
-    const reply = (text: string) =>
-      drawn({
-        surface: 'desktop',
-        component: 'AssistantMessage',
-        requestId: '1',
-        props: { text, isFirstOfReply: true },
-      });
-    const thought = (text: string) =>
-      drawn({
-        surface: 'desktop',
-        component: 'Thinking',
-        requestId: '2',
-        props: { text },
-      });
-    return { complete, reply, thought };
-  }
 
   it('translates English into Simplified Chinese with the fast model', async () => {
-    const { complete, reply, thought } = await create('zh-CN');
-    await expect(reply('Run the tests.')).resolves.toBe('[Run the tests.]');
-    await expect(thought('Check the file first.')).resolves.toBe(
-      '[Check the file first.]',
-    );
-    expect(complete).toHaveBeenCalledTimes(2);
-    const request = complete.mock.calls[0][0];
-    expect(request).toMatchObject({
-      model: 'haiku',
-      prompt: 'Run the tests.',
-      maxTokens: 8192,
-      timeoutMs: 25000,
-    });
-    expect(request.effort).toBeUndefined();
-    expect(request.system).toContain('into Simplified Chinese');
-    expect(request.system).toMatch(
-      /followed by this exact line:\n\[QWEN_DISPLAY_END\]$/,
+    const complete = answer('运行测试。');
+    await expect(
+      translateDisplayText('Run the tests.', 'zh-CN', complete, signal),
+    ).resolves.toBe('运行测试。');
+    expect(complete).toHaveBeenCalledExactlyOnceWith(
+      {
+        model: 'haiku',
+        prompt: 'Run the tests.',
+        maxTokens: 8192,
+        timeoutMs: 25000,
+        system: expect.stringMatching(
+          /into Simplified Chinese.*followed by this exact line:\n\[QWEN_DISPLAY_END\]$/,
+        ),
+      },
+      signal,
     );
   });
 
-  it('leaves Chinese, code-only and empty prose alone for a Chinese target', async () => {
-    const { complete, reply } = await create('zh-CN');
-    // Han characters against Latin words: two English words, four characters.
+  it('skips Simplified Chinese, code-only Markdown and empty prose', async () => {
+    const complete = answer('运行测试。');
     for (const text of [
       '把 useState 换成 useReducer',
       '```ts\nconst answer = 42;\n```\n`npm test`',
       '~~~~sh\nnpm run build\n~~~~~\n`npm test`',
       '    const answer = 42;\n\n\treturn answer;',
+      '> ~~~sh\n> npm test\n> ~~~',
+      '``long `inline` example``',
+      '~~~sh\nnpm test',
       '42 → 43',
-    ])
-      await expect(reply(text)).resolves.toBe(text);
+    ]) {
+      await expect(
+        translateDisplayText(text, 'zh-CN', complete, signal),
+      ).resolves.toBeUndefined();
+    }
     expect(complete).not.toHaveBeenCalled();
   });
 
-  it('judges a block on its prose, without its code', async () => {
-    const { complete, reply } = await create('zh-CN');
+  it('classifies prose independently from indented, fenced and inline code', async () => {
+    const code =
+      '\n\n    # 测试运行情况以及输出内容\n    npm test' +
+      '\n\n~~~sh\n# 中文注释中文注释\nnpm test\n~~~';
+    const inline = '``这是一个`很长`的中文标识符``';
+    const original = 'Use ' + inline + ' here.' + code;
+    const translated = '在这里使用 ' + inline + '。' + code;
+    const complete = answer(translated);
     await expect(
-      reply('Use `这是一个很长的中文标识符` here.\n```\n中文注释中文注释\n```'),
-    ).resolves.toMatch(/^\[Use/);
+      translateDisplayText(original, 'zh-CN', complete, signal),
+    ).resolves.toBe(translated);
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it('translates Traditional Chinese when the target is Simplified Chinese', async () => {
+    const complete = answer('请先确认这个文件是否存在。');
+    await expect(
+      translateDisplayText(
+        '請先確認這個檔案是否存在。',
+        'zh-CN',
+        complete,
+        signal,
+      ),
+    ).resolves.toBe('请先确认这个文件是否存在。');
     expect(complete).toHaveBeenCalledOnce();
   });
 
   it('translates Chinese into English and leaves English alone', async () => {
-    const { complete, reply, thought } = await create('en');
-    await expect(thought('先看看这个文件。')).resolves.toBe(
-      '[先看看这个文件。]',
-    );
-    await expect(reply('Run the tests.')).resolves.toBe('Run the tests.');
-    await expect(reply('`git status`')).resolves.toBe('`git status`');
+    const complete = answer('Check this file first.');
+    await expect(
+      translateDisplayText('先看看这个文件。', 'en', complete, signal),
+    ).resolves.toBe('Check this file first.');
+    await expect(
+      translateDisplayText('Run the tests.', 'en', complete, signal),
+    ).resolves.toBeUndefined();
     expect(complete).toHaveBeenCalledOnce();
     expect(complete.mock.calls[0][0].system).toContain('into English');
   });
 
-  it('keeps the original when the call is not answered, answers nothing or is cut off', async () => {
-    const unanswered = await create('zh-CN', () => ({
+  it('does not confuse prose in another script with an empty block', async () => {
+    await expect(
+      translateDisplayText(
+        'Запустите тесты.',
+        'en',
+        answer('Run the tests.'),
+        signal,
+      ),
+    ).resolves.toBe('Run the tests.');
+  });
+
+  it.each([
+    [
+      'Run the command.\n\n~~~sh\nnpm test\n~~~',
+      '运行命令。\n\n~~~sh\nnpm run build\n~~~',
+    ],
+    ['Run `npm test`.', '运行 `npm run build`。'],
+    ['Run this.\n\n    npm test', '运行这个。\n\n    npm run build'],
+    ['Run this.\n\n> ~~~sh\n> npm test\n> ~~~', '运行这个。'],
+    ['Run the command.', '运行命令。\n\n~~~sh\nnpm run build\n~~~'],
+    [
+      'Use the command.\n\n| Command |\n| --- |\n| `test\\|run` |',
+      '使用以下命令。\n\n| 命令 |\n| --- |\n| `test\\|build` |',
+    ],
+  ])(
+    'keeps the original when the translation changes code in %s',
+    async (original, translated) => {
+      await expect(
+        translateDisplayText(original, 'zh-CN', answer(translated), signal),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  it('keeps the original when the call is unanswered or throws', async () => {
+    const unanswered: ModModelCompleteResult = {
       isAnswered: false,
       reason: 'aborted',
       usage,
-    }));
-    await expect(unanswered.reply('Run the tests.')).resolves.toBe(
-      'Run the tests.',
-    );
-    const blank = await create('zh-CN', () => ({
-      isAnswered: true,
-      text: ` \n${END}`,
-      usage,
-    }));
-    await expect(blank.reply('Run the tests.')).resolves.toBe('Run the tests.');
-    // Without its end line, or cut to its head and tail by the host.
+    };
+    await expect(
+      translateDisplayText(
+        'Run the tests.',
+        'zh-CN',
+        async () => unanswered,
+        signal,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      translateDisplayText(
+        'Run the tests.',
+        'zh-CN',
+        vi.fn().mockRejectedValue(new Error('No configured model')),
+        signal,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('keeps the original on an empty or incomplete translation', async () => {
     for (const text of [
+      ' \n' + END,
       '运行测试。',
-      `运行\n[... truncated for Mods ...]\n测试。${END}`,
+      '运行\n[... truncated for Mods ...]\n测试。' + END,
     ]) {
-      const cut = await create('zh-CN', () => ({
-        isAnswered: true,
-        text,
-        usage,
-      }));
-      await expect(cut.reply('Run the tests.')).resolves.toBe('Run the tests.');
+      await expect(
+        translateDisplayText(
+          'Run the tests.',
+          'zh-CN',
+          async () => answered(text),
+          signal,
+        ),
+      ).resolves.toBeUndefined();
     }
-    expect(logs.map((log) => log.text)).toEqual([
-      'Left untranslated: aborted',
-      'Left untranslated: empty answer',
-      'Left untranslated: incomplete answer',
-      'Left untranslated: incomplete answer',
-    ]);
-    expect(logs.every((log) => log.to === 'debug')).toBe(true);
+  });
+
+  it('ignores a successful answer that arrives after cancellation', async () => {
+    const controller = new AbortController();
+    await expect(
+      translateDisplayText(
+        'Run the tests.',
+        'zh-CN',
+        async () => {
+          controller.abort();
+          return answered('运行测试。' + END);
+        },
+        controller.signal,
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it('drops carriage returns from the translation', async () => {
-    const { reply } = await create('zh-CN', () => ({
-      isAnswered: true,
-      text: `第一行\r\n第二行\r${END}`,
-      usage,
-    }));
-    await expect(reply('First line.\nSecond line.')).resolves.toBe(
-      '第一行\n第二行',
-    );
+    await expect(
+      translateDisplayText(
+        'First line.\nSecond line.',
+        'zh-CN',
+        answer('第一行\r\n第二行\r'),
+        signal,
+      ),
+    ).resolves.toBe('第一行\n第二行');
   });
 });

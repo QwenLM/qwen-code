@@ -113,7 +113,7 @@ Display translation leaves the model's language alone and translates what you re
 }
 ```
 
-You can also set **Language: Display Translation** in `/settings` or in the Web Shell's settings. It applies to sessions started after the change. It needs neither experimental Mods nor a trusted workspace.
+You can also set **Language: Display Translation** on the **User** tab in `/settings` or in the Web Shell's settings. User and system settings can enable it for new sessions, including sessions in an untrusted workspace.
 
 - **Only the display changes.** The model still works in its own language. The stored conversation, what the model reads in later turns, `/copy` and the Web Shell's copy buttons keep the original.
 - **Some blocks are left as they are.** A block that is already in the target language, or that is only code, is not translated.
@@ -124,7 +124,7 @@ You can also set **Language: Display Translation** in `/settings` or in the Web 
 - **Some sessions turn it off.** Like installed Mods, it does not run with `disableAllHooks`, managed hooks, bare mode, safe mode or a sandbox.
 - **The thought translate button goes away.** In the Web Shell, a translated thought no longer shows its translate button.
 
-Display translation runs as a built-in [Mod](../extension/mods.md) after any Mods you install. A Mod of yours that rewrites replies or thoughts therefore has its result translated.
+Display translation runs after any installed [Mods](../extension/mods.md) finish rewriting a reply or thought. The row keeps its original code when translation changes the surrounding prose.
 
 ## Configuration
 

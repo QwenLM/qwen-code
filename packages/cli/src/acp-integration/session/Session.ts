@@ -8906,9 +8906,9 @@ export class Session implements SessionContext {
                               continue;
                             }
 
-                            this.messageEmitter.emitMessage(
+                            this.emitModelText(
                               part.text,
-                              'assistant',
+                              responseStream,
                               part.thought,
                             );
                             if (!part.thought) {
@@ -8953,6 +8953,7 @@ export class Session implements SessionContext {
                             resp.type === StreamEventType.MODEL_FALLBACK ||
                             !resp.isContinuation
                           ) {
+                            this.mods?.settleModelText(responseStream, false);
                             rewindChannelDeliveryResponseBlock(
                               channelDeliveryResponseBlock,
                               channelDeliveryCheckpoint,
@@ -8979,6 +8980,12 @@ export class Session implements SessionContext {
                       streamFailed = true;
                       throw error;
                     } finally {
+                      this.mods?.settleModelText(
+                        responseStream,
+                        !streamFailed &&
+                          !pendingSend.signal.aborted &&
+                          !responseInterrupt.signal.aborted,
+                      );
                       await finalizeToolCallPreparations(
                         preparationTracker,
                         streamFailed || pendingSend.signal.aborted,
@@ -9261,6 +9268,7 @@ export class Session implements SessionContext {
       return pushCount !== undefined && pushCount <= pushCountBefore;
     };
     let attempt: ModelResponseFacts = newModelResponseFacts();
+    const modelTextAttempt = {};
     // The user-content push a response answers. A continuation
     // sends another request within the round, and its response
     // starts its own facts, capture and usage, as a new send
@@ -9397,11 +9405,7 @@ export class Session implements SessionContext {
                 if (!event.value) break;
                 // A background response is shown once it ended.
                 if (!responseCapture.backgroundResponse) {
-                  void this.messageEmitter.emitMessage(
-                    event.value,
-                    'assistant',
-                    false,
-                  );
+                  void this.emitModelText(event.value, modelTextAttempt);
                 }
                 responseCapture.agentOutput.appendText(event.value);
                 appendChannelDeliveryResponseText(
@@ -9411,11 +9415,7 @@ export class Session implements SessionContext {
                 break;
               case LlmEventType.Thought:
                 if (event.text) {
-                  void this.messageEmitter.emitMessage(
-                    event.text,
-                    'assistant',
-                    true,
-                  );
+                  void this.emitModelText(event.text, modelTextAttempt, true);
                 }
                 break;
               case LlmEventType.ToolCallPreparation:
@@ -9445,6 +9445,7 @@ export class Session implements SessionContext {
                   event.isContinuation === true;
                 responseCapture.agentOutput.restartAttempt(continuation);
                 if (!continuation) {
+                  this.mods?.settleModelText(modelTextAttempt, false);
                   rewindChannelDeliveryResponseBlock(
                     channelDeliveryResponseBlock,
                     channelDeliveryCheckpoint,
@@ -9537,6 +9538,10 @@ export class Session implements SessionContext {
         };
       }
     } finally {
+      this.mods?.settleModelText(
+        modelTextAttempt,
+        !streamFailed && !signal.aborted && !cutForInput() && !responseOpened,
+      );
       round.onModelStarted?.();
       pushed =
         (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) >
@@ -10445,6 +10450,7 @@ export class Session implements SessionContext {
       let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
       const streamStartTime = Date.now();
       let streamFailed = false;
+      const modelTextAttempt = {};
       let guardForThisSend = nextGuardContinuation;
       let preserveGuardOnSkippedSend = false;
       let messageForPreservation = nextMessage;
@@ -10824,11 +10830,7 @@ export class Session implements SessionContext {
                 !options.responseCapture?.backgroundResponse ||
                 part.thought
               ) {
-                this.messageEmitter.emitMessage(
-                  part.text,
-                  'assistant',
-                  part.thought,
-                );
+                this.emitModelText(part.text, modelTextAttempt, part.thought);
               }
               if (!part.thought) {
                 options.responseCapture?.agentOutput.appendText(part.text);
@@ -10869,6 +10871,7 @@ export class Session implements SessionContext {
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
             ) {
+              this.mods?.settleModelText(modelTextAttempt, false);
               rewindChannelDeliveryResponseBlock(
                 channelDeliveryResponseBlock,
                 channelDeliveryCheckpoint,
@@ -10942,6 +10945,12 @@ export class Session implements SessionContext {
         }
         throw error;
       } finally {
+        this.mods?.settleModelText(
+          modelTextAttempt,
+          !streamFailed &&
+            !pendingSend.signal.aborted &&
+            !responseInterrupt.signal.aborted,
+        );
         try {
           await finalizeToolCallPreparations(
             preparationTracker,
@@ -11238,6 +11247,15 @@ export class Session implements SessionContext {
 
   isDisposed(): boolean {
     return this.disposed;
+  }
+
+  private emitModelText(
+    text: string,
+    attempt: object,
+    thought = false,
+  ): Promise<void> {
+    this.mods?.observeModelText(text, thought, attempt);
+    return this.messageEmitter.emitMessage(text, 'assistant', thought);
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -13790,9 +13808,9 @@ export class Session implements SessionContext {
                         const candidate = resp.value.candidates[0];
                         for (const part of candidate.content?.parts ?? []) {
                           if (!part.text) continue;
-                          this.messageEmitter.emitMessage(
+                          this.emitModelText(
                             part.text,
-                            'assistant',
+                            responseStream,
                             part.thought,
                           );
                           if (!part.thought) {
@@ -13835,6 +13853,7 @@ export class Session implements SessionContext {
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
                         ) {
+                          this.mods?.settleModelText(responseStream, false);
                           rewindChannelDeliveryResponseBlock(
                             channelDeliveryResponseBlock,
                             channelDeliveryCheckpoint,
@@ -13861,6 +13880,10 @@ export class Session implements SessionContext {
                     streamFailed = true;
                     throw error;
                   } finally {
+                    this.mods?.settleModelText(
+                      responseStream,
+                      !streamFailed && !ac.signal.aborted,
+                    );
                     try {
                       await finalizeToolCallPreparations(
                         preparationTracker,
@@ -15274,11 +15297,7 @@ export class Session implements SessionContext {
                   for (const part of candidate.content?.parts ?? []) {
                     if (!part.text) continue;
                     if (part.thought) {
-                      await this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        true,
-                      );
+                      await this.emitModelText(part.text, responseStream, true);
                     } else {
                       responseText += part.text;
                       messageDisplay?.addChunk(part.text);
@@ -15304,6 +15323,12 @@ export class Session implements SessionContext {
                   resp.type === StreamEventType.RETRY ||
                   resp.type === StreamEventType.MODEL_FALLBACK
                 ) {
+                  if (
+                    resp.type === StreamEventType.MODEL_FALLBACK ||
+                    !resp.isContinuation
+                  ) {
+                    this.mods?.settleModelText(responseStream, false);
+                  }
                   await finalizeToolCallPreparations(
                     preparationTracker,
                     true,
@@ -15322,6 +15347,10 @@ export class Session implements SessionContext {
               streamFailed = true;
               throw error;
             } finally {
+              this.mods?.settleModelText(
+                responseStream,
+                !streamFailed && !ac.signal.aborted,
+              );
               try {
                 await finalizeToolCallPreparations(
                   preparationTracker,
@@ -15553,6 +15582,8 @@ export class Session implements SessionContext {
         ? undefined
         : (item.structured?.description ?? item.structured?.commandLabel));
     const label = rawLabel ? truncateNotificationLabel(rawLabel) : undefined;
+    if (text && !partial && !signal.aborted)
+      this.mods?.rememberCompletedReply(text);
     const update: SessionUpdate = {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },

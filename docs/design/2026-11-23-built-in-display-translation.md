@@ -2,7 +2,7 @@
 
 [English](2026-11-23-built-in-display-translation.md) | [简体中文](2026-11-23-built-in-display-translation.zh-CN.md)
 
-Status: implemented. This adds a setting that shows the model's replies and opened thoughts translated into Simplified Chinese or English, tracked in #13749. It ships the translation as a built-in Mod on the reply and thinking rows described in [Mod reply rows in the Web Shell](2026-11-18-mod-rows-in-web-shell.md) and [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md).
+Status: implemented. This adds a setting that shows the model's replies and opened thoughts translated into Simplified Chinese or English, tracked in #13749. Translation uses the reply and thinking rows described in [Mod reply rows in the Web Shell](2026-11-18-mod-rows-in-web-shell.md) and [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md).
 
 ## Problem and current behavior
 
@@ -37,30 +37,21 @@ Non-goals:
 
 ### The setting
 
-`general.displayLanguage` is an enum with the values `off`, `zh-CN` and `en`, and defaults to `off`. Its label is "Language: Display Translation", next to "Language: UI" (`general.language`) and "Language: Model" (`general.outputLanguage`). Its description says how it differs from the other two: the model answers as usual and only the display is translated.
+`general.displayLanguage` is an enum with the values `off`, `zh-CN` and `en`, and defaults to `off`. Its label is "Language: Display Translation", next to "Language: UI" (`general.language`) and "Language: Model" (`general.outputLanguage`). The user or system controls the extra model calls. Workspace settings cannot set this key.
 
 The target is read when a session starts and stays fixed for that session, so the setting requires a restart. A row's cached answer is keyed on the row's component and props, not on the target, so a target that changed mid-session would answer rows from the cache in the old language. The Web Shell applies a change to the sessions it starts after the change, like `experimental.mods`. It does not follow the Web Shell's own interface language either: two tabs in different interface languages share one session and its cache.
 
-### A built-in Mod
+### Built-in translation after Mod rendering
 
-The translation is a Mod whose source ships inside the CLI, so it uses the same path as an installed Mod:
+The CLI translates rows after installed Mods render them. It shares the row requests, serial row scheduling, 30-second deadline, and session cache with Mod rendering. Translation has no Mod slot, and its model request runs outside the queue that handles prompts and tools.
 
-- the row asks in each surface;
-- the one-at-a-time row queue and its 30-second deadline;
-- the session's row cache, which answers a reload, a second tab or a re-opened thought;
-- `$.model.complete` with the fast model.
-
-No surface gains new drawing code. The Web Shell already asks for rows whenever the daemon offers them, so its message components are unchanged and the export bundle does not grow.
-
-The Mod takes the target as its option and registers one `ui.render` hook for `AssistantMessage` and `Thinking`. It is added to the session's Mods only where the host draws at least one of those sites. Headless runs draw none and do not start it.
-
-It runs after every installed Mod, innermost in the hook chain, so it translates the text the other Mods settled on.
+Translation runs where the host draws `AssistantMessage` or `Thinking` rows. For requests from the Web Shell, the owning session verifies that the row came from its completed reply or thinking output before calling the translation model. The cache answers a reload, a second tab or a re-opened thought.
 
 The user guide's translation example now points to this setting for these two languages, and stays as an example of building such a Mod.
 
 ### Gates
 
-Installed Mods run third-party code, so they need `experimental.mods` and a trusted workspace. The built-in Mod runs only Qwen Code's own code on the model's own output, so it needs neither: it loads in an untrusted workspace, and with `experimental.mods` off. Installed Mods still load only with both.
+Installed Mods run third-party code, so they need `experimental.mods` and a trusted workspace. The built-in translation can run with the user's setting in an untrusted workspace and with `experimental.mods` off.
 
 Every other gate still applies to it. They describe sessions where an administrator or the user turned hooks off, or where Mods cannot run or have nothing to draw:
 
@@ -72,20 +63,20 @@ Every other gate still applies to it. They describe sessions where an administra
 - an execution environment;
 - a session run by a workspace agent.
 
-With only the built-in Mod loaded, a failure to start it is logged and the session runs untranslated. An installed Mod's failure still stops the session's Mods as it does today, because the built-in Mod shares their runtime.
+A translation failure keeps the row's existing content. Installed Mods keep their existing initialization behavior.
 
 ### Which blocks are translated
 
-A block made only of indented code is left as it is. Any other block is judged on its prose, with closed fences of backticks or tildes and inline code removed, the same as the guide's example. Its Han characters are compared with its Latin words. A block counts as Chinese when it has at least as many Han characters as Latin words. A block with neither is left as it is.
+The language check reads the Markdown prose and skips fenced, indented and inline code. For Han and Latin prose, a block counts as Chinese when it has at least as many Han characters as Latin words. Prose with letters from another script is eligible for translation. A code-only block is left as it is.
 
-- Target `zh-CN`: Chinese blocks are left as they are.
-- Target `en`: blocks that are not Chinese are left as they are.
+- Target `zh-CN`: Simplified Chinese blocks are left as they are. Traditional Chinese prose can be translated.
+- Target `en`: the language check leaves Latin prose as it is when Latin words outnumber Han characters.
 
 This compares characters with words because a Chinese sentence often carries English identifiers. Comparing letters, as the guide's example does, would count `useState` as eight English signs against one Chinese word. For a Chinese target that only means a few extra calls; for an English target it would leave such a Chinese sentence untranslated.
 
 ### The model call
 
-The hook calls `$.model.complete` with the `haiku` alias, which runs the session's fast model, or the session's model when none is set. The call has no `effort`, so no thinking is requested, a 25-second timeout inside the row's 30-second deadline and a limit of 8,192 output tokens. The system prompt asks for a translation that keeps the Markdown structure, code, paths, URLs, commands and identifiers, followed by a fixed end line. An answer without that line was cut off, for example at the token limit. An answer the host cut to its head and tail for the Mod payload carries the host's truncation marker. Either is incomplete, so like an unanswered call or an empty answer it leaves the block's original text and writes a debug log line.
+Translation uses the Mod model service with the `haiku` alias, which selects the session's fast model or falls back to the session model. The call requests no thinking, has a 25-second timeout inside the row's 30-second deadline and has a limit of 8,192 output tokens. The prompt asks for a complete translation ending with a fixed line. If the answer is empty, lacks the end line, carries the host's truncation marker or changes the Markdown code, the row keeps its previous text.
 
 The call sends the text of each translated block to the fast model's endpoint. When the fast model uses another provider than the session model, that provider receives the text.
 
@@ -93,20 +84,18 @@ The call sends the text of each translated block to the fast model's endpoint. W
 
 Unit tests:
 
-- Settings: only `zh-CN` and `en` turn the translation on, and either it or `experimental.mods` starts a session's Mods.
+- Settings: only `zh-CN` and `en` turn the translation on. A workspace value leaves the user setting in effect.
 - Mod session:
-  - With only the setting on, the built-in Mod loads, including in an untrusted workspace. Installed Mods do not load without `experimental.mods`, nor in an untrusted workspace.
+  - With only the user setting on, translation works in an untrusted workspace. Installed Mods still require their own opt-in and workspace trust.
   - Bare mode and `disableAllHooks` keep it off.
-  - With both on, the built-in Mod runs after the installed ones.
-  - A host that draws no reply or thinking rows does not start it.
-  - A failed start with only the built-in Mod leaves the session running.
-- Built-in Mod:
-  - Each target skips blocks already in that language and code-only blocks.
-  - It translates the others through the fast-model alias.
-  - It leaves the original on an unanswered call.
-- Mutation checks: each of 19 mutations of the language rule, the answer handling, the gates, the load order and the failure handling makes a test fail.
+  - Translation runs after installed Mods, preserves all 32 installed slots, and leaves prompt dispatch free while the translation provider responds.
+  - A host that draws no reply or thinking rows does not translate.
+- Translation:
+  - Each target skips blocks already in that language and code-only blocks. Traditional Chinese is eligible for the Simplified Chinese target.
+  - It translates other eligible blocks through the fast-model alias.
+  - It preserves code and leaves the original on an unanswered call.
 
-The `qwen-serve-mod-rows` integration test gains a case with no extension installed and the setting on: a reply row and a thinking row are answered with the fake model's translation.
+The `qwen-serve-mod-rows` integration test uses a fake model to translate session reply and thinking rows with the setting alone. A row absent from the session makes no translation call.
 
 In a real Web Shell, and in the Ink and OpenTUI terminals, check both targets with and without a fast model set:
 
