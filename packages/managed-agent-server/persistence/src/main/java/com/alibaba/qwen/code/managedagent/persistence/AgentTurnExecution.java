@@ -81,6 +81,7 @@ final class AgentTurnExecution {
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
                         + " dispatch_owner = ?, dispatch_lease_until = ?,"
+                        + " error_code = CASE WHEN error_code = ? THEN NULL ELSE error_code END,"
                         + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ? AND turn_id = ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
@@ -89,8 +90,8 @@ final class AgentTurnExecution {
                         + " NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR NOT EXISTS"
                         + " (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id"
                         + " AND w.session_id = ma_turn.session_id AND w.state <> 'READY'))",
-                owner, now + leaseDuration.toMillis(), now, tenantId,
-                sessionId, turnId, now, now);
+                owner, now + leaseDuration.toMillis(), AgentStateStore.HARNESS_ACTION_PARKED,
+                now, tenantId, sessionId, turnId, now, now);
         return updated == 0 ? Optional.empty()
                 : storeRows.findTurn(tenantId, sessionId, turnId);
     }
