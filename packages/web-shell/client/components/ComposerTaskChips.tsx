@@ -22,6 +22,7 @@ import {
 import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useSharedNow } from '../hooks/useSharedNow';
+import { getShadowAwareActiveElement, isFocusUnclaimed } from '../utils/dom';
 import {
   explainDisplayLabel,
   getComposerTaskChipGroups,
@@ -30,7 +31,6 @@ import {
   type ComposerTaskChipKind,
 } from '../utils/composerTasks';
 import { formatRuntime } from '../utils/formatRuntime';
-import { isFocusUnclaimed } from '../utils/dom';
 import styles from './ComposerTaskChips.module.css';
 
 export interface ComposerTaskChipsHandle {
@@ -42,8 +42,8 @@ export interface ComposerTaskChipsProps {
   tasks: readonly ComposerChipTask[];
   /** Whether background agents get a chip (hosts without agent surfaces opt out). */
   includeAgents: boolean;
-  /** Open the task: locate a workflow in the transcript, open a shell's output, … */
-  onSelectTask: (task: ComposerChipTask) => void;
+  /** Select a task; direct single-chip activation also allows collapsing it. */
+  onSelectTask: (task: ComposerChipTask, toggle?: boolean) => void;
   /** Whether a single-task chip's target panel or dialog is currently open. */
   isTaskOpen?: (task: ComposerChipTask) => boolean;
   /** Ask the model to explain the task as a side question, without opening it. */
@@ -118,8 +118,9 @@ function TaskElapsed({ task, now }: { task: ComposerChipTask; now: number }) {
 /**
  * Chips above the composer for this session's unfinished background work —
  * one per kind ("1 workflow", "2 shells"). A chip that stands for a single
- * task opens it directly; one that stands for several opens a list above the
- * row to pick from. Finished tasks have no chip, so the row clears itself.
+ * task toggles its detail; one that stands for several opens a list above the
+ * row to pick from and collapses that list on repeat activation. Finished
+ * tasks have no chip, so the row clears itself.
  */
 export const ComposerTaskChips = forwardRef<
   ComposerTaskChipsHandle,
@@ -214,7 +215,13 @@ export const ComposerTaskChips = forwardRef<
       setOpenKind(null);
     };
     const clearInsidePointerDown = () => {
+      if (!pointerDownInsideRef.current) return;
       pointerDownInsideRef.current = false;
+      const activeElement =
+        getShadowAwareActiveElement(rootRef.current) ?? document.activeElement;
+      if (rootRef.current?.contains(activeElement)) return;
+      focusedElementRef.current = null;
+      setOpenKind(null);
     };
     const closeOnWindowBlur = () => {
       pointerDownInsideRef.current = false;
@@ -240,10 +247,14 @@ export const ComposerTaskChips = forwardRef<
 
   if (groups.length === 0) return null;
 
-  const selectTask = (task: ComposerChipTask) => {
+  const selectTask = (task: ComposerChipTask, toggle = false) => {
     chipRefs.current.get(task.kind)?.focus({ preventScroll: true });
     setOpenKind(null);
-    onSelectTask(task);
+    if (toggle) {
+      onSelectTask(task, true);
+    } else {
+      onSelectTask(task);
+    }
   };
 
   const handleListKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -280,7 +291,7 @@ export const ComposerTaskChips = forwardRef<
 
   const activateChip = (group: ComposerTaskChipGroup) => {
     if (group.tasks.length === 1) {
-      selectTask(group.tasks[0]);
+      selectTask(group.tasks[0], true);
       return;
     }
     if (openKind === group.kind) {
@@ -367,12 +378,7 @@ export const ComposerTaskChips = forwardRef<
         if (openGroup) pointerDownInsideRef.current = true;
       }}
       onMouseDown={(event) => {
-        if (
-          openGroup &&
-          !(event.target instanceof Element && event.target.closest('button'))
-        ) {
-          event.preventDefault();
-        }
+        if (openGroup) event.preventDefault();
       }}
       onFocus={(event) => {
         focusedElementRef.current = {
@@ -381,15 +387,9 @@ export const ComposerTaskChips = forwardRef<
         };
       }}
       onBlur={(event) => {
-        const rootNode = event.currentTarget.getRootNode();
-        const activeElement =
-          rootNode instanceof ShadowRoot
-            ? rootNode.activeElement
-            : document.activeElement;
         if (
           (pointerDownInsideRef.current &&
-            activeElement !== null &&
-            event.currentTarget.contains(activeElement)) ||
+            !(event.relatedTarget instanceof Node)) ||
           (event.relatedTarget instanceof Node &&
             event.currentTarget.contains(event.relatedTarget))
         ) {

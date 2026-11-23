@@ -159,6 +159,7 @@ describe('ComposerTaskChips', () => {
     act(() => chips()[0]!.click());
     expect(onSelectTask).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'session', sessionId: 'kid-1' }),
+      true,
     );
   });
 
@@ -173,6 +174,7 @@ describe('ComposerTaskChips', () => {
     act(() => chips()[0]!.click());
     expect(onSelectTask).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'kid-1' }),
+      true,
     );
   });
 
@@ -199,7 +201,7 @@ describe('ComposerTaskChips', () => {
 
     act(() => chips()[0].click());
 
-    expect(onSelectTask).toHaveBeenCalledWith(task);
+    expect(onSelectTask).toHaveBeenCalledWith(task, true);
     expect(
       container.querySelector('[data-testid="composer-task-list"]'),
     ).toBeNull();
@@ -321,6 +323,33 @@ describe('ComposerTaskChips', () => {
       ).toBeNull();
     },
   );
+
+  it('preserves row focus when pressing a task button or its explanation', () => {
+    render([workflow('wf-1'), workflow('wf-2')], {
+      onExplainTask: vi.fn(),
+    });
+    act(() => chips()[0].click());
+    const firstRow = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-task-open"]',
+    )!;
+    expect(document.activeElement).toBe(firstRow);
+    const secondRow = container.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="composer-task-open"]',
+    )[1]!;
+    const secondExplain = container.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="composer-task-explain"]',
+    )[1]!;
+
+    for (const button of [secondRow, secondExplain]) {
+      const event = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => button.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(firstRow);
+    }
+  });
 
   it('focuses the first choice on opening without stealing focus on refresh', () => {
     render([workflow('wf-1'), workflow('wf-2')]);
@@ -507,7 +536,7 @@ describe('ComposerTaskChips', () => {
 
       act(() => chips()[0].click());
 
-      expect(onSelectTask).toHaveBeenCalledExactlyOnceWith(task);
+      expect(onSelectTask).toHaveBeenCalledExactlyOnceWith(task, true);
       expect(onExplainTask).not.toHaveBeenCalled();
     });
 
@@ -904,6 +933,51 @@ describe('ComposerTaskChips', () => {
     expect(
       container.querySelector('[data-testid="composer-task-list"]'),
     ).toBeNull();
+  });
+
+  it('keeps the gesture open through a null blur, then closes it on release if focus is outside', () => {
+    render([workflow('wf-1'), workflow('wf-2', 'paused')]);
+    const chip = chips()[0];
+    act(() => chip.click());
+    const firstRow = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-task-open"]',
+    )!;
+    expect(document.activeElement).toBe(firstRow);
+
+    act(() => {
+      firstRow.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      firstRow.blur();
+    });
+    expect(document.activeElement).toBe(document.body);
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(new Event('pointerup', { bubbles: true }));
+    });
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).toBeNull();
+  });
+
+  it('marks direct chip activation as toggle but forwards list-row selection without toggle', () => {
+    const first = shell('shell-first');
+    const second = shell('shell-second');
+    const onSelectTask = vi.fn();
+    render([first, second], { onSelectTask });
+    act(() => chips()[0].click());
+    const row = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-task-open"]',
+    )!;
+    act(() => row.click());
+    expect(onSelectTask.mock.calls).toEqual([[first]]);
+
+    const single = shell('shell-single');
+    onSelectTask.mockClear();
+    render([single], { onSelectTask });
+    act(() => chips()[0].click());
+    expect(onSelectTask.mock.calls).toEqual([[single, true]]);
   });
 
   it('reflects single-task open state in aria-expanded and forwards repeat clicks', () => {

@@ -398,6 +398,105 @@ test('clicking an expanded single-task shell chip again collapses its detail pan
   await expect(chip).toHaveAttribute('aria-expanded', 'false');
 });
 
+test('mouse presses on a task-row button preserve list focus until selection', async ({
+  page,
+}, testInfo) => {
+  const firstShell: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-first',
+    command: 'First command',
+    label: 'First command',
+    description: 'First command',
+    status: 'running',
+    startTime: Date.now() - 20_000,
+    runtimeMs: 20_000,
+    cwd: '/workspace',
+  };
+  await openSession(page, testInfo, [
+    firstShell,
+    {
+      ...firstShell,
+      id: 'shell-second',
+      command: 'Second command',
+      label: 'Second command',
+      description: 'Second command',
+    },
+  ]);
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 shells' })
+    .click();
+  const list = page.getByTestId('composer-task-list');
+  const firstRow = list.getByTestId('composer-task-open').first();
+  const secondRow = list.getByTestId('composer-task-open').nth(1);
+  await expect(firstRow).toBeFocused();
+
+  await secondRow.hover();
+  await page.mouse.down();
+  await expect(list).toBeVisible();
+  await expect(firstRow).toBeFocused();
+  await page.mouse.up();
+  await expect(list).toHaveCount(0);
+  await expect(page.getByTestId('artifact-panel-explain')).toBeVisible();
+});
+
+test('clicking an unlinked workflow chip again cancels its pending dialog', async ({
+  page,
+}, testInfo) => {
+  const { scenario, tasksPolled } = await openSession(page, testInfo, [
+    workflowTask({ toolUseId: undefined }),
+  ]);
+  await tasksPolled;
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 workflow' });
+  await expect(chip).toBeVisible();
+  let requests = 0;
+  let releaseResponse!: () => void;
+  const responseGate = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  await page.route(
+    (url) =>
+      url.pathname.endsWith(`/session/${scenario.sessionId}/tasks`) &&
+      url.searchParams.get('includeWorkflows') === 'true',
+    async (route) => {
+      requests += 1;
+      await responseGate;
+      await route.fulfill({
+        json: {
+          v: 1,
+          sessionId: scenario.sessionId,
+          now: Date.now(),
+          tasks: scenario.workflowTasks ?? [],
+        },
+      });
+    },
+  );
+  const dialogRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return (
+      url.pathname.endsWith(`/session/${scenario.sessionId}/tasks`) &&
+      url.searchParams.get('includeWorkflows') === 'true' &&
+      request.method() === 'GET'
+    );
+  });
+
+  await chip.click();
+  await dialogRequest;
+  await chip.click();
+  releaseResponse();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
+
+  expect(requests).toBe(1);
+  await expect(
+    page.getByRole('dialog', { name: 'Background tasks' }),
+  ).toHaveCount(0);
+});
+
 test('a "?" on a task choice asks a side question for an explanation', async ({
   page,
 }, testInfo) => {
