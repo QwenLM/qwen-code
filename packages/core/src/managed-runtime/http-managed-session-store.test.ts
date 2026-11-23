@@ -2893,6 +2893,25 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it('carries the action-parking capability and seal certificate', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsActionParking()).toBe(true);
+    await session.authority.close({
+      pending: false,
+      dueAt: 0,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345, approvalRevision: 7 },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: false,
+      dueAt: 0,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345, approvalRevision: 7 },
+    });
+  });
+
   it('sends no wake stamp on a bare seal', async () => {
     const server = new FakeManagedSessionStore();
     server.wakeDispatch = true;
@@ -2901,17 +2920,22 @@ describe('HTTP Managed Session store', () => {
     expect(server.sealBodies.at(-1)).not.toHaveProperty('wake');
   });
 
-  it('refreshes the wake-dispatch capability on every ordinary writer renewal', async () => {
+  it('refreshes grant capabilities on every ordinary writer renewal', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
     try {
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
       server.wakeDispatch = true;
+      server.actionParking = true;
       await stores.assertWritable();
       expect(stores.supportsWakeDispatch()).toBe(true);
+      expect(stores.supportsActionParking()).toBe(true);
       server.wakeDispatch = false;
+      server.actionParking = false;
       await stores.assertWritable();
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
     } finally {
       await session.close().catch(() => undefined);
     }
@@ -2923,9 +2947,12 @@ describe('HTTP Managed Session store', () => {
     const { stores, authority } = await bootOriginalCsiAuthority(server);
     try {
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
       server.wakeDispatch = true;
+      server.actionParking = true;
       await authority.renewActivation({ leaseDurationMs: 60_000 });
       expect(stores.supportsWakeDispatch()).toBe(true);
+      expect(stores.supportsActionParking()).toBe(true);
     } finally {
       await stores.stopLocal();
     }
@@ -9748,6 +9775,7 @@ describe('HTTP Managed Session store', () => {
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   wakeDispatch = false;
+  actionParking = false;
   readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
   readonly commits: Array<Record<string, unknown>> = [];
@@ -10201,6 +10229,7 @@ class FakeManagedSessionStore {
     return {
       activationLeaseRenewal: this.activationLeaseRenewal,
       ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
+      ...(this.actionParking ? { actionParking: true } : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),

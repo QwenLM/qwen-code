@@ -905,7 +905,7 @@ class EventTransportBrokerGate {
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', X'', 0, 1)",
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', '', 0, 1)",
                 TENANT, session);
         return session;
     }
@@ -959,7 +959,7 @@ class EventTransportBrokerGate {
                 event.eventId(), event.turnId(), type, event.createdAt());
         jdbc.update("UPDATE ma_event_stream SET last_sequence = ? WHERE"
                 + " tenant_id = ? AND session_id = ? AND stream_kind ="
-                + " 'SESSION' AND stream_id = X''", sequence, TENANT,
+                + " 'SESSION' AND stream_id = ''", sequence, TENANT,
                 session);
         return event;
     }
@@ -992,7 +992,7 @@ class EventTransportBrokerGate {
         List<Long> covered = jdbc.queryForList("SELECT"
                 + " wake_covered_sequence FROM ma_event_stream WHERE"
                 + " tenant_id = ? AND session_id = ? AND stream_kind ="
-                + " 'SESSION' AND stream_id = X''", Long.class, TENANT,
+                + " 'SESSION' AND stream_id = ''", Long.class, TENANT,
                 session);
         return covered.isEmpty() ? null : covered.getFirst();
     }
@@ -1000,7 +1000,7 @@ class EventTransportBrokerGate {
     private long projectionWatermark(String session) {
         return jdbc.queryForObject("SELECT covered_sequence FROM"
                 + " ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
-                + " stream_kind = 'SESSION' AND stream_id = X''",
+                + " stream_kind = 'SESSION' AND stream_id = ''",
                 Long.class, TENANT, session);
     }
 }

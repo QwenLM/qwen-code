@@ -78,7 +78,7 @@ class ClientFilesRelayServiceTest {
         when(harness.clientFilesOperation(anyString(), anyString(), any()))
                 .thenReturn(Map.of("registered", true, "toolCount", 1));
         service = new ClientFilesRelayService(store, agentService, workspaces, properties, harness, new ObjectMapper());
-        tenant = "tenant-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
     }
 
     @org.junit.jupiter.api.AfterEach

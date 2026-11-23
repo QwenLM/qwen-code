@@ -3,8 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -169,6 +168,38 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
         assertThat(settled.failureCode()).isEqualTo("turn_already_settled");
     }
 
+    @Test
+    void actionParkAndCancelConvergeUnderSessionTurnLocks() throws Exception {
+        for (int index = 0; index < 4; index++) {
+            sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
+                    "create-action-race-" + index, "digest-action-race-" + index,
+                    "qwen-code", null, null, List.of(), null).sessionId();
+            String raceId = "action-race-" + index;
+            Admission turn = actionParkableTurn(raceId);
+            String racingSession = sessionId;
+            var start = new CyclicBarrier(2);
+            var transactions = transactions();
+            var parked = CompletableFuture.supplyAsync(() -> {
+                await(start);
+                return transactions.execute(status -> store.parkTurnForAction(
+                        TENANT, racingSession, turn.turnId(), OWNER));
+            });
+            var cancelled = CompletableFuture.supplyAsync(() -> {
+                await(start);
+                return transactions.execute(status -> cancel("cancel-" + raceId,
+                        "digest-cancel-" + raceId, turn));
+            });
+
+            // Either side may win; convergence is the post-state below.
+            parked.orTimeout(30, TimeUnit.SECONDS).join();
+            cancelled.orTimeout(30, TimeUnit.SECONDS).join();
+            var current = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
+            assertThat(current.status()).isEqualTo("CANCELLING");
+            assertThat(current.errorCode()).isNull();
+            assertThat(current.retryAfter()).isNull();
+        }
+    }
+
     // Snapshot witnesses: the server default must not decide the isolation.
     private TransactionTemplate transactions() {
         var transactions = new TransactionTemplate(
@@ -179,23 +210,22 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
     }
 
     private void settledCancels(String session, String turnId, int count) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
-        String target = ManagedSchemaKeys.key(turnId);
-        jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key,"
+        jdbc.batchUpdate("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id,"
                         + " operation_id, operation_kind,"
-                        + " tenant_id, session_id, target_kind, target_key,"
-                        + " target_id, request_digest, request_json, state,"
+                        + " tenant_id, session_id, target_kind, target_id,"
+                        + " request_digest, request_json, state,"
                         + " phase, admission_stage, delivery_state,"
                         + " failure_code, gmt_create, gmt_modified) VALUES"
-                        + " (?, ?, ?, 'CANCEL', ?, ?, 'TURN', ?, ?,"
+                        + " (?, 'SESSION', ?, ?, 'CANCEL', ?, ?, 'TURN', ?,"
                         + " 'digest', '{}', 'FAILED', 'FAILED', 'JAVA_DURABLE',"
                         + " 'BLOCKED', 'turn_already_settled', 1, 1)",
                 IntStream.range(0, count)
                         .mapToObj(index -> new Object[] {
-                                ManagedSchemaKeys.key(session, turnId,
-                                        Integer.toString(index)),
-                                scope, "op_settled_" + index, TENANT,
-                                session, target, turnId})
+                                ManagedIdentityRefs.operationRef("CANCEL", TENANT,
+                                        "SESSION", session, turnId,
+                                        "op_settled_" + index),
+                                session, "op_settled_" + index, TENANT,
+                                session, turnId})
                         .toList());
     }
 

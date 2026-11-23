@@ -1376,10 +1376,20 @@ describe('getReasoningEffortsForConfig', () => {
       getReasoningEffortsForConfig(
         configWith(undefined, 'gemini-4-neon', 'gemini'),
       ),
-    ).toEqual(['low', 'medium', 'high']);
+    ).toEqual(['low', 'medium', 'high', 'xhigh']);
     expect(
       getReasoningEffortsForConfig(
         configWith(undefined, 'gemini-4-neon', 'vertex-ai'),
+      ),
+    ).toEqual(['low', 'medium', 'high', 'xhigh']);
+    expect(
+      getReasoningEffortsForConfig(
+        configWith(undefined, 'gemini-4-hydrogen', 'gemini'),
+      ),
+    ).toEqual(['low', 'medium', 'high', 'xhigh']);
+    expect(
+      getReasoningEffortsForConfig(
+        configWith(undefined, 'gemini-4-argon-high', 'gemini'),
       ),
     ).toEqual(['low', 'medium', 'high']);
   });
@@ -1423,9 +1433,31 @@ describe('external reasoning controls', () => {
         { value: 'low' },
         { value: 'medium' },
         { value: 'high' },
+        { value: 'xhigh' },
       ],
     });
     expect(geminiGeneration.reasoning).toBeUndefined();
+
+    const argonGeneration: ContentGeneratorConfig = {
+      ...geminiGeneration,
+      model: 'gemini-4-argon',
+    };
+    const argonResolved = resolveReasoningForModel(undefined, argonGeneration);
+    expect(
+      buildModelReasoningRoutePreview(
+        argonGeneration,
+        argonResolved,
+        undefined,
+      )?.[0],
+    ).toMatchObject({
+      currentValue: 'high',
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'high' },
+      ],
+    });
   });
 
   it('shows concrete defaults without persisting them as a selection', () => {
