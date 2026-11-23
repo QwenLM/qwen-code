@@ -1443,6 +1443,66 @@ describe('createManagedChatController', () => {
     await unrelated;
   });
 
+  it('keeps rejected action-attempt settlements out of later approval and question retries (R4-1)', async () => {
+    const h = createHarness();
+    h.setPendingActions([permissionAction({ actionId: 'act-rejected' })]);
+    expect(h.controller.pendingApprovals).toHaveLength(1);
+
+    const held = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(held.promise);
+    const unrelated = h.controller.submit({ text: 'hold buffer drain open' });
+    const firstTransport = deferred<ManagedTransportAdmission>();
+    h.submitApproval.mockReturnValueOnce(firstTransport.promise);
+    const first = h.controller.respondApproval('act-rejected', 'allow');
+    h.emitAction({ actionId: 'act-rejected', outcome: 'resolved' });
+    firstTransport.resolve({ admission: 'rejected' });
+    expect((await first).admission).toBe('rejected');
+
+    h.submitApproval.mockResolvedValueOnce({ admission: 'accepted' });
+    const retry = await h.controller.respondApproval('act-rejected', 'allow');
+    expect(retry.admission).toBe('accepted');
+    expect(h.submitApproval).toHaveBeenCalledTimes(2);
+    expect(retry.outcome).toBe('unsettled');
+    expect(
+      h.controller.operations.find((operation) => operation.kind === 'approval')
+        ?.state,
+    ).toBe('pending');
+    h.emitAction({ actionId: 'act-rejected', outcome: 'resolved' });
+    expect(
+      h.controller.operations.find((operation) => operation.kind === 'approval')
+        ?.state,
+    ).toBe('established');
+
+    h.setPendingActions([questionAction({ actionId: 'q-rejected' })]);
+    const firstQuestionTransport = deferred<ManagedTransportAdmission>();
+    h.submitQuestion.mockReturnValueOnce(firstQuestionTransport.promise);
+    const answers = [
+      { questionId: '0', value: 'Dev' },
+      { questionId: '1', value: 'Dry run' },
+    ];
+    const firstQuestion = h.controller.respondQuestion('q-rejected', answers);
+    h.emitAction({ actionId: 'q-rejected', outcome: 'resolved' });
+    firstQuestionTransport.resolve({ admission: 'rejected' });
+    expect((await firstQuestion).admission).toBe('rejected');
+
+    h.submitQuestion.mockResolvedValueOnce({ admission: 'accepted' });
+    const questionRetry = await h.controller.respondQuestion(
+      'q-rejected',
+      answers,
+    );
+    expect(questionRetry.admission).toBe('accepted');
+    expect(questionRetry.outcome).toBe('unsettled');
+    expect(h.submitQuestion).toHaveBeenCalledTimes(2);
+    h.emitAction({ actionId: 'q-rejected', outcome: 'resolved' });
+    expect(
+      h.controller.operations.find((operation) => operation.kind === 'question')
+        ?.state,
+    ).toBe('established');
+
+    held.resolve({ admission: 'rejected' });
+    await unrelated;
+  });
+
   it('keeps a summary-level cancelling phase while a submit is pending (H3)', async () => {
     const h = createHarness();
     h.submitPrompt.mockResolvedValueOnce({

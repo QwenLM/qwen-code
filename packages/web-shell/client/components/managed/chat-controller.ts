@@ -472,7 +472,10 @@ export function createManagedChatController(
   >();
   const bufferedActionOutcome = new Map<
     string,
-    ManagedActionSettlement['outcome']
+    {
+      readonly outcome: ManagedActionSettlement['outcome'];
+      readonly dispatchSequence: number;
+    }
   >();
   let cachedOperations: readonly ChatOperation[] = Object.freeze([]);
   let dirty = false;
@@ -575,7 +578,10 @@ export function createManagedChatController(
       applyState(entry, next);
     }
     if (inFlightActionIds.has(event.actionId)) {
-      bufferedActionOutcome.set(event.actionId, event.outcome);
+      bufferedActionOutcome.set(event.actionId, {
+        outcome: event.outcome,
+        dispatchSequence: seq,
+      });
     }
   };
 
@@ -833,12 +839,15 @@ export function createManagedChatController(
           () => deps.submitApproval(requestId, optionId),
           (entry) => {
             entry.boundActionId = requestId;
-            const outcome = bufferedActionOutcome.get(requestId);
-            if (outcome !== undefined) {
+            const buffered = bufferedActionOutcome.get(requestId);
+            if (
+              buffered !== undefined &&
+              entry.sequence <= buffered.dispatchSequence
+            ) {
               bufferedActionOutcome.delete(requestId);
               applyState(
                 entry,
-                outcome === 'resolved' ? 'established' : 'failed',
+                buffered.outcome === 'resolved' ? 'established' : 'failed',
               );
             }
           },
@@ -882,12 +891,15 @@ export function createManagedChatController(
           () => deps.submitQuestion(requestId, normalized),
           (entry) => {
             entry.boundActionId = requestId;
-            const outcome = bufferedActionOutcome.get(requestId);
-            if (outcome !== undefined) {
+            const buffered = bufferedActionOutcome.get(requestId);
+            if (
+              buffered !== undefined &&
+              entry.sequence <= buffered.dispatchSequence
+            ) {
               bufferedActionOutcome.delete(requestId);
               applyState(
                 entry,
-                outcome === 'resolved' ? 'established' : 'failed',
+                buffered.outcome === 'resolved' ? 'established' : 'failed',
               );
             }
           },

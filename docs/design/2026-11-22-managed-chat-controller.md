@@ -83,12 +83,14 @@ actions, and Java command operations into `SessionChatController`:
   absorb a later settlement. Operations buffer a settlement with no active row
   only while a dispatch is in flight; turns buffer while a dispatch is in flight
   because a submit's `turnId` is unknown until its transport response; actions
-  buffer only while their own `actionId` is in `inFlightActionIds`. Operation
-  and turn buffer entries record the newest dispatch sequence at arrival, and
-  only an attempt already started at that sequence can consume it on bind, so
-  an unrelated dispatch cannot leak old turn or action evidence into a retry. The turn
-  buffer still serves an unbound in-flight cancel even when its shared submit
-  row was active. Buffered operation/action entries are deleted on consumption;
+  buffer only while their own `actionId` is in `inFlightActionIds`. Every
+  operation, turn, and action buffer entry records the newest dispatch sequence
+  at arrival. Only an attempt already started at that sequence can consume it
+  on bind, so an early settlement while the matching transport is pending
+  remains usable, but a rejected attempt's action evidence cannot be consumed
+  by a later retry when another dispatch keeps the drain open. The turn buffer
+  still serves an unbound in-flight cancel even when its shared submit row was
+  active. Buffered operation/action entries are deleted on consumption;
   all three buffers clear when all in-flight dispatches drain.
 - **Turn-scoped cancel with per-target retention.** `cancel()` fails closed when
   `deps.activeTurnId` is `undefined` (managed cancel requires a `turnId`),
@@ -153,8 +155,9 @@ actions, and Java command operations into `SessionChatController`:
   including a selected `Dry run` id plus separately typed `Verbose`, while all
   pre-existing legacy three-argument submissions remain unchanged.
 - `components/managed/chat-controller.test.ts` covers exhaustive
-  phase/operation-status mappings, attempt-scoped settlement buffering (including
-  old action/turn evidence followed by a retry), live one-hot pagination +
+  phase/operation-status mappings, attempt-scoped settlement buffering
+  (including own-action settlement, rejected transport, and both approval and
+  question retries), live one-hot pagination +
   `loadOlder({ force: true })`, permission/question projection, question answer
   normalization and fail-closed rejections, submit/cancel/approval/question
   admission vs settlement (including buffered early settlements,

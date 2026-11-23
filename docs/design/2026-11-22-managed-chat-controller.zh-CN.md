@@ -76,10 +76,11 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   `'established'`，`expired`/`superseded`/`failed` → `'failed'`）。已终态行永不
   吸收后续结算。operation 只在存在在飞派发时缓冲未命中活跃行的结算；turn 因在
   submit 的传输响应到达前不知道 `turnId`，也在存在在飞派发时缓冲；action 仅在
-  其 `actionId` 位于 `inFlightActionIds` 时缓冲。operation 与 turn 缓冲记录到达时最新
-  已启动的派发序号，绑定时只有当时已经启动的尝试才能消费，故无关派发不能把旧 turn
-  或 action 证据泄漏给稍后发起的重试。即使共享 `turnId` 的 submit 行仍活跃，尚未绑
-  定的在飞 cancel 仍能消费 turn 结算。operation/action 缓冲在消费时删除，三者均
+  其 `actionId` 位于 `inFlightActionIds` 时缓冲。operation、turn 与 action 缓冲均记录
+  到达时最新已启动的派发序号，绑定时只有当时已经启动的尝试才能消费，因此仍能利用
+  对应传输尚未返回而提前到达的结算，但另一派发保持排空门时，被拒尝试的 action 证
+  据不会被后续重试消费。即使共享 `turnId` 的 submit 行仍活跃，尚未绑定的在飞 cancel
+  仍能消费 turn 结算。operation/action 缓冲在消费时删除，三者均
   在所有在飞派发排空时清空。
 - **回合作用域取消与按目标保留。** `deps.activeTurnId` 为 `undefined` 时 `cancel()`
   fail-closed 返回 `rejected`（Managed 取消要求 `turnId`）；派发时捕获
@@ -133,7 +134,7 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   `components/managed/chat-controller.test.ts` 钉住结构化交接，包括选择
   `Dry run` 的 id 加独立输入的 `Verbose`，且全部既有旧三参数提交保持不变。
 - `components/managed/chat-controller.test.ts` 覆盖穷举相态与操作状态映射、按尝试
-  归属的结算缓冲（含旧 action/turn 证据后重试）、实时
+  归属的结算缓冲（含 action 在飞结算、被拒传输及 approval/question 两条重试路径）、实时
   one-hot 分页透传与 `loadOlder({ force: true })`、权限/提问拆分与投影、提问答案
   归一化与 fail-closed 拒绝、四个意图的准入/结算分离（含提前到达缓冲、
   `recovery_blocked`、派发期 cancel `turnId` 盖章、回合自行完成令 cancel 失败、并发
