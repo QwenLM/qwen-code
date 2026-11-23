@@ -18,6 +18,7 @@ import { MANAGED_TASK_MESSAGES_EN } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_EN } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_EN } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_EN } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN } from './components/artifacts/workspace-artifact-library-messages.js';
 import { MANAGED_MCP_MESSAGES_EN } from './components/managed/managed-mcp-messages.js';
 import {
   createContext,
@@ -5424,6 +5425,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...ARTIFACT_LIBRARY_MESSAGES_EN,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
   ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,

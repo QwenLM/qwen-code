@@ -2,7 +2,7 @@
 
 [English](2026-11-21-web-shell-workspace-artifact-library.md) | [简体中文](2026-11-21-web-shell-workspace-artifact-library.zh-CN.md)
 
-Status: accepted (merged via #18036); not yet implemented.
+Status: implemented.
 
 ## Problem statement
 

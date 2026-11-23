@@ -370,6 +370,13 @@ interface RegisterSessionRoutesDeps {
   bridge: AcpSessionBridge;
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
+  /**
+   * Channel label for transcript exports, resolved once per daemon at boot
+   * (hosted-harness → managed, desktop shell → desktop, otherwise daemon).
+   * Reading the shared process.env marker at request time would let a
+   * co-resident daemon relabel this daemon's exports.
+   */
+  exportChannel?: string;
   requestedSessionIdAdmission?: RequestedSessionIdAdmission;
   /**
    * Fired after a load/resume makes a session live, so the PR watch can deliver
@@ -1889,7 +1896,7 @@ export function registerSessionRoutes(
               sessionId,
               format,
               archiveState: target.archiveState,
-              config: { getChannel: () => 'daemon' },
+              config: { getChannel: () => deps.exportChannel ?? 'daemon' },
             });
           });
         })(),

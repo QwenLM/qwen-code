@@ -605,6 +605,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toMatch(/["'`]workspaceArtifactLibrary\./);
     expect(js).not.toContain(
       'No artifacts have been produced in this workspace yet.',
     );
@@ -612,6 +613,7 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
     const interactive = readPackageJavascript();
     expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('workspaceArtifactLibrary.title');
     expect(interactive).toContain('Artifact library');
     expect(interactive).toContain('产物库');
     expect(interactive).toContain('Библиотека артефактов');
