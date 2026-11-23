@@ -1298,8 +1298,8 @@ thoughts.
 This Mod shows the model's replies and the thoughts you open in Simplified
 Chinese, in the Ink and OpenTUI terminals and the Web Shell. It rewrites the
 [reply rows](#reply-rows) and [thinking rows](#thinking-rows) with
-`$.model.complete`, so only the drawing changes: the stored conversation, what
-the model reads, `/copy` and the Web Shell's copy buttons keep the original.
+`$.model.complete`. The stored conversation, what the session model reads in
+the main conversation, `/copy` and the Web Shell's copy buttons keep the original.
 
 ```text
 zh-display/
@@ -1322,15 +1322,25 @@ zh-display/
 
 `hooks/register.js`:
 
-````javascript
+```javascript
+const END = '\n[ZH_DISPLAY_END]';
 const SYSTEM =
   'Translate the Markdown the user sends into Simplified Chinese. Keep its ' +
   'Markdown structure, code blocks, inline code, file paths, URLs, commands ' +
-  'and identifiers unchanged. Reply with the translation only.';
+  'and identifiers unchanged. Reply with only the full translation, followed by this exact line:' +
+  END;
 
 // Prose that is already mostly Chinese, or a block of code alone, stays as it is.
 function mostlyChinese(text) {
-  const prose = text.replace(/```[\s\S]*?```|`[^`\n]*`/g, '');
+  if (
+    text.split('\n').every((line) => !line.trim() || /^( {4}|\t)/.test(line))
+  ) {
+    return true;
+  }
+  // The closing fence uses the same character and can be longer.
+  const fencedCode =
+    /^ {0,3}((`|~)\2{2,})(?!\2)[^\n]*\n[\s\S]*?^ {0,3}\1\2*[ \t]*$/gm;
+  const prose = text.replace(fencedCode, '').replace(/`[^`\n]*`/g, '');
   const letters = prose.match(/[A-Za-z一-鿿]/g) ?? [];
   const han = letters.filter((letter) => letter >= '一').length;
   return han * 2 >= letters.length;
@@ -1356,12 +1366,25 @@ export function register(on) {
         $.ui.log(`Left untranslated: ${r.reason}`, { to: 'debug' });
         return next(e);
       }
-      const text = r.text.replace(/\r/g, '');
+      const answer = r.text.replace(/\r/g, '').trimEnd();
+      if (
+        !answer.endsWith(END) ||
+        answer.includes('\n[... truncated for Mods ...]\n')
+      ) {
+        return next(e);
+      }
+      const text = answer.slice(0, -END.length);
+      if (!text.trim()) return next(e);
       return next({ ...e, props: { ...e.props, text } });
     },
   );
 }
-````
+```
+
+The Mod sends the original text of each row it translates to the selected
+model's endpoint, including visible replies and expanded thoughts from resumed
+sessions. If your fast model uses a different provider, that provider receives
+the text.
 
 Install it, turn Mods on, and start a new session:
 
@@ -1373,12 +1396,13 @@ qwen extensions install ./zh-display --consent
   translation once it is complete and the hook answers. Open a thought to have
   it translated; a thought that stays collapsed costs nothing.
 - `model: 'haiku'` runs the session's [fast model](../configuration/settings.md#fastmodel),
-  or the session's model when none is set. A fast model without thinking keeps
-  each translation well inside the 30 seconds a row may take, including the
-  model call; a row whose call runs out of time keeps its original text.
-- Each block and opened thought costs one model call per session: the session
-  answers it again from its row cache, but a resumed session translates the
-  rows it shows again.
+  or the session's model when none is set. A fast model without thinking can
+  reduce latency. The hook allows 25 seconds for the model call within the
+  30-second row render limit. A failed, timed-out, or incomplete translation
+  leaves the original text.
+- An uncached reply block or opened thought that needs translation makes one
+  model call when shown. The session reuses the answer while it is cached. An
+  evicted row or a row shown after resuming a session can trigger another call.
 - In the Web Shell, a translated thought no longer shows the built-in translate
   button.
 - For another language, change the system prompt and the `mostlyChinese` check.
