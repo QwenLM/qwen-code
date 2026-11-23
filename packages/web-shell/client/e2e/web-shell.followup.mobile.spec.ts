@@ -455,7 +455,7 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
               !buttons.every((button) => {
                 const rect = button.getBoundingClientRect();
                 const x = rect.x + rect.width / 2;
-                return [rect.y - 3, rect.y + rect.height + 3].every((y) => {
+                return [rect.y - 3.5, rect.y + rect.height + 3.5].every((y) => {
                   const hit = document.elementFromPoint(x, y);
                   return hit === button || button.contains(hit);
                 });

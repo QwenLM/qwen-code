@@ -7061,6 +7061,71 @@ describe('ChatEditor mobile composer actions', () => {
     }
   });
 
+  it('preserves the read-only workspace indicator through responsive context placement', () => {
+    const backend = mobileComposer('draft');
+    const { observers, restore } = captureResizeObservers();
+    let containerWidth = 768;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { width: containerWidth } as DOMRect;
+        }
+        return { width: 0 } as DOMRect;
+      });
+    const props = {
+      workspaceName: 'api',
+      workspaceTitle: 'api',
+      workspaceFeaturesEnabled: true,
+      visibleToolbarActions: ['workspace'] as const,
+      contextChipPlacement: 'below' as const,
+    };
+    try {
+      const container = renderChatEditor(props);
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      const actions = () =>
+        container.querySelector('[data-web-shell-mobile-editing-actions]')!;
+      for (const width of [768, 480]) {
+        containerWidth = width;
+        act(() => fireResize(observers, surface));
+        const selector = actions().querySelector('[data-web-shell-workspace]')!;
+        expect(selector).not.toBeNull();
+        expect(selector.getAttribute('data-web-shell-workspace-title')).toBe(
+          'api',
+        );
+      }
+      containerWidth = 390;
+      act(() => fireResize(observers, surface));
+      const below = () =>
+        container.querySelector('[data-web-shell-composer-context-row]')!;
+      expect(actions().querySelector('[class*="mobileContextRow"]')).toBeNull();
+      expect(
+        below().querySelector('[data-web-shell-workspace]'),
+      ).not.toBeNull();
+      act(() => backend.textareaRef.current!.focus());
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+      act(() => backend.textareaRef.current!.blur());
+      expect(below()).not.toBeNull();
+
+      rerenderChatEditor(container, {
+        ...props,
+        contextChipPlacement: 'header',
+      });
+      containerWidth = 390;
+      act(() => fireResize(observers, surface));
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+    } finally {
+      rectSpy.mockRestore();
+      restore();
+    }
+  });
+
   function visibleFollowup() {
     composerCoreState.followupState = {
       isVisible: true,

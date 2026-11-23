@@ -41,20 +41,23 @@ width so the editing row never wraps onto two lines:
   strip below the composer while the textarea is blurred (staying open while a
   branch picker is active) and hide automatically while focused; when
   `contextChipPlacement` is `header`, workspace is not duplicated below the
-  composer. Below `320px`, the below-composer strip collapses labels while
+  composer. At or below 320px (`≤ 320px`), the below-composer strip collapses labels while
   preserving icon and conflict badge indicators.
 
 Retain the inline context row's measured height allowance in the composer's
 height cap on wide/medium touch layouts. Context and editing controls must not
 overlap. Preserve host-provided toolbar slots.
 
-Keep 44px touch targets on the bottom toolbar and expand the 36px-tall single
-editing row buttons' hit areas via `::before` pseudo-elements so the row stays
-compact without shrinking tap targets. Center toolbar icons in their targets
-and remove extra gaps within the mobile toolbar groups, including the
-context-usage button. Allow model and mode labels to shrink with ellipsis so
-long model names do not prematurely wrap the bottom toolbar. Keep Plan as an
-active-state chip. While a turn runs, stop remains available alongside send
+Keep 44px touch targets for bottom-toolbar and workspace/Git controls. Editing
+keys use a 36px visual height plus a 4px transparent band above and below.
+Their minimum visual widths are 34px, or 26px at the tiny-container tier; this
+explicit narrow-width allowance is not a blanket promise of 44×44px keys.
+Adjacent hit areas must not overlap. The bottom-right button group may wrap
+inside the available width to keep stop and send reachable at the required
+touch size. Center toolbar icons in their targets and remove extra gaps within
+the mobile toolbar groups, including the context-usage button. Allow model and
+mode labels to shrink with ellipsis so long model names do not prematurely wrap
+the bottom toolbar. Keep Plan as an active-state chip. While a turn runs, stop remains available alongside send
 when there is a draft; stopping never clears that draft. Voice capture retains
 its existing reduced toolbar and hides the context and editing rows.
 
@@ -181,8 +184,8 @@ Record any runtime limitations separately from mocked browser results.
   345px, 320px, 310px, and 240px viewport widths, all 6 keys remain on one
   row inside the editing container, respect their width floors, and produce
   no horizontal page overflow. Coordinate hit tests must resolve the actual
-  key three pixels above and below its 36px visual box, confirming the 44px
-  touch band is effective rather than merely declared.
+  key 3.5px above and below its 36px visual box, confirming that the 44px
+  vertical touch band is effective rather than merely declared.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

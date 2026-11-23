@@ -3204,10 +3204,9 @@
   --chat-editor-max-height: var(--chat-editor-composer-cap);
 }
 
-/* The workspace/Git row lives inside the capped box; without its height added
-   back, a soft keyboard leaves the attachments strip almost no room. The
-   height is measured because the row wraps on narrow viewports, and the 8px
-   is the pull-up the editing row gives up below it. */
+/* Wide and medium touch layouts keep workspace/Git on one inline row. Its
+   measured height and the editing row's 4px inset stay inside the cap so a
+   soft keyboard leaves room for the attachments strip. */
 .editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
   --chat-editor-max-height: calc(
     var(--chat-editor-composer-cap) +
@@ -3245,6 +3244,11 @@
 
 .editorShell[data-web-shell-mobile-composer] .toolbarRight {
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   margin-left: auto;
   margin-right: 0;
 }

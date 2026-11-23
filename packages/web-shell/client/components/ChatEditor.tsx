@@ -4308,7 +4308,10 @@ export const ChatEditor = memo(
                     aria-label={t('composerMobile.history')}
                     title={t('composerMobile.history')}
                     onMouseDown={(event) => event.preventDefault()}
-                    onClick={core.searchState.openHistorySearch}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      core.searchState.openHistorySearch();
+                    }}
                   >
                     <HistoryIcon />
                   </button>

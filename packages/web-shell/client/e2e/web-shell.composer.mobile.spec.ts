@@ -1765,10 +1765,15 @@ for (const width of [240, 310, 320, 345, 390, 480]) {
 
     const workspaceBeforeTap = (await workspace.boundingBox())!;
     expect(workspaceBeforeTap.height).toBeGreaterThanOrEqual(44);
+    expect(workspaceBeforeTap.width).toBeGreaterThanOrEqual(44);
     const gitHeight = await composer
       .locator('[data-web-shell-git-branch]')
       .evaluate((element) => element.getBoundingClientRect().height);
+    const gitWidth = await composer
+      .locator('[data-web-shell-git-branch]')
+      .evaluate((element) => element.getBoundingClientRect().width);
     expect(gitHeight).toBeGreaterThanOrEqual(44);
+    expect(gitWidth).toBeGreaterThanOrEqual(44);
     const value = workspace.locator('[data-slot="select-value"]');
     const initialWorkspaceLabel = await value.innerText();
     if (await value.isVisible()) {
@@ -2264,7 +2269,7 @@ for (const width of [240, 360]) {
       const hitAreas = await button.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         const x = rect.x + rect.width / 2;
-        return [rect.y - 3, rect.y + rect.height + 3].every((y) => {
+        return [rect.y - 3.5, rect.y + rect.height + 3.5].every((y) => {
           const hit = document.elementFromPoint(x, y);
           return hit === element || element.contains(hit);
         });
