@@ -4,12 +4,14 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,19 +35,20 @@ class ManagedExtensionAgentLaunchTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
-        String request = DigestUtils.sha256Hex("request");
         String capability = ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
-        jdbc.update("INSERT INTO ma_runtime_slot (request_key, tenant_id, workspace_id, workspace_generation,"
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace", capability, "session");
+        String request = RuntimeRequestKeys.requestKey(new RuntimeProvisionRequest(scope, "parent"));
+        jdbc.update("INSERT INTO ma_runtime_slot (request_id, tenant_id, workspace_id, workspace_generation,"
                 + " canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind, storage_id,"
                 + " last_generation, active_binding_id) VALUES (?, 'tenant', 'workspace', '1', '/workspace', ?,"
                 + " 'session', 'parent', 'local-process', 'storage', 1, 'binding')", request, capability);
-        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_id, scope_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind,"
                 + " storage_id, runtime_generation, binding_state, runtime_instance_id, runtime_lease_id,"
                 + " attestation_generation, is_drain_requested, operation_generation, record_version, last_active_at)"
                 + " VALUES ('binding', ?, ?, 'tenant', 'workspace', '1', '/workspace', ?, 'session', 'parent',"
                 + " 'local-process', 'storage', 1, 'READY', 'worker', 'lease', 1, FALSE, 0, 1, 0)",
-                request, DigestUtils.sha256Hex("scope"), capability);
+                request, RuntimeRequestKeys.scopeKey(scope), capability);
         owner = JSON.createObjectNode().put("executionMode", "developer-process-group");
         owner.putObject("runtime").put("bindingId", "binding").put("generation", "1").put("workspaceGeneration", "1");
     }

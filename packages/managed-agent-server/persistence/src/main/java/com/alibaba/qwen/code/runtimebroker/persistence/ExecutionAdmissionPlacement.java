@@ -77,8 +77,8 @@ final class ExecutionAdmissionPlacement {
                 + (forUpdate ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setQueryTimeout(10);
-            statement.setBytes(1, tenantId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            statement.setBytes(2, sessionId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            statement.setString(1, tenantId);
+            statement.setString(2, sessionId);
             try (ResultSet row = statement.executeQuery()) {
                 return row.next();
             }
@@ -87,8 +87,9 @@ final class ExecutionAdmissionPlacement {
 
     private static boolean localOrAbsent(Connection connection, String tenant, String storage) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT storage_kind FROM ma_storage WHERE alias_key = ?")) {
-            statement.setString(1, RuntimeAdmissionFences.storageAliasKey(tenant, storage));
+                "SELECT storage_kind FROM ma_storage WHERE tenant_id = ? AND storage_id = ?")) {
+            statement.setString(1, tenant);
+            JdbcRepositorySupport.setIdentity(statement, 2, storage);
             try (ResultSet row = statement.executeQuery()) {
                 return !row.next() || "LOCAL".equals(row.getString(1));
             }

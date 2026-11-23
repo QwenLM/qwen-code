@@ -28,6 +28,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
+  setSessionTranscriptIndexBuildCompleteHookForTest,
+  setSessionTranscriptIndexCacheMaxBytesForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
   InvalidRewindTargetError,
   SessionBusyError,
   SessionNotFoundError,
@@ -6002,6 +6006,53 @@ describe('multi-workspace session dispatch', () => {
       expect(expired.status).toBe(400);
       expect(expired.body.code).toBe('invalid_transcript_cursor');
       expect(expired.body.sessionId).toBe(sessionId);
+    });
+  });
+
+  it('reuses the cached transcript index across workspace requests', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440273';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'first page',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const { app } = makeHarness({ secondaryTrusted: false });
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+        if (builtPath === transcriptPath) builds++;
+      });
+      // A 1-byte shared budget lands the index in the oversized class, so
+      // the reuse pinned here is the oversized-class retention of #17889.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      try {
+        await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        expect(builds).toBe(1);
+        const repeat = await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        // The second request hits the daemon-local index cache: no rebuild.
+        expect(builds).toBe(1);
+        expect(repeat.body.events).toHaveLength(1);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      }
     });
   });
 

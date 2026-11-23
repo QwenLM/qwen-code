@@ -105,12 +105,25 @@ export interface ManagedSessionCommitProof {
   readonly committedPrefixHash: string;
 }
 
+export interface ManagedSessionParkedTurn {
+  readonly promptId: string;
+  readonly wakeAt: number;
+  readonly approvalRevision?: number;
+}
+
 /** What the wake pump would pick from the committed prefix at suspension. */
 export interface ManagedSessionWakeStamp {
   /** Whether a deliverable wake input remains. */
   readonly pending: boolean;
   /** When the earliest deliverable wake input is due; 0 when one is due now. */
   readonly dueAt: number;
+  /**
+   * Whether every unsettled run and owed cleanup of this prefix is a verified
+   * background hold. Only the writer can run that per-run evidence check, so
+   * the seal certifies it for the control plane's recovery view.
+   */
+  readonly backgroundHeld?: boolean;
+  readonly parkedTurn?: ManagedSessionParkedTurn;
 }
 
 /**
@@ -176,7 +189,16 @@ export interface ManagedSessionJournalStore {
 }
 
 export interface ManagedSessionResourceStore {
-  publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
+  /**
+   * An explicit resourceId republishes bytes another owner already named
+   * (a worker-owned delivery entry carries its complete refs); omitting it
+   * mints a fresh identity.
+   */
+  publish(
+    kind: string,
+    bytes: Buffer,
+    resourceId?: string,
+  ): Promise<ManagedSessionDurableRef>;
   read(ref: ManagedSessionDurableRef): Promise<Buffer>;
 }
 

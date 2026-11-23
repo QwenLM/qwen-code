@@ -119,6 +119,8 @@ import type {
   DaemonWriteMemoryResult,
   DaemonRevisionRequest,
   SetUserLanguageResult,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -952,9 +954,24 @@ export interface DaemonWorkspaceActions
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
+
+  // Workspace artifact library
+  artifactLibrary(
+    workspaceSelector: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<DaemonWorkspaceArtifactLibraryResult>;
+  artifactLibraryStream(
+    workspaceSelector: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent>;
 }
 
 export type {
+  DaemonArtifactLibraryMemberError,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
   DaemonChannelQrLoginStartResult,
   DaemonChannelQrLoginView,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';
