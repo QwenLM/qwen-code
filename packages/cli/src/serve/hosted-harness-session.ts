@@ -65,8 +65,15 @@ import {
   type RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import {
+  hostedActionParkRegistration,
+  registerHostedActionPark,
+  type HostedActionParkRegistration,
+} from './hosted-action-parking.js';
+import {
   reconcileHostedTurnCleanup,
+  backgroundSuspensionCertificate,
   hasHostedCleanupDebt,
+  hasHostedCleanupDebtExcluding,
   hasBlockingHostedCleanupDebt,
   oweHostedTurnCleanup,
   type HostedCleanupHold,
@@ -93,6 +100,7 @@ import {
   endHostedAction,
   parseHostedActionOptions,
   hostedLiveApprovalPoll,
+  hostedApprovalAsks,
 } from './hosted-tool-approval.js';
 import { readHostedQuestionDecision } from './hosted-user-question.js';
 
@@ -227,6 +235,7 @@ import {
   managedSessionDurableRefsEqual,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionCommitRejectedError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import type { ManagedSessionWakeStamp } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import {
@@ -276,6 +285,10 @@ import {
   isHostedConfigScopedOwner,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import {
+  detachBackgroundPublishers,
+  reattachAndDrainBackgroundDeliveries,
+} from './hosted-background-delivery-recovery.js';
 import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
 import {
   ChildMessagesPendingError,
@@ -832,6 +845,7 @@ interface HostedSession {
   cwd: string;
   streams: Set<() => void>;
   active?: { promptId: string; digest: string; abort: AbortController };
+  deadlineTimer?: NodeJS.Timeout;
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
   /** #13800 D4: the named store failure kept in memory once a settlement's
@@ -2863,10 +2877,28 @@ function retainHostedCleanupHolds(
   }
 }
 
+// A resumed approval restarts from this text, so an Action park refuses a
+// Turn without it exactly as the recovery arms do.
+async function hostedOriginalPromptText(
+  managed: ManagedSession,
+  promptId: string,
+): Promise<string | undefined> {
+  const user = (await managed.sink.project()).find(
+    (item) => item.type === 'user' && item.daemonPromptId === promptId,
+  );
+  return (
+    user?.message?.parts
+      ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
+      .join('\n') || undefined
+  );
+}
+
 async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
   drain = false,
+  probeOnly = false,
+  excludedPromptId?: string,
 ): Promise<void> {
   if (!drain && unsettledPromptId(session)) return;
   // A load can overlap the wake pump's retry. Re-read the debt with each
@@ -2886,7 +2918,8 @@ async function retryHostedCleanup(
               session.managed,
               options,
               undefined,
-              drain,
+              drain && !probeOnly,
+              excludedPromptId,
             ),
           );
         }
@@ -3848,6 +3881,7 @@ async function startHostedRecoveredTurn(
         )
       : undefined;
   timer?.unref();
+  session.deadlineTimer = timer;
   if (cancelled) {
     await stopPublicChildSource(session, resume.promptId);
     abort.abort();
@@ -3915,6 +3949,7 @@ async function startHostedRecoveredTurn(
     })
     .finally(() => {
       if (timer) clearTimeout(timer);
+      if (session.deadlineTimer === timer) session.deadlineTimer = undefined;
       session.active = undefined;
       noteSessionActivity(session);
     });
@@ -4030,12 +4065,28 @@ async function executeHostedTurn(
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
       const options = await readHostedActionOptions(session.managed, original);
+      let parkRegistration: HostedActionParkRegistration | undefined;
       try {
         const liveApproval =
           options.toolName !== 'exit_plan_mode' &&
           !options.requiresHumanDecision
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
+        parkRegistration =
+          options.continuationRef !== undefined
+            ? {
+                promptId,
+                options,
+                settings: liveApproval?.settings,
+                livePoll:
+                  liveApproval !== undefined &&
+                  liveApproval.readSettings !== undefined,
+                globProfile: false,
+                freeze: () => session.waiters.park(actionId),
+              }
+            : undefined;
+        if (parkRegistration)
+          registerHostedActionPark(session.managed, parkRegistration);
         onResumeReady?.();
         if (
           plan.runtime &&
@@ -4067,6 +4118,9 @@ async function executeHostedTurn(
               requestId: actionId,
               expiresAt: options.expiresAt,
               signal: abort.signal,
+              registerFreeze: (freeze) => {
+                if (parkRegistration) parkRegistration.freeze = freeze;
+              },
             });
         } else
           await session.waiters.wait(
@@ -4090,6 +4144,9 @@ async function executeHostedTurn(
           );
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
+      } finally {
+        if (parkRegistration)
+          registerHostedActionPark(session.managed, undefined);
       }
       if (authority.action(actionId)?.state === 'requested')
         await endHostedAction(
@@ -5055,12 +5112,103 @@ export function registerHostedHarnessSessionRoutes(
     suspension.rearm?.();
   };
 
+  interface ActionParkCandidate {
+    readonly registration: HostedActionParkRegistration;
+    readonly promptId: string;
+    readonly wakeAt: number;
+    readonly approvalRevision?: number;
+    readonly cleanupExempt: boolean;
+  }
+
+  const actionParkCandidate = async (
+    session: HostedSession,
+  ): Promise<ActionParkCandidate | undefined> => {
+    const registration = hostedActionParkRegistration(session.managed);
+    if (
+      !registration ||
+      session.active?.promptId !== registration.promptId ||
+      session.recoveredTurn !== undefined ||
+      session.definition?.['lineage'] !== undefined ||
+      session.hooks ||
+      session.mcp ||
+      session.stores?.supportsActionParking?.() !== true ||
+      session.stores?.supportsWakeDispatch?.() !== true
+    )
+      return undefined;
+    const events = session.managed.authority.eventsInSequenceRange(
+      1,
+      session.managed.authority.committedSequence,
+    );
+    const accepted = events.find(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['turnId'] === registration.promptId,
+    );
+    if (!accepted || isWakeOwnedInput(accepted)) return undefined;
+    const unsettled = unsettledInputs(session);
+    if (
+      unsettled.size !== 1 ||
+      !unsettled.has(registration.promptId) ||
+      session.managed.authority.action(registration.options.requestId)
+        ?.state !== 'requested'
+    )
+      return undefined;
+    const continuation = await findHostedApprovalContinuation(
+      session.managed,
+      registration.promptId,
+    );
+    if (
+      !continuation ||
+      continuation.plan.commandStep !== undefined ||
+      !(await hostedOriginalPromptText(session.managed, registration.promptId))
+    )
+      return undefined;
+    let approvalRevision: number | undefined;
+    if (registration.livePoll) {
+      const settings = registration.settings;
+      const selection = await session.stores.approvalSelection();
+      if (
+        !settings ||
+        !selection ||
+        !hostedApprovalAsks(
+          {
+            mode: selection.mode,
+            timeoutMs: settings.timeoutMs,
+            permissionRules: selection.permissionRules,
+          },
+          registration.options.toolName,
+          registration.globProfile,
+        )
+      )
+        return undefined;
+      approvalRevision = selection.revision;
+    }
+    const deadline = accepted.payload['deadline'];
+    return {
+      registration,
+      promptId: registration.promptId,
+      wakeAt:
+        typeof deadline === 'number'
+          ? Math.min(registration.options.expiresAt, deadline)
+          : registration.options.expiresAt,
+      approvalRevision,
+      cleanupExempt: !(await hasHostedCleanupDebtExcluding(
+        session.managed,
+        registration.promptId,
+      )),
+    };
+  };
+
   // Live work only. The persistent owners (hooks, mcp, publishers) are
   // teardown targets the next load re-acquires, not residency pins; the
   // runtime lease is released by teardown step 3. Instance-wide terms are
   // not per-Session eligibility.
-  const suspensionLiveWork = (session: HostedSession): boolean =>
-    session.active !== undefined ||
+  const suspensionLiveWork = (
+    session: HostedSession,
+    backgroundCertified = false,
+    actionPark?: ActionParkCandidate,
+  ): boolean =>
+    (session.active !== undefined && !actionPark) ||
     session.recoveredTurn !== undefined ||
     session.blocked ||
     session.lifecycle !== undefined ||
@@ -5077,11 +5225,9 @@ export function registerHostedHarnessSessionRoutes(
     (session.hooks?.hasPendingOperations ?? false) ||
     compressionBusy(session) ||
     session.fileHistoryOwed !== undefined ||
-    hasHostedCleanupDebt(session.managed) ||
     session.childConsumption.size > 0 ||
     (session.messageOperations?.size ?? 0) > 0 ||
-    unsettledInputs(session).size > 0 ||
-    session.heldRuntimeTurns.size > 0 ||
+    (!actionPark && unsettledInputs(session).size > 0) ||
     session.automations?.hasPendingGateReleases === true ||
     session.extensionBootstrapPending === true ||
     (session.replyPlanRetries?.size ?? 0) > 0 ||
@@ -5092,21 +5238,25 @@ export function registerHostedHarnessSessionRoutes(
     session.clientFiles?.active === true ||
     // An open Harness event stream is a reader this teardown would cut. The
     // design's predicate names it beside the Turn's own stream.
-    session.streams.size > 0 ||
-    [...(session.shell?.monitorLoops?.values() ?? [])].some(
-      (loop) => loop.live,
-    ) ||
-    [...(session.backgroundLane?.monitorLoops?.values() ?? [])].some(
-      (loop) => loop.live,
-    ) ||
-    ['child_run', 'monitor_run'].some((domain) =>
-      session.managed.authority
-        .extensionRecordsInDomain(domain as 'child_run' | 'monitor_run')
-        .some(
-          (entry) =>
-            !['settled', 'failed', 'cancelled'].includes(entry.run.state),
-        ),
-    ) ||
+    (!actionPark && session.streams.size > 0) ||
+    // The background terms a certified suspension exempts (§4.8).
+    (!backgroundCertified &&
+      ((actionPark?.cleanupExempt
+        ? false
+        : hasHostedCleanupDebt(session.managed)) ||
+        session.heldRuntimeTurns.size > 0 ||
+        [
+          ...(session.shell?.monitorLoops?.values() ?? []),
+          ...(session.backgroundLane?.monitorLoops?.values() ?? []),
+        ].some((loop) => loop.live) ||
+        ['child_run', 'monitor_run'].some((domain) =>
+          session.managed.authority
+            .extensionRecordsInDomain(domain as 'child_run' | 'monitor_run')
+            .some(
+              (entry) =>
+                !['settled', 'failed', 'cancelled'].includes(entry.run.state),
+            ),
+        ))) ||
     (session.mcp !== undefined &&
       isHostedWorkspacePublicShellProfile(session.toolProfile) &&
       session.lifecycleProtocolVersion !== 2);
@@ -5128,14 +5278,58 @@ export function registerHostedHarnessSessionRoutes(
       publishers: false,
       writer: false,
     };
+    // The background certificate is re-derived on every eligibility pass,
+    // so an exemption the teardown relies on is never older than the last
+    // check before the irreversible boundary (§4.8).
+    let backgroundCertified = false;
+    const refreshBackgroundCertificate = async (): Promise<boolean> => {
+      const previous = backgroundCertified;
+      backgroundCertified =
+        session.stores?.supportsRuntimeObservation?.() === true &&
+        // The seal only stamps the background hold under wake dispatch; a
+        // certificate without it would suspend a Session into a seal its
+        // recovery cannot read.
+        session.stores?.supportsWakeDispatch?.() === true &&
+        (await backgroundSuspensionCertificate(
+          session.managed,
+          new Set([
+            ...(session.shell?.observationBindings ?? []),
+            ...(session.backgroundLane?.observationBindings ?? []),
+          ]),
+        ));
+      // The exemption evaporated between passes: revert instead of tearing
+      // down against evidence that no longer holds.
+      return previous && !backgroundCertified;
+    };
+    let actionPark: ActionParkCandidate | undefined;
     const outcome = await runSuspensionAttempt(suspension, {
       pendingInputs: async () => {
+        // Derived inside the attempt so a failed read reverts and rearms;
+        // the pass under the gate re-reads the approval selection (§4.1).
+        if (!marked) actionPark = await actionParkCandidate(session);
+        else if (actionPark) {
+          const current = await actionParkCandidate(session);
+          if (current?.registration !== actionPark.registration) return true;
+          actionPark = current;
+        }
         const pending = pendingSessionInputs(
           session.managed.authority.eventsInSequenceRange(
             1,
             session.managed.authority.committedSequence,
           ),
         );
+        const park = actionPark;
+        if (park) {
+          const certificateLost = await refreshBackgroundCertificate();
+          const blocked =
+            backgroundCertified ||
+            certificateLost ||
+            hostedActionParkRegistration(session.managed) !==
+              park.registration ||
+            pending.some((input) => input.turnId !== park.promptId);
+          if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
+          return blocked;
+        }
         let blocked = pending.length > 0;
         if (blocked && session.stores?.supportsWakeDispatch?.()) {
           const projected = await session.managed.sink.project();
@@ -5144,12 +5338,14 @@ export function registerHostedHarnessSessionRoutes(
             (input) => !wakeDispatchOwnsInput(session, input, projected, now),
           );
         }
-        if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
-        return blocked;
+        const certificateLost = await refreshBackgroundCertificate();
+        if (!marked && (blocked || certificateLost))
+          suspensionStats.eligibilityFailures += 1;
+        return blocked || certificateLost;
       },
       markClosing: (attemptStart) => {
         if (
-          suspensionLiveWork(session) ||
+          suspensionLiveWork(session, backgroundCertified, actionPark) ||
           suspension.lastActivity > attemptStart ||
           session.ownershipRelease !== undefined ||
           session.lifecycle !== undefined ||
@@ -5166,7 +5362,22 @@ export function registerHostedHarnessSessionRoutes(
         session.mcpClosing = true;
         return true;
       },
-      liveWork: () => suspensionLiveWork(session),
+      liveWork: () =>
+        suspensionLiveWork(session, backgroundCertified, actionPark),
+      beforeTeardown: () => {
+        const park = actionPark;
+        if (!park) return true;
+        // A poll or resolution in flight refuses the freeze; the attempt
+        // reverts and the next idle period tries again.
+        if (
+          hostedActionParkRegistration(session.managed) !== park.registration ||
+          !park.registration.freeze()
+        )
+          return false;
+        if (session.deadlineTimer) clearTimeout(session.deadlineTimer);
+        session.deadlineTimer = undefined;
+        return true;
+      },
       teardown: async () => {
         try {
           if (!done.wake) {
@@ -5179,10 +5390,33 @@ export function registerHostedHarnessSessionRoutes(
             done.owners = true;
           }
           if (!done.lease) {
-            if (await releaseLeaseNow(session, false, true))
+            if (
+              await releaseLeaseNow(
+                session,
+                false,
+                true,
+                backgroundCertified,
+                actionPark?.promptId,
+              )
+            )
               throw new Error('Runtime lease release is unproven.');
-            if (broker) await retryHostedCleanup(session, broker, true);
-            else if (hasHostedCleanupDebt(session.managed))
+            if (broker)
+              await retryHostedCleanup(
+                session,
+                broker,
+                true,
+                backgroundCertified,
+                actionPark?.promptId,
+              );
+            else if (
+              !backgroundCertified &&
+              (!actionPark
+                ? hasHostedCleanupDebt(session.managed)
+                : await hasHostedCleanupDebtExcluding(
+                    session.managed,
+                    actionPark.promptId,
+                  ))
+            )
               throw new Error('Runtime cleanup remains owed.');
             done.lease = true;
           }
@@ -5190,6 +5424,23 @@ export function registerHostedHarnessSessionRoutes(
             for (const timer of session.replyPlanRetries?.values() ?? [])
               clearTimeout(timer);
             session.replyPlanRetries?.clear();
+            // A certified background suspension detaches its publisher
+            // with the final applied watermark instead of closing the
+            // worker relationship (§4.9); the local listener still stops
+            // because this resident is going away.
+            if (backgroundCertified && broker && session.stores?.publication) {
+              for (const lane of [session.backgroundLane, session.shell]) {
+                if (!lane?.publisher) continue;
+                await detachBackgroundPublishers({
+                  managed: session.managed,
+                  lane,
+                  writerOwner: session.stores.publication,
+                  brokerOptions: broker,
+                  childRuns: session.childRuns,
+                  monitors: session.monitors,
+                });
+              }
+            }
             await session.shell?.publisher?.close();
             await session.backgroundLane?.publisher?.close();
             done.publishers = true;
@@ -5207,18 +5458,35 @@ export function registerHostedHarnessSessionRoutes(
             // The memoized seal: a retry reconciles this same seal. The wake
             // stamp is what the pump would pick from the prefix this seal
             // closes, recomputed on every retry.
-            let wake: { pending: boolean; dueAt: number } | undefined;
-            if (session.stores?.supportsWakeDispatch?.()) {
+            let wake: ManagedSessionWakeStamp | undefined;
+            if (actionPark) {
+              wake = {
+                pending: false,
+                dueAt: 0,
+                parkedTurn: {
+                  promptId: actionPark.promptId,
+                  wakeAt: actionPark.wakeAt,
+                  ...(actionPark.approvalRevision === undefined
+                    ? {}
+                    : { approvalRevision: actionPark.approvalRevision }),
+                },
+              };
+            } else if (session.stores?.supportsWakeDispatch?.()) {
               const { first, earliestDeferred } = pickWakeInputs(
                 session,
                 Date.now(),
               );
               wake =
                 first !== undefined
-                  ? { pending: true, dueAt: 0 }
+                  ? {
+                      pending: true,
+                      dueAt: 0,
+                      ...(backgroundCertified ? { backgroundHeld: true } : {}),
+                    }
                   : {
                       pending: earliestDeferred !== undefined,
                       dueAt: earliestDeferred ?? 0,
+                      ...(backgroundCertified ? { backgroundHeld: true } : {}),
                     };
             }
             await session.managed.authority.close(wake);
@@ -6429,14 +6697,10 @@ export function registerHostedHarnessSessionRoutes(
               ? await findHostedMemoryResults(resident.managed, parked)
               : undefined;
           if (model || approval || memoryResults) {
-            const user = (await resident.managed.sink.project()).find(
-              (item) => item.type === 'user' && item.daemonPromptId === parked,
+            const text = await hostedOriginalPromptText(
+              resident.managed,
+              parked,
             );
-            const text = user?.message?.parts
-              ?.flatMap((part) =>
-                typeof part.text === 'string' ? [part.text] : [],
-              )
-              .join('\n');
             if (!text)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
@@ -8401,15 +8665,7 @@ export function registerHostedHarnessSessionRoutes(
             pendingCommandApproval ??
             (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
-            const user = (await managed.sink.project()).find(
-              (item) =>
-                item.type === 'user' && item.daemonPromptId === unsettled,
-            );
-            const text = user?.message?.parts
-              ?.flatMap((part) =>
-                typeof part.text === 'string' ? [part.text] : [],
-              )
-              .join('\n');
+            const text = await hostedOriginalPromptText(managed, unsettled);
             if (!text)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
@@ -8870,6 +9126,22 @@ export function registerHostedHarnessSessionRoutes(
           resumeModel,
           body?.['cancellationTakeover'] === true,
         );
+      const deliveryRecoveryLane = session.backgroundLane ?? session.shell;
+      if (
+        brokerOptions &&
+        deliveryRecoveryLane &&
+        session.stores?.publication &&
+        !unsettledPromptId(session)
+      ) {
+        await reattachAndDrainBackgroundDeliveries({
+          managed,
+          lane: deliveryRecoveryLane,
+          writerOwner: session.stores.publication,
+          brokerOptions,
+          childRuns: session.childRuns,
+          monitors: session.monitors,
+        });
+      }
       if (
         brokerOptions &&
         hasHostedCleanupDebt(managed) &&
@@ -10004,6 +10276,7 @@ export function registerHostedHarnessSessionRoutes(
             deadlineMs as number,
           );
     timer?.unref();
+    session.deadlineTimer = timer;
     session.active = { promptId, digest, abort };
     void (async () => {
       // A settled Turn's owed file-history retirement runs at admission,
@@ -10163,6 +10436,7 @@ export function registerHostedHarnessSessionRoutes(
           );
       } finally {
         if (timer) clearTimeout(timer);
+        if (session.deadlineTimer === timer) session.deadlineTimer = undefined;
         // Backstop for the admission-time retirement: it must finish inside
         // the busy flag, before the Session is re-admittable — a fresh
         // prompt meeting the still-pending marker would block with no
@@ -11450,10 +11724,17 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     terminal: boolean,
     rethrowOnFailure = false,
+    probeOnly = false,
+    retainPromptId?: string,
   ): Promise<boolean> => {
     await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
-    if (lease === undefined || !brokerOptions) return false;
+    if (
+      lease === undefined ||
+      !brokerOptions ||
+      lease.promptId === retainPromptId
+    )
+      return false;
     if (
       session.mcp &&
       lease.runtimeSessionId !== hostedRuntimeSessionId(lease.promptId)
@@ -11464,14 +11745,22 @@ export function registerHostedHarnessSessionRoutes(
       session,
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
       lease,
-      true,
+      !probeOnly,
       terminal,
     ).then(
       (outcome) => {
-        if (outcome !== 'released' && outcome !== 'deferred')
+        // A suspension release stops nothing (§4.9): the Broker confirmed
+        // this hold is a background execution of the current binding and
+        // generation, so 'held' is its success. Foreground debt still fails.
+        if (
+          outcome !== 'released' &&
+          outcome !== 'deferred' &&
+          !(probeOnly && outcome === 'held')
+        )
           throw new Error('Original Runtime cleanup is still owed.');
         // Only a non-terminal handback can defer, so a deferral here always
-        // means the owner really was left running.
+        // means the owner really was left running. A certified background
+        // hold is proven by the Broker's own answer, not left unproven.
         unproven = outcome === 'deferred';
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;

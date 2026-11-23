@@ -79,6 +79,7 @@ describe('Managed Agent gate scope', () => {
     '.github/workflows/managed-agent-gate.yml',
     '.github/scripts/managed-agent-gate-scope.mjs',
     '.github/scripts/managed-agent-gate-tier.sh',
+    '.github/scripts/maven-cache-seed.sh',
   ])('runs the suite for %s', (path) => {
     expect(touchesManagedAgent(['README.md', path])).toBe(true);
   });

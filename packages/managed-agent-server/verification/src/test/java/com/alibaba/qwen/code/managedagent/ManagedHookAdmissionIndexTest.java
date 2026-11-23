@@ -158,12 +158,12 @@ class ManagedHookAdmissionIndexTest {
             assertThatThrownBy(
                             () ->
                                     jdbc.update(
-                                            "INSERT INTO ma_session_record (session_scope_key,"
-                                                + " record_key, tenant_id, workspace_id,"
+                                            "INSERT INTO ma_session_record ("
+                                                + "record_key, tenant_id, workspace_id,"
                                                 + " session_id, domain, record_id, operation_hash,"
                                                 + " revision, record_resource_id, gmt_create,"
                                                 + " hook_once_key_hash, hook_occurrence_hash,"
-                                                + " hook_ordinal) SELECT session_scope_key, ?,"
+                                                + " hook_ordinal) SELECT ?,"
                                                 + " tenant_id, workspace_id, session_id, domain,"
                                                 + " 'duplicate', ?, 1, record_resource_id,"
                                                 + " gmt_create, "

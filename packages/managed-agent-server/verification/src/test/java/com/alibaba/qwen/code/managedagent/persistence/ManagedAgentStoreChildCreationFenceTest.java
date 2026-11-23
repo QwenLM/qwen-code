@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -82,15 +81,14 @@ class ManagedAgentStoreChildCreationFenceTest {
         // that key proves it evaluates the run's own row and not a
         // physically-near but unrelated record.
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_kind, session_scope_key, record_key, tenant_id,"
+                        + " (record_kind, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES ('DOMAIN', ?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES ('DOMAIN', ?, 'tenant', 'workspace', ?,"
                         + " 'child_run', ?, 'h', 1, ?, 'child_agent', ?,"
                         + " 'session', ?, 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", parent),
                 ManagedExtensionProjection.recordKey(parent, "child_run",
                         childRunId),
                 parent, childRunId, "resource-" + childRunId, taskState,

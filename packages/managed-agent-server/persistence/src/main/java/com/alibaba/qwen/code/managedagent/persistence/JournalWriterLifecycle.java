@@ -16,7 +16,6 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.dao.DuplicateKeyException;
@@ -169,8 +168,7 @@ final class JournalWriterLifecycle {
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
-        jdbc.update("INSERT IGNORE INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'OPEN', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId),
+        jdbc.update("INSERT IGNORE INTO ma_session_head (tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', 'OPEN', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 tenantId, sessionId, sessionId);
         if (authority != null) {
             JdbcWorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority,
@@ -192,34 +190,26 @@ final class JournalWriterLifecycle {
                 request.leaseMillis());
         List<String> kinds =
                 jdbc.queryForList(
-                        "SELECT head_kind FROM ma_session_head WHERE tenant_key = ? AND harness_key"
-                            + " = ? AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                        "SELECT head_kind FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ?"
+                            + " FOR UPDATE",
                         String.class,
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, has_activity_diagnostics = 0, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, has_activity_diagnostics = 0, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', gmt_modified = ? WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     request.writerId(),
                     initialLeaseUntil.getTime(),
                     tokenHash,
                     createdAt.getTime(),
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
             return new WriterGrant(1, JournalStoreRows.epochMillis(initialLeaseUntil), 0, 0, null, 0, false);
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, has_activity_diagnostics, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, 0, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
-                    RuntimeAdmissionFences
-                            .harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences
-                            .harnessDrainKey(sessionId),
+                    "INSERT INTO ma_session_head (harness_session_id, head_kind, tenant_id, workspace_id, session_id, has_activity_diagnostics, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, 'MANAGED_SESSION', ?, ?, ?, 0, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
                     sessionId,
                     tenantId,
                     request.workspaceId(),
@@ -262,11 +252,9 @@ final class JournalWriterLifecycle {
             Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                     plusMillis(now, request.leaseMillis()));
             jdbc.update(
-                    "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                    "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_id = ? AND harness_session_id = ?",
                     leaseUntil.getTime(),
                     now.getTime(),
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
             return grant(head, leaseUntil, true);
@@ -283,15 +271,13 @@ final class JournalWriterLifecycle {
         // pace, so a crash after accepting an immediate input is recovered as
         // today; it never lowers a delay a claim just set.
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_seal_background = 0, wake_seal_parked_prompt_id = NULL, wake_seal_parked_until = NULL, wake_seal_parked_approval_revision = NULL, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_id = ? AND harness_session_id = ?",
                 generation,
                 request.writerId(),
                 leaseUntil.getTime(),
                 tokenHash,
                 now.getTime(),
                 now.getTime() + JdbcWakeRecoveryStore.RETRY_MS,
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
         return new WriterGrant(generation, JournalStoreRows.epochMillis(leaseUntil),
@@ -324,11 +310,9 @@ final class JournalWriterLifecycle {
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
         jdbc.update(
-                "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_id = ? AND harness_session_id = ?",
                 leaseUntil.getTime(),
                 now.getTime(),
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
         if (request.activation() != null) {
@@ -356,9 +340,8 @@ final class JournalWriterLifecycle {
                                 + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
                         until, activation.renewalSeq(), tenantId, sessionId, row.revision());
                 jdbc.update("UPDATE ma_session_head SET activation_expires_at = ?"
-                                + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                        until, RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
+                                + " WHERE tenant_id = ? AND harness_session_id = ?",
+                        until, tenantId, sessionId);
             }
             var lease = new ManagedSessionStoreModels.ActivationLease(
                     activation.activationId(), activation.epoch(), activation.renewalSeq(), until);
@@ -394,16 +377,29 @@ final class JournalWriterLifecycle {
         Timestamp now = storeRows.databaseNow();
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, false);
+        boolean stagedWake = JdbcRuntimeStageStore.hasWakeWorthyRow(
+                jdbc, ManagedSessionStore.sessionScopeKey(tenantId, sessionId));
         WakeStamp wake = request.wake();
         if (wake == null) {
-            jdbc.update(
-                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_key = ?"
-                        + " AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                    now.getTime(),
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
-                    tenantId,
-                    sessionId);
+            if (stagedWake) {
+                jdbc.update(
+                        "UPDATE ma_session_head SET state = 'SEALED', is_wake_pending = TRUE,"
+                            + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
+                            + " THEN ? ELSE wake_retry_at END, gmt_modified = ? WHERE tenant_id = ? AND"
+                            + " harness_session_id = ?",
+                        now.getTime(),
+                        now.getTime(),
+                        now.getTime(),
+                        tenantId,
+                        sessionId);
+            } else {
+                jdbc.update(
+                        "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_id = ? AND"
+                            + " harness_session_id = ?",
+                        now.getTime(),
+                        tenantId,
+                        sessionId);
+            }
             return new SealReceipt(head.writerGeneration(), "SEALED", false);
         }
         JournalStoreRows.validateCounter(wake.revision(), "wake.revision", 0);
@@ -415,16 +411,61 @@ final class JournalWriterLifecycle {
             throw JournalStoreRows.conflict("managed_session_wake_stamp_stale",
                     "The wake stamp does not match the committed journal revision.");
         }
-        String tenantKey = RuntimeAdmissionFences.harnessDrainKey(tenantId);
-        String sessionKey = RuntimeAdmissionFences.harnessDrainKey(sessionId);
-        jdbc.update(
-                "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?, wake_seal_revision = journal_revision,"
-                    + " wake_head_revision = journal_revision, is_wake_pending = ?"
-                    + (wake.pending() ? ", wake_retry_at = ?" : "")
-                    + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                wake.pending()
-                        ? new Object[] {now.getTime(), true, wake.dueAt(), tenantKey, sessionKey, tenantId, sessionId}
-                        : new Object[] {now.getTime(), false, tenantKey, sessionKey, tenantId, sessionId});
+        boolean effectivePending = wake.pending() || stagedWake;
+        ManagedSessionStoreModels.ParkedTurn parked = wake.parkedTurn();
+        if (parked != null) {
+            // Only the client's own wake claim contradicts a park certificate;
+            // server-discovered staged work seals through the staged-wake
+            // path below, which clears the parked fields safely.
+            if (wake.pending() || wake.backgroundHeld()) {
+                throw JournalStoreRows.invalid(
+                        "A parked Turn cannot share a wake-pending or background seal.");
+            }
+            JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId");
+            JournalStoreRows.validateCounter(parked.wakeAt(), "wake.parkedTurn.wakeAt", 0);
+            if (parked.approvalRevision() != null) {
+                JournalStoreRows.validateCounter(parked.approvalRevision(),
+                        "wake.parkedTurn.approvalRevision", 0);
+            }
+        }
+        if (stagedWake) {
+            jdbc.update(
+                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
+                        + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
+                        + " wake_seal_background = ?, is_wake_pending = TRUE,"
+                        + " wake_seal_parked_prompt_id = NULL, wake_seal_parked_until = NULL,"
+                        + " wake_seal_parked_approval_revision = NULL,"
+                        + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
+                        + " THEN ? ELSE wake_retry_at END"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?",
+                    now.getTime(),
+                    wake.backgroundHeld(),
+                    now.getTime(),
+                    now.getTime(),
+                    tenantId,
+                    sessionId);
+        } else {
+            List<Object> parameters = new java.util.ArrayList<>();
+            parameters.add(now.getTime());
+            parameters.add(wake.backgroundHeld());
+            parameters.add(effectivePending);
+            parameters.add(parked == null ? null : parked.promptId());
+            parameters.add(parked == null ? null : parked.wakeAt());
+            parameters.add(parked == null ? null : parked.approvalRevision());
+            if (effectivePending) {
+                parameters.add(wake.dueAt());
+            }
+            parameters.add(tenantId);
+            parameters.add(sessionId);
+            jdbc.update(
+                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?, wake_seal_revision = journal_revision,"
+                        + " wake_head_revision = journal_revision, wake_seal_background = ?, is_wake_pending = ?,"
+                        + " wake_seal_parked_prompt_id = ?, wake_seal_parked_until = ?,"
+                        + " wake_seal_parked_approval_revision = ?"
+                        + (effectivePending ? ", wake_retry_at = ?" : "")
+                        + " WHERE tenant_id = ? AND harness_session_id = ?",
+                    parameters.toArray());
+        }
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
     }
 
@@ -478,9 +519,9 @@ final class JournalWriterLifecycle {
         receipt.put("state", "RELEASED");
         // Normalize integer nodes to the representation read back from the stored JSON.
         receipt = (ObjectNode) ManagedExtensionRecordStore.parse(receipt.toString());
-        var saved = jdbc.query("SELECT record_resource_id FROM ma_session_record WHERE session_scope_key = ?"
-                + " AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_kind = 'DOMAIN'",
-                (row, index) -> row.getString(1), scope, recordKey, tenantId, sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN);
+        var saved = jdbc.query("SELECT record_resource_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
+                + " AND record_key = ? AND domain = ? AND record_kind = 'DOMAIN'",
+                (row, index) -> row.getString(1), tenantId, sessionId, recordKey, JdbcHarnessPlacementStore.RELEASE_DOMAIN);
         if (!saved.isEmpty()) {
             var resource = storeRows.findResource(scope, saved.getFirst());
             if (resource == null) {
@@ -518,22 +559,22 @@ final class JournalWriterLifecycle {
         }
         ManagedHarnessReleaseRecords.require(receipt);
         String resourceKey = ManagedSessionStore.resourceKey(scope, resourceId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at)"
-                + " VALUES (?, ?, ?, ?, ?, ?, 'managed-hosted_harness_release', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', ?, ?)",
-                resourceKey, scope, tenantId, request.workspaceId(), sessionId, resourceId,
+                + " VALUES (?, ?, ?, ?, ?, 'managed-hosted_harness_release', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', ?, ?)",
+                resourceKey, tenantId, request.workspaceId(), sessionId, resourceId,
                 bytes.length, JournalStoreRows.sha256(bytes), bytes, now.getTime(), now.getTime());
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id,"
                 + " domain, record_id, operation_hash, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", scope, recordKey, tenantId,
+                + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", recordKey, tenantId,
                 request.workspaceId(), sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN, recordId, JournalStoreRows.sha256(request.operationId().getBytes(StandardCharsets.UTF_8)),
                 resourceId, now.getTime(), now.getTime(), head.committedSequence());
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
-                + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, 1, ?, ?, ?, ?, ?, ?)",
-                scope, recordKey, resourceKey, tenantId, request.workspaceId(), sessionId, resourceId, now.getTime());
-        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ?"
-                + " AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", now.getTime(),
-                RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key,"
+                + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES ('SESSION_RECORD', ?, 1, ?, ?, ?, ?, ?, ?)",
+                recordKey, resourceKey, tenantId, request.workspaceId(), sessionId, resourceId, now.getTime());
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_id = ? AND"
+                + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION'", now.getTime(),
+                tenantId, sessionId);
         jdbc.update("UPDATE ma_session SET harness_placement_state = 'RELEASED' WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId);
         return receipt;
@@ -577,13 +618,11 @@ final class JournalWriterLifecycle {
         }
         jdbc.update(
                 "UPDATE ma_session_head SET recovery_status = ?, recovery_detail_code = ?,"
-                    + " gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                    + " AND session_id = ?",
+                    + " gmt_modified = ? WHERE tenant_id = ? AND"
+                    + " harness_session_id = ?",
                 request.recoveryStatus(),
                 request.recoveryDetailCode(),
                 now.getTime(),
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
         return new RecoveryStateReceipt(head.writerGeneration(),
@@ -599,12 +638,10 @@ final class JournalWriterLifecycle {
     boolean hasLiveWriter(String tenantId, String sessionId) {
         List<Timestamp> leases =
                 jdbc.query(
-                        "SELECT writer_lease_until FROM ma_session_head WHERE tenant_key = ? AND"
-                            + " harness_key = ? AND tenant_id = ? AND session_id = ? AND state ="
+                        "SELECT writer_lease_until FROM ma_session_head WHERE tenant_id = ? AND"
+                            + " harness_session_id = ? AND state ="
                             + " 'ACTIVE' FOR UPDATE",
                         (result, row) -> ManagedSchemaTime.timestamp(result, "writer_lease_until"),
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         return !leases.isEmpty() && leases.getFirst() != null
