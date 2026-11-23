@@ -248,6 +248,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
   turn_skill_file_snapshot: { since: 'v1' },
+  session_retire_if_idle: { since: 'v1' },
   // Qualified-only deletion of regular files in trusted local workspaces.
   workspace_file_delete: { since: 'v1' },
   workspace_directory_create: { since: 'v1' },

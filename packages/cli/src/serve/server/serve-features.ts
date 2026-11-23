@@ -73,6 +73,7 @@ interface CreateServeFeaturesDeps {
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
   turnSkillFileSnapshotAvailable?: () => boolean;
+  sessionRetireIfIdleAvailable?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
   getEnv?: () => Readonly<Record<string, string | undefined>>;
 }
@@ -143,6 +144,7 @@ export function createServeFeatures(
       const currentAcpHttpEnabled =
         acpHttpEnabled ?? resolveAcpHttpEnabled(env as NodeJS.ProcessEnv);
       return getAdvertisedServeFeatures(undefined, {
+        sessionRetireIfIdleAvailable: deps.sessionRetireIfIdleAvailable?.(),
         hostedHarness: opts.profile === 'hosted-harness',
         requireAuth: opts.requireAuth === true,
         turnSkillFileSnapshotAvailable: deps.turnSkillFileSnapshotAvailable?.(),

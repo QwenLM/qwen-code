@@ -7248,6 +7248,130 @@ export function registerSessionRoutes(
     ),
   );
 
+  const retirementPath = '/session/:id/retirements/:operationId';
+  const retirementId = z.string().uuid();
+  const retirementRuntimes = () =>
+    workspaceRegistry
+      .listAll()
+      .filter(
+        (runtime) =>
+          runtime.trusted &&
+          !isInternalWorkspaceRuntime(runtime) &&
+          !runtime.routeFileSystemFactory.sshWorkspace &&
+          runtime.bridge.getSessionRetirement !== undefined,
+      );
+  const sendRetirement = (
+    res: Response,
+    receipt: NonNullable<
+      ReturnType<NonNullable<AcpSessionBridge['getSessionRetirement']>>
+    >,
+  ) =>
+    res
+      .set('Cache-Control', 'no-store')
+      .status(receipt.state === 'retired' ? 200 : 202)
+      .json(receipt);
+  app.get(retirementPath, (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const operation = retirementId.safeParse(req.params['operationId']);
+    if (!operation.success) {
+      res.status(400).json({ code: 'invalid_session_retirement' });
+      return;
+    }
+    const route = 'GET /session/:id/retirements/:operationId';
+    try {
+      const receipts = retirementRuntimes().flatMap(({ bridge }) => {
+        const receipt = bridge.getSessionRetirement?.(
+          sessionId,
+          operation.data,
+        );
+        return receipt ? [receipt] : [];
+      });
+      if (receipts.length === 1 && receipts[0])
+        sendRetirement(res, receipts[0]);
+      else if (receipts.length > 1)
+        res.status(409).json({ code: 'session_retire_identity_conflict' });
+      else res.status(404).json({ code: 'session_retire_receipt_unavailable' });
+    } catch (error) {
+      sendBridgeError(res, error, { route, sessionId });
+    }
+  });
+
+  app.put(retirementPath, mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const operation = retirementId.safeParse(req.params['operationId']);
+    const expected = retirementId.safeParse(
+      safeBody(req)['expectedEventEpoch'],
+    );
+    if (!operation.success || !expected.success) {
+      res.status(400).json({ code: 'invalid_session_retirement' });
+      return;
+    }
+    const identity = {
+      sessionId,
+      eventEpoch: expected.data,
+      operationId: operation.data,
+    };
+    const route = 'PUT /session/:id/retirements/:operationId';
+    try {
+      const existing = retirementRuntimes().flatMap(({ bridge }) => {
+        const receipt = bridge.getSessionRetirement?.(sessionId);
+        return receipt ? [receipt] : [];
+      });
+      if (existing.length) {
+        if (
+          existing.length !== 1 ||
+          existing[0]?.operationId !== identity.operationId ||
+          existing[0].eventEpoch !== identity.eventEpoch
+        )
+          res
+            .status(409)
+            .json({ ...identity, code: 'session_retire_identity_conflict' });
+        else sendRetirement(res, existing[0]);
+        return;
+      }
+      const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
+      if (!owner) return;
+      const runtime = owner.runtime;
+      if (
+        !retirementRuntimes().includes(runtime) ||
+        !runtime.bridge.retireSessionIfIdle
+      ) {
+        res
+          .status(409)
+          .json({ ...identity, code: 'session_retire_unavailable' });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      runtime.generationGuard?.assertOpen();
+      const receipt = await runtime.bridge.retireSessionIfIdle(
+        identity,
+        clientId === undefined ? undefined : { clientId },
+      );
+      sendRetirement(res, receipt);
+    } catch (error) {
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? error.code
+          : undefined;
+      if (
+        code === 'session_retire_busy' ||
+        code === 'session_retire_epoch_mismatch' ||
+        code === 'session_retire_identity_conflict'
+      ) {
+        res.status(409).json({
+          ...identity,
+          code,
+          ...(code === 'session_retire_busy'
+            ? { definitivelyNotStarted: true }
+            : {}),
+        });
+      } else sendBridgeError(res, error, { route, sessionId });
+    }
+  });
+
   app.get(
     '/session/:id/status',
     withOwnerReadSession(
@@ -7277,7 +7401,15 @@ export function registerSessionRoutes(
           summary.lastUserPromptAt = undefined;
         }
         runtime.generationGuard?.assertOpen();
-        res.status(200).json(summary);
+        res.status(200).json({
+          ...summary,
+          ...(runtime.bridge.retireSessionIfIdle
+            ? {
+                sessionId,
+                eventEpoch: runtime.bridge.getSessionEventEpoch(sessionId),
+              }
+            : {}),
+        });
       },
     ),
   );

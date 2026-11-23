@@ -3749,6 +3749,16 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'session_retire_if_idle') {
+          expect(predicate({ sessionRetireIfIdleAvailable: true })).toBe(true);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionRetireIfIdleAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
         if (feature === 'turn_skill_file_snapshot') {
           expect(predicate({ turnSkillFileSnapshotAvailable: true })).toBe(
             true,
@@ -21549,6 +21559,82 @@ describe('createServeApp', () => {
       expect(mismatchedNew.status).toBe(409);
       expect(mismatchedNew.body.code).toBe('turn_skill_digest_mismatch');
       expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('returns exact retirement identities, busy refusal, and the stored receipt', async () => {
+      const sessionId = 'session-A';
+      const eventEpoch = '869de41b-bf9e-44ee-aa21-ab64a3af220a';
+      const operationId = '4279fbbe-7845-49a8-87fe-9cd4cc61b19c';
+      const pathName = `/session/${sessionId}/retirements/${operationId}`;
+      const bridge = fakeBridge({
+        getSessionEventEpochImpl: () => eventEpoch,
+        summaryImpl: () => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-11-01T00:00:00Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      let busy = true;
+      let received:
+        | Awaited<ReturnType<NonNullable<typeof bridge.retireSessionIfIdle>>>
+        | undefined;
+      bridge.getSessionRetirement = (id, operation) =>
+        id === sessionId && (!operation || operation === operationId)
+          ? received
+          : undefined;
+      bridge.retireSessionIfIdle = vi.fn(async (identity) => {
+        if (busy)
+          throw Object.assign(new Error('held'), {
+            code: 'session_retire_busy',
+          });
+        received = { ...identity, state: 'retired' };
+        return received;
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const host = `127.0.0.1:${baseOpts.port}`;
+      const caps = await request(app).get('/capabilities').set('Host', host);
+      expect(caps.body.features).toContain('session_retire_if_idle');
+      const status = await request(app)
+        .get(`/session/${sessionId}/status`)
+        .set('Host', host);
+      expect(status.status).toBe(200);
+      expect(status.body).toMatchObject({ sessionId, eventEpoch });
+      const put = () =>
+        request(app)
+          .put(pathName)
+          .set('Host', host)
+          .send({ expectedEventEpoch: eventEpoch });
+      const refused = await put();
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({
+        sessionId,
+        eventEpoch,
+        operationId,
+        definitivelyNotStarted: true,
+        code: 'session_retire_busy',
+      });
+      expect((await request(app).get(pathName).set('Host', host)).status).toBe(
+        404,
+      );
+      busy = false;
+      const accepted = await put();
+      expect(accepted.status).toBe(200);
+      expect(accepted.body).toEqual({
+        sessionId,
+        eventEpoch,
+        operationId,
+        state: 'retired',
+      });
+      expect((await put()).body).toEqual(accepted.body);
+      expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
+        accepted.body,
+      );
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(2);
     });
 
     it('scopes idempotency keys per session (W4)', async () => {

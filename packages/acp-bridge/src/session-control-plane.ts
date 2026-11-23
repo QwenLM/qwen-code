@@ -11,6 +11,13 @@ import {
   parseSessionStartupConfig,
   type SessionStartupConfig,
 } from './session-startup-config.js';
+import {
+  SessionRetirementError,
+  SessionRetirementLedger,
+  isRetirementId,
+  type SessionRetirementIdentity,
+  type SessionRetirementReceipt,
+} from './session-retirement.js';
 import { randomUUID } from 'node:crypto';
 import { forwardPrompt } from './channel-connection.js';
 import * as path from 'node:path';
@@ -2586,6 +2593,28 @@ export function createSessionControlPlane(
     | undefined;
   let liveTaskToolRequestHandler: LiveTaskToolRequestHandler | undefined;
   let liveSpeakToUserHandler: LiveSpeakToUserHandler | undefined;
+  const retirementLedger =
+    opts.artifactSnapshotRuntimeBaseDir && process.platform !== 'win32'
+      ? new SessionRetirementLedger(
+          opts.artifactSnapshotRuntimeBaseDir,
+          opts.boundWorkspace,
+        )
+      : undefined;
+  const retiringSessions = new Set<string>();
+
+  function getSessionRetirement(sessionId: string, operationId?: string) {
+    const receipt = retirementLedger?.read(sessionId);
+    if (
+      !receipt ||
+      (operationId !== undefined && receipt.operationId !== operationId)
+    )
+      return undefined;
+    if (receipt.state === 'retiring' && !retiringSessions.has(sessionId)) {
+      return { ...receipt, state: 'result_unknown' as const };
+    }
+    return receipt;
+  }
+
   const defaultSessionScope = opts.sessionScope ?? 'single';
   // Resolved once beside the other option defaults: this default is
   // load-bearing for every non-daemon consumer, and reading `?? true` inline
@@ -8889,6 +8918,7 @@ export function createSessionControlPlane(
         );
       }
     }
+    retirementLedger?.assertOpen(req.sessionId);
     req = { ...req };
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
@@ -10127,6 +10157,7 @@ export function createSessionControlPlane(
     sessionId: string,
     context?: BridgeClientRequestContext,
     closeOpts?: CloseSessionOpts,
+    retirement?: SessionRetirementIdentity,
   ): Promise<void> {
     if (closeOpts?.cause !== 'workspace_runtime_stop')
       assertRuntimeNotStopping();
@@ -10166,6 +10197,7 @@ export function createSessionControlPlane(
     if (context?.clientId !== undefined) {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
     }
+    if (retirement) retirementLedger?.begin(retirement);
     entry.closing = true;
     // DAEMON-005: remember the deferred-close stamp before clearing it. If the
     // child refuses the close, the session is still alive and may need the
@@ -10245,6 +10277,11 @@ export function createSessionControlPlane(
       // unknown outcome because the close RPC may already have succeeded.
       // Terminate that process so its leases become stale and channel-exit
       // cleanup removes every bridge entry it owned.
+      if (retirement) {
+        // The durable fence remains authoritative after any ambiguous close.
+        // Do not terminate a shared ACP child and disturb other sessions.
+        throw error;
+      }
       if (isDefinitiveAcpRequestError(error)) {
         entry.closing = false;
         // DAEMON-005: the child refused the close and the session remains live.
@@ -10268,9 +10305,17 @@ export function createSessionControlPlane(
       throw error;
     }
     if (requireIdle && !agentSessionClosed) {
+      if (retirement) retirementLedger?.releaseNotStarted(retirement);
       entry.closing = false;
       if (deferredCloseStamp !== null) {
         entry.promptSettledAt = deferredCloseStamp;
+      }
+      if (retirement) {
+        throw new SessionRetirementError(
+          'session_retire_busy',
+          'The native owner refused retirement before starting it',
+          retirement,
+        );
       }
       throw new SessionBusyError(
         sessionId,
@@ -11275,6 +11320,8 @@ export function createSessionControlPlane(
     },
 
     async spawnOrAttach(req) {
+      if (req.sessionId !== undefined)
+        retirementLedger?.assertOpen(req.sessionId);
       if (shuttingDown) {
         // `runQwenServe.close()` calls `bridge.shutdown()` BEFORE
         // `server.close()`. During that window, established HTTP
@@ -11753,6 +11800,7 @@ export function createSessionControlPlane(
       // a prompt that was never enqueued, and a channel relay would mark the
       // event delivered and lose it instead of waking the session and
       // retrying.
+      retirementLedger?.assertOpen(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       if (isClosingOrAuthorizingClose(entry)) {
         throw new SessionNotFoundError(
@@ -13783,6 +13831,83 @@ export function createSessionControlPlane(
       entry?.deferredRestoreAskUserQuestionPrompts?.delete(clientId);
     },
 
+    ...(retirementLedger
+      ? {
+          getSessionRetirement,
+          async retireSessionIfIdle(
+            identity: SessionRetirementIdentity,
+            context?: BridgeClientRequestContext,
+          ): Promise<SessionRetirementReceipt> {
+            const { sessionId, eventEpoch, operationId } = identity;
+            if (!isRetirementId(operationId) || !isRetirementId(eventEpoch)) {
+              throw new TypeError('Invalid session retirement identity');
+            }
+            const previous = retirementLedger.read(sessionId);
+            if (previous) {
+              if (
+                previous.operationId !== operationId ||
+                previous.eventEpoch !== eventEpoch
+              ) {
+                throw new SessionRetirementError(
+                  'session_retire_identity_conflict',
+                  'A different retirement already owns this native session',
+                  identity,
+                );
+              }
+              return getSessionRetirement(sessionId, operationId)!;
+            }
+            const entry = byId.get(sessionId);
+            if (!entry || entry.events.epoch !== eventEpoch) {
+              throw new SessionRetirementError(
+                'session_retire_epoch_mismatch',
+                'The native session generation has changed',
+                identity,
+              );
+            }
+            if (
+              isClosingOrAuthorizingClose(entry) ||
+              entryActiveWorkState(entry) !== 'idle' ||
+              entry.pendingPermissionIds.size > 0 ||
+              entry.pendingInteractions.size > 0 ||
+              entry.attachments.hasRetirementHold()
+            ) {
+              throw new SessionRetirementError(
+                'session_retire_busy',
+                'Native session has active, unconfirmed, or unarchived work',
+                identity,
+              );
+            }
+            retiringSessions.add(sessionId);
+            try {
+              await closeSessionImpl(
+                sessionId,
+                context,
+                {
+                  requireIdle: true,
+                  requireAgentClose: true,
+                  reason: 'retirement',
+                  agentCloseTimeoutMs: 10_000,
+                },
+                identity,
+              );
+              return retirementLedger.settle(identity, 'retired');
+            } catch (error) {
+              const recorded = retirementLedger.read(sessionId);
+              if (
+                recorded?.operationId !== operationId ||
+                recorded.eventEpoch !== eventEpoch
+              )
+                throw error;
+              if (recorded.state === 'retiring') {
+                return retirementLedger.settle(identity, 'result_unknown');
+              }
+              return recorded;
+            } finally {
+              retiringSessions.delete(sessionId);
+            }
+          },
+        }
+      : {}),
     async closeSession(sessionId, context, closeOpts) {
       return closeSessionImpl(sessionId, context, closeOpts);
     },
@@ -15877,6 +16002,7 @@ export function createSessionControlPlane(
     },
 
     createSessionAttachmentUpload(sessionId, metadata, context) {
+      retirementLedger?.assertOpen(sessionId);
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
@@ -15884,6 +16010,7 @@ export function createSessionControlPlane(
     },
 
     appendSessionAttachmentUpload(sessionId, uploadId, offset, data, context) {
+      retirementLedger?.assertOpen(sessionId);
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
@@ -15896,6 +16023,7 @@ export function createSessionControlPlane(
       context,
       assertCanCommit,
     ) {
+      retirementLedger?.assertOpen(sessionId);
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
@@ -15908,6 +16036,7 @@ export function createSessionControlPlane(
     },
 
     cancelSessionAttachmentUpload(sessionId, uploadId, context) {
+      retirementLedger?.assertOpen(sessionId);
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
@@ -15915,6 +16044,7 @@ export function createSessionControlPlane(
     },
 
     async storeSessionAttachment(sessionId, data, mimeType, context, name) {
+      retirementLedger?.assertOpen(sessionId);
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
@@ -15936,6 +16066,7 @@ export function createSessionControlPlane(
     },
 
     async removeSessionAttachment(sessionId, attachmentId, context) {
+      retirementLedger?.assertOpen(sessionId);
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
@@ -15943,6 +16074,7 @@ export function createSessionControlPlane(
     },
 
     async deleteSessionAttachments(sessionId, options) {
+      retirementLedger?.assertOpen(sessionId);
       const store =
         byId.get(sessionId)?.attachments ??
         new SessionAttachmentStore(

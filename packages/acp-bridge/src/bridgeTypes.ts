@@ -1457,6 +1457,15 @@ export interface SessionMetadataUpdate {
   prs?: SessionPrInfo[];
 }
 
+export type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+import type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+
 export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
@@ -2178,6 +2187,15 @@ export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
 }
 
 export interface AcpSessionBridge extends WorkspaceEventBridge {
+  retireSessionIfIdle?(
+    identity: SessionRetirementIdentity,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionRetirementReceipt>;
+  getSessionRetirement?(
+    sessionId: string,
+    operationId?: string,
+  ): SessionRetirementReceipt | undefined;
+
   /**
    * Immutable proof derived at construction: this bridge's frozen
    * child-environment overrides carry the exact Conversations provenance

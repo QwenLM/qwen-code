@@ -1226,6 +1226,16 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionRetireIfIdleAvailable: () =>
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              runtime.provenance !== 'live-conversation' &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              runtime.bridge.retireSessionIfIdle !== undefined,
+          ),
       turnSkillFileSnapshotAvailable: () =>
         workspaceRegistry
           .listAll()

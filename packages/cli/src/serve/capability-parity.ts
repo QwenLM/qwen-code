@@ -115,6 +115,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed sub-session send surface',
   ),
   session_prompt: { standing: 'managed', evidence: 'surface:TURN_SUBMIT' },
+  session_retire_if_idle: NO_MANAGED_EQUIVALENT(
+    'source-native retirement is available only on trusted local daemon sessions',
+  ),
   turn_skill_file_snapshot: NO_MANAGED_EQUIVALENT(
     'optional snapshot support is restricted to trusted local daemon sessions',
   ),
