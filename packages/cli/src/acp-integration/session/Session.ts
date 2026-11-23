@@ -487,7 +487,10 @@ import {
   getSlashCommandFirstToken,
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
-import { getAtPathCandidates } from '../../ui/utils/at-path-candidates.js';
+import {
+  getAtPathCandidates,
+  selectAtPathCandidateSync,
+} from '../../ui/utils/at-path-candidates.js';
 import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
@@ -21145,17 +21148,14 @@ export class Session implements SessionContext {
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const rawPathSpec of extractAtPathCommands(part.text)) {
-            const candidates = getAtPathCandidates(rawPathSpec);
-            const pathSpec =
-              candidates.length > 1
-                ? (candidates.find(
-                    (candidate) =>
-                      path.isAbsolute(candidate) &&
-                      resolveExistingFile(
-                        path.resolve(this.config.getProjectRoot(), candidate),
-                      ) !== undefined,
-                  ) ?? rawPathSpec)
-                : rawPathSpec;
+            const pathSpec = selectAtPathCandidateSync(
+              getAtPathCandidates(rawPathSpec),
+              [this.config.getProjectRoot()],
+              [
+                this.config.getProjectRoot(),
+                ...(this.config.getWorkspaceContext().getDirectories?.() ?? []),
+              ],
+            );
             if (!path.isAbsolute(pathSpec)) continue;
             const resolved = path.resolve(
               this.config.getProjectRoot(),

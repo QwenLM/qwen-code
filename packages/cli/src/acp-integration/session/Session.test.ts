@@ -9,7 +9,7 @@ import type { MockInstance } from 'vitest';
 import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import * as fsSync from 'node:fs';
+import fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -309,6 +309,25 @@ vi.mock('../../services/voice-transcriber.js', async (importOriginal) => {
   return {
     ...actual,
     transcribeVoiceAudio: transcribeVoiceAudioSpy,
+  };
+});
+
+const atPathCandidatesControl = vi.hoisted(() => ({
+  override: undefined as
+    | ((pathSpec: string) => string[] | undefined)
+    | undefined,
+}));
+
+vi.mock('../../ui/utils/at-path-candidates.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../ui/utils/at-path-candidates.js')
+    >();
+  return {
+    ...actual,
+    getAtPathCandidates: (pathSpec: string, platform?: NodeJS.Platform) =>
+      atPathCandidatesControl.override?.(pathSpec) ??
+      actual.getAtPathCandidates(pathSpec, platform),
   };
 });
 
@@ -27109,6 +27128,69 @@ describe('Session', () => {
       }
     });
 
+    it('falls back across multiple candidates to resolve an ACP text image on any platform', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-fallback-image-')),
+      );
+      const aliasPath = path.join(tempDir, 'missing-alias.png');
+      const imagePath = path.join(tempDir, 'my image.png');
+      await fs.writeFile(imagePath, 'image');
+      atPathCandidatesControl.override = (pathSpec) =>
+        pathSpec === aliasPath ? [aliasPath, imagePath] : undefined;
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[text @ fallback image]' }],
+        transcript: '[text @ fallback image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: `look at @${aliasPath}`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
+          paths: [imagePath],
+          signal: expect.any(AbortSignal),
+          preserveUnsupportedImageForBridge: true,
+          validatedPathIdentities: expect.any(Map),
+          displayPaths: new Map([[imagePath, imagePath]]),
+        });
+      } finally {
+        atPathCandidatesControl.override = undefined;
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('does not fall back to an unescaped sibling image when the literal ACP text path exists and is ignored', async () => {
       const tempDir = await fs.realpath(
         await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-literal-ignore-')),
@@ -27119,6 +27201,8 @@ describe('Session', () => {
       await fs.mkdir(path.dirname(siblingImage), { recursive: true });
       await fs.writeFile(literalImage, 'ignored-image');
       await fs.writeFile(siblingImage, 'sibling-image');
+      atPathCandidatesControl.override = (pathSpec) =>
+        pathSpec === literalImage ? [literalImage, siblingImage] : undefined;
       mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
       mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
         isPathWithinWorkspace: (pathSpec: string) =>
@@ -27156,6 +27240,71 @@ describe('Session', () => {
 
         expect(readManyFilesSpy).not.toHaveBeenCalled();
       } finally {
+        atPathCandidatesControl.override = undefined;
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not fall back to an unescaped sibling image when probing the literal ACP text path fails with EPERM', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-literal-eperm-')),
+      );
+      const literalImage = path.join(tempDir, 'dir', '#v2', 'pic.png');
+      const siblingImage = path.join(tempDir, 'dir#v2', 'pic.png');
+      await fs.mkdir(path.dirname(siblingImage), { recursive: true });
+      await fs.writeFile(siblingImage, 'sibling-image');
+      atPathCandidatesControl.override = (pathSpec) =>
+        pathSpec === literalImage ? [literalImage, siblingImage] : undefined;
+      const eperm = Object.assign(new Error('EPERM: operation not permitted'), {
+        code: 'EPERM',
+      });
+      const origLstatSync = fsSync.lstatSync.bind(fsSync);
+      const lstatSyncSpy = vi
+        .spyOn(fsSync, 'lstatSync')
+        .mockImplementation((target) => {
+          if (String(target) === literalImage) {
+            throw eperm;
+          }
+          return origLstatSync(target);
+        });
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getFileService = vi.fn().mockReturnValue({
+        shouldIgnoreFile: vi.fn().mockReturnValue(false),
+      });
+      mockConfig.getFileFilteringOptions = vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: 'should not read',
+          files: [],
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: `look at @${literalImage}`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+      } finally {
+        atPathCandidatesControl.override = undefined;
+        lstatSyncSpy.mockRestore();
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
       }

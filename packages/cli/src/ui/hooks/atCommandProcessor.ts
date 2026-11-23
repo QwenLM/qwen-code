@@ -46,7 +46,10 @@ import {
   matchMcpServerByRef,
   parseMcpServerRef,
 } from '../../utils/mcp-server-mention.js';
-import { getAtPathCandidates } from '../utils/at-path-candidates.js';
+import {
+  getAtPathCandidates,
+  selectAtPathCandidate,
+} from '../utils/at-path-candidates.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -190,35 +193,6 @@ export function extractAtPathCommands(query: string): string[] {
       ? [part.content.substring(1)]
       : [],
   );
-}
-
-async function selectAtPathCandidate(
-  pathName: string,
-  workspaceDirs: readonly string[],
-): Promise<string> {
-  const candidates = getAtPathCandidates(pathName);
-  if (candidates.length === 1) {
-    return pathName;
-  }
-  for (const candidate of candidates) {
-    if (path.isAbsolute(candidate)) {
-      try {
-        await fs.lstat(candidate);
-        return candidate;
-      } catch {
-        continue;
-      }
-    }
-    for (const dir of workspaceDirs) {
-      try {
-        await fs.lstat(path.resolve(dir, candidate));
-        return candidate;
-      } catch {
-        // Try next workspace directory.
-      }
-    }
-  }
-  return pathName;
 }
 
 /**
@@ -466,9 +440,11 @@ export async function resolveAtCommandQuery({
 
     // Check if path should be ignored based on filtering options
     const workspaceContext = config.getWorkspaceContext();
+    const workspaceDirs = workspaceContext.getDirectories();
     pathName = await selectAtPathCandidate(
-      pathName,
-      workspaceContext.getDirectories(),
+      getAtPathCandidates(pathName),
+      workspaceDirs,
+      [...workspaceDirs, configuredProjectTempDir, projectTempDir],
     );
 
     // Check if path is in project temp directory

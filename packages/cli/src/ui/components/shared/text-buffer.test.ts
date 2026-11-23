@@ -5,7 +5,7 @@
  */
 // @vitest-environment jsdom
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import { renderHook, act } from '@testing-library/react';
 import type {
@@ -25,6 +25,23 @@ import {
   __resetWordSegmenter,
 } from './text-buffer.js';
 import { cpLen } from '../../utils/textUtils.js';
+
+const atPathCandidatesControl = vi.hoisted(() => ({
+  override: undefined as
+    | ((pathSpec: string) => string[] | undefined)
+    | undefined,
+}));
+
+vi.mock('../../utils/at-path-candidates.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/at-path-candidates.js')>();
+  return {
+    ...actual,
+    getAtPathCandidates: (pathSpec: string, platform?: NodeJS.Platform) =>
+      atPathCandidatesControl.override?.(pathSpec) ??
+      actual.getAtPathCandidates(pathSpec, platform),
+  };
+});
 
 const initialState: TextBufferState = {
   lines: [''],
@@ -953,6 +970,10 @@ describe('useTextBuffer', () => {
       expect(getBufferState(result).text).toBe(filePaths);
     });
 
+    afterEach(() => {
+      atPathCandidatesControl.override = undefined;
+    });
+
     it('should recognize already-escaped paths with spaces when pasted', () => {
       const { result } = renderHook(() =>
         useTextBuffer({
@@ -970,23 +991,63 @@ describe('useTextBuffer', () => {
       );
     });
 
+    it('should fall back to the second candidate on any platform when pasting', () => {
+      atPathCandidatesControl.override = (pathSpec) =>
+        pathSpec === '/workspace/escaped-alias.txt'
+          ? ['/workspace/escaped-alias.txt', '/workspace/my file.txt']
+          : undefined;
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) => p === '/workspace/my file.txt',
+        }),
+      );
+      act(() =>
+        result.current.insert('/workspace/escaped-alias.txt', {
+          paste: true,
+        }),
+      );
+      expect(getBufferState(result).text).toBe('@/workspace/my\\ file.txt ');
+    });
+
+    it('should fall back to the second candidate when pasting a single-quoted path', () => {
+      atPathCandidatesControl.override = (pathSpec) =>
+        pathSpec === '/workspace/quoted-alias.txt'
+          ? ['/workspace/quoted-alias.txt', '/workspace/my file.txt']
+          : undefined;
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) => p === '/workspace/my file.txt',
+        }),
+      );
+      act(() =>
+        result.current.insert("'/workspace/quoted-alias.txt'", {
+          paste: true,
+        }),
+      );
+      expect(getBufferState(result).text).toBe('@/workspace/my\\ file.txt ');
+    });
+
     it('should prefer an existing literal path over unescaping when both match isValidPath', () => {
+      atPathCandidatesControl.override = (pathSpec) =>
+        pathSpec === '/workspace/literal.txt'
+          ? ['/workspace/literal.txt', '/workspace/sibling file.txt']
+          : undefined;
       const { result } = renderHook(() =>
         useTextBuffer({
           viewport,
           isValidPath: (p: string) =>
-            p === 'C:\\Users\\demo\\dir\\#v2\\file.txt' ||
-            p === 'C:\\Users\\demo\\dir#v2\\file.txt',
+            p === '/workspace/literal.txt' ||
+            p === '/workspace/sibling file.txt',
         }),
       );
       act(() =>
-        result.current.insert('C:\\Users\\demo\\dir\\#v2\\file.txt', {
+        result.current.insert('/workspace/literal.txt', {
           paste: true,
         }),
       );
-      expect(getBufferState(result).text).toBe(
-        '@C:\\Users\\demo\\dir\\#v2\\file.txt ',
-      );
+      expect(getBufferState(result).text).toBe('@/workspace/literal.txt ');
     });
 
     it('should handle Windows drive-letter paths', () => {
