@@ -109,7 +109,10 @@ final class ManagedLoopSkill {
      * null when it was not (so the caller validates {@code merged} itself). The
      * returned catalog is the single validated/serialized pass — the admission
      * reuses it instead of re-validating. {@code merged} already holds the pinned
-     * definition's skills; the caller skills are appended after them. The variant
+     * definition's skills; on every profile but the external files lane the caller
+     * skills are appended after them. The external creation pin already carries the
+     * caller catalog, so there {@code merged} is the whole caller set and
+     * {@code callerSkills} is neither appended nor counted as definitions. The variant
      * replaces only the Web Shell's bundled {@code loop} import, carrying over
      * that entry's model_invocable / user_invocable flags; a user-authored or
      * definition-authored {@code loop} is preserved and suppresses the variant
@@ -127,7 +130,14 @@ final class ManagedLoopSkill {
             List<Map<String, Object>> callerSkills, String profile,
             boolean sessionSkillsSupported, List<StandaloneSkill> packageSkills) {
         int definitionCount = merged.size();
-        merged.addAll(callerSkills);
+        if (WorkspaceToolProfiles.isExternal(profile)) {
+            // External creationPin already carried the caller skills into the pin;
+            // appending them again duplicates every name and the catalog validation
+            // refuses the creation. The pin slice is the whole caller catalog here.
+            definitionCount = 0;
+        } else {
+            merged.addAll(callerSkills);
+        }
         if (!sessionSkillsSupported) {
             return null;
         }
