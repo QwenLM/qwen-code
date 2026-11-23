@@ -968,6 +968,18 @@ describe('ChatCompressionService', () => {
     expect(digest).not.toContain(CSI8);
   });
 
+  it('consumes an OSC string whose terminator is on a later line (#17322)', async () => {
+    // `.` does not cross a line terminator without the `s` flag, so an OSC
+    // string spanning lines fell through to the two-byte form: the ESC ]
+    // pair was stripped, but the payload and the BEL stayed in the digest.
+    const lines = await digestLines([
+      failingTurn('t', `${ESC}]0;PWNED\nline2${BEL}after`),
+    ]);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe('- t: after');
+    expect(lines[1]).not.toContain(BEL);
+  });
+
   it('flattens VT, FF, NEL, U+2028 and U+2029 line terminators (#17322 F5)', async () => {
     const lines = await digestLines([
       failingTurn('t', `a\u000Bb\u000Cc\u0085d\u2028e\u2029f`),

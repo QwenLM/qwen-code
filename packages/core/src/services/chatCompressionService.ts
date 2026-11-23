@@ -483,7 +483,10 @@ const BEL = String.fromCharCode(7);
 // OSC strings (ESC ] ... BEL | ESC \), the general two-byte escape form
 // (ESC + optional intermediates + a final byte, covering `ESC c`, `ESC 7`,
 // `ESC M`, ...), and the 8-bit CSI form (U+009B). A trailing catch-all
-// drops any ESC left stranded by an unterminated sequence.
+// drops any ESC left stranded by an unterminated sequence. The `s` flag is
+// for the OSC branch, the only one with `.`: its terminator may sit on a
+// later line, and without the flag the branch fails there, so the payload
+// and the BEL stay behind.
 const ANSI_ESCAPE_PATTERN = new RegExp(
   [
     `${ESC}\\[[0-?]*[ -/]*[@-~]`,
@@ -492,7 +495,7 @@ const ANSI_ESCAPE_PATTERN = new RegExp(
     '\\u009B[0-?]*[ -/]*[@-~]',
     ESC,
   ].join('|'),
-  'g',
+  'gs',
 );
 // Every line terminator a terminal renders as a break, not just \n and \r
 // (#17322 F5): vertical tab, form feed, NEL (U+0085), U+2028, U+2029.
