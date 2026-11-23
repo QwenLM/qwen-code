@@ -73,7 +73,10 @@ import {
   spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 import { readConfigFile } from './read-config-file.js';
-import { normalizeUpdateModeInPlace } from '../utils/update-mode.js';
+import {
+  isUpdateMode,
+  normalizeUpdateModeInPlace,
+} from '../utils/update-mode.js';
 
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -406,6 +409,19 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       settingsFile.path,
     )) {
       warningSet.add(warning);
+    }
+
+    // The resolver already warns to the debug log and fails safe; this
+    // surfaces the mistake in the terminal UI so it actually gets fixed.
+    const generalSection = settingsObject['general'];
+    if (
+      isPlainObject(generalSection) &&
+      generalSection['updateMode'] !== undefined &&
+      !isUpdateMode(generalSection['updateMode'])
+    ) {
+      warningSet.add(
+        `Warning: general.updateMode in ${settingsFile.path} is invalid (${JSON.stringify(generalSection['updateMode'])}); expected "auto", "notify", or "off". The value is ignored in favor of a legacy general.enableAutoUpdate, and resolves to "notify" when no legacy key exists.`,
+      );
     }
   }
 
@@ -868,6 +884,9 @@ export class LoadedSettings {
     }
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    if (key === 'general.enableAutoUpdate' || key === 'general.updateMode') {
+      rederiveUpdateMode(settingsFile);
+    }
     this._merged = this.computeMergedSettings();
     if (!opts.throwOnWriteFailure) {
       saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
@@ -880,6 +899,9 @@ export class LoadedSettings {
     for (const [key, value] of Object.entries(values)) {
       setNestedPropertySafe(settingsFile.settings, key, value);
       setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
+    if ('general' in values) {
+      rederiveUpdateMode(settingsFile);
     }
     this._merged = this.computeMergedSettings();
   }
@@ -903,6 +925,17 @@ export class LoadedSettings {
       setNestedPropertySafe(settingsFile.settings, write.key, value);
       setNestedPropertySafe(settingsFile.originalSettings, write.key, value);
       scopes.add(write.scope);
+    }
+    for (const scope of scopes) {
+      const touchedUpdateKeys = writes.some(
+        (write) =>
+          write.scope === scope &&
+          (write.key === 'general.enableAutoUpdate' ||
+            write.key === 'general.updateMode'),
+      );
+      if (touchedUpdateKeys) {
+        rederiveUpdateMode(this.forScope(scope));
+      }
     }
     this._merged = this.computeMergedSettings();
     const scopeList = Array.from(scopes);
@@ -959,6 +992,10 @@ export class LoadedSettings {
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
+        // Keep a reload on par with load-time normalization: a scope the
+        // watcher rereads must still expose the derived updateMode to the
+        // merged view and per-scope reporting (#14274).
+        normalizeUpdateModeInPlace(resolved);
         reloaded = true;
       } else {
         debugLogger.warn(
@@ -1717,6 +1754,25 @@ function createSettingsUpdate(
   const root: Record<string, unknown> = {};
   setNestedPropertySafe(root, key, value);
   return root;
+}
+
+/**
+ * Re-derives `general.updateMode` in a scope's in-memory view after a write
+ * touched the general update keys, mirroring load-time normalization: a
+ * valid `updateMode` explicitly present in the raw file still wins (matching
+ * resolveUpdateMode precedence), but a value that was only derived at load
+ * time must not go stale after the legacy key changes underneath it. Only
+ * the in-memory view changes; the file is written from the raw value.
+ */
+function rederiveUpdateMode(settingsFile: SettingsFile): void {
+  if (isUpdateMode(settingsFile.originalSettings.general?.updateMode)) {
+    return;
+  }
+  const general = settingsFile.settings.general;
+  if (general) {
+    delete general.updateMode;
+  }
+  normalizeUpdateModeInPlace(settingsFile.settings);
 }
 
 export function saveSettings(

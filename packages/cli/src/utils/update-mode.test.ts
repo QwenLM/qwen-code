@@ -50,8 +50,8 @@ describe('resolveUpdateMode', () => {
     ).toBe('auto');
   });
 
-  it('falls back to auto when updateMode is invalid and no legacy key exists', () => {
-    expect(resolveUpdateMode({ updateMode: 'sometimes' })).toBe('auto');
+  it('fails safe to notify when updateMode is invalid and no legacy key exists', () => {
+    expect(resolveUpdateMode({ updateMode: 'sometimes' })).toBe('notify');
   });
 });
 

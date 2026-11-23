@@ -790,6 +790,30 @@ describe('Settings Loading and Merging', () => {
       },
     );
 
+    it('warns that an invalid general.updateMode is ignored and fails safe (#14274)', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                general: { updateMode: 'sometimes' },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([
+        expect.stringContaining('general.updateMode'),
+      ]);
+      // No legacy key exists, so the failure mode is 'notify' — checks
+      // without installing — rather than the permissive 'auto' default.
+      expect(settings.merged.general?.updateMode).toBe('notify');
+    });
+
     it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
@@ -1252,6 +1276,38 @@ describe('Settings Loading and Merging', () => {
 
       expect(settings.merged.general?.updateMode).toBeUndefined();
       expect(settings.user.settings.general?.updateMode).toBeUndefined();
+    });
+
+    it('refreshes the derived updateMode when a legacy key is written (#14274)', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              general: { enableAutoUpdate: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.general?.updateMode).toBe('auto');
+
+      settings.setValue(SettingScope.User, 'general.enableAutoUpdate', false);
+
+      expect(settings.merged.general?.updateMode).toBe('off');
+      expect(settings.user.settings.general?.updateMode).toBe('off');
+      // The write persists the raw legacy key only; the derived value
+      // stays out of both the in-memory original and the file on disk.
+      expect(
+        settings.user.originalSettings.general?.updateMode,
+      ).toBeUndefined();
+      expect(
+        JSON.stringify((fs.writeFileSync as Mock).mock.calls),
+      ).not.toContain('updateMode');
     });
 
     it('should bump version to 3 even when V2 settings already have V3-compatible content', () => {
@@ -5474,6 +5530,37 @@ describe('Settings Loading and Merging', () => {
       });
       expect(loaded.forScope(scope).settings.ui?.theme).toBe('light');
       expect(loaded.forScope(scope).rawJson).toBe(content);
+    });
+
+    it('reloads a legacy-only scope and keeps the derived updateMode current (#14274)', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      let currentUserSettingsContent = JSON.stringify({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        general: { enableAutoUpdate: true },
+      });
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return currentUserSettingsContent;
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.general?.updateMode).toBe('auto');
+      currentUserSettingsContent = JSON.stringify({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        general: { enableAutoUpdate: false },
+      });
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+
+      expect(settings.user.settings.general?.updateMode).toBe('off');
+      expect(
+        settings.user.originalSettings.general?.updateMode,
+      ).toBeUndefined();
+      expect(settings.merged.general?.updateMode).toBe('off');
     });
 
     it('reloads a scope from disk and resolves home env vars', () => {

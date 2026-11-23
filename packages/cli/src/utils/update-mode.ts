@@ -41,7 +41,9 @@ interface UpdateModeGeneralSection {
  *
  * Precedence:
  * 1. An explicit valid `general.updateMode` wins.
- * 2. An invalid `updateMode` warns and falls through to the legacy key.
+ * 2. An invalid `updateMode` warns and falls through to the legacy key;
+ *    with no legacy key the failure mode is 'notify', not the permissive
+ *    'auto' default.
  * 3. Legacy `general.enableAutoUpdate`: `false` maps to 'off' (the cohort
  *    that opted into silence keeps it), any other value maps to 'auto'.
  *
@@ -59,6 +61,16 @@ export function resolveUpdateMode(
     debugLogger.warn(
       `Invalid general.updateMode value ${JSON.stringify(explicit)}; falling back to general.enableAutoUpdate.`,
     );
+    // An install-consent control must not fail permissive: a typo'd value
+    // resolves to 'notify' (checks, never installs by itself) rather than
+    // the 'auto' default, unless the legacy key pins the behavior.
+    if (general?.enableAutoUpdate === false) {
+      return 'off';
+    }
+    if (general?.enableAutoUpdate === true) {
+      return 'auto';
+    }
+    return 'notify';
   }
   if (general?.enableAutoUpdate === false) {
     return 'off';
