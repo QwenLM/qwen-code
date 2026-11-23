@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CONTAINER_SANDBOX_NO_PROXY,
   fakeServerHostOptions,
+  headlessLoopPaths,
   IS_CONTAINER_SANDBOX,
   readDebugLogs,
   TestRig,
@@ -27,15 +28,6 @@ import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
-
-// The debug logger may insert a `[trace_id=… span_id=…]` context between the
-// tag and the message when telemetry is active, so allow it optionally and
-// capture only the path.
-const LOOP_ENTRY =
-  /\[LOOP\] (?:\[trace_id=[^\]]*\] )?headless (legacy|shared|kernel)/g;
-
-const headlessPaths = (log: string): string[] =>
-  [...log.matchAll(LOOP_ENTRY)].map((match) => match[1]);
 
 describe('agent loop visibility (headless entry marker)', () => {
   let rig: TestRig;
@@ -123,7 +115,7 @@ describe('agent loop visibility (headless entry marker)', () => {
 
   it('runs headless on the kernel when both switches are unset', async () => {
     const log = await runHeadless();
-    expect(headlessPaths(log)).toEqual(['kernel']);
+    expect(headlessLoopPaths(log)).toEqual(['kernel']);
     expect(log).toContain('runAgentLoopOnBus started');
   });
 
@@ -132,7 +124,7 @@ describe('agent loop visibility (headless entry marker)', () => {
       unifiedAgentLoop: false,
       eventBusAgentLoop: false,
     });
-    expect(headlessPaths(log)).toEqual(['legacy']);
+    expect(headlessLoopPaths(log)).toEqual(['legacy']);
   });
 
   it('logs the shared path when only the unified switch is on', async () => {
@@ -140,7 +132,7 @@ describe('agent loop visibility (headless entry marker)', () => {
       unifiedAgentLoop: true,
       eventBusAgentLoop: false,
     });
-    expect(headlessPaths(log)).toEqual(['shared']);
+    expect(headlessLoopPaths(log)).toEqual(['shared']);
   });
 
   it('logs the kernel path when both switches are on', async () => {
@@ -148,7 +140,7 @@ describe('agent loop visibility (headless entry marker)', () => {
       unifiedAgentLoop: true,
       eventBusAgentLoop: true,
     });
-    expect(headlessPaths(log)).toEqual(['kernel']);
+    expect(headlessLoopPaths(log)).toEqual(['kernel']);
   });
 
   it('does not reuse the parity suites counted marker wording', async () => {
