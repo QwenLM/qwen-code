@@ -145,7 +145,11 @@ describe('Hosted Hook model boundary', () => {
       sessionId: 'session-1',
       sessionIdGenerated: true,
       chatRecording: false,
+      acp: true,
     });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[1]).not.toHaveProperty(
+      'channel',
+    );
     expect(config.initialize).toHaveBeenCalledWith(
       expect.objectContaining({
         skipHooks: true,

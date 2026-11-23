@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
@@ -96,21 +95,21 @@ public class JdbcAutomationLedgerStore
         for (int start = 0; start < identities.size(); start += RUN_READ_BATCH_SIZE) {
             int end = Math.min(start + RUN_READ_BATCH_SIZE, identities.size());
             StringBuilder sql = new StringBuilder(
-                    "SELECT session_scope_key, record_key,"
+                    "SELECT record_key,"
                             + " CASE WHEN task_kind IS NOT NULL THEN task_state END AS task_state FROM"
                             + " ma_session_record WHERE ");
-            List<Object> args = new ArrayList<>((end - start) * 2);
+            List<Object> args = new ArrayList<>((end - start) * 3);
             Map<String, RunIdentity> runByRecordKey = new HashMap<>();
             for (int index = start; index < end; index += 1) {
                 if (index > start) {
                     sql.append(" OR ");
                 }
-                sql.append("(session_scope_key = ? AND record_key = ?)");
+                sql.append("(tenant_id = ? AND session_id = ? AND record_key = ?)");
                 String recordKey = ManagedExtensionProjection.recordKey(
                         identities.get(index).sessionId(), "automation_run",
                         identities.get(index).runId());
-                args.add(ManagedSessionStore.sessionScopeKey(tenantId,
-                        identities.get(index).sessionId()));
+                args.add(tenantId);
+                args.add(identities.get(index).sessionId());
                 args.add(recordKey);
                 runByRecordKey.put(recordKey, identities.get(index));
             }
@@ -492,10 +491,10 @@ public class JdbcAutomationLedgerStore
 
     private boolean readRunTerminal(String tenantId, String sessionId, String runId) {
         return jdbc.query("SELECT task_state FROM ma_session_record"
-                        + " WHERE session_scope_key = ? AND record_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
                         + " AND task_kind IS NOT NULL FOR UPDATE",
                 (result, row) -> result.getString("task_state"),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId,
                 ManagedExtensionProjection.recordKey(sessionId, "automation_run", runId))
                 .stream().anyMatch(state -> state != null && TERMINAL_MIRROR_STATES.contains(state));
     }

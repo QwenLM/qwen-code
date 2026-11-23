@@ -17,6 +17,7 @@ import { getComposerDraftStorageKey } from '../hooks/useComposerCore.js';
 import {
   extractPendingPermission,
   isAskUserPermissionBlock,
+  pendingPermissionRevision,
 } from '../adapters/transcriptAdapter.js';
 import { isExitPlanApprovalRequest } from '../utils/todos.js';
 import {
@@ -25,6 +26,7 @@ import {
   useDaemonPendingPermissions,
   useDaemonPromptSettled,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptHistory,
 } from './session/DaemonSessionProvider.js';
 import {
   createDaemonChatController,
@@ -40,6 +42,10 @@ import {
 interface LiveFacts {
   messages: SessionChatController['messages'];
   transcriptState: SessionChatController['transcriptState'];
+  hasOlderHistory: boolean;
+  loadingOlderHistory: boolean;
+  historyCapacityReached: boolean;
+  historyPaginationError: boolean;
   pendingApprovals: readonly PendingApproval[];
   pendingQuestions: readonly PendingQuestion[];
   statusFacts: ChatStatusFacts;
@@ -83,6 +89,7 @@ export function useDaemonChatController(): SessionChatController {
   const actions = useDaemonActions();
   const blocks = useDaemonTranscriptBlocks();
   const pendingPermissions = useDaemonPendingPermissions();
+  const transcriptHistory = useDaemonTranscriptHistory();
   const messages = useMessagesFromBlocks(t, blocks);
 
   const sessionId = connection.sessionId;
@@ -96,26 +103,38 @@ export function useDaemonChatController(): SessionChatController {
   // routed through the approval lane as a bare vote. The provider re-runs its
   // uncached pending selector on every streaming delta, so `pendingPermissions`
   // arrives as a fresh array even when the pending content is unchanged. Key the
-  // split on a content signature (request id + question/approval classification)
-  // cached in a ref, so the array identities — and the derivation effect below —
-  // stay stable across those deltas. The signature is content-derived, not
-  // id-derived: a block's payload can change its classification under the same
-  // request id. Classification uses the cheap block-level predicate rather than
-  // the full payload extraction, so a delta does not re-serialize each payload.
+  // split on a content signature (request id + question/approval classification
+  // + a cheap payload revision) cached in a ref, so the array identities — and
+  // the derivation effect below — stay stable across those deltas. The signature
+  // is content-derived, not id-derived: a re-emitted request under the same id
+  // can change its classification or its title/options, and the revision term
+  // (updatedAt + title + option ids) forces a re-extraction so the cached
+  // render-ready request never goes stale. Classification and the revision use
+  // cheap block-level reads rather than the full payload extraction, so a delta
+  // does not re-serialize each payload.
   const classifiedPending = pendingPermissions.map((permission) => ({
+    block: permission,
     id: permission.requestId,
     isQuestion: isAskUserPermissionBlock(permission),
   }));
   const pendingSignature = classifiedPending
-    .map(({ id, isQuestion }) => `${id}:${isQuestion ? 'q' : 'a'}`)
+    .map(
+      ({ block, id, isQuestion }) =>
+        `${id}:${isQuestion ? 'q' : 'a'}:${pendingPermissionRevision(block)}`,
+    )
     .join('|');
   let pendingSplit = pendingSplitRef.current;
   if (!pendingSplit || pendingSplit.signature !== pendingSignature) {
     const approvals: PendingApproval[] = [];
     const questions: PendingQuestion[] = [];
-    for (const { id, isQuestion } of classifiedPending) {
-      if (isQuestion) questions.push({ id });
-      else approvals.push({ id, status: 'pending' });
+    for (const { block, id, isQuestion } of classifiedPending) {
+      // The render-ready request is extracted only on a content change (the
+      // signature cache), not per streaming delta. Pending blocks are unresolved
+      // by the selector, so the extraction yields a request.
+      const request = extractPendingPermission([block]);
+      if (!request) continue;
+      if (isQuestion) questions.push({ id, request });
+      else approvals.push({ id, status: 'pending', request });
     }
     pendingSplit = {
       signature: pendingSignature,
@@ -129,6 +148,10 @@ export function useDaemonChatController(): SessionChatController {
   const factsRef = useRef<LiveFacts>({
     messages,
     transcriptState: 'loading',
+    hasOlderHistory: false,
+    loadingOlderHistory: false,
+    historyCapacityReached: false,
+    historyPaginationError: false,
     pendingApprovals,
     pendingQuestions,
     statusFacts: { queueLength: 0, goalActive: false },
@@ -145,6 +168,10 @@ export function useDaemonChatController(): SessionChatController {
       : connection.loadingTranscript
         ? 'loading'
         : 'ready',
+    hasOlderHistory: transcriptHistory.hasMore,
+    loadingOlderHistory: transcriptHistory.loading,
+    historyCapacityReached: transcriptHistory.capacityReached,
+    historyPaginationError: transcriptHistory.paginationError,
     pendingApprovals,
     pendingQuestions,
     // Queue length and goal activity are surfaced by the ChatSurface increment;
@@ -165,6 +192,9 @@ export function useDaemonChatController(): SessionChatController {
   const pendingPermissionsRef = useRef(pendingPermissions);
   pendingPermissionsRef.current = pendingPermissions;
 
+  const transcriptHistoryRef = useRef(transcriptHistory);
+  transcriptHistoryRef.current = transcriptHistory;
+
   const promptListenerRef = useRef<
     ((e: DaemonPromptSettlement) => void) | undefined
   >(undefined);
@@ -176,6 +206,11 @@ export function useDaemonChatController(): SessionChatController {
   >(undefined);
   const answeredRef = useRef<Set<string>>(new Set());
   const prevPendingRef = useRef<Set<string>>(new Set());
+  // Tracks admitted prompts per durable session across controller rebuilds
+  // (e.g. s1 -> s2 -> s1) so a re-created controller for s1 still knows its
+  // active FIFO turn id until a terminal settlement removes it.
+  const livePromptsBySessionRef = useRef<Map<string, string[]>>(new Map());
+  const pendingSubmitSettledRef = useRef<Set<Set<string>>>(new Set());
 
   const controllerRef = useRef<{
     sessionId: string | undefined;
@@ -185,10 +220,11 @@ export function useDaemonChatController(): SessionChatController {
   if (!controllerRef.current || controllerRef.current.sessionId !== sessionId) {
     answeredRef.current = new Set();
     prevPendingRef.current = new Set();
+    const boundSessionId = sessionId ?? '';
     controllerRef.current = {
       sessionId,
       controller: createDaemonChatController({
-        sessionId: sessionId ?? '',
+        sessionId: boundSessionId,
         storageKey:
           getComposerDraftStorageKey(sessionId, connection.workspaceCwd) ?? '',
         get messages() {
@@ -196,6 +232,18 @@ export function useDaemonChatController(): SessionChatController {
         },
         get transcriptState() {
           return factsRef.current.transcriptState;
+        },
+        get hasOlderHistory() {
+          return factsRef.current.hasOlderHistory;
+        },
+        get loadingOlderHistory() {
+          return factsRef.current.loadingOlderHistory;
+        },
+        get historyCapacityReached() {
+          return factsRef.current.historyCapacityReached;
+        },
+        get historyPaginationError() {
+          return factsRef.current.historyPaginationError;
         },
         get pendingApprovals() {
           return factsRef.current.pendingApprovals;
@@ -212,8 +260,18 @@ export function useDaemonChatController(): SessionChatController {
         get settledPhase() {
           return factsRef.current.settledPhase;
         },
+        // History pagination is a provider capability, not an intent: read the
+        // latest loader per call and forward options (including { force: true }
+        // for pagination-error retries) so a session-stable controller never
+        // pins a stale history handle or silently drops a retry.
+        loadOlder: (options) => transcriptHistoryRef.current.loadMore(options),
         liveApprovalRequestIds: pendingApprovals.map((approval) => approval.id),
+        livePromptIds: boundSessionId
+          ? livePromptsBySessionRef.current.get(boundSessionId)
+          : undefined,
         async submitPrompt(input, onAdmitted) {
+          const settledDuringSubmit = new Set<string>();
+          pendingSubmitSettledRef.current.add(settledDuringSubmit);
           try {
             // submitPrompt is non-blocking and resolves the prompt id; it does
             // not invoke an onAdmitted option (only sendPrompt does), so bind
@@ -227,10 +285,26 @@ export function useDaemonChatController(): SessionChatController {
                 ? { inputAnnotations: [...input.metadata.inputAnnotations] }
                 : {}),
             });
+            if (
+              boundSessionId !== '' &&
+              accepted.promptId &&
+              !settledDuringSubmit.has(accepted.promptId)
+            ) {
+              let queue = livePromptsBySessionRef.current.get(boundSessionId);
+              if (!queue) {
+                queue = [];
+                livePromptsBySessionRef.current.set(boundSessionId, queue);
+              }
+              if (!queue.includes(accepted.promptId)) {
+                queue.push(accepted.promptId);
+              }
+            }
             onAdmitted(accepted.promptId);
             return 'accepted';
           } catch {
             return 'unknown';
+          } finally {
+            pendingSubmitSettledRef.current.delete(settledDuringSubmit);
           }
         },
         async cancelPrompt() {
@@ -346,10 +420,31 @@ export function useDaemonChatController(): SessionChatController {
 
   useDaemonPromptSettled(
     useCallback((event: DaemonPromptSettledEvent) => {
-      promptListenerRef.current?.({
-        promptId: event.promptId,
-        outcome: event.outcome,
-      });
+      for (const settled of pendingSubmitSettledRef.current) {
+        settled.add(event.promptId);
+      }
+      // Remove the settled prompt from its owning session's live queue
+      // (matching event.sessionId when present, or scanning all queues when a
+      // test fixture omits event.sessionId).
+      const targetSessions = event.sessionId
+        ? [event.sessionId]
+        : [...livePromptsBySessionRef.current.keys()];
+      for (const sid of targetSessions) {
+        const queue = livePromptsBySessionRef.current.get(sid);
+        if (!queue) continue;
+        const index = queue.indexOf(event.promptId);
+        if (index !== -1) queue.splice(index, 1);
+        if (queue.length === 0) livePromptsBySessionRef.current.delete(sid);
+      }
+      if (
+        !event.sessionId ||
+        event.sessionId === controllerRef.current?.sessionId
+      ) {
+        promptListenerRef.current?.({
+          promptId: event.promptId,
+          outcome: event.outcome,
+        });
+      }
     }, []),
   );
 

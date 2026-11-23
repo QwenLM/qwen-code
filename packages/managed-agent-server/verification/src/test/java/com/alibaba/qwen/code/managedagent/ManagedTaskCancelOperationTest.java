@@ -511,18 +511,17 @@ class ManagedTaskCancelOperationTest {
                 "child_run", "run-stop");
         String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, gmt_create) VALUES (?, ?, ?,"
+                        + " task_kind, task_state, gmt_create) VALUES (?, ?,"
                         + " 'workspace', ?, 'child_run', 'run-stop', ?, 2,"
-                        + " 'resource-stop', 'child_agent', 'running', 1)",
-                scope, recordKey, TENANT, sessionId, recordKey);
+                        + " 'resource-stop', 'child_agent', 'running', 1)", recordKey, TENANT, sessionId, recordKey);
         byte[] body = ("{\"kind\":\"child_agent\",\"stopRequested\":true,"
                 + "\"run\":{\"state\":\"running\"}}")
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'resource-stop', 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSchemaKeys.key(scope, "resource-stop"), scope, TENANT, sessionId, body.length, "c".repeat(64), body);
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'workspace', ?, 'resource-stop', 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                ManagedSchemaKeys.key(scope, "resource-stop"), TENANT, sessionId, body.length, "c".repeat(64), body);
         JdbcChildResultRelayStore relay = new JdbcChildResultRelayStore(jdbc);
         assertThat(relay.stopState(TENANT, sessionId, "run-stop"))
                 .isEqualTo(new JdbcChildResultRelayStore.StopState(true, false));
@@ -534,13 +533,12 @@ class ManagedTaskCancelOperationTest {
             String state) {
         String recordKey = taskId.substring("task_".length());
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, ?, ?, ?, 1, ?,"
+                        + " VALUES (?, ?, 'workspace', ?, ?, ?, ?, 1, ?,"
                         + " ?, ?, 1)",
-                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
                 recordKey, TENANT, sessionId, domain, "record-" + recordKey,
                 recordKey, "resource-" + recordKey, kind, state);
     }

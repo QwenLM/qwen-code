@@ -1115,6 +1115,370 @@ describe('ci flaky rerun patrol', () => {
     expect(evidence).toContain('TypeError: ensureTool is not a function');
   });
 
+  it('strips terminal controls after redaction, not before', () => {
+    // A bare \r supplies the word boundary \bnpm_ needs: stripping controls
+    // before redactLog would concatenate `x` onto the token and leak it. The
+    // strip must also cover backspace and friends, not just CR.
+    const evidence = skillLog(
+      '##[error]Downloading pkg 42% x\rnpm_ABCDEFGHIJKLMNOPQRSTUV0123 installed\b\bSPOOFED\x0b\u202E\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+    expect(evidence).toContain('installedSPOOFED');
+    expect(evidence).not.toContain('\r');
+    expect(evidence).not.toContain('\b');
+    expect(evidence).not.toContain('\x0b');
+    expect(evidence).not.toContain('\u202E');
+  });
+
+  it('redacts a credential split by a control byte once the strip rejoins it', () => {
+    // A control INSIDE the token defeats \bnpm_… on the first pass (only the
+    // short prefix precedes it); deleting the control welds the fragments into
+    // a contiguous token, so a second redaction pass must still scrub it.
+    const evidence = skillLog(
+      '##[error]npm_\rABCDEFGHIJKLMNOPQRSTUV0123 done\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+  });
+
+  it('redacts a welded credential whose leading boundary the strip also removed', () => {
+    // The strip deletes the CR in front of the token as well as the one inside
+    // it, so the second pass sees `xnpm_…`: the first pass had a boundary but
+    // no token, and \b has nothing to match once the fragments are welded.
+    const evidence = skillLog(
+      '##[error]Downloading x\rnpm_\rABCDEFGHIJKLMNOPQRSTUV0123 installed\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+  });
+
+  it('keeps the failure line that follows a CR-terminated header', () => {
+    // The header rules are bounded by \r as well as \n, which is what keeps
+    // them off the next line. Re-running them after the strip deleted every
+    // \r would swallow everything up to the next newline — including the
+    // ##[error] line the excerpt exists to show, leaving only noise.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const evidence = skillLog(
+      `${noise}\nCookie: sid=abc\r##[error]AssertionError: real failure\n${noise}`,
+    );
+    expect(evidence).toContain('##[error]AssertionError: real failure');
+    expect(evidence).toContain('Cookie: [redacted]');
+    expect(evidence).not.toContain('sid=abc');
+  });
+
+  it('keeps the failure line after a CR-terminated value of a whitespace-bounded rule', () => {
+    // Bearer's \S+ and the env rule's [^"',\s}]+ also stop at \r, so the strip
+    // welds their value onto the next logical line just like the header rules.
+    // The post-strip value is a tempered token that stops before the ##[error]
+    // marker, so the weld cannot carry the value over the marker and the
+    // excerpt keeps the failure it was fetched for.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    for (const prefix of [
+      'SSH_AUTH_SOCK=/tmp/agent',
+      'NPM_TOKEN=abc',
+      'API_KEY=abc',
+      'GITHUB_TOKEN=abc',
+      'Bearer abc123',
+    ]) {
+      for (const control of ['\r', '\x0b', '\x0c']) {
+        const evidence = skillLog(
+          `${noise}\n${prefix}${control}##[error]AssertionError: real failure\n${noise}`,
+        );
+        expect(evidence).toContain('##[error]AssertionError: real failure');
+        expect(evidence).toContain('[redacted]');
+      }
+    }
+  });
+
+  it('keeps the failure payload of a control-free quoted JSON object', () => {
+    // Regression: the repair pass re-matched the already-redacted value and ran
+    // its whitespace-bounded token to the end of the line, eating the rest of
+    // the JSON object — the failure identifier the excerpt exists to show. A
+    // quoted value must stop at its closing quote; an already-[redacted] value
+    // followed by a structural delimiter must not be re-redacted greedily.
+    for (const [line, payload, secret] of [
+      [
+        '{"authToken":"s3cr3t","err":"TestFailed:suiteA"}',
+        '"err":"TestFailed:suiteA"',
+        's3cr3t',
+      ],
+      [
+        '{"apiKey":"s3cr3t","msg":"AssertionError: expected 1 to be 2"}',
+        '"msg":"AssertionError: expected 1 to be 2"',
+        's3cr3t',
+      ],
+      [
+        '{"db_password":"x","msg":"AssertionError: boom"}',
+        '"msg":"AssertionError: boom"',
+        '"x"',
+      ],
+      // A control splits the KEY, so pass 1 misses it and the repair's
+      // quoted-value branch is load-bearing: it must bound the value at its
+      // closing quote, not run into the err payload. Deleting that branch
+      // reds this case.
+      ['{"auth\rToken":"s3cr3t","err":"boom"}', '"err":"boom"', 's3cr3t'],
+    ]) {
+      const evidence = skillLog(`${line}\n`);
+      expect(evidence, line).toContain(payload);
+      expect(evidence, line).not.toContain(secret);
+    }
+  });
+
+  it('keeps the failure payload when a quoted value is unclosed across lines or carries an escape', () => {
+    // Regression: the quoted-value branch must bound its value on the SAME line
+    // and handle escapes. skillLog joins each contiguous run of selected lines
+    // with \n, so a value class that matches \n lets an unclosed quote swallow
+    // every following selected line; a value class that excludes \ lets an
+    // escaped value ("C:\temp") never reach its closing quote, and the greedy
+    // unquoted rule then eats the rest of the line. Both delete the failure
+    // evidence the excerpt is fetched for.
+    const multilineSplitKey =
+      'noise0\nnoise1\nNPM_TO\x0bKEN="ab\nFAIL src/a.test.ts > suite > case\nAssertionError: expected 1 to be 2\n    at Object.<anonymous> ("/build/a.ts":12:3)\nnoise8\nnoise9';
+    const multilineControlFree =
+      'noise0\nAPI_KEY="\nFAIL src/a.test.ts\nAssertionError: expected 1 to be 2\n    at x.ts:1:1\n"end"\nnoise9';
+    const escaped = '{"auth\rToken":"C:\\temp","err":"boom"}';
+    for (const [line, needles] of [
+      [
+        multilineSplitKey,
+        ['FAIL src/a.test.ts', 'AssertionError: expected 1 to be 2'],
+      ],
+      [
+        multilineControlFree,
+        ['FAIL src/a.test.ts', 'AssertionError: expected 1 to be 2'],
+      ],
+      [escaped, ['"err":"boom"']],
+    ]) {
+      const evidence = skillLog(line);
+      for (const needle of needles) expect(evidence, line).toContain(needle);
+    }
+    expect(skillLog(multilineSplitKey)).not.toContain('"ab');
+    expect(skillLog(escaped)).not.toContain('C:\\temp');
+  });
+
+  it('keeps the failure line a welded URL userinfo would otherwise reach', () => {
+    // The scheme rule's userinfo is a tempered token per @-segment: it runs to
+    // the next whitespace or @ but never across the ##[error] marker. Two
+    // shapes: one where the first pass already redacted the userinfo, and one
+    // where the only @ sits past the CR so the first pass never reached it — in
+    // both, the temper keeps the rule off the ##[error] marker.
+    for (const line of [
+      'https://u@h\r##[error]AssertionError:real@failure',
+      'https://host\r##[error]AssertionError:real@failure',
+    ]) {
+      const evidence = skillLog(line);
+      expect(evidence, line).toContain('##[error]AssertionError:real@failure');
+    }
+    expect(
+      skillLog('https://u@h\r##[error]AssertionError:real@failure'),
+    ).toContain('https://[redacted]@');
+  });
+
+  it('keeps the marker when a control splits the credential keyword itself', () => {
+    // A split keyword is exactly the case the first pass cannot see. Selection
+    // runs before the strip so the line is still chosen. For the env / Bearer
+    // fixtures the repair pass redacts the welded value (a tempered token that
+    // stops before the ##[error] marker); for the private-key fixture the
+    // tempered body stops at the marker, so the marker survives rather than the
+    // span being redacted. Either way the weld cannot carry a value over the
+    // marker.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const tail = Array.from({ length: 40 }, (_, i) => `tail line ${i}`).join(
+      '\n',
+    );
+    for (const [line, marker] of [
+      [
+        'SSH_AU\rTH_SOCK=abc\r##[error]AssertionError: real failure',
+        '##[error]AssertionError: real failure',
+      ],
+      ['Bea\rrer abc123\r##[error]Build failed', '##[error]Build failed'],
+      [
+        '-----BEGIN RSA\rKEY-----\r##[error]AssertionError: boom\r-----END RSA\rKEY-----',
+        '##[error]AssertionError: boom',
+      ],
+    ]) {
+      const evidence = skillLog(`${noise}\n${line}\n${tail}`);
+      expect(evidence, line).toContain(marker);
+    }
+    expect(
+      skillLog('SSH_AU\rTH_SOCK=abc\r##[error]AssertionError: real failure'),
+    ).toContain('SSH_AUTH_SOCK=[redacted]');
+    expect(skillLog('Bea\rrer abc123\r##[error]Build failed')).toContain(
+      'Bearer [redacted]',
+    );
+  });
+
+  it('selects a FAIL line whose leading whitespace is a control', () => {
+    // \sFAIL\s needs the whitespace a leading \r supplies. Stripping before
+    // selection deleted it, so the line was never chosen and the excerpt fell
+    // back to noise.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const evidence = skillLog(`${noise}\n\rFAIL src/a.test.ts\n${noise}`);
+    expect(evidence).toContain('FAIL src/a.test.ts');
+  });
+
+  it('does not infer redaction completeness from the [redacted] placeholder', () => {
+    // Pass 1's value class stops INSIDE a credential at , } quote or a stripped
+    // control, so KEY=[redacted]<remainder> comes from both a completed and a
+    // truncated redaction. The repair must not re-redact a [redacted]-prefixed
+    // value: greedily re-matching it deletes the failure payload, and skipping
+    // only on a delimiter ships a truncated secret tail. Such values are left as
+    // pass 1 (base) left them. (A fork's [redacted]secret under a split key is
+    // likewise left as base leaves it — a recorded base-equivalent limitation.)
+    for (const [line, payload] of [
+      [
+        '{"apiKey":"Ab\'c123","msg":"AssertionError: boom"}',
+        '"msg":"AssertionError: boom"',
+      ],
+      [
+        '##[error]{"authToken":"s3\r3cr3t","err":"TestFailed:suiteA"}',
+        '"err":"TestFailed:suiteA"',
+      ],
+      // A backslash directly before the marker must not carry the quoted value
+      // across it (the escape unit is tempered too).
+      [
+        '{"auth\rToken":"C:\\##[error]AssertionError: boom","err":"k"}',
+        '##[error]AssertionError: boom',
+      ],
+    ]) {
+      const evidence = skillLog(line);
+      expect(evidence, line).toContain(payload);
+    }
+    // The truncated unquoted value is left as base leaves it: the tail is not
+    // re-redacted, but nothing after it is deleted either.
+    expect(skillLog('##[error]API_PASSWORD=p,ssw0rd done')).toBe(
+      '##[error]API_PASSWORD=[redacted],ssw0rd done',
+    );
+  });
+
+  it('repairs every credential family a control byte split', () => {
+    // The post-strip rule list is a hand-copy of redactLog's; pin each rule
+    // individually so deleting one cannot leave both suites green.
+    const cases = [
+      [
+        '-----BEGIN RSA\rKEY-----\nbody\n-----END RSA\rKEY-----',
+        '[redacted private key]',
+      ],
+      ['eyJ\rhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij', '[redacted jwt]'],
+      ['Bea\rrer abcdefghij', 'Bearer [redacted]'],
+      ['ghp_\rABCDEFGHIJKLMNOPQRSTUV0123', '[redacted]'],
+      ['sk-\rabcdefghijklmnopqrstuvwx', 'sk-[redacted]'],
+      ['AKIA\rABCDEFGHIJKLMNOP', '[redacted]'],
+      ['npm_\rABCDEFGHIJKLMNOPQRSTUV0123', '[redacted]'],
+      ['https://u\rser:pass@host', 'https://[redacted]@host'],
+      ['NPM_TO\rKEN=abcdefghij', 'NPM_TOKEN=[redacted]'],
+      // Round-6 entrances: a value carrying a terminator character, a welded
+      // scheme prefix, a multi-@ userinfo, and a deleted Bearer separator.
+      ['https:/\r/[redacted]realsecretvalue@host', 'https://[redacted]@'],
+      ['42\rhttps://us\rer:pw@host', '42https://[redacted]@'],
+      ['NPM_TO\rKEN=abc#realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['https://u\rser:p@ss@host', 'https://[redacted]@host'],
+      ['Bea\rrer\rrealsecretvalue123', 'Bearer[redacted]'],
+      // Adversarial audit: a value carrying a structural terminator (} or a
+      // quote) or a URL password carrying # must not ship its tail either.
+      ['NPM_TO\rKEN=abc}realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['NPM_TO\rKEN=abc"realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['https://us\rer:p#ss@host', 'https://[redacted]@host'],
+    ];
+    for (const [input, expected] of cases) {
+      const evidence = skillLog(`##[error]${input} done`);
+      expect(evidence, input).toContain(expected);
+    }
+    // The secret tail must be gone, not just the placeholder present.
+    for (const [input, secret] of [
+      ['https:/\r/[redacted]realsecretvalue@host', 'realsecretvalue'],
+      ['42\rhttps://us\rer:pw@host', 'user:pw'],
+      ['NPM_TO\rKEN=abc#realsecret99', 'realsecret99'],
+      ['https://u\rser:p@ss@host', 'p@ss'],
+      ['Bea\rrer\rrealsecretvalue123', 'realsecretvalue123'],
+      ['NPM_TO\rKEN=abc}realsecret99', 'realsecret99'],
+      ['NPM_TO\rKEN=abc"realsecret99', 'realsecret99'],
+      ['https://us\rer:p#ss@host', 'p#ss'],
+    ]) {
+      expect(skillLog(`##[error]${input} done`), input).not.toContain(secret);
+    }
+  });
+
+  it('keeps a marker inside a BEGIN…END span instead of redacting the span', () => {
+    // For a SPLIT-label block (the case the repair pass handles) the tempered
+    // private-key body stops before ##[error], so the marker survives instead
+    // of the span being redacted. (An intact-label block is redacted whole by
+    // the first pass, as in base — that path has no marker temper.) A real PEM
+    // (no marker) and a body with a non-marker # are still fully redacted.
+    const withMarker = skillLog(
+      '-----BEGIN RSA\rKEY-----\nMIIEow\n##[error]x\n-----END RSA\rKEY-----',
+    );
+    expect(withMarker).toContain('##[error]x');
+    expect(
+      skillLog('-----BEGIN RSA\rKEY-----\nMIIEow\n-----END RSA\rKEY-----'),
+    ).toContain('[redacted private key]');
+    expect(
+      skillLog('-----BEGIN RSA\rKEY-----\nMIIE#ow\n-----END RSA\rKEY-----'),
+    ).toContain('[redacted private key]');
+  });
+
+  it('does not pair a key BEGIN and END across non-adjacent selected windows', () => {
+    // The selected windows are joined per contiguous run, so a control-split
+    // BEGIN in the primary window cannot pair with a control-split END in the
+    // always-selected tail and delete the failure line between them.
+    const log = [
+      'a line 1',
+      'a line 2',
+      '-----BEGIN RSA\rKEY-----',
+      'TypeError: boom',
+      ...Array.from({ length: 30 }, (_, i) => `b line ${i}`),
+      '-----END RSA\rKEY-----',
+      'tail one',
+      'tail two',
+    ].join('\n');
+    const evidence = skillLog(log);
+    expect(evidence).toContain('TypeError: boom');
+    expect(evidence).not.toContain('[redacted private key]');
+  });
+
+  it('strips every control and Bidi_Control code point, keeping tab and newline', () => {
+    // Pin the extent of the class, not the points a fixture happens to sample:
+    // every member is fed, and the assertion asks Unicode itself, so narrowing
+    // the class to a sample cannot stay green. \n and \t must survive.
+    const controls = [
+      ...Array.from({ length: 0x20 }, (_, i) => i).filter(
+        (i) => i !== 0x09 && i !== 0x0a,
+      ),
+      ...Array.from({ length: 0x21 }, (_, i) => 0x7f + i),
+    ].map((i) => String.fromCharCode(i));
+    const bidi = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+    const evidence = skillLog(
+      `##[error]AssertionError: real failure${[...controls, ...bidi].join('')}\ttail\nsecond line`,
+    );
+    expect(evidence).toContain('real failure');
+    expect(evidence).toContain('\ttail');
+    expect(evidence).toContain('second line');
+    expect(evidence).not.toMatch(/\p{Bidi_Control}/u);
+    // eslint-disable-next-line no-control-regex -- the class under test is the control set
+    expect(evidence).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/u);
+  });
+
   it('keeps fallback errors', () => {
     expect(skillLog('Error: connect ECONNREFUSED')).toContain(
       'Error: connect ECONNREFUSED',
