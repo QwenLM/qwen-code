@@ -31,6 +31,7 @@ vi.mock('../server/session-archive.js', async (importOriginal) => ({
   assertSessionLoadable: archiveMocks.assertSessionLoadable,
 }));
 
+import { SessionTranscriptReader } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { registerSessionRoutes } from './session.js';
 
 function bridgeWithSessions(sessionIds: string[] = []): AcpSessionBridge {
@@ -92,6 +93,20 @@ describe('special session resolver telemetry publication', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     archiveMocks.assertSessionLoadable.mockResolvedValue(undefined);
+    // The default transcript route reads daemon-local; these tests use fake
+    // workspace cwds with no persisted files and assert resolution/telemetry,
+    // not page content, so stub the reader to an empty page.
+    vi.spyOn(SessionTranscriptReader.prototype, 'readPage').mockImplementation(
+      async (sessionId: string) => ({
+        sessionId,
+        filePath: '',
+        records: [],
+        gaps: [],
+        hasMore: false,
+        startTime: '2026-05-28T12:00:00.000Z',
+        lastUpdated: '2026-05-28T12:00:00.000Z',
+      }),
+    );
   });
 
   it('publishes the runtime root for creation before later validation', async () => {

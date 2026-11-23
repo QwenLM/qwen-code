@@ -18,6 +18,7 @@ import { MANAGED_TASK_MESSAGES_EN } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_EN } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_EN } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_EN } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN } from './components/artifacts/workspace-artifact-library-messages.js';
 import { MANAGED_MCP_MESSAGES_EN } from './components/managed/managed-mcp-messages.js';
 import {
   createContext,
@@ -1231,6 +1232,12 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
+  'composerMobile.acceptFollowup': 'Accept suggestion',
+  'composerMobile.dismissFollowup': 'Dismiss suggestion',
+  'composerMobile.caretUp': 'Move cursor up',
+  'composerMobile.caretDown': 'Move cursor down',
+  'composerMobile.caretRight': 'Move cursor right',
+  'composerMobile.insertSlash': 'Insert slash',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -1308,6 +1315,31 @@ const EN: Messages = {
     'This older session was cancelled, but the reason was not recorded. Confirm before continuing.',
   'session.recovery.confirmCancellation':
     'This turn may have been stopped intentionally. Do you want to continue it?',
+  'restartRecovery.title': (v) =>
+    `${v?.['count'] ?? 0} task${v?.['count'] === 1 ? '' : 's'} interrupted by a restart`,
+  'restartRecovery.review': 'Review',
+  'restartRecovery.hide': 'Hide',
+  'restartRecovery.continue': 'Continue',
+  'restartRecovery.continueAll': 'Continue all',
+  'restartRecovery.confirmToolTurn': 'Confirm and continue',
+  'restartRecovery.toolTurnHint':
+    'This task stopped during a tool call. Continuing closes the unfinished call as failed before the model resumes.',
+  'restartRecovery.inFlight': 'Process interrupted',
+  'restartRecovery.daemonShutdown': 'Daemon restarted',
+  'restartRecovery.interrupted': 'Interrupted',
+  'restartRecovery.cancellationNeedsConversation':
+    'Open the conversation to confirm this cancellation.',
+  'restartRecovery.notContinuable':
+    'This task is no longer waiting for recovery.',
+  'restartRecovery.failed': 'Could not continue',
+  'restartRecovery.batchStopped':
+    'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
+  'restartRecovery.loadFailed': 'Could not read interrupted tasks',
+  'restartRecovery.retry': 'Retry',
+  'restartRecovery.truncated':
+    'More interrupted tasks may be available beyond the scan limit. Retry to scan again.',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `Could not scan: ${v?.workspaces ?? ''}`,
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -1389,6 +1421,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
+  'chat.promptNotConfirmed': 'Prompt not confirmed',
+  'chat.promptNotAdmitted': 'Prompt not accepted',
+  'chat.failedToSend': 'Failed to send message',
+  'chat.approvalNotAccepted': 'Approval was not accepted',
+  'chat.acknowledgeUnknown': 'I have checked the session',
+  'chat.stopNotConfirmed': 'Stop request not confirmed',
   'askUser.shortcuts.previous': '← previous',
   'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
   'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
@@ -2400,6 +2438,14 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'attachment.readFailed': 'Failed to read attachment.',
   'attachment.loadingFile': 'Loading file...',
   'attachment.loadingPreview': 'Loading preview...',
+  'pdf.previousPage': 'Previous page',
+  'pdf.nextPage': 'Next page',
+  'pdf.openFull': 'Open full PDF',
+  'pdf.page': (v) => `PDF page ${v?.page ?? 1}`,
+  'pdf.fileChanged': 'File changed while loading. Reopen the preview to retry.',
+  'pdf.workerFailed': 'Could not start the PDF preview.',
+  'pdf.externalFontMap':
+    'This PDF needs a font map. Open the full PDF to view it.',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
   'sideTask.commandsLoadingTimedOut':
@@ -2754,6 +2800,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionIssueStateNotPlanned': 'Not planned',
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.userInputNeededShort': 'Input',
+  'sidebar.continuationNeeded': 'Continue execution needed',
+  'sidebar.continuationNeededShort': 'Continue',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.selectSessions': 'Select sessions',
@@ -2836,7 +2884,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.sendNow': 'Send now',
   'queue.sendNowTip':
-    "Send queued messages now, cutting the model's current response short unless it has started a tool call; running tools finish first",
+    'Send queued messages now. Interrupts the model if it is responding or calling tools',
   'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
@@ -4371,6 +4419,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `Failed to restore panel: ${v?.error ?? 'Unknown error'}`,
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
+  'userMessage.automatic.title': 'Automatic trigger',
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
@@ -5376,6 +5425,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...ARTIFACT_LIBRARY_MESSAGES_EN,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
   ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
@@ -5390,6 +5440,14 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
  */
 export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
   key.startsWith('localFiles.'),
+);
+
+export const RESTART_RECOVERY_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('restartRecovery.'),
+);
+
+export const CHAT_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('chat.'),
 );
 
 const catalogs = new Map(eagerCatalogs);

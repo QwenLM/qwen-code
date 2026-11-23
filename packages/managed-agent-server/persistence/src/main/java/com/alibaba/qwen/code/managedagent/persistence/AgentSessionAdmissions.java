@@ -12,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -239,7 +238,13 @@ final class AgentSessionAdmissions {
         if (worktree != null) {
             sessionWorktrees.admit(tenantId, actorId, admission.sessionId(), worktree, workspace);
         }
-        if (workspaceChildAgentsEnabled && publicChildrenSupported && (!sshWorkspace || managedExtensionExecutionEnabled)
+        // D5′: SSH roots admit children under the same arms as local roots;
+        // the configuration and harness capability gates, not the Workspace
+        // transport, decide. Resident/CSI Workspaces stay excluded
+        // structurally, not by a resident gate: the provisioner capability
+        // arms admit only local-process/SSH, and isPublicShell refuses their
+        // files-only profile.
+        if (workspaceChildAgentsEnabled && publicChildrenSupported
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
                 && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
@@ -433,15 +438,13 @@ final class AgentSessionAdmissions {
         // is the same key the idempotent admission derives, so the
         // locking read never becomes a cross-tenant table scan under
         // REPEATABLE READ.
-        String fenceScopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
-                parentSessionId);
         String fenceRecordKey = ManagedExtensionProjection.recordKey(
                 parentSessionId, "child_run", lineage.parentChildRunId());
         List<String> runState = jdbc.query("SELECT task_state FROM"
                 + " ma_session_record"
-                + " WHERE session_scope_key = ? AND record_key = ?"
+                + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
                 + " FOR UPDATE",
-                (result, row) -> result.getString(1), fenceScopeKey,
+                (result, row) -> result.getString(1), tenantId, parentSessionId,
                 fenceRecordKey);
         if (!runState.isEmpty()
                 && ("completed".equals(runState.getFirst())

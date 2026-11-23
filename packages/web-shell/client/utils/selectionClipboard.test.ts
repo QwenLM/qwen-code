@@ -46,6 +46,28 @@ describe('selected reply clipboard content', () => {
         'Before ![diagram](https://example.com/diagram.png) after.\n\n-   ![item](https://example.com/item.png)',
     });
   });
+  it('rebuilds the image reference from the fallback chip', () => {
+    const body = fixture(
+      '<p>Before <span data-markdown-image-alt="chart" data-markdown-image-src="https://example.invalid/x.png">chart</span> after.</p>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)).toEqual({
+      text: 'Before chart after.',
+      markdown: 'Before ![chart](https://example.invalid/x.png) after.',
+    });
+  });
+  it('keeps the reference shape for a chip without src (document mode)', () => {
+    const body = fixture(
+      '<p><span data-markdown-image-alt="diagram">Failed to load</span></p>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)).toEqual({
+      text: 'diagram',
+      markdown: '![diagram]()',
+    });
+  });
   it.each([false, true])(
     'copies one formula source for displayMode=%s',
     (displayMode) => {
@@ -261,6 +283,24 @@ describe('selected reply plain text', () => {
 
   it('returns null when the selection has no copyable text', () => {
     const body = fixture('<p><img src="https://example.com/a.png" alt=""></p>');
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyText(body, range)).toBeNull();
+  });
+
+  it('reads the image fallback chip as the alt of the img it replaces', () => {
+    const body = fixture(
+      '<p>Before <span data-markdown-image-alt="diagram">/Users/foo/shot.png</span> after.</p>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyText(body, range)).toBe('Before diagram after.');
+  });
+
+  it('keeps the empty-alt fallback chip extraction empty', () => {
+    const body = fixture(
+      '<p><span data-markdown-image-alt="">Failed to load</span></p>',
+    );
     const range = document.createRange();
     range.selectNodeContents(body);
     expect(getSelectedReplyText(body, range)).toBeNull();

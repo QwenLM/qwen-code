@@ -664,13 +664,16 @@ export async function installMockDaemon(
 
 export function userTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: { id?: number; sessionId?: string; promptId?: string } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      // Mirrors the production replay stamp: the user record's
+      // daemonPromptId lands in the chunk's `_meta.promptId`.
+      ...(options.promptId ? { _meta: { promptId: options.promptId } } : {}),
     },
     options.id,
   );
@@ -2365,7 +2368,10 @@ async function handleDaemonRoute(
       return;
     }
     const summary = scenario.sessions[index];
-    const displayName = readStringField(body, 'displayName');
+    const initialDisplayName = readStringField(body, 'initialDisplayName');
+    const displayName =
+      readStringField(body, 'displayName') ??
+      (summary.displayName?.trim() ? undefined : initialDisplayName);
     const prInput = getRecordValue(body, 'pr');
     let prs = summary.prs ?? [];
     if (prInput !== undefined) {
@@ -2446,7 +2452,11 @@ async function handleDaemonRoute(
     };
     await json(route, {
       sessionId,
-      ...(displayName !== undefined ? { displayName } : {}),
+      ...(displayName !== undefined
+        ? { displayName }
+        : initialDisplayName !== undefined
+          ? { displayName: summary.displayName }
+          : {}),
       prs,
     });
     return;

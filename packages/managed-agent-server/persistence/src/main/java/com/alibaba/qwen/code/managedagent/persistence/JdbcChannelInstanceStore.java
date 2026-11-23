@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -229,6 +228,9 @@ public class JdbcChannelInstanceStore
      */
     public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
+        // ma_session.session_scope_key stays NULL for PUBLIC Sessions (only
+        // CONTROL admission writes it), so the record join must stay on the
+        // raw tenant/session identity, not the scope key.
         return jdbc.query("SELECT r.session_id, MIN(r.gmt_create) AS"
                         + " oldest_due"
                         + " FROM ma_session_record r"
@@ -253,12 +255,12 @@ public class JdbcChannelInstanceStore
             String sessionId, String deliveryId) {
         return jdbc.query("SELECT delivery_state, record_resource_id"
                         + " FROM ma_session_record"
-                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
+                        + " WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND record_id = ?",
                 (row, index) -> new DeliveryRecordState(row.getString(1),
                         row.getString(2)),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId,
                 deliveryId).stream().findFirst();
     }
 
@@ -272,7 +274,7 @@ public class JdbcChannelInstanceStore
         return jdbc.query("SELECT session_id, record_id, revision,"
                         + " delivery_state, record_resource_id"
                         + " FROM ma_session_record USE INDEX (idx_ma_record_session_delivery)"
-                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
+                        + " WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND delivery_state IN ('planned', 'partial')"
                         + " ORDER BY gmt_create, record_key LIMIT ?",
@@ -280,7 +282,7 @@ public class JdbcChannelInstanceStore
                         row.getString("record_id"), row.getLong("revision"),
                         row.getString("delivery_state"),
                         row.getString("record_resource_id")),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId,
                 limit);
     }
 
@@ -288,11 +290,11 @@ public class JdbcChannelInstanceStore
     public String readResource(String tenantId, String sessionId, String resourceId) {
         List<byte[]> rows = jdbc.query(
                 "SELECT inline_bytes FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND storage_kind = 'MYSQL_INLINE'"
                         + " AND state = 'REFERENCED'",
                 (row, index) -> row.getBytes("inline_bytes"),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, resourceId);
+                tenantId, sessionId, resourceId);
         return rows.isEmpty() ? null
                 : new String(rows.getFirst(), StandardCharsets.UTF_8);
     }

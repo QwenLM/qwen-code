@@ -343,6 +343,331 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('restart recovery', () => {
+    it('reads the interrupted-session batch over REST', async () => {
+      const body = {
+        workspaces: [
+          {
+            workspace: 'workspace-a',
+            workspaceId: 'workspace-id',
+            cwd: '/work/a',
+            v: 1 as const,
+            items: [
+              {
+                sessionId: 'session-1',
+                lastActivityAt: '2026-11-17T09:12:31.000Z',
+                interruption: 'daemon_shutdown',
+              },
+            ],
+            truncated: false,
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn();
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'token-1',
+        fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
+      });
+
+      await expect(
+        client.getRestartRecoveries({
+          workspaces: ['workspace-a'],
+          sinceMs: 3_600_000,
+        }),
+      ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/sessions/recovery',
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer token-1',
+          'content-type': 'application/json',
+        },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        workspaces: ['workspace-a'],
+        sinceMs: 3_600_000,
+      });
+    });
+
+    it('continues the selected batch over REST', async () => {
+      const body = {
+        results: [
+          {
+            workspace: 'workspace-a',
+            sessionId: 'session-1',
+            status: 'accepted',
+            kind: 'interrupted_prompt',
+            promptId: 'continue-1',
+            lastEventId: 17,
+            eventEpoch: 'epoch-1',
+          },
+          {
+            workspace: 'workspace-a',
+            sessionId: 'session-2',
+            status: 'confirmation_required',
+            kind: 'interrupted_turn',
+            code: 'tool_turn',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn();
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
+      });
+
+      await expect(
+        client.continueRestartRecoveries({
+          sessions: [
+            { workspace: 'workspace-a', sessionId: 'session-1' },
+            { workspace: 'workspace-a', sessionId: 'session-2' },
+          ],
+          confirmToolTurn: false,
+        }),
+      ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/sessions/recovery/continue',
+        method: 'POST',
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessions: [
+          { workspace: 'workspace-a', sessionId: 'session-1' },
+          { workspace: 'workspace-a', sessionId: 'session-2' },
+        ],
+        confirmToolTurn: false,
+      });
+    });
+
+    it('sizes a continuation from the advertised restore budget instead of the generic deadline', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const body = {
+          results: [
+            {
+              workspace: 'workspace-a',
+              sessionId: 'session-1',
+              status: 'accepted' as const,
+              kind: 'interrupted_prompt' as const,
+              promptId: 'continue-1',
+            },
+          ],
+        };
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 60_000 },
+              }),
+            );
+          }
+          signal = init?.signal ?? undefined;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () => resolve(jsonResponse(200, body)),
+              45_000,
+            );
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal?.reason);
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client.continueRestartRecoveries({
+          sessions: [
+            { workspace: 'workspace-a', sessionId: 'session-1' },
+            { workspace: 'workspace-a', sessionId: 'session-2' },
+          ],
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        await expect(outcome).resolves.toEqual(body);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not abort at one budget and times out only after two derived budgets', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 60_000 },
+              }),
+            );
+          }
+          signal = init?.signal ?? undefined;
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client
+          .continueRestartRecoveries({
+            sessions: [
+              { workspace: 'workspace-a', sessionId: 'session-1' },
+              { workspace: 'workspace-a', sessionId: 'session-2' },
+            ],
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(99_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(40_000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves an explicit zero deadline over the derived member budget', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(
+          () =>
+            new Promise<Response>((resolve) => {
+              setTimeout(
+                () => resolve(jsonResponse(200, { workspaces: [] })),
+                45_000,
+              );
+            }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 30_000,
+        });
+        const outcome = client.getRestartRecoveries(
+          { workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`) },
+          { timeoutMs: 0 },
+        );
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(calls[0]?.signal?.aborted ?? false).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        await expect(outcome).resolves.toEqual({ workspaces: [] });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('lets an explicit global timeout win instead of multiplying the member count', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(({ signal }) => {
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 1_000,
+        });
+        const outcome = client
+          .getRestartRecoveries({
+            workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`),
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(calls[0]?.signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('honors a per-call timeout independently of the member count', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(({ signal }) => {
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const outcome = client
+          .getRestartRecoveries(
+            {
+              workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`),
+            },
+            { timeoutMs: 5_000 },
+          )
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(calls[0]?.signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves a per-workspace error and a route rejection', async () => {
+      const member = {
+        workspaces: [
+          {
+            workspace: 'workspace-a',
+            error: {
+              code: 'untrusted_workspace',
+              message: 'Workspace is not trusted.',
+              status: 403,
+            },
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        calls.length === 1
+          ? jsonResponse(200, member)
+          : jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getRestartRecoveries({ workspaces: ['workspace-a'] }),
+      ).resolves.toEqual(member);
+      await expect(
+        client.getRestartRecoveries({ workspaces: ['workspace-a'] }),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(2);
+    });
+  });
+
   describe('session Goal lifecycle', () => {
     it('reads and controls the authoritative snapshot with client identity', async () => {
       const response: GoalStateResponse = { snapshot: GOAL_SNAPSHOT };
@@ -1412,6 +1737,48 @@ describe('DaemonClient', () => {
       expect(err).toBeInstanceOf(DaemonHttpError);
       expect((err as DaemonHttpError).status).toBe(400);
       expect((err as DaemonHttpError).body).toEqual(body);
+    });
+  });
+
+  describe('setVisionBridgeSettings', () => {
+    it('POSTs both settings through the qualified workspace route', async () => {
+      const result = {
+        key: 'visionBridgeTimeoutMs',
+        scope: 'workspace',
+        value: 60_000,
+        requiresRestart: true,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).resolves.toEqual(result);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspaces/%2Fwork%2Fsecondary/settings/vision-bridge',
+        body: '{"model":"qwen-vl","timeoutMs":60000}',
+      });
+    });
+
+    it('surfaces a missing batch route without falling back to separate writes', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceById('secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/secondary/settings/vision-bridge',
+      );
     });
   });
 
@@ -7913,6 +8280,65 @@ describe('DaemonClient', () => {
         status,
         body,
         message: `POST /session/:id/model: ${expected}`,
+      });
+    });
+  });
+
+  describe('rateSessionTurn', () => {
+    it('POSTs promptId and rating and returns the recorded answer', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn('s-1', 'prompt-1', 'up');
+      expect(result).toEqual({ recorded: true });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/feedback');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'up',
+      });
+    });
+
+    it('sends the client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn(
+        's-1',
+        'prompt-1',
+        'down',
+        'client-1',
+      );
+      expect(result).toEqual({ recorded: false });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'down',
+      });
+    });
+
+    it('throws on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('surfaces the route label on failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: "`rating` must be 'up' or 'down'" }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining('POST /session/:id/feedback'),
       });
     });
   });

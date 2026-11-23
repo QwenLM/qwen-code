@@ -122,6 +122,12 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.label.visionModel': 'Vision Model',
   'settings.description.visionModel':
     'Image-capable model used as the vision bridge. Leave empty to auto-select.',
+  // `/model --vision --timeout` writes this setting; kept here with the
+  // settings strings so the transcript export drops them.
+  'model.setVisionTimeout': 'Set Vision Bridge Timeout',
+  'model.invalidOption': (v) => `Invalid /model option "${v?.option ?? ''}".`,
+  'model.invalidVisionTimeout': (v) =>
+    `Invalid --timeout value "${v?.value ?? ''}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.`,
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
@@ -332,6 +338,13 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.visionModel': '视觉模型',
   'settings.description.visionModel':
     '用于视觉桥接的图像能力模型。留空则自动选择。',
+  'model.setVisionTimeout': '设置视觉桥接超时',
+  'model.invalidOption': (v) => `无效的 /model 选项“${v?.option ?? ''}”。`,
+  'model.invalidVisionTimeout': (v) =>
+    `无效的 --timeout 值 "${v?.value ?? ''}"。请使用正整数秒数，例如 60、60s 或 90000ms。`,
+  'settings.label.visionBridgeTimeoutMs': '视觉桥接超时（毫秒）',
+  'settings.description.visionBridgeTimeoutMs':
+    '视觉桥接图片转写调用的单次超时（毫秒，正整数，最大 2147483647）。留空使用内置的 30 秒。视觉端点较慢或经过代理时可调大。也可用 /model --vision --timeout <秒数> 设置。',
   'settings.label.modelFallbacks': '模型回退',
   'settings.description.modelFallbacks':
     '主模型遇到容量错误（429/503/529）时按序尝试的回退模型 ID 列表（逗号分隔，最多 3 个）。例如“qwen-plus,qwen-turbo”。可用 CLI --fallback-model 设置。',
@@ -441,10 +454,10 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '在受信任的本地交互终端、无界面会话和 ACP 会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'settings.label.experimental.unifiedAgentLoop': '统一 Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
-    '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI 和子代理运行在共享 loop 上，OpenTUI 和 Hosted Harness 仍用各自的 loop（在这些入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless、ACP 会话、Ink TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+    '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理运行在共享 loop 上，Hosted Harness 仍用自己的 loop（在该入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless、ACP 会话、两个 TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
   'settings.label.experimental.eventBusAgentLoop': '事件总线 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '让共享 agent loop 运行在事件总线架构上（实验性）。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI 和子代理，开启 experimental.unifiedAgentLoop 时还有 OpenTUI；其他 surface 保留现有的 loop 内部实现。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+    '让共享 agent loop 运行在事件总线架构上（实验性）。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留现有的 loop 内部实现。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
   'settings.label.experimental.modelAvailabilityTracking': '模型可用性台账',
   'settings.description.experimental.modelAvailabilityTracking':
     '在会话内跨请求记住模型健康状态（实验性）。当某个 fallback 模型在容量错误（429/503/529）上耗尽重试后，模型 fallback 链在本轮剩余请求中跳过它，并在下一轮重新探测一次；显式重试也会重新探测被跳过的模型。primary 模型仍每个请求都会被尝试。永久配额耗尽仍快速失败，不视为瞬时容量跳过。关闭时 fallback 链行为与之前完全一致。',
@@ -471,6 +484,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
   'settings.description.worktree.defaultForNewSessions':
     '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
+  'settings.label.worktree.maxRetained': '保留的会话 Worktree 上限',
+  'settings.description.worktree.maxRetained':
+    '每仓库最近 Web Shell 会话 worktree 的预留保留上限，目前尚未应用：按数量清扫与重开 chat 时恢复均未在此切片实现。删除 chat 仅在必须保留工作树状态时，于移除前创建快照；归档 chat 保留工作树及绑定。设为 0 将用于关闭按数量自动删除。不影响工具/agent worktree，它们保留现有清理语义。后续功能由 #17237 跟踪。',
 };
 
 export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
@@ -487,6 +503,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.experimental.generatedUi': 'Generated UI',
   'settings.description.experimental.generatedUi':
     'Показывать интерактивные виды из встроенного Generated UI в поддерживаемых локальных сессиях, например Web Shell. Включено по умолчанию. Перезапустите владеющую сессию, чтобы применить изменения.',
+  'settings.label.experimental.mods': 'Mods (экспериментально)',
+  'settings.description.experimental.mods':
+    'Включить экспериментальные Mods из включённых расширений в доверенных локальных терминальных, headless и ACP сессиях. Требуется перезапуск.',
 
   'settings.models.editWindow': 'Изменить окно контекста',
   'settings.models.windowHint':
@@ -702,6 +721,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.fastModel': 'Быстрая модель',
   'settings.description.fastModel':
     'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
+  'settings.label.visionBridgeTimeoutMs': 'Тайм-аут моста зрения (мс)',
+  'settings.description.visionBridgeTimeoutMs':
+    'Тайм-аут одной попытки в миллисекундах для вызова транскрипции изображений моста зрения (положительное целое до 2147483647). Без значения используются встроенные 30 с. Увеличьте для медленных или проксируемых vision-эндпоинтов. Задаётся через /model --vision --timeout <секунды>.',
   'settings.label.modelFallbacks': 'Резервные модели',
   'settings.description.modelFallbacks':
     'Список ID резервных моделей (через запятую, до 3), которые пробуются по порядку при ошибках ёмкости основной (429/503/529). Например «qwen-plus,qwen-turbo». Можно задать CLI --fallback-model.',
@@ -747,9 +769,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Открывать страницы результатов',
   'settings.description.tools.webSearch.webExtractor':
     'Разрешить поисковому агенту открывать и читать страницы результатов (DashScope web_extractor), чтобы ответы были обоснованнее. DashScope тарифицирует это отдельно. Переопределение: WEB_SEARCH_EXTRACTOR.',
-  'settings.label.tools.webSearch.timeoutMs': 'Таймаут поиска (мс)',
+  'settings.label.tools.webSearch.timeoutMs': 'Тайм-аут поиска (мс)',
   'settings.description.tools.webSearch.timeoutMs':
-    'Общий бюджет времени одного вызова web_search в миллисекундах (по умолчанию 120000, максимум 600000; остальные значения откатываются к умолчанию). Поисковый агент делает несколько запросов и может открывать страницы; если бюджет исчерпан после хотя бы одного завершённого поиска, возвращаются частичные результаты — если бюджет кончился до первого поиска, инструмент сообщает ошибку таймаута, потому что рассказ без выполненного поиска не является аудируемым доказательством. Более низкий лимит одного инструмента (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) сработает раньше и отбросит частичные результаты; держите его выше этого бюджета. Переопределение: WEB_SEARCH_TIMEOUT_MS.',
+    'Общий бюджет времени одного вызова web_search в миллисекундах (по умолчанию 120000, максимум 600000; остальные значения откатываются к умолчанию). Поисковый агент делает несколько запросов и может открывать страницы; если бюджет исчерпан после хотя бы одного завершённого поиска, возвращаются частичные результаты — если бюджет кончился до первого поиска, инструмент сообщает ошибку тайм-аута, потому что рассказ без выполненного поиска не является аудируемым доказательством. Более низкий лимит одного инструмента (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) сработает раньше и отбросит частичные результаты; держите его выше этого бюджета. Переопределение: WEB_SEARCH_TIMEOUT_MS.',
   'settings.label.tools.webSearch.maxPerSession': 'Максимум поисков за сессию',
   'settings.description.tools.webSearch.maxPerSession':
     'Максимум вызовов web_search в одной сессии (по умолчанию 200, максимум 10000; остальные значения откатываются к умолчанию). Счётчик общий с субагентами и сбрасывается при смене сессии (/clear, /resume, ветка). По достижении лимита дальнейшие поиски пропускаются, модели предлагается продолжить с уже собранным. Переопределение: WEB_SEARCH_MAX_PER_SESSION.',
@@ -826,10 +848,10 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Включает экспериментальные Mods из включённых расширений в доверенном локальном терминале, сессиях без интерфейса и ACP. Требуется перезапуск.',
   'settings.label.experimental.unifiedAgentLoop': 'Единый Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
-    'Запускать сессии на общем agent loop. Если не задано, у каждого входа своё умолчание: headless (`-p` и stream-json), Ink TUI и субагенты идут на общем loop, ACP (Zed, VS Code, Web Shell, channel), OpenTUI и Hosted Harness — на своих (для этих входов это экспериментально). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, Ink TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
+    'Запускать сессии на общем agent loop. Если настройка не задана, headless (`-p` и stream-json), ACP (Zed, VS Code, Web Shell, channel), Ink TUI, OpenTUI и субагенты работают на общем loop, а Hosted Harness — на своём (для него общий loop экспериментальный). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, ACP, оба TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
   'settings.label.experimental.eventBusAgentLoop': 'Agent Loop на шине событий',
   'settings.description.experimental.eventBusAgentLoop':
-    'Запускать общий agent loop на архитектуре шины событий (экспериментально). Действует для входов на общем agent loop: по умолчанию headless (`-p` и stream-json), Ink TUI и субагенты, а при experimental.unifiedAgentLoop ещё ACP (Zed, VS Code, Web Shell, channel) и OpenTUI; остальные поверхности оставляют свою внутреннюю реализацию loop. QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP перекрывает: `1` включает, `0` выключает, список через запятую (например `headless=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core; `speculation` зарезервировано). Сегодня действуют только уже подключённые входы; голые `1`/`0` — только как целое значение, не внутри списка, неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
+    'Запускать общий agent loop на архитектуре шины событий (экспериментально). При включении действует для входов, использующих общий agent loop. По умолчанию на общем loop работают headless (`-p` и stream-json), ACP (Zed, VS Code, Web Shell, channel), Ink TUI, OpenTUI и субагенты. Остальные входы сохраняют свою реализацию loop. QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP перекрывает: `1` включает, `0` выключает, список через запятую (например `headless=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core; `speculation` зарезервировано). Сегодня действуют только уже подключённые входы; голые `1`/`0` — только как целое значение, не внутри списка, неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
   'settings.label.experimental.artifact': 'Включить Artifacts',
   'settings.description.experimental.artifact':
     'Включить инструменты artifact, по умолчанию включены. В интерактивных не-SDK сессиях модель может публиковать самодостаточные HTML-страницы как интерактивный Artifact и открывать их в браузере; не-SDK сессии daemon могут использовать record_artifact, который пишет только метаданные. false или QWEN_CODE_DISABLE_ARTIFACT=1 отключают оба.',

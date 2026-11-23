@@ -4079,17 +4079,10 @@ esac`,
     );
   });
 
-  it('force-pushes the release branch so a retry replaces a failed attempt', () => {
-    // A failed attempt leaves release/<tag> on an older head, and the
-    // retry's divergent bump commit makes a plain push fail as
-    // non-fast-forward, blocking every retry of the release. Force is safe
-    // only while nothing for this version has shipped, so the push is
-    // pinned INSIDE the dry-run guard: the dry-run contract (release.yml's
-    // dispatch input) promises no branch is created, and no other test
-    // pins this guard — a force push outside it would turn a dry run into
-    // a destructive overwrite of the remote branch.
+  it('pushes new release branches without replacing an existing release', () => {
+    expect(releaseStepScript).not.toContain('git push --force');
     expect(releaseStepScript).toMatch(
-      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
+      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
     );
   });
 
@@ -4111,22 +4104,23 @@ esac`,
     ).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
-  it('serializes publish jobs per release tag', () => {
+  it('serializes publish jobs per npm channel', () => {
     // The pre-push re-validation below is only sound while at most one
-    // publish job pushes and publishes a given version at a time; --force
-    // removed the non-fast-forward rejection that used to serialize the
-    // push itself. The group must sit on the publish job — in-progress
-    // runs are never cancelled, and of queued same-tag runs only the
+    // publish job pushes and publishes on a given channel at a time.
+    // The group must sit on the publish job — in-progress
+    // runs are never cancelled, and of queued same-channel runs only the
     // latest survives, but whichever run reaches the push re-validates
-    // first — and it must be keyed by the computed tag, which only exists
-    // as a prepare output, plus is_dry_run, so a dry run (which ships
-    // nothing) never queues ahead of the real release for the same tag.
+    // first — and it must be keyed by the npm channel this run publishes to,
+    // which only exists as a prepare output, plus is_dry_run, so a dry run
+    // (which ships nothing) never queues ahead of the real release for the
+    // same channel. Channel rather than tag is deliberate: a newer version
+    // must not publish on the same channel while an older one resumes.
     // timeout-minutes bounds the hold a wedged publish (a stalled npm
     // publish or asset upload) keeps on the group: without it the GitHub
-    // default of 360 minutes leaves same-tag retries queued behind it,
+    // default of 360 minutes leaves same-channel retries queued behind it,
     // unable to run, fail, or notify.
     expect(workflow).toMatch(
-      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.release_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
+      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n(?: {6}#[^\n]*\n)* {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.npm_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
     );
   });
 
@@ -4148,12 +4142,11 @@ esac`,
     );
   });
 
-  it('re-validates that the version is still unshipped right before force-pushing', () => {
+  it('re-validates that the version is still unshipped before pushing a new release branch', () => {
     // prepare computed and validated the version minutes to hours before
     // this push (the validation jobs and the production-release approval
     // gate sit in between). A concurrent same-version run can ship in that
-    // window; the force push would then replace the branch tip that the
-    // shipped npm packages, tag, and merge to main anchor to. Pin the
+    // window before this run has created its release branch. Pin the
     // re-validation of prepare's invariant directly before the push, and
     // pinned to the script that owns the published-package list so the
     // guard cannot silently drift from it: the call must sit inside the
@@ -4189,6 +4182,30 @@ esac`,
     expect(pushReleaseBranchStep.env.RELEASE_VERSION).toBe(
       '${{ needs.prepare.outputs.release_version }}',
     );
+    // The resume arm verifies the reused commit is the release source or
+    // its direct single-parent version commit. Without RELEASE_SHA wired
+    // into the step the provenance check can never pass and every resume
+    // is refused.
+    expect(pushReleaseBranchStep.env.RELEASE_SHA).toBe(
+      '${{ needs.prepare.outputs.release_sha }}',
+    );
+    // The resume-time channel guard must ride the same workflow-pinned
+    // script (neither its comparison code nor its npm probes may come from
+    // the selected release ref), run before the write credential is
+    // exported, and turn its decisive exit 1 into the version_refusal
+    // marker.
+    const resumeGuardCall =
+      'node .release-workflow/scripts/assert-release-version.mjs --assert-channel-resumable --version="${RELEASE_VERSION}" --tag="${NPM_TAG}"';
+    const resumeGuard = releaseStepScript.indexOf(resumeGuardCall);
+    expect(resumeGuard).toBeGreaterThan(
+      releaseStepScript.indexOf('if [[ "${IS_DRY_RUN}" == "false" ]]'),
+    );
+    expect(resumeGuard).toBeLessThan(
+      releaseStepScript.indexOf('export GH_TOKEN="${CI_BOT_PAT}"'),
+    );
+    expect(releaseStepScript).toMatch(
+      /node \.release-workflow\/scripts\/assert-release-version\.mjs --assert-channel-resumable --version="\$\{RELEASE_VERSION\}" --tag="\$\{NPM_TAG\}" \|\| channel_status=\$\?[\s\S]*?if \[\[ "\$\{channel_status\}" -eq 1 \]\]; then\n {10}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {10}exit 1\n {8}fi/,
+    );
     expect(pushReleaseBranchStep.run).toContain('push-release-branch');
     const guard = releaseStepScript.indexOf(
       'node .release-workflow/scripts/assert-release-version.mjs --assert-unreleased="${RELEASE_VERSION}" || guard_status=$?',
@@ -4201,7 +4218,7 @@ esac`,
     );
     expect(
       releaseStepScript.indexOf(
-        'git push --force --set-upstream origin "${release_branch_name}" --follow-tags',
+        'git push --set-upstream origin "${release_branch_name}" --follow-tags',
       ),
     ).toBeGreaterThan(guard);
   });
@@ -4289,6 +4306,78 @@ esac`,
       );
       expect(result.status).toBe(3);
       expect(result.stdout).toContain('has already shipped');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'decides the resume verdict without the release checkout dependencies',
+    () => {
+      // The publish job installs the selected ref's lockfile into the
+      // release checkout, and a bare require('semver') from
+      // .release-workflow/scripts/ walks up into that node_modules. Plant a
+      // copy that reports every version as not-ahead: a guard loading it
+      // would resume a release whose channel already moved past it, in the
+      // first step carrying a write-scoped token. The verdict must survive
+      // the poisoning, so it can only come from the pinned script itself.
+      const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'resume-')));
+      const pinned = join(workspace, '.release-workflow');
+      mkdirSync(join(pinned, 'scripts'), { recursive: true });
+      for (const file of [
+        'assert-release-version.mjs',
+        'release-packages.mjs',
+        'workspaces.js',
+      ]) {
+        writeFileSync(
+          join(pinned, 'scripts', file),
+          readFileSync(join('scripts', file)),
+        );
+      }
+      writeFileSync(
+        join(pinned, 'package.json'),
+        JSON.stringify({ workspaces: ['packages/*'] }),
+      );
+      mkdirSync(join(pinned, 'packages/example'), { recursive: true });
+      writeFileSync(
+        join(pinned, 'packages/example/package.json'),
+        JSON.stringify({ name: '@qwen-code/example' }),
+      );
+      const poisoned = join(workspace, 'node_modules', 'semver');
+      mkdirSync(poisoned, { recursive: true });
+      writeFileSync(
+        join(poisoned, 'package.json'),
+        JSON.stringify({ name: 'semver', main: 'index.js' }),
+      );
+      writeFileSync(
+        join(poisoned, 'index.js'),
+        'module.exports = { parse: (value) => ({ value }), gt: () => false };\n',
+      );
+      const bin = join(workspace, 'bin');
+      mkdirSync(bin);
+      const runGuard = (distTag) => {
+        writeFileSync(join(bin, 'npm'), `#!/bin/sh\necho "${distTag}"\n`, {
+          mode: 0o755,
+        });
+        return spawnSync(
+          process.execPath,
+          [
+            join(pinned, 'scripts', 'assert-release-version.mjs'),
+            '--assert-channel-resumable',
+            '--version=1.2.3',
+            '--tag=latest',
+          ],
+          {
+            cwd: workspace,
+            encoding: 'utf8',
+            env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          },
+        );
+      };
+      const ahead = runGuard('9.9.9');
+      expect(ahead.status, ahead.stderr).toBe(1);
+      expect(ahead.stdout).toContain('past 1.2.3');
+      const behind = runGuard('1.2.2');
+      expect(behind.status, behind.stderr).toBe(0);
+      rmSync(workspace, { recursive: true, force: true });
     },
   );
 
@@ -4583,15 +4672,22 @@ describe('release artifact handoff', () => {
       '${{ needs.build_release.outputs.release_commit }}',
     );
     expect(restore.if).toBe("${{ needs.build_release.result == 'success' }}");
+    expect(step('publish', 'Prepare release branch').if).toBe(
+      "${{ needs.build_release.result != 'success' }}",
+    );
+    // A resume rebuilds through these two steps so the trusted
+    // reset/checkout pair between them also covers the retry path.
     for (const name of [
-      'Prepare release branch',
       'Build Bundle and Prepare Package',
       'Build Standalone Archives',
     ]) {
       expect(step('publish', name).if).toBe(
-        "${{ needs.build_release.result != 'success' }}",
+        "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}",
       );
     }
+    expect(releaseStepScript).toContain(
+      'git switch -C "${release_branch_name}" "${release_commit}"',
+    );
     expect(publish.steps.indexOf(restore)).toBeLessThan(
       publish.steps.indexOf(
         step('publish', 'Conditionally push release branch'),

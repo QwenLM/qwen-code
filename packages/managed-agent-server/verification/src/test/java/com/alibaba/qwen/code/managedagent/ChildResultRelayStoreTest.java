@@ -11,11 +11,15 @@ import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.Relay
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -315,21 +319,27 @@ class ChildResultRelayStoreTest {
     private void insertRecordRow(String scopeKey, String sessionId,
             String recordId, String kind, String deliveryState,
             String taskState) {
+        insertRecordRow(scopeKey, sessionId, recordId, kind, deliveryState,
+                taskState, 1);
+    }
+
+    private void insertRecordRow(String scopeKey, String sessionId,
+            String recordId, String kind, String deliveryState,
+            String taskState, long createdAt) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
-                        + " 'h', 1, ?, ?, ?, ?, ?, 1)",
-                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                        + " VALUES (?, ?, 'workspace', ?, 'child_run', ?,"
+                        + " 'h', 1, ?, ?, ?, ?, ?, ?)",
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
                 TENANT, sessionId, recordId,
                 "resource-" + recordId,
                 "shell".equals(kind) ? "background_shell" : kind, taskState,
                 deliveryState == null ? null : "session",
-                deliveryState);
+                deliveryState, createdAt);
     }
 
     @Test
@@ -586,6 +596,158 @@ class ChildResultRelayStoreTest {
                 "done", null, now + 2_000);
     }
 
+    @ParameterizedTest
+    @CsvSource({"7,7", "1,7", "7,1", "0,7", "7,0"})
+    void takesTheGlobalTopNFromUnevenBranches(int starts, int debts) {
+        String session = UUID.randomUUID().toString();
+        List<PendingChild> expected = new ArrayList<>();
+        for (int index = 0; index < starts; index++) {
+            String run = "start-" + index;
+            insertRecordRow("scope-top", session, run, "child_agent",
+                    "planned", "pending", 10_000 + index);
+            expected.add(new PendingChild(TENANT, session, run, 1,
+                    "planned", "resource-" + run));
+        }
+        for (int index = 0; index < debts; index++) {
+            String run = "debt-" + index;
+            retainDiscoveryCloseDebt(session, run, "owner", 100 + index, 0);
+            expected.add(new PendingChild(TENANT, session, run, 0,
+                    "accepted", null));
+        }
+        assertThat(relayStore.findPendingChildren("owner", 1_000_000, 4))
+                .containsExactlyElementsOf(expected.subList(0, 4));
+        assertThat(relayStore.findPendingChildren("owner", 1_000_000, 0))
+                .isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void ordersEachBranchByCreationSessionAndRunAtTheLimit(boolean debt) {
+        List<String> sessions = List.of("parent-b", "parent-a", "parent-a", "parent-a", "parent-z");
+        List<String> runs = List.of("run-a", "run-c", "run-b", "run-a", "run-old");
+        List<PendingChild> inserted = new ArrayList<>();
+        for (int index = 0; index < runs.size(); index++) {
+            String session = sessions.get(index);
+            String run = runs.get(index);
+            long createdAt = index == 4 ? 9 : 10;
+            // Debt ordering belongs to the operation, not its optional record.
+            insertRecordRow("scope-tie", session, run, "workflow",
+                    "planned", "pending", debt ? 100 - index : createdAt);
+            if (debt) {
+                retainDiscoveryCloseDebt(session, run, "owner", createdAt, 0);
+            }
+            inserted.add(new PendingChild(TENANT, session, run, 1,
+                    "planned", "resource-" + run));
+        }
+        assertThat(relayStore.findPendingChildren("owner", 1_000_000, 3))
+                .containsExactly(inserted.get(4), inserted.get(3), inserted.get(2));
+        assertThat(relayStore.findPendingChildren("owner", 1_000_000, 5))
+                .containsExactly(inserted.get(4), inserted.get(3), inserted.get(2),
+                        inserted.get(1), inserted.get(0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"planned", "accepting", "unknown", "accepted", "consumed", "cancelled"})
+    void filtersStartCandidatesBeforeTheirBranchLimit(String delivery) {
+        long now = 1_000_000L;
+        String session = UUID.randomUUID().toString();
+        for (String terminal : List.of("done", "orphaned", "unknown")) {
+            String run = "terminal-" + terminal;
+            insertRecordRow("scope-filter", session, run, "child_agent",
+                    delivery, "pending", now - 100);
+            RelayRow row = relayStore.claim(TENANT, session, run, "key-" + run,
+                    "owner", now + 30_000, now - 100);
+            relayStore.classify(row, "owner", terminal, null, now - 90);
+        }
+        for (String run : List.of("backed-off", "foreign-lease")) {
+            insertRecordRow("scope-filter", session, run, "child_agent",
+                    delivery, "pending", now - 100);
+            String owner = "backed-off".equals(run) ? "owner" : "other";
+            RelayRow row = relayStore.claim(TENANT, session, run, "key-" + run,
+                    owner, now + 30_000, now - 100);
+            relayStore.advance(row, owner, "binding", "child-" + run,
+                    "backed-off".equals(run) ? now + 1_000 : 0, null,
+                    now + 30_000, now - 100);
+        }
+        for (String closeState : List.of("close_debt", "done", "orphaned", "unknown")) {
+            String run = "closed-" + closeState;
+            insertRecordRow("scope-filter", session, run, "child_agent",
+                    delivery, "pending", now - 100);
+            RelayRow close = retainDiscoveryCloseDebt(session, run, "owner",
+                    now - 100, now + 1_000);
+            if (!"close_debt".equals(closeState)) {
+                relayStore.classify(close, "owner", closeState, null, now - 90);
+            }
+            // Keep START eligible so only NOT EXISTS can exclude this record.
+            jdbc.update("UPDATE ma_operation SET state = 'binding'"
+                            + " WHERE scope_key = ? AND operation_id = ?"
+                            + " AND operation_kind = 'CHILD_SESSION_START'",
+                    ManagedSessionStore.sessionScopeKey(TENANT, session), run);
+        }
+        insertRecordRow("scope-filter", session, "shell", "shell",
+                delivery, "pending", now - 100);
+        insertRecordRow("scope-filter", session, "missing-start", "child_agent",
+                delivery, "pending", now - 20);
+        insertRecordRow("scope-filter", session, "binding", "child_agent",
+                delivery, "pending", now - 10);
+        RelayRow binding = relayStore.claim(TENANT, session, "binding", "key-binding",
+                "owner", now + 30_000, now - 10);
+        relayStore.advance(binding, "owner", "binding", "child-binding", now,
+                null, now + 30_000, now - 10);
+        List<String> expected = new ArrayList<>();
+        if (List.of("planned", "accepting", "unknown").contains(delivery)) {
+            expected.add("missing-start");
+        }
+        expected.add("binding");
+        assertThat(relayStore.findPendingChildren("owner", now, 1))
+                .extracting(PendingChild::childRunId).containsExactly(expected.getFirst());
+        assertThat(relayStore.findPendingChildren("owner", now, 2))
+                .extracting(PendingChild::childRunId).containsExactlyElementsOf(expected);
+    }
+
+    @Test
+    void filtersCloseDebtsBeforeTheirBranchLimit() {
+        long now = 1_000_000L;
+        String session = UUID.randomUUID().toString();
+        for (String terminal : List.of("done", "orphaned", "unknown")) {
+            RelayRow close = retainDiscoveryCloseDebt(session, "terminal-" + terminal,
+                    "owner", now - 300, 0);
+            relayStore.classify(close, "owner", terminal, null, now - 299);
+        }
+        retainDiscoveryCloseDebt(session, "backed-off", "owner", now - 200, now + 1_000);
+        retainDiscoveryCloseDebt(session, "foreign-lease", "other", now - 190, 0);
+        for (int index = 3; index >= 0; index--) {
+            String run = "debt-" + index;
+            if (index == 1 || index == 2) {
+                insertRecordRow("scope-debt", session, run, "child_agent",
+                        index == 1 ? "consumed" : null, "completed", 1);
+            }
+            retainDiscoveryCloseDebt(session, run, "owner", now - 100 + index, now);
+        }
+        insertRecordRow("scope-debt", session, "launch", "child_agent",
+                "planned", "pending", now - 1);
+        assertThat(relayStore.findPendingChildren("owner", now, 4))
+                .containsExactly(
+                        new PendingChild(TENANT, session, "launch", 1, "planned", "resource-launch"),
+                        new PendingChild(TENANT, session, "debt-0", 0, "accepted", null),
+                        new PendingChild(TENANT, session, "debt-1", 1, "consumed", "resource-debt-1"),
+                        new PendingChild(TENANT, session, "debt-2", 1, "accepted", "resource-debt-2"));
+        assertThat(relayStore.findPendingChildren("stranger", now, 4))
+                .extracting(PendingChild::childRunId).containsExactly("launch");
+        assertThat(relayStore.findPendingChildren("stranger", now + 30_000, 3))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("launch", "backed-off", "foreign-lease");
+    }
+
+    private RelayRow retainDiscoveryCloseDebt(String session, String run, String owner,
+            long createdAt, long availableAt) {
+        RelayRow row = relayStore.claim(TENANT, session, run, "key-" + run,
+                owner, createdAt + 30_000, createdAt);
+        relayStore.retainCloseDebt(row, owner, "done", "child-" + run,
+                availableAt, null, createdAt + 30_000, createdAt);
+        return relayStore.find(TENANT, session, run);
+    }
+
     // The execution proof is the record's own body: the runtime_state
     // column is the Runtime projection (`unbound`, `provisioning`,
     // `ready`) and never carries the execution enum — a column read
@@ -643,8 +805,8 @@ class ChildResultRelayStoreTest {
     private void resource(String sessionId, String resourceId, String kind, String body) {
         String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), scope, TENANT, sessionId,
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), TENANT, sessionId,
                 resourceId, kind, bytes.length, "a".repeat(64), bytes);
     }
 

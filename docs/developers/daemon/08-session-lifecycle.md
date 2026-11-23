@@ -189,11 +189,11 @@ best-effort.
 ### Mod Rows (`session_mod_rows` capability tag)
 
 `POST /session/:id/mod-row` asks a live session's Mods for one row the Web Shell
-draws, with body `{ component, props }` (today `AssistantMessage` with
-`{ text, isFirstOfReply }`). It answers `{ status: 'unhooked' }`,
-`{ status: 'unanswered' }` or `{ status: 'answered', props? }`; the session
-answers the same props from its row cache. See the protocol reference for the
-full contract.
+draws, with body `{ component, props }` (`AssistantMessage` with
+`{ text, isFirstOfReply }`, or `Thinking` with `{ text }`). It answers
+`{ status: 'unhooked' }`, `{ status: 'unanswered' }` or
+`{ status: 'answered', props? }`; the session answers the same props from its
+row cache. See the protocol reference for the full contract.
 
 ### Session BTW / Side Question (`session_btw` capability tag)
 

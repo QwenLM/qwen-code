@@ -53,16 +53,9 @@ vi.mock('ws', () => {
   return { default: FakeWebSocket };
 });
 
-vi.mock('axios', () => {
-  const post = vi.fn(async () => ({
-    data: { endpoint: 'wss://fake.invalid', ticket: 'tk' },
-  }));
-  const get = vi.fn(async () => ({
-    status: 200,
-    data: { access_token: 'token' },
-  }));
-  return { default: Object.assign(post, { get }) };
-});
+// Endpoint discovery is the wrapper's own bounded fetch, not the SDK's axios
+// (#17173 R11), so fetch is the network boundary to fake here.
+const fetchState = vi.hoisted(() => ({ hangNext: false }));
 
 import { createManagedDingtalkDeps } from './managed-dingtalk-deps.js';
 
@@ -101,6 +94,23 @@ const startOpen = async () => {
 
 beforeEach(() => {
   wsState.instances.length = 0;
+  fetchState.hangNext = false;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      if (fetchState.hangNext) {
+        fetchState.hangNext = false;
+        return new Promise(() => {});
+      }
+      return {
+        ok: true,
+        json: async () =>
+          String(url).includes('gettoken')
+            ? { access_token: 'token' }
+            : { endpoint: 'wss://fake.invalid', ticket: 'tk' },
+      };
+    }),
+  );
   vi.useFakeTimers();
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -110,6 +120,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -204,10 +215,7 @@ describe('managed DingTalk reconnect arbitration (#17173 R11)', () => {
     // no close event can then re-arm the retry, so the attempt budget's error
     // path is the only thing that can. A blocked upgrade would close a socket
     // and mask that path.
-    const { default: axios } = await import('axios');
-    (
-      axios as unknown as { get: ReturnType<typeof vi.fn> }
-    ).get.mockImplementationOnce(() => new Promise(() => {}));
+    fetchState.hangNext = true;
 
     await vi.advanceTimersByTimeAsync(RETRY_MS);
     await vi.advanceTimersByTimeAsync(0);

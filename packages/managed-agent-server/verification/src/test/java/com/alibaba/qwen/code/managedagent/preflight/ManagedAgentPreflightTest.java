@@ -341,9 +341,11 @@ class ManagedAgentPreflightTest {
 
     @Test
     void requiresTheLifecycleTheWorkspaceToolsNeed() throws IOException {
+        // D3: ordinary files needs lifecycle v2 (external-files keeps v1).
         HttpServer textOnly = capabilitiesServer(capabilities(DIGEST, "")
                 .replace("\"lifecycleProtocolVersion\":1,", ""));
-        HttpServer filesOnly = capabilitiesServer(capabilities(DIGEST, ""));
+        HttpServer filesOnly = capabilitiesServer(
+                capabilities(DIGEST, "\"hosted-workspace-files/1\""));
         try {
             ManagedAgentProperties files = harness(
                     "http://127.0.0.1:" + textOnly.getAddress().getPort());
@@ -351,7 +353,8 @@ class ManagedAgentPreflightTest {
             ManagedAgentPreflight.Check noFiles =
                     ManagedAgentPreflight.harnessCheck(files, null);
             assertEquals(ManagedAgentPreflight.Status.FAIL, noFiles.status());
-            assertTrue(noFiles.detail().endsWith("does not support Workspace files"));
+            assertTrue(noFiles.detail().endsWith("does not offer hosted-workspace-files/1"),
+                    noFiles.detail());
             ManagedAgentProperties shell = harness(
                     "http://127.0.0.1:" + filesOnly.getAddress().getPort());
             shell.getHarness().setWorkspaceFilesEnabled(true);
@@ -361,7 +364,7 @@ class ManagedAgentPreflightTest {
             assertEquals(ManagedAgentPreflight.Status.FAIL, noShell.status());
             assertEquals("add hosted-workspace-shell/1 to QWEN_HOSTED_LIFECYCLE_V2_PROFILES"
                     + " in the Harness environment; an explicit value replaces the whole"
-                    + " list, so set it to hosted-workspace-shell/1", noShell.fix());
+                    + " list, so set it to hosted-workspace-files/1,hosted-workspace-shell/1", noShell.fix());
             // Profiles an AgentDefinition may select need their lifecycle too.
             ManagedAgentProperties mcp = harness(
                     "http://127.0.0.1:" + filesOnly.getAddress().getPort());
@@ -388,14 +391,14 @@ class ManagedAgentPreflightTest {
             ManagedAgentPreflight.Check check = ManagedAgentPreflight.harnessCheck(shell, null);
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
             assertTrue(check.fix().endsWith("so set it to"
-                    + " hosted-workspace-mcp/1,hosted-workspace-shell/1"), check.fix());
+                    + " hosted-workspace-mcp/1,hosted-workspace-files/1,hosted-workspace-shell/1"), check.fix());
         } finally {
             mcpOnly.stop(0);
         }
         HttpServer withShell = capabilitiesServer(
-                capabilities(DIGEST, "\"hosted-workspace-shell/1\""));
+                capabilities(DIGEST, "\"hosted-workspace-files/1\",\"hosted-workspace-shell/1\""));
         HttpServer withShellMcp = capabilitiesServer(
-                capabilities(DIGEST, "\"hosted-workspace-shell/1\"").replace(
+                capabilities(DIGEST, "\"hosted-workspace-files/1\",\"hosted-workspace-shell/1\"").replace(
                         "\"lifecycleProtocolVersion\":1,",
                         "\"features\":[\"workspace-shell-mcp/1\"],\"lifecycleProtocolVersion\":1,"));
         try {
