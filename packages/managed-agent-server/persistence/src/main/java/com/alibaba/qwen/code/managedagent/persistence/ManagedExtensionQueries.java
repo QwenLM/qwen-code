@@ -5,9 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHookRecor
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskPage;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskTarget;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,10 +23,10 @@ final class ManagedExtensionQueries {
         JdbcManagedExtensionRecordStore.require(body != null, "Unknown extension record domain.");
         List<String> ids = jdbc.query("SELECT record_resource_id FROM"
                         + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
-                        + " session_scope_key = ? AND tenant_id = ?"
+                        + " tenant_id = ?"
                         + " AND session_id = ? AND domain = ? ORDER BY gmt_create, record_key",
                 (result, row) -> result.getString("record_resource_id"),
-                ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, domain);
+                tenant, session, domain);
         return ids.stream().map(id -> {
             JsonNode record = JdbcManagedExtensionRecordStore.readBody(store.readResource(tenant, session, id));
             body.require().accept(record);
@@ -38,10 +36,10 @@ final class ManagedExtensionQueries {
 
     static Optional<JsonNode> latestHook(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore store, String tenant, String session) {
         return jdbc.query("SELECT record_resource_id FROM ma_session_record WHERE record_kind ="
-                        + " 'DOMAIN' AND session_scope_key = ? AND tenant_id = ? AND session_id"
+                        + " 'DOMAIN' AND tenant_id = ? AND session_id"
                         + " = ? AND domain = 'hook_registration' AND settled_at IS NOT NULL ORDER BY first_sequence DESC",
                 (result, row) -> result.getString("record_resource_id"),
-                ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session)
+                tenant, session)
                 .stream().map(id -> {
                     JsonNode record = JdbcManagedExtensionRecordStore.readBody(store.readResource(tenant, session, id));
                     ManagedHookRecords.requireRegistration(record);
@@ -50,10 +48,9 @@ final class ManagedExtensionQueries {
     }
 
     static String readRevision(JdbcTemplate jdbc, String tenant, String session) {
-        return jdbc.query("SELECT journal_revision FROM ma_session_head WHERE tenant_key = ?"
-                        + " AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                (row, index) -> row.getString("journal_revision"), RuntimeAdmissionFences.harnessDrainKey(tenant),
-                RuntimeAdmissionFences.harnessDrainKey(session), tenant, session).stream().findFirst().orElse(null);
+        return jdbc.query("SELECT journal_revision FROM ma_session_head WHERE tenant_id = ? AND"
+                        + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                (row, index) -> row.getString("journal_revision"), tenant, session).stream().findFirst().orElse(null);
     }
 
     static Optional<JsonNode> configRef(JdbcTemplate jdbc, String tenant, String session) {
@@ -73,15 +70,14 @@ final class ManagedExtensionQueries {
 
     private static List<JsonNode> refs(JdbcTemplate jdbc, String tenant, String session, String suffix, List<?> extra) {
         List<Object> arguments = new ArrayList<>();
-        arguments.add(ManagedSessionStore.sessionScopeKey(tenant, session));
         arguments.add(tenant);
         arguments.add(session);
         arguments.addAll(extra);
         return jdbc.query("SELECT r.record_resource_id, u.kind, u.schema_version, u.byte_length, u.sha256"
-                        + " FROM ma_session_record r LEFT JOIN ma_resource u ON u.session_scope_key = r.session_scope_key"
-                        + " AND u.resource_id = r.record_resource_id AND u.tenant_id = r.tenant_id AND u.session_id = r.session_id"
+                        + " FROM ma_session_record r LEFT JOIN ma_resource u ON"
+                        + " u.resource_id = r.record_resource_id AND u.tenant_id = r.tenant_id AND u.session_id = r.session_id"
                         + " AND u.workspace_id = r.workspace_id WHERE r.record_kind = 'DOMAIN'"
-                        + " AND r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?" + suffix,
+                        + " AND r.tenant_id = ? AND r.session_id = ?" + suffix,
                 (row, index) -> (JsonNode) JsonNodeFactory.instance.objectNode().put("resourceId", row.getString("record_resource_id"))
                         .put("kind", row.getString("kind")).put("schemaVersion", row.getInt("schema_version"))
                         .put("byteLength", row.getLong("byte_length")).put("digest", row.getString("sha256")), arguments.toArray());
@@ -90,7 +86,8 @@ final class ManagedExtensionQueries {
     static TaskPage tasks(JdbcTemplate jdbc, String tenant, String session, Long beforeCreatedAt,
             String beforeRecordKey, int limit, boolean childrenOnly, RowMapper<TaskRow> mapper) {
         List<Object> arguments = new ArrayList<>();
-        arguments.add(ManagedSessionStore.sessionScopeKey(tenant, session));
+        arguments.add(tenant);
+        arguments.add(session);
         String cursor = "";
         if (beforeCreatedAt != null) {
             cursor = " AND (gmt_create < ? OR gmt_create = ? AND record_key < ?)";
@@ -100,7 +97,7 @@ final class ManagedExtensionQueries {
         }
         arguments.add(limit + 1);
         List<TaskRow> rows = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM"
-                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND "
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ? AND "
                         + (childrenOnly ? "task_kind = 'child_agent'" : "task_kind IS NOT NULL")
                         + cursor + " ORDER BY gmt_create DESC, record_key DESC LIMIT ?", mapper, arguments.toArray());
         boolean hasMore = rows.size() > limit;
@@ -112,8 +109,9 @@ final class ManagedExtensionQueries {
             return Optional.empty();
         }
         return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns()
-                        + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
-                mapper, ManagedSessionStore.sessionScopeKey(tenant, session), recordKey)
+                        + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ? AND record_key = ?"
+                        + " AND task_kind IS NOT NULL",
+                mapper, tenant, session, recordKey)
                 .stream().findFirst();
     }
 
@@ -123,13 +121,14 @@ final class ManagedExtensionQueries {
             return Optional.empty();
         }
         return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns()
-                        + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
+                        + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ? AND record_key = ?"
+                        + " AND task_kind IS NOT NULL",
                 (result, row) -> {
                     mapper.mapRow(result, row);
                     return new String[] {result.getString("domain"), result.getString("record_id"),
                             result.getString("task_kind"), result.getString("task_state"),
                             Long.toString(result.getLong("revision")), result.getString("record_resource_id")};
-                }, ManagedSessionStore.sessionScopeKey(tenant, session), recordKey)
+                }, tenant, session, recordKey)
                 .stream().findFirst().map(row -> {
                     JsonNode body = JdbcManagedExtensionRecordStore.readBody(store.readResource(tenant, session, row[5]));
                     ManagedExtensionProjection.RECORD_BODIES.get(row[0]).require().accept(body);

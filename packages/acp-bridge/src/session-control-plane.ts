@@ -234,6 +234,7 @@ import type {
   SessionPrInfo,
   BridgeTurnStatus,
   BridgeSessionCatalogVersion,
+  BridgeSessionFeedbackResult,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -293,6 +294,7 @@ import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import {
   BridgeClient,
+  clearGoalTurn,
   hasAvailableWorkflowApprovalClient,
   KNOWN_APPROVAL_MODES,
   type BridgeClientDeferredArtifactBatch,
@@ -904,6 +906,10 @@ interface SessionEntry {
    * normal prompt FIFO if it remains undrained at idle.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /** Drains that took messages and have not answered the child yet. */
+  midTurnDrainsAnswering?: number;
+  /** A send-now request held until those drains have answered. */
+  sendNowAfterDrains?: () => void;
   /**
    * Bounded ids either handed to the ACP child or explicitly deleted.
    */
@@ -999,6 +1005,8 @@ interface SessionEntry {
    * summaries because Goal turns never flip `promptActive`.
    */
   goalTurnActive?: boolean;
+  goalTurnId?: string;
+  retiringGoalTurnId?: string;
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   backgroundAdmissionEpoch?: number;
@@ -10790,6 +10798,7 @@ export function createSessionControlPlane(
   const settleMidTurnQueueAfterAutomaticTurn = (sessionId: string) => {
     const entry = byId.get(sessionId);
     if (!entry) return;
+    delete entry.sendNowAfterDrains;
     advanceTurnActivity(entry);
     entry.sessionLastSeenAt = Date.now();
     touchActivity(entry);
@@ -12271,6 +12280,9 @@ export function createSessionControlPlane(
                 // Resolving attachments can yield; a quarantine that began
                 // meanwhile still refuses the prompt before it is sent.
                 assertChannelAdmitsPrompts(entry);
+                if (isPromotedMidTurn && pendingEntry.removed) {
+                  throw new DOMException('Prompt aborted', 'AbortError');
+                }
                 dispatchSignal?.throwIfAborted();
                 context?.assertCanDispatch?.();
                 entry.events.setEventDetailMode(eventDetailMode);
@@ -12292,10 +12304,6 @@ export function createSessionControlPlane(
                   entry.activePromptTerminal.resolve();
                 }
                 entry.promptActive = true;
-                // The child serializes Goal turns against RPC prompts, so a
-                // still-set flag here means the goal end_turn signal was
-                // lost; self-heal rather than pin the session active.
-                entry.goalTurnActive = false;
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
@@ -12366,7 +12374,17 @@ export function createSessionControlPlane(
                     );
                   }
                 };
-                if (!guardedDispatch) pendingEntry.dispatched = true;
+                const markPromptDispatched = () => {
+                  pendingEntry.dispatched = true;
+                  // A guarded write can still be refused before this point.
+                  // Keep the Goal's ID for its terminal, retiring only its
+                  // permission ownership once the prompt starts writing.
+                  if (entry.goalTurnId !== undefined) {
+                    entry.retiringGoalTurnId = entry.goalTurnId;
+                  }
+                  clearGoalTurn(entry, permissionMediator);
+                };
+                if (!guardedDispatch) markPromptDispatched();
                 const promptPromise = forwardPrompt(
                   entry.connection,
                   promptRequest,
@@ -12390,7 +12408,7 @@ export function createSessionControlPlane(
                           context?.assertCanDispatch?.();
                         },
                         onWriteStarted() {
-                          pendingEntry.dispatched = true;
+                          markPromptDispatched();
                           notifyDispatchObserver(onWriteStarted);
                         },
                         onWritten() {
@@ -12444,6 +12462,11 @@ export function createSessionControlPlane(
                       getTransportClosedReject(entry),
                     );
 
+                const cancelDispatchedTurnApprovals = () => {
+                  if (pendingEntry.dispatched) {
+                    permissionMediator.cancelForTurnCancel(sessionId);
+                  }
+                };
                 // The user echo (`echoPromptToSessionBus`) was already published
                 // BEFORE the forward. If the forward itself fails (transport died,
                 // ACP child error) and it wasn't a user-initiated cancel that
@@ -12480,7 +12503,7 @@ export function createSessionControlPlane(
                         // already ends the turn visibly; a phantom
                         // forward-failure line and prompt_cancelled broadcast
                         // would misreport it.
-                        permissionMediator.cancelForTurnCancel(sessionId);
+                        cancelDispatchedTurnApprovals();
                         return;
                       }
                       writeStderrLine(
@@ -12493,7 +12516,7 @@ export function createSessionControlPlane(
                         originatorClientId,
                         'forward_failed',
                       );
-                      permissionMediator.cancelForTurnCancel(sessionId);
+                      cancelDispatchedTurnApprovals();
                     },
                   )
                   .catch(() => {});
@@ -12509,7 +12532,7 @@ export function createSessionControlPlane(
                     pendingEntry.promptId,
                     originatorClientId,
                   );
-                  permissionMediator.cancelForTurnCancel(sessionId);
+                  cancelDispatchedTurnApprovals();
                   if (
                     pendingEntry.dispatched &&
                     byId.get(sessionId) === entry
@@ -12626,7 +12649,10 @@ export function createSessionControlPlane(
               }
             }
           }
+          const goalOwnsQueue =
+            !pendingEntry.dispatched && entry.goalTurnActive === true;
           const shouldSettleMidTurnQueue =
+            !goalOwnsQueue &&
             entry.pendingPromptCount === 1 &&
             !entry.backgroundTurn &&
             !entry.closing &&
@@ -12634,6 +12660,18 @@ export function createSessionControlPlane(
           const undrainedMessages = shouldSettleMidTurnQueue
             ? entry.midTurnMessageQueue.splice(0)
             : [];
+          // A refused prompt never took ownership of the active Goal's
+          // queue or its held send-now request.
+          if (!goalOwnsQueue) delete entry.sendNowAfterDrains;
+          // An approval this turn asked for can no longer be answered: a
+          // send-now interrupt ends the turn from inside the child, which
+          // stops waiting on the request without the host's cancel path.
+          if (pendingEntry.dispatched) {
+            permissionMediator.cancelForPrompt(
+              sessionId,
+              pendingEntry.promptId,
+            );
+          }
           // Release the old turn before handing back queue-only messages. Its
           // caller synchronously reserves the next FIFO slot, then ordinary
           // promotions follow it without exposing the fallback as queued.
@@ -15033,6 +15071,17 @@ export function createSessionControlPlane(
       if (!decision.accepted) {
         return decision;
       }
+      context?.assertCanContinue?.();
+      if (
+        context?.expectedInterruption !== undefined &&
+        context.expectedInterruption !== decision.interruption
+      ) {
+        return {
+          accepted: false,
+          interruption: decision.interruption,
+          reason: 'interruption_mismatch',
+        };
+      }
 
       // Accepted → drive the real turn through the normal prompt-admission path
       // (so pendingPromptCount / promptActive / originator are tracked and
@@ -15068,6 +15117,25 @@ export function createSessionControlPlane(
       // continuation was never queued. Only failures AFTER the turn is admitted
       // (it then runs async) reach the `.catch` below — those are logged, since
       // the ack already went out and the turn's terminal event covers clients.
+      let firstWrite: Promise<void> | undefined;
+      let rejectFirstWrite: ((error: unknown) => void) | undefined;
+      let onPromptWriteStarted = context?.onPromptWriteStarted;
+      if (context?.requireDispatchAck) {
+        let resolveFirstWrite!: () => void;
+        firstWrite = new Promise<void>((resolve, reject) => {
+          resolveFirstWrite = resolve;
+          rejectFirstWrite = reject;
+        });
+        const observer = onPromptWriteStarted;
+        onPromptWriteStarted = () => {
+          try {
+            observer?.();
+          } finally {
+            resolveFirstWrite();
+          }
+        };
+      }
+
       // No caller signal: a continuation is cancelled via the cancelSession
       // route (entry.connection.cancel), not a per-dispatch AbortController.
       const promptPromise = bridgeApi.sendPrompt(
@@ -15082,6 +15150,12 @@ export function createSessionControlPlane(
             : {}),
           ...(promptId !== undefined ? { promptId } : {}),
           continue: true,
+          ...(context?.assertCanDispatch !== undefined
+            ? { assertCanDispatch: context.assertCanDispatch }
+            : {}),
+          ...(onPromptWriteStarted !== undefined
+            ? { onPromptWriteStarted }
+            : {}),
           ...(typeof context?.confirmCancellation === 'string'
             ? { confirmCancellation: context.confirmCancellation }
             : {}),
@@ -15092,7 +15166,11 @@ export function createSessionControlPlane(
           `continueSession: continuation turn failed for ${sessionId}: ` +
             `${err instanceof Error ? err.message : String(err)}`,
         );
+        rejectFirstWrite?.(err);
       });
+      if (firstWrite !== undefined) {
+        await firstWrite;
+      }
 
       return {
         ...decision,
@@ -15674,6 +15752,17 @@ export function createSessionControlPlane(
       };
     },
 
+    async rateSessionTurn(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await requestSessionStatus<BridgeSessionFeedbackResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        { promptId: req.promptId, rating: req.rating },
+      );
+    },
+
     generateSessionContent(sessionId, prompt, signal, context) {
       return startSessionGeneration(sessionId, prompt, signal, context);
     },
@@ -16164,18 +16253,54 @@ export function createSessionControlPlane(
       resolveTrustedClientId(entry, context?.clientId);
       // Only the user's own messages ask for this; queue-only steering keeps
       // its tool-boundary delivery unless user input travels with it.
-      if (!entry.midTurnMessageQueue.some((message) => !message.queueOnly)) {
+      const holdsUserInput = () =>
+        entry.midTurnMessageQueue.some((message) => !message.queueOnly);
+      if (!holdsUserInput()) {
         return { requested: false };
       }
-      // Best-effort: an agent without the method still drains the queue at its
-      // next tool boundary.
-      void entry.connection
-        .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
-        .catch((error: unknown) => {
-          writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
-          );
-        });
+      const turnOwner = () => {
+        const { activePromptId, goalTurnId, backgroundTurn } = entry;
+        // A guarded RPC claims prompt bookkeeping before the write, while
+        // the still-live Goal keeps owning its input queue.
+        if (
+          goalTurnId !== undefined &&
+          !entry.pendingPromptList.some(
+            (prompt) => prompt.promptId === activePromptId && prompt.dispatched,
+          )
+        ) {
+          return goalTurnId;
+        }
+        return activePromptId ?? goalTurnId ?? backgroundTurn?.turnId;
+      };
+      const owner = turnOwner();
+      const request = () => {
+        // A drain answered meanwhile may have taken the messages.
+        if (
+          !holdsUserInput() ||
+          byId.get(sessionId) !== entry ||
+          turnOwner() !== owner
+        ) {
+          return;
+        }
+        // Best-effort: an agent without the method still drains the queue at
+        // its next tool boundary.
+        void entry.connection
+          .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
+          .catch((error: unknown) => {
+            writeStderrLine(
+              `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+            );
+          });
+      };
+      // The child takes a request with no drain out as proof that the host
+      // still holds the input, so a drain that is still resolving attachments
+      // answers first.
+      if ((entry.midTurnDrainsAnswering ?? 0) > 0) {
+        entry.sendNowAfterDrains = request;
+      } else {
+        delete entry.sendNowAfterDrains;
+        request();
+      }
       return { requested: true };
     },
 
@@ -16507,7 +16632,7 @@ export function createSessionControlPlane(
       // session is the checkout itself — the strongest writer vector on the
       // superseded session, not a workspace-cwd one.
       assertSessionResetNotPending(sessionId);
-      assertChannelAdmitsPrompts(entry);
+      assertSessionAdmitsSideRequest(entry);
 
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
@@ -16533,6 +16658,7 @@ export function createSessionControlPlane(
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
       }
+      assertSessionAdmitsSideRequest(entry);
       const cwd = entry.effectiveCwd;
 
       entry.events.publish({

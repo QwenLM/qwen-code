@@ -180,10 +180,10 @@ class ConsolidatedActionStoreTest {
     private ObjectNode storeBody(String id, String kind, JsonNode body) throws Exception {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+        jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                         + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                        + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                ManagedSchemaKeys.key(scope, id), scope, "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
+                        + " VALUES (?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                ManagedSchemaKeys.key(scope, id), "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
         return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
     }
 

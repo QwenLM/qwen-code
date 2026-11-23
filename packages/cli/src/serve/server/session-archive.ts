@@ -37,6 +37,7 @@ import {
   logWorktreeCleanupPreserve,
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
+  withWorktreeArchiveMove,
 } from './worktree-orphan-cleanup.js';
 
 export interface DaemonArchiveSessionsResult {
@@ -497,6 +498,42 @@ async function deletePersistedSessionWithLease(
   };
 }
 
+function sessionLiveOnBridge(
+  bridge: Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>,
+  candidate: string,
+): boolean {
+  if (!bridge.getSessionSummary) return true;
+  try {
+    bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
+    return true;
+  } catch (error) {
+    return !(
+      isSessionNotFoundError(error) &&
+      (error as SessionNotFoundError).code !== 'session_closing'
+    );
+  }
+}
+
+async function prepareWorktreeCleanup(
+  service: SessionService,
+  sessionId: string,
+  runtimeWorkspaceCwd?: string,
+) {
+  const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
+  const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    'archived',
+  );
+  if (
+    !fs.existsSync(activeSidecarPath) &&
+    (archivedSidecarPath === activeSidecarPath ||
+      !fs.existsSync(archivedSidecarPath))
+  ) {
+    return undefined;
+  }
+  return preclassifyWorktreeCleanup(service, sessionId, runtimeWorkspaceCwd);
+}
+
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
@@ -534,18 +571,8 @@ export async function deleteDaemonSessions(params: {
   // on this runtime's bridge. Only a genuine not-found counts as gone; any
   // other answer, a `session_closing` refusal included, or a bridge
   // without the query counts as live, so the checkout is kept.
-  const isSessionLive = (candidate: string): boolean => {
-    if (!bridge.getSessionSummary) return true;
-    try {
-      bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
-      return true;
-    } catch (error) {
-      return !(
-        isSessionNotFoundError(error) &&
-        (error as SessionNotFoundError).code !== 'session_closing'
-      );
-    }
-  };
+  const isSessionLive = (candidate: string): boolean =>
+    sessionLiveOnBridge(bridge, candidate);
   // Ownership-verified worktree cleanup (#11024): classify before the
   // record deletion (the deletion destroys the sidecar), execute only
   // after a confirmed removal, all under the worktree ownership lock so
@@ -577,7 +604,7 @@ export async function deleteDaemonSessions(params: {
     ) {
       return coordinator.runExclusiveMany([sessionId], mutateSession);
     }
-    const cleanupPlan = await preclassifyWorktreeCleanup(
+    const cleanupPlan = await prepareWorktreeCleanup(
       service,
       sessionId,
       runtimeWorkspaceCwd,
@@ -1086,7 +1113,9 @@ export async function archiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'active', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -1272,7 +1301,9 @@ export async function unarchiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'archived', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;

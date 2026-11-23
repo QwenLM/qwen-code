@@ -29,8 +29,11 @@ import {
   INCOMPLETE_ARGS_EDIT_REJECTION,
   INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
   isToolCallConcurrencySafe,
+  TOOL_DISCARDED_FOR_USER_MESSAGE,
+  TOOL_INTERRUPTED_FOR_USER_MESSAGE,
   TRUNCATION_EDIT_REJECTION,
   TRUNCATION_RETRY_LOOP_DIRECTIVE,
+  USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import {
@@ -85,7 +88,12 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import {
   createUserPromptSubmitContextPart,
   hasUserPromptSubmitContext,
+  isUserPromptSubmitContextPartText,
 } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
+import {
+  appendAsyncHookContextPart,
+  drainAsyncHookContextPart,
+} from '@qwen-code/qwen-code-core/hooks/async-hook-context.js';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
@@ -242,9 +250,9 @@ import {
   formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
-  shouldClassifyAllShellForAutoMode,
+  confirmAutomaticReviewOnAllow,
   finalizeToolResponses,
-  shouldForceAutoModeReviewForAllow,
+  shouldRequireAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
@@ -387,6 +395,7 @@ import {
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -619,6 +628,11 @@ const MID_TURN_INPUT_ABORT_REASON = 'qwen:mid-turn-input';
 // the turn to the session, which goes on to answer the input the round took
 // (see `#openResponseInterrupt`).
 const MID_TURN_INPUT_KEPT_ABORT_REASON = 'qwen:mid-turn-input-kept';
+// Ends a turn whose tool calls keep queued user input the user asked to send
+// now from reaching the model; the host then sends the input as the next
+// prompt. Unlike a user cancel, it leaves cron jobs, background notifications
+// and the Goal running.
+const MID_TURN_SEND_NOW_ABORT_REASON = USER_MESSAGE_INTERRUPT_ABORT_REASON;
 /** The failure a Goal turn stopped by loop protection pauses with. */
 const GOAL_LOOP_STOP_FAILURE = 'loop detected';
 const GOAL_HELD_RECOVERY_COMMANDS =
@@ -768,7 +782,8 @@ function isControlledPromptAbortReason(reason: unknown): boolean {
     reason === USER_CANCEL_ABORT_REASON ||
     reason === MOD_TURN_ABORT_REASON ||
     reason === SESSION_DISPOSE_ABORT_REASON ||
-    reason === INTERRUPTED_PROMPT_ABORT_REASON
+    reason === INTERRUPTED_PROMPT_ABORT_REASON ||
+    reason === MID_TURN_SEND_NOW_ABORT_REASON
   );
 }
 
@@ -2810,8 +2825,17 @@ export class Session implements SessionContext {
   // drain request goes out, since that request takes everything queued before
   // it; a request left over from an earlier turn never matches a later one.
   private midTurnSendNowFor: AbortSignal | undefined;
+  private midTurnHandoff?: Promise<Record<string, unknown>>;
   // Pulls queued input for the model response currently open to interruption.
   private pullForOpenResponse: (() => void) | undefined;
+  // Whether the response for the given turn has started a tool call.
+  private openResponseHasToolCall:
+    | ((signal: AbortSignal) => boolean)
+    | undefined;
+  // The turn whose last response called tools, until that tool batch settles.
+  private midTurnToolPhaseFor: AbortSignal | undefined;
+  // Drain requests awaiting the host's answer.
+  private midTurnDrainsInFlight = 0;
   // A drain started for an open response and still awaiting its answer. Later
   // drains wait for it, so the messages it takes are never stranded.
   private earlyMidTurnDrain: Promise<void> | undefined;
@@ -3474,6 +3498,7 @@ export class Session implements SessionContext {
       this.disposed ||
       this.closing ||
       this.goalProcessing ||
+      this.midTurnHandoff ||
       this.pendingPrompt ||
       this.pendingPromptCompletion ||
       this.cronProcessing ||
@@ -3503,7 +3528,7 @@ export class Session implements SessionContext {
       this.config.getToolRegistry?.(),
     );
     let result: PromptResponse | undefined;
-    await this.#emitGoalStartTurn();
+    await this.#emitGoalStartTurn(turn.permit.turnId);
     try {
       result = await this.prompt(
         {
@@ -3539,7 +3564,10 @@ export class Session implements SessionContext {
         }`,
       );
     } finally {
-      await this.#emitGoalEndTurn(result);
+      await this.#emitGoalEndTurn(turn.permit.turnId, result);
+      if (turn.controller.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON) {
+        this.#waitForMidTurnHandoff();
+      }
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
       this.#activeWorkChanged();
@@ -3547,6 +3575,22 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
       void this.#drainGoalQueue();
     }
+  }
+
+  #waitForMidTurnHandoff(): void {
+    // Let the old turn finish while the host resolves and runs queued prompts.
+    const handoff = this.client.extMethod(MID_TURN_GOAL_HANDOFF_METHOD, {
+      sessionId: this.sessionId,
+    });
+    this.midTurnHandoff = handoff;
+    const resume = () => {
+      if (this.midTurnHandoff !== handoff) return;
+      this.midTurnHandoff = undefined;
+      void this.#drainGoalQueue();
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
+    void handoff.then(resume, resume);
   }
 
   /**
@@ -3660,8 +3704,11 @@ export class Session implements SessionContext {
       // pure timing. Without this, the same user action persists the goal as
       // either active-with-handoff or paused depending on where the abort
       // landed, and the paused branch silently stops the autonomous loop.
+      const interruptedForUserInput =
+        turn.controller.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON;
       const supersededByNewPrompt =
-        turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON;
+        turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON ||
+        interruptedForUserInput;
       // One list, not two: the cause that decides whether to pause is the same
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
@@ -3703,7 +3750,11 @@ export class Session implements SessionContext {
           });
           return;
         }
-        await runtime.finishTurn(turn.permit);
+        if (interruptedForUserInput) {
+          await runtime.finishTurn(turn.permit, { interruptedForUserInput });
+        } else {
+          await runtime.finishTurn(turn.permit);
+        }
       } catch (error) {
         debugLogger.warn(
           `Failed to record ACP Goal turn settlement: ${
@@ -4030,13 +4081,30 @@ export class Session implements SessionContext {
 
   /**
    * Host request to deliver the queued mid-turn input now. A model response
-   * open to interruption takes it at once; otherwise the next drain does.
+   * open to interruption takes it at once. A response that started a tool
+   * call, or the tools it called, could only take it at the tool boundary, so
+   * the turn ends instead and the host sends the input as the next prompt.
    * Ignored between turns, where the host promotes the queue itself.
    */
   sendMidTurnInputNow(): void {
-    if (!this.pendingPrompt) return;
-    this.midTurnSendNowFor = this.pendingPrompt.signal;
+    const pending = this.pendingPrompt;
+    if (!pending) return;
+    this.midTurnSendNowFor = pending.signal;
     this.pullForOpenResponse?.();
+    // The host sends this request only while it holds user input, and only
+    // once every drain that took input has answered, on the same ordered
+    // connection: with no drain out, the input is still with the host and is
+    // promoted when the turn ends; a drain still out brings it into this
+    // turn. Input a timed-out drain handed over late waits for the tool
+    // boundary, and the newer input with it, so the two stay in order.
+    if (
+      this.midTurnDrainsInFlight === 0 &&
+      this.midTurnRecoveredMessages.length === 0 &&
+      (this.midTurnToolPhaseFor === pending.signal ||
+        this.openResponseHasToolCall?.(pending.signal) === true)
+    ) {
+      pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+    }
   }
 
   releaseTodoStopGuardQueuedPromptWait(promptId: string): boolean {
@@ -4417,6 +4485,7 @@ export class Session implements SessionContext {
                 workspace: req.workspace,
                 workspaceGeneration: req.workspaceGeneration,
                 ...(req.requiresYolo ? { requiresYolo: true } : {}),
+                ...(req.requiresAutoMode ? { requiresAutoMode: true } : {}),
               }
             : {}),
           ...(req.sessionId ? { sessionId: req.sessionId } : {}),
@@ -4456,18 +4525,29 @@ export class Session implements SessionContext {
           SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
           { workspace },
         );
-        const { workspaceId, workspaceCwd, workspaceGeneration } = resp;
+        const {
+          workspaceId,
+          workspaceCwd,
+          workspaceGeneration,
+          sameWorkspace,
+        } = resp;
         if (
           typeof workspaceId !== 'string' ||
           !workspaceId ||
           typeof workspaceCwd !== 'string' ||
           !workspaceCwd ||
           typeof workspaceGeneration !== 'string' ||
-          !workspaceGeneration
+          !workspaceGeneration ||
+          typeof sameWorkspace !== 'boolean'
         ) {
           throw new Error('create_sub_session: invalid workspace binding');
         }
-        return { workspaceId, workspaceCwd, workspaceGeneration };
+        return {
+          workspaceId,
+          workspaceCwd,
+          workspaceGeneration,
+          sameWorkspace,
+        };
       },
     );
   }
@@ -6480,6 +6560,12 @@ export class Session implements SessionContext {
         this.midTurnSendNowFor = undefined;
       }
       if (this.pendingPrompt === pendingSend) {
+        if (
+          !scheduledGoalTurn &&
+          pendingSend.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON
+        ) {
+          this.#waitForMidTurnHandoff();
+        }
         this.pendingPrompt = null;
         if (!scheduledGoalTurn)
           this.lastCompletedRpcPromptId = invocationContext?.promptId;
@@ -8394,6 +8480,7 @@ export class Session implements SessionContext {
                 // cover the run itself — the durable record is written on
                 // runToolCalls' return path.
                 let toolRun: RunToolResult;
+                this.midTurnToolPhaseFor = pendingSend.signal;
                 try {
                   toolRun = await this.#runWithFullTurnModel(
                     fullTurnModelOverride,
@@ -8407,6 +8494,9 @@ export class Session implements SessionContext {
                       ),
                   );
                 } finally {
+                  if (this.midTurnToolPhaseFor === pendingSend.signal) {
+                    this.midTurnToolPhaseFor = undefined;
+                  }
                   this.restoringAskUserQuestionCallIds = undefined;
                   this.restoredAskUserQuestionSkipPersistence = false;
                 }
@@ -8540,13 +8630,13 @@ export class Session implements SessionContext {
                 // The shared round's request reaches history inside the
                 // client; until then a cut would drop the message it carries.
                 let requestUnsent = () => false;
+                const hasToolCall = () =>
+                  functionCalls.length > 0 || preparationTracker.hasToolCall;
                 const responseInterrupt = this.#openResponseInterrupt(
                   pendingSend.signal,
-                  () =>
-                    functionCalls.length > 0 ||
-                    preparationTracker.hasToolCall ||
-                    requestUnsent(),
+                  () => hasToolCall() || requestUnsent(),
                   !channelTurn,
+                  hasToolCall,
                 );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
@@ -11682,6 +11772,39 @@ export class Session implements SessionContext {
       ]);
     }
 
+    // Background (async) hooks may have produced output since the last turn.
+    // Drain it (get-and-clear) and deliver it on this legacy request, mirroring
+    // the LlmClient path (capability ledger L11). This runs after
+    // beforeSend/prepareBeforeCompression — a stop continuation replaces the
+    // message with its closure's preparedMessage, which would overwrite an
+    // earlier append — and after the memory insertion, so the trailing-receipt
+    // check sees the final shape; and before the send and its internal
+    // compaction, so the threshold sees the same tail the provider will. Splice
+    // ahead of a trailing UserPromptSubmit receipt so that block stays last for
+    // the resume/projection/title strips. ACP has no side query reaching this
+    // wrapper, so no ownership gate is needed.
+    const asyncHookContextPart = drainAsyncHookContextPart(
+      this.config.getHookSystem?.(),
+    );
+    if (asyncHookContextPart) {
+      // The drain is get-and-clear: once consumed there is no post-hoc evidence,
+      // so log the delivery to make the consume-but-not-sent window diagnosable.
+      debugLogger.debug(
+        `Delivering async hook context (${asyncHookContextPart.text.length} chars) on legacy send for prompt ${promptId}`,
+      );
+      const lastPart = message[message.length - 1];
+      const syncReceiptTrailing =
+        lastPart !== undefined &&
+        'text' in lastPart &&
+        typeof lastPart.text === 'string' &&
+        isUserPromptSubmitContextPartText(lastPart.text);
+      message = appendAsyncHookContextPart(
+        message,
+        asyncHookContextPart,
+        syncReceiptTrailing,
+      );
+    }
+
     const chat = this.#getCurrentChat();
     const request = {
       message,
@@ -12421,7 +12544,9 @@ export class Session implements SessionContext {
     // re-inject them here on the next batch.
     const recovered = this.#takeRecoveredMidTurnMessages();
 
-    if (this.midTurnDrainUnavailable) {
+    // A stopped turn takes nothing more from the host, which promotes what is
+    // still queued once the turn ends.
+    if (this.midTurnDrainUnavailable || abortSignal.aborted) {
       return {
         parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
@@ -12482,6 +12607,7 @@ export class Session implements SessionContext {
     // after it goes out sets the request again.
     this.midTurnSendNowFor = undefined;
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
+    this.midTurnDrainsInFlight += 1;
     try {
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
@@ -12564,6 +12690,8 @@ export class Session implements SessionContext {
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
       return undefined;
+    } finally {
+      this.midTurnDrainsInFlight -= 1;
     }
   }
 
@@ -12590,6 +12718,7 @@ export class Session implements SessionContext {
     turnSignal: AbortSignal,
     hasFunctionCalls: () => boolean,
     enabled: boolean,
+    hasToolCall: () => boolean = hasFunctionCalls,
   ): ResponseInterrupt {
     if (!enabled) {
       return {
@@ -12664,15 +12793,22 @@ export class Session implements SessionContext {
         this.pullForOpenResponse?.();
       });
     };
+    const openHasToolCall = (signal: AbortSignal) =>
+      open && signal === turnSignal && hasToolCall();
     const begin = () => {
       open = true;
       this.pullForOpenResponse = pull;
+      this.openResponseHasToolCall = openHasToolCall;
       pull();
     };
     const end = () => {
+      if (open && hasToolCall()) this.midTurnToolPhaseFor = turnSignal;
       open = false;
       if (this.pullForOpenResponse === pull) {
         this.pullForOpenResponse = undefined;
+      }
+      if (this.openResponseHasToolCall === openHasToolCall) {
+        this.openResponseHasToolCall = undefined;
       }
     };
     const interrupted = () => controller.signal.aborted && !turnSignal.aborted;
@@ -13278,7 +13414,7 @@ export class Session implements SessionContext {
   }
 
   #nextCronQueueIndex(): number {
-    if (this.cronQueue.length === 0) return -1;
+    if (this.cronQueue.length === 0 || this.midTurnHandoff) return -1;
     if (this.todoStopGuardQueuedPromptPriority) return -1;
     if (!this.todoStopGuard.blocksUnrelatedAutomaticTurns) return 0;
     return this.cronQueue.findIndex((item) =>
@@ -14826,6 +14962,9 @@ export class Session implements SessionContext {
     const channelTasks = [...this.channelTaskCaptures].filter(
       (capture) => capture.workChainId && !capture.signal.aborted,
     );
+    // The handoff waits for the FIFO. Notifications related to a per_task
+    // prompt must be allowed to settle that prompt within the FIFO.
+    if (this.midTurnHandoff && channelTasks.length === 0) return -1;
     // Independent admission waits for the parent RPC to settle. Do not let
     // an unrelated queue head block the related results that RPC awaits.
     return this.notificationQueue.findIndex(
@@ -15469,11 +15608,12 @@ export class Session implements SessionContext {
    * otherwise publish no `turn_complete` — leaving SSE clients (Web Shell,
    * SDK) with a streaming state that never settles.
    */
-  async #emitGoalStartTurn(): Promise<void> {
+  async #emitGoalStartTurn(turnId: string): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/start_turn', {
         sessionId: this.sessionId,
         source: 'goal',
+        turnId,
       });
     } catch (error) {
       debugLogger.debug(
@@ -15482,12 +15622,16 @@ export class Session implements SessionContext {
     }
   }
 
-  async #emitGoalEndTurn(result: PromptResponse | undefined): Promise<void> {
+  async #emitGoalEndTurn(
+    turnId: string,
+    result: PromptResponse | undefined,
+  ): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/end_turn', {
         sessionId: this.sessionId,
         reason: result?.stopReason ?? 'cancelled',
         source: 'goal',
+        turnId,
         promptId: this.config.getSessionId() + '########' + String(this.turn),
       });
     } catch (error) {
@@ -15600,26 +15744,31 @@ export class Session implements SessionContext {
     return pending;
   }
 
-  #withBackgroundPermission(
+  #withPermissionTurn(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
     if (params.toolCall._meta?.['backgroundWorkflowApproval'] === true) {
       return params;
     }
     const execution = backgroundTurnContext.getStore();
-    return execution?.active && execution.sessionId === this.sessionId
-      ? {
-          ...params,
-          _meta: { ...params._meta, backgroundTurn: execution.turn },
-        }
-      : params;
+    if (execution?.active && execution.sessionId === this.sessionId) {
+      return {
+        ...params,
+        _meta: { ...params._meta, backgroundTurn: execution.turn },
+      };
+    }
+    const goalTurnId = goalTurnContext.getStore()?.turnId;
+    if (goalTurnId && goalTurnId === this.activeGoalTurn?.permit.turnId) {
+      return { ...params, _meta: { ...params._meta, goalTurnId } };
+    }
+    return params;
   }
 
   #requestPermissionQueued(
     params: RequestPermissionRequest,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
-    params = this.#withBackgroundPermission(params);
+    params = this.#withPermissionTurn(params);
     const prior = this.permissionRequestTail;
     const transportRequest = prior.then(() =>
       signal.aborted
@@ -16315,6 +16464,18 @@ export class Session implements SessionContext {
    * keeps its repeated parameter-error and partial-edit stops, per turn.
    */
   async #runSharedToolBatch(
+    ...args: Parameters<Session['runSharedToolBatchUntracked']>
+  ): Promise<RunToolResult> {
+    try {
+      return await this.runSharedToolBatchUntracked(...args);
+    } finally {
+      if (this.midTurnToolPhaseFor === args[0]) {
+        this.midTurnToolPhaseFor = undefined;
+      }
+    }
+  }
+
+  private async runSharedToolBatchUntracked(
     abortSignal: AbortSignal,
     promptId: string,
     requests: ToolCallRequestInfo[],
@@ -16492,7 +16653,24 @@ export class Session implements SessionContext {
     });
   }
 
+  /**
+   * Runs a tool batch. Once it settles, the turn is no longer calling tools:
+   * a send-now request then waits for the tool-boundary drain or the next
+   * response instead of ending a turn that may already be finishing.
+   */
   private async runToolCalls(
+    ...args: Parameters<Session['runToolCallsUntracked']>
+  ): Promise<RunToolResult> {
+    try {
+      return await this.runToolCallsUntracked(...args);
+    } finally {
+      if (this.midTurnToolPhaseFor === args[0]) {
+        this.midTurnToolPhaseFor = undefined;
+      }
+    }
+  }
+
+  private async runToolCallsUntracked(
     abortSignal: AbortSignal,
     promptId: string,
     functionCalls: FunctionCall[],
@@ -18460,8 +18638,12 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(policyToolName, this.config));
+            shouldRequireAutoModeReviewForAllow(
+              invocation,
+              pmCtx,
+              policyToolName,
+              this.config,
+            );
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -18646,9 +18828,36 @@ export class Session implements SessionContext {
             if ('cancelled' in classified) return classified.cancelled;
             const { outcome, denialState } = classified;
             switch (outcome.kind) {
-              case 'approved':
+              case 'approved': {
+                const automaticApproval = await confirmAutomaticReviewOnAllow(
+                  this.config,
+                  invocation,
+                  activeToolAbortSignal,
+                );
+                if (
+                  automaticApproval === 'mode-changed' ||
+                  automaticApproval === 'requires-human'
+                ) {
+                  return earlyErrorResponse(
+                    new Error(
+                      automaticApproval === 'mode-changed'
+                        ? 'Approval mode changed before confirmation. Please retry.'
+                        : 'This tool call requires one-time human approval under the current permission rules. Please retry.',
+                    ),
+                    toolName,
+                    {
+                      status: 'error',
+                      errorType: ToolErrorType.EXECUTION_DENIED,
+                      executionStatus: 'not_started',
+                    },
+                  );
+                }
+                if (automaticApproval === 'cancelled') {
+                  return cancelBeforeExecutionIfAborted(toolName)!;
+                }
                 autoModeAllowed = true;
                 break;
+              }
               case 'blocked':
                 return earlyErrorResponse(
                   new Error(outcome.errorMessage),
@@ -18914,6 +19123,7 @@ export class Session implements SessionContext {
                     }
                     recordAutoModeFallbackResolution(approval.outcome);
                   } else {
+                    let confirmationApprovalMode = approvalMode;
                     if (hookResult.updatedInput) {
                       // The replacement is checked like the input before it:
                       // its gates, schema and permission rules. This hook's
@@ -19031,28 +19241,32 @@ export class Session implements SessionContext {
                         string,
                         unknown
                       >;
+                      const replacementApprovalMode =
+                        this.config.getApprovalMode();
+                      confirmationApprovalMode = replacementApprovalMode;
                       const replacementAllowed =
                         replacementFlow.finalPermission === 'allow' &&
                         !(
-                          approvalMode === ApprovalMode.AUTO &&
-                          (shouldForceAutoModeReviewForAllow(
+                          replacementApprovalMode === ApprovalMode.AUTO &&
+                          shouldRequireAutoModeReviewForAllow(
+                            replacement,
                             replacementFlow.pmCtx,
-                            this.config.getCwd(),
-                          ) ||
-                            shouldClassifyAllShellForAutoMode(
-                              policyToolName,
-                              this.config,
-                            ))
+                            policyToolName,
+                            this.config,
+                          )
                         );
                       if (
                         replacementAllowed &&
-                        approvalMode === ApprovalMode.AUTO
+                        replacementApprovalMode === ApprovalMode.AUTO
                       ) {
                         recordAutoModeAllow(replacementParams);
                         updateAutoModeFallback();
                       } else if (
                         !replacementAllowed &&
-                        shouldRunAutoModeForCall(approvalMode, policyToolName)
+                        shouldRunAutoModeForCall(
+                          replacementApprovalMode,
+                          policyToolName,
+                        )
                       ) {
                         const classified = await classifyForAutoMode(
                           replacementParams,
@@ -19088,9 +19302,41 @@ export class Session implements SessionContext {
                       }
                       hookHandled = false;
                     } else {
-                      await confirmationDetails.onConfirm(
-                        ToolConfirmationOutcome.ProceedOnce,
-                      );
+                      if (
+                        invocation.requiresUserInteraction?.() === true ||
+                        (invocation.requiresAutoReviewOnAllow?.() === true &&
+                          this.config.getApprovalMode() !==
+                            confirmationApprovalMode &&
+                          !(
+                            confirmationApprovalMode === ApprovalMode.AUTO &&
+                            this.config.getApprovalMode() === ApprovalMode.YOLO
+                          ))
+                      ) {
+                        return earlyErrorResponse(
+                          new Error(
+                            invocation.requiresUserInteraction?.()
+                              ? 'This tool call requires one-time human approval under the current permission rules. Please retry.'
+                              : 'Approval mode changed before confirmation. Please retry.',
+                          ),
+                          toolName,
+                          {
+                            status: 'error',
+                            errorType: ToolErrorType.EXECUTION_DENIED,
+                            executionStatus: 'not_started',
+                          },
+                        );
+                      }
+                      // Automatic callbacks are provided by the resolved
+                      // destination-specific confirmation object.
+                      if (confirmationDetails.onAutoConfirm) {
+                        await confirmationDetails.onAutoConfirm(
+                          this.config.getApprovalMode(),
+                        );
+                      } else {
+                        await confirmationDetails.onConfirm(
+                          ToolConfirmationOutcome.ProceedOnce,
+                        );
+                      }
                       const hookConfirmationCancellation =
                         cancelBeforeExecutionIfAborted(toolName);
                       if (hookConfirmationCancellation) {
@@ -19182,7 +19428,7 @@ export class Session implements SessionContext {
 
               const permissionOptions = toPermissionOptions(
                 confirmationDetails,
-                pmForcedAsk,
+                pmForcedAsk || requiresUserInteraction,
                 this.requiresManagedConversationBinding
                   ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
                   : undefined,
@@ -20181,7 +20427,12 @@ export class Session implements SessionContext {
 
             if (activeToolAbortSignal.aborted) {
               return earlyErrorResponse(
-                new Error(TOOL_POST_EXECUTION_CANCELLED_MESSAGE),
+                new Error(
+                  activeToolAbortSignal.reason ===
+                  MID_TURN_SEND_NOW_ABORT_REASON
+                    ? TOOL_DISCARDED_FOR_USER_MESSAGE
+                    : TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
+                ),
                 toolName,
                 {
                   status: 'cancelled',
@@ -20304,9 +20555,15 @@ export class Session implements SessionContext {
 
           const interruptedBeforeCompletion =
             toolResult.interruptedBeforeCompletion === true;
-          const cancelReason = interruptedBeforeCompletion
-            ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-            : TOOL_POST_EXECUTION_CANCELLED_MESSAGE;
+          const forUserMessage =
+            activeToolAbortSignal.reason === MID_TURN_SEND_NOW_ABORT_REASON;
+          const cancelReason = !interruptedBeforeCompletion
+            ? forUserMessage
+              ? TOOL_DISCARDED_FOR_USER_MESSAGE
+              : TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+            : forUserMessage
+              ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
+              : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
           if (
             activeToolAbortSignal.aborted &&
             !(isExecutionTimeout && parentAbortedAtExecutionSettle)
@@ -20560,13 +20817,20 @@ export class Session implements SessionContext {
                     (!toolBuildSucceeded
                       ? ToolErrorType.INVALID_TOOL_PARAMS
                       : ToolErrorType.UNHANDLED_EXCEPTION))));
-          return earlyErrorResponse(error, toolName, {
-            status,
-            errorType,
-            executionStatus,
-            recordInvalidToolParams: !toolBuildSucceeded,
-            stopAfterPermissionCancel: nestedPermissionCancelled,
-          });
+          return earlyErrorResponse(
+            status === 'cancelled' &&
+              activeToolAbortSignal.reason === MID_TURN_SEND_NOW_ABORT_REASON
+              ? new Error(TOOL_INTERRUPTED_FOR_USER_MESSAGE)
+              : error,
+            toolName,
+            {
+              status,
+              errorType,
+              executionStatus,
+              recordInvalidToolParams: !toolBuildSucceeded,
+              stopAfterPermissionCancel: nestedPermissionCancelled,
+            },
+          );
         }
       }); // end runInToolSpanContext
     } catch (e) {

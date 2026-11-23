@@ -31,9 +31,9 @@ final class SideQueryConversation {
 
     static ObjectNode state(JdbcTemplate jdbc, String tenant, String session) {
         String scope = scope(tenant, session);
-        var rows = jdbc.query("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
+        var rows = jdbc.query("SELECT options_json FROM ma_session_record WHERE tenant_id=? AND session_id=?"
                         + " AND record_key=? AND record_kind='CONVERSATION' FOR UPDATE",
-                (row, index) -> row.getString(1), scope, ManagedSchemaKeys.key(scope, DOMAIN));
+                (row, index) -> row.getString(1), tenant, session, ManagedSchemaKeys.key(scope, DOMAIN));
         if (rows.isEmpty()) {
             return JSON.createObjectNode();
         }
@@ -164,14 +164,14 @@ final class SideQueryConversation {
         String scope = scope(tenant, session);
         String key = ManagedSchemaKeys.key(scope, DOMAIN);
         int updated = jdbc.update("UPDATE ma_session_record SET options_json=?, revision=revision+1"
-                + " WHERE session_scope_key=? AND record_key=? AND record_kind='CONVERSATION'",
-                state.toString(), scope, key);
+                + " WHERE tenant_id=? AND session_id=? AND record_key=? AND record_kind='CONVERSATION'",
+                state.toString(), tenant, session, key);
         if (updated == 0) {
             String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id=? AND session_id=?",
                     String.class, tenant, session);
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,workspace_id,domain,"
-                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,?,1,'CONVERSATION',?,?)",
-                    scope, key, tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
+            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,workspace_id,domain,"
+                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,?)",
+                    key, tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
         }
     }
 
