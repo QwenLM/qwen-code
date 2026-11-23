@@ -73,7 +73,7 @@ describe('turn skill snapshot', () => {
     return lease.snapshot;
   }
 
-  function setupTool(initial: SkillConfig) {
+  function setupTool(initial: SkillConfig, bundled?: SkillConfig) {
     let discovered = initial;
     let enabled = true;
     const config = {
@@ -87,15 +87,22 @@ describe('turn skill snapshot', () => {
       getHookSystem: () => null,
       isExplicitlyTrustedFolder: () => false,
       isSkillEnabled: (skill: SkillConfig) =>
-        enabled && skill.filePath === initial.filePath,
+        enabled &&
+        (skill.filePath === initial.filePath ||
+          skill.filePath === bundled?.filePath),
       getSkillManager: () => manager,
     } as unknown as Config;
     const manager = new SkillManager(config);
-    vi.spyOn(manager, 'listSkills').mockImplementation(async () => [
-      discovered,
-    ]);
-    vi.spyOn(manager, 'getCachedSkills').mockImplementation(() => [discovered]);
-    vi.spyOn(manager, 'loadSkill').mockImplementation(async () => discovered);
+    vi.spyOn(manager, 'listSkills').mockImplementation(
+      async ({ level } = {}) =>
+        level === 'bundled' ? (bundled ? [bundled] : []) : [discovered],
+    );
+    vi.spyOn(manager, 'getCachedSkills').mockImplementation((level) =>
+      level === 'bundled' ? (bundled ? [bundled] : []) : [discovered],
+    );
+    vi.spyOn(manager, 'loadSkill').mockImplementation(async (_name, level) =>
+      level === 'bundled' ? (bundled ?? null) : discovered,
+    );
     const tool = new SkillTool(config);
     return {
       tool,
@@ -171,6 +178,35 @@ describe('turn skill snapshot', () => {
       ).toEqual([expect.objectContaining({ name: v2.name })]);
     });
     expect(await manager.loadSkillForRuntime(v2.name)).toEqual(v2);
+  });
+
+  it('preserves unpinned bundled skills and the selected override priority', async () => {
+    const extension = await publish('override body');
+    const bundled: SkillConfig = {
+      ...extension,
+      level: 'bundled',
+      body: 'bundled body',
+      filePath: path.join(source, 'builtin', 'SKILL.md'),
+    };
+    const { tool } = setupTool(extension, bundled);
+    const params = { skill: extension.name };
+    const snapshot = await capture(extension);
+    await runWithTurnSkillSnapshot(snapshot, async () => {
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
+      expect(partToString(result.llmContent)).toContain('override body');
+    });
+    const empty = await prepareTurnSkillSnapshot([], {
+      baseDirectory: snapshots,
+    });
+    leases.push(empty);
+    await runWithTurnSkillSnapshot(empty.snapshot, async () => {
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
+      expect(partToString(result.llmContent)).toContain('bundled body');
+    });
   });
 
   it('checks the original resource identity against current authorization after building a tool call', async () => {

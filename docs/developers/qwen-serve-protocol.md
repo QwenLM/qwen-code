@@ -4214,8 +4214,10 @@ runtime responds with `409 turn_skill_snapshot_unavailable`. These receipts
 do not promise recovery across a daemon restart.
 
 The snapshot covers each selected `SKILL.md` and regular files under its skill
-directory, including skills provided by extensions. Path references to files
-outside those directories, session-scoped hooks and permission grants,
+directory, including skills provided by extensions. Bundled system Skills
+resolve through their existing installed definitions and do not affect this
+digest. A configured Skill with the same name takes precedence as usual.
+Path references to files outside those directories, session-scoped hooks and permission grants,
 process-wide tool registrations, MCP server processes, and external executable
 dependencies have their existing behavior. A session where a selected skill
 would register a hook or allow rule is rejected before this opt-in admission.

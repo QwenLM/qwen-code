@@ -437,11 +437,11 @@ export class SkillManager {
     );
     const snapshot = getTurnSkillSnapshot();
     if (snapshot) {
-      return (
-        snapshot.skills.find(
-          (skill) => skill.name === name && (!level || skill.level === level),
-        ) ?? null
-      );
+      const pinned = snapshot.skills.find((skill) => skill.name === name);
+      if (pinned) return !level || pinned.level === level ? pinned : null;
+      return !level || level === 'bundled'
+        ? this.loadSkill(name, 'bundled')
+        : null;
     }
     const skill = await this.loadSkill(name, level);
     if (!skill) {
@@ -599,7 +599,9 @@ export class SkillManager {
   isSkillActive(skill: SkillConfig, liveOnly?: boolean): boolean {
     if (!skill.paths || skill.paths.length === 0) return true;
     const registry =
-      (!liveOnly && getTurnSkillActivation(this.config.getProjectRoot())) ||
+      (!liveOnly &&
+        skill.level !== 'bundled' &&
+        getTurnSkillActivation(this.config.getProjectRoot())) ||
       this.activationRegistry;
     return registry?.isActivated(skill.name) ?? false;
   }

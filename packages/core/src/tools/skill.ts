@@ -276,9 +276,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
     const snapshot = getTurnSkillSnapshot();
     if (snapshot) {
-      const skill = snapshot.skills.find(
-        (entry) => entry.name === params.skill,
-      );
+      const skill = this.findTurnSkill(snapshot, params.skill);
       if (skill && !skill.disableModelInvocation) {
         if (!this.config.isSkillEnabled(getSkillSource(skill))) {
           if (
@@ -394,8 +392,12 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     }
     const snapshot = getTurnSkillSnapshot();
     if (snapshot) {
+      const bundled = this.skillManager.getCachedSkills('bundled') ?? [];
       const shadowed = new Set(
-        snapshot.skills
+        [
+          ...snapshot.skills,
+          ...bundled.filter((skill) => skill.level === 'bundled'),
+        ]
           .filter(
             (skill) =>
               !skill.disableModelInvocation &&
@@ -418,11 +420,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return commands.filter((cmd) => !shadowedNames.has(cmd.name));
   }
 
+  private findTurnSkill(snapshot: TurnSkillSnapshot, name: string) {
+    return (
+      snapshot.skills.find((skill) => skill.name === name) ??
+      this.skillManager
+        .getCachedSkills('bundled')
+        ?.find((skill) => skill.level === 'bundled' && skill.name === name)
+    );
+  }
+
   protected createInvocation(params: SkillParams) {
     const snapshot = getTurnSkillSnapshot();
-    const pinnedSkill = snapshot?.skills.find(
-      (skill) => skill.name === params.skill,
-    );
+    const turnSkill = snapshot && this.findTurnSkill(snapshot, params.skill);
+    const pinned =
+      snapshot && turnSkill?.level !== 'bundled' ? snapshot : undefined;
     return new SkillToolInvocation(
       this.config,
       this.skillManager,
@@ -430,11 +441,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string, content?: string, skill?: SkillConfig) => {
         this.loadedSkillNames.add(name);
         if (content !== undefined) {
-          if (snapshot) {
-            let loaded = this.loadedTurnSkills.get(snapshot);
+          if (pinned) {
+            let loaded = this.loadedTurnSkills.get(pinned);
             if (!loaded) {
               loaded = new Set();
-              this.loadedTurnSkills.set(snapshot, loaded);
+              this.loadedTurnSkills.set(pinned, loaded);
             }
             loaded.add(name);
           }
@@ -446,15 +457,25 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         }
       },
       this.config.getModelInvocableCommandsExecutor(),
+      (name: string) => {
+        if (pinned)
+          return this.loadedTurnSkills.get(pinned)?.has(name) ?? false;
+        if (snapshot && turnSkill) {
+          return (
+            this.loadedSkillContentByName.get(name)?.content ===
+            buildSkillLlmContent(
+              path.dirname(turnSkill.filePath),
+              turnSkill.body,
+            )
+          );
+        }
+        return this.loadedSkillNames.has(name);
+      },
       (name: string) =>
         snapshot
-          ? (this.loadedTurnSkills.get(snapshot)?.has(name) ?? false)
-          : this.loadedSkillNames.has(name),
-      (name: string) =>
-        snapshot
-          ? pinnedSkill?.disableModelInvocation === true
+          ? turnSkill?.disableModelInvocation === true
           : this.hiddenSkillNames.has(name),
-      snapshot ? () => pinnedSkill ?? null : undefined,
+      pinned ? () => turnSkill ?? null : undefined,
     );
   }
 

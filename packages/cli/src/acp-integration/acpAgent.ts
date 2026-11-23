@@ -10453,8 +10453,10 @@ class QwenAgent implements Agent {
               const skills = await manager.listSkills({ force: true });
               if (manager.hasDiscoveryReadErrors())
                 throw new Error('Skill discovery incomplete');
-              const enabled = skills.filter((skill) =>
-                sessionConfig.isSkillEnabled(skill),
+              const enabled = skills.filter(
+                (skill) =>
+                  skill.level !== 'bundled' &&
+                  sessionConfig.isSkillEnabled(skill),
               );
               if (
                 !sessionConfig.isWorkspaceAgentSession() &&

@@ -6,11 +6,11 @@
 
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  getTurnSkillSnapshot,
-  getSkillSource,
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
+  getTurnSkillSnapshot,
+  getSkillSource,
   applySkillSideEffects,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
@@ -100,23 +100,17 @@ export class BundledSkillLoader implements ICommandLoader {
           level: skill.level,
         },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
-          const snapshot = getTurnSkillSnapshot();
-          const selected = snapshot
-            ? snapshot.skills.find(
-                (candidate) =>
-                  candidate.name === skill.name &&
-                  candidate.level === skill.level &&
-                  candidate.extensionName === skill.extensionName,
-              )
-            : skill;
-          if (!selected || selected.userInvocable === false) {
+          const selected =
+            getTurnSkillSnapshot()?.skills.find(
+              (candidate) => candidate.name === skill.name,
+            ) ?? skill;
+          if (selected.userInvocable === false) {
             return {
               type: 'message',
               messageType: 'error',
-              content: `Skill "${skill.name}" is unavailable in this turn.`,
+              content: `Skill "${selected.name}" is unavailable in this turn.`,
             };
           }
-
           if (this.config?.getShellExecutionSandbox?.()) {
             return {
               type: 'message',
@@ -148,8 +142,13 @@ export class BundledSkillLoader implements ICommandLoader {
           let body = selected.body;
           const modelId = this.config?.getModel()?.trim() || '';
           const cliVersion = this.config?.getCliVersion()?.trim() || 'unknown';
-          body = body.replaceAll('{{cliVersion}}', cliVersion);
-          if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
+          if (selected.level === 'bundled') {
+            body = body.replaceAll('{{cliVersion}}', cliVersion);
+          }
+          if (
+            selected.level === 'bundled' &&
+            (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID'))
+          ) {
             body = body.replaceAll('{{model}}', modelId);
             body = body.replaceAll('YOUR_MODEL_ID', modelId);
             // Prepend model identity as a top-level declaration so the LLM

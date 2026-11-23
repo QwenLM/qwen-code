@@ -202,7 +202,15 @@ async function collectAvailableSkillEntriesUncached(
   // Include a skill only when the model could invoke it right now (see
   // `skillModelInvocationBlock`). Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
-  const allSkills = snapshot?.skills ?? (await skillManager.listSkills());
+  const allSkills = snapshot
+    ? [
+        ...snapshot.skills,
+        ...(await skillManager.listSkills({ level: 'bundled' })).filter(
+          (skill) =>
+            !snapshot.skills.some((pinned) => pinned.name === skill.name),
+        ),
+      ]
+    : await skillManager.listSkills();
   const isEnabled = (skill: SkillConfig) =>
     config.isSkillEnabled(getSkillSource(skill));
 
