@@ -33,11 +33,13 @@ import {
   ENGINE_NODE,
   MOD_ROW_SITES,
   type ModRenderSite,
+  type ModRenderSurface,
 } from './render-tree.js';
 import {
   MOD_EVENTS,
   MOD_HOST_EVENTS,
   MOD_STORE_EVENTS,
+  MOD_TOOL_EVENTS,
   MOD_METHODS,
   MOD_READS,
   ModBudget,
@@ -128,7 +130,7 @@ let logChars = 0;
 let operations = 0;
 let pumping = false;
 let builtinTool: string | undefined;
-let surface: 'terminal' | null = null;
+let surface: ModRenderSurface | null = null;
 let sites: readonly ModRenderSite[] = [];
 let version = 'unknown';
 // Whether the host runs what `$.prompt.submit` submits.
@@ -312,6 +314,7 @@ class Realm {
     const identity = this.vm.newString(
       JSON.stringify({ name: plugin.name, root: plugin.source.root }),
     );
+    const drawnOn = this.vm.newString(surface ?? '');
     this.guest = this.vm.unwrapResult(
       this.vm.callFunction(
         factory,
@@ -319,12 +322,14 @@ class Realm {
         bridge,
         status,
         identity,
+        drawnOn,
       ),
     );
     factory.dispose();
     bridge.dispose();
     status.dispose();
     identity.dispose();
+    drawnOn.dispose();
   }
   execute<T>(action: () => T, call?: ModInvocation): T {
     executing++;
@@ -1253,9 +1258,11 @@ port.on('message', async (request: ModWorkerRequest) => {
           !MOD_HOST_EVENTS.includes(event) ||
           (event === 'prompt.submit'
             ? request.prompts === true
-            : MOD_STORE_EVENTS.includes(event)
-              ? keepsStore
-              : sites.length > 0),
+            : MOD_TOOL_EVENTS.includes(event)
+              ? request.tools === true
+              : MOD_STORE_EVENTS.includes(event)
+                ? keepsStore
+                : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();
@@ -1293,7 +1300,8 @@ port.on('message', async (request: ModWorkerRequest) => {
       starting = true;
       await dispatch(
         'session.start',
-        { cwd: request.cwd, surface, isInteractive: surface === 'terminal' },
+        // A surface that draws has a person at its prompt.
+        { cwd: request.cwd, surface, isInteractive: surface !== null },
         engineOrigin,
         [],
         async (e) => ({ cwd: e['cwd'] }),

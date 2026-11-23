@@ -12,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,7 +32,6 @@ final class JournalCommit {
     private final JournalLifecycleAuthorization lifecycleAuthorization;
     private final JournalResourceWrites resourceWrites;
     private final JournalStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion;
     private final JdbcTemplate jdbc;
     private final JdbcManagedToolResultStore toolResults;
     private final JournalEventTransport journalEventTransport;
@@ -45,7 +43,6 @@ final class JournalCommit {
             JournalLifecycleAuthorization lifecycleAuthorization,
             JournalResourceWrites resourceWrites,
             JournalStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
             JdbcTemplate jdbc,
             JdbcManagedToolResultStore toolResults,
             JournalEventTransport journalEventTransport,
@@ -55,7 +52,6 @@ final class JournalCommit {
         this.lifecycleAuthorization = lifecycleAuthorization;
         this.resourceWrites = resourceWrites;
         this.storeRows = storeRows;
-        this.readerVersion = readerVersion;
         this.jdbc = jdbc;
         this.toolResults = toolResults;
         this.journalEventTransport = journalEventTransport;
@@ -82,10 +78,7 @@ final class JournalCommit {
         fencing.lockSessionFirst(tenantId, sessionId);
         JdbcHarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
-        int storageFloor = ManagedModelDiagnosticProjection.storageFloor(validated.recordBytes(), request.resources(), validated.resources());
-        if (storageFloor > 1) {
-            readerVersion.requireReadable(storageFloor);
-        }
+        boolean activityDiagnostics = ManagedModelDiagnosticProjection.hasActivityDiagnostics(validated.recordBytes(), validated.resources());
         JournalStoreRows.TransactionRow existing = storeRows.findTransactionByCommand(tenantId,
                 sessionId, JournalStoreRows.commandKeyHash(request.operation(),
                         request.commandId()));
@@ -108,7 +101,7 @@ final class JournalCommit {
         }
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterRootLock(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
-        if (head.storageVersion() >= 4) {
+        if (head.activityDiagnostics()) {
             JsonNode activity = extensionRecords.findActivityStatistics(tenantId, sessionId);
             if (activity == null || !"ready".equals(activity.path("readiness").asText())) {
                 throw JournalStoreRows.conflict("managed_activity_rebuilding", "Session diagnostics are being restored before writer admission.");
@@ -269,9 +262,9 @@ final class JournalCommit {
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
-                        + " activation_head_revision = ?, storage_version = ?, gmt_modified = ?"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ?",
+                        + " activation_head_revision = ?, has_activity_diagnostics = has_activity_diagnostics OR ?, gmt_modified = ?"
+                        + " WHERE tenant_id = ? AND"
+                        + " harness_session_id = ?",
                 revision, request.lastSequence(),
                 wakeInput,
                 head.journalRevision(), revision, head.journalRevision(), revision, request.commitDigest(),
@@ -285,7 +278,7 @@ final class JournalCommit {
                         : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
                         : activation.expiresAt(),
-                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
+                activationHeadRevision, activityDiagnostics, now.getTime(), tenantId, sessionId);
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }

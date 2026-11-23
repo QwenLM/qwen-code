@@ -933,25 +933,16 @@ export function assembleSystemPrompt(layers: SystemPromptLayers): string {
   );
 }
 
-/**
- * Returns the "Executing actions with care" system prompt section.
- * Provides layered guidance for risky operations: general principle,
- * 4 categories of dangerous operations, behavioral rules, and approval scoping.
- * Placed between Sandbox and Git Repository sections in the prompt.
- */
+/** Guidance for scope, authorization, and protecting existing user work. */
 function getActionsSection(): string {
   return `
 # Executing actions with care
 
-Carefully consider the reversibility and blast radius of actions. Generally you can freely take local, reversible actions like editing files or running tests. But for actions that are hard to reverse, affect shared systems beyond your local environment, or could otherwise be risky or destructive, obtain confirmation when the current interaction mode can receive it; otherwise stop and report the blocker. The cost of pausing to confirm is low, while the cost of an unwanted action (lost work, unintended messages sent, deleted branches) can be very high. For actions like these, consider the context, the action, and user instructions, and by default transparently communicate the action and follow the active interaction mode's question guidance before proceeding. This default can be changed by user instructions - if explicitly asked to operate more autonomously, then you may proceed without confirmation, but still attend to the risks and consequences when taking actions. A user approving an action (like a git push) once does NOT mean that they approve it in all contexts, so unless actions are authorized in advance in durable instructions like QWEN.md files, obtain confirmation only when the current interaction mode can receive it; otherwise report the blocker. Authorization stands for the scope specified, not beyond. Match the scope of your actions to what was actually requested.
+Take local reversible actions within the requested scope. Before risky, destructive, hard-to-reverse, or externally visible actions, explain the impact and confirm unless the user has authorized the specific action, including through durable workspace instructions. If confirmation is needed and the current interaction mode cannot receive it, stop and report the blocker. Prior approval applies only within its original scope.
 
-Examples of the kind of risky actions that warrant user confirmation:
-- Destructive operations: deleting files/branches, dropping database tables, killing processes, rm -rf, overwriting uncommitted changes
-- Hard-to-reverse operations: force-pushing (can also overwrite upstream), git reset --hard, amending published commits, removing or downgrading packages/dependencies, modifying CI/CD pipelines
-- Actions visible to others or that affect shared state: pushing code, creating/closing/commenting on PRs or issues, sending messages (Slack, email, GitHub), posting to external services, modifying shared infrastructure or permissions
-- Uploading content to third-party web tools (diagram renderers, pastebins, gists) publishes it - consider whether it could be sensitive before sending, since it may be cached or indexed even if later deleted.
+Examples include deleting or overwriting work, rewriting published history, changing shared systems or permissions, sending messages, and uploading data. Treat third-party uploads as publication because services may retain or index the data.
 
-When you encounter an obstacle, do not use destructive actions as a shortcut to simply make it go away. For instance, try to identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state like unfamiliar files, branches, or configuration, investigate before deleting or overwriting, as it may represent the user's in-progress work. For example, typically resolve merge conflicts rather than discarding changes; similarly, if a lock file exists, investigate what process holds it rather than deleting it. In short: only take risky actions carefully, and when in doubt, follow the active interaction mode's question guidance before acting. Follow both the spirit and letter of these instructions - measure twice, cut once.`;
+Inspect unexpected files, branches, or configuration before modifying them. Protect existing user work and investigate failures without bypassing safeguards or taking destructive shortcuts.`;
 }
 
 /**
@@ -1505,7 +1496,7 @@ function getToolCallExamples(
     }
   }
 
-  return adaptSearchToolExamples(generalToolCallExamples, hasBashSearch);
+  return '';
 }
 
 /**

@@ -3027,6 +3027,28 @@
             "type": "integer",
             "minimum": 0
           },
+          "connectedClientsMax": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "Effective aggregate SSE admission cap paired with connectedClients; null = unlimited."
+          },
+          "listenerConnectedClients": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Occupancy of the population the arriving listener's governing bound caps: the daemon total when the aggregate cap binds, the listener's own streams when its clamp binds."
+          },
+          "listenerConnectedClientsMax": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "The arriving listener's governing bound: the tighter of the aggregate cap and its own clamp (the aggregate on primary, 51 on pairing listeners); null = unlimited."
+          },
+          "rateLimitHits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
           "channelAlive": {
             "type": "boolean"
           },
@@ -3694,6 +3716,10 @@
           },
           "hasTurnError": {
             "type": "boolean"
+          },
+          "needsContinuation": {
+            "type": "boolean",
+            "description": "Persisted prompt-ledger evidence that the session's latest prompt was cut off mid-flight (dangling admission, reconciled interruption, or a teardown flush), so opening the session can offer Continue execution. A list-surface hint only; the loaded session's recovery status stays authoritative. Absent when there is no ledger evidence; never false."
           },
           "turnError": {
             "type": "object",

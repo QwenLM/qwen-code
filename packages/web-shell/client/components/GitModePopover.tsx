@@ -5,8 +5,14 @@
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react';
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import { CircleDotIcon, GitBranchIcon, GitForkIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
+import {
+  deriveStatus,
+  GitBranchChipContent,
+  gitStatusPhrases,
+} from './GitBranchIndicator';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import styles from './GitModePopover.module.css';
 import {
@@ -58,6 +64,7 @@ export function validateBranchName(name: string): boolean {
 
 interface GitModePopoverProps {
   branch: string;
+  status?: DaemonWorkspaceGitStatus;
   compact?: boolean;
   intent: SessionGitIntent;
   onIntentChange: (intent: SessionGitIntent) => void;
@@ -65,6 +72,7 @@ interface GitModePopoverProps {
 
 export function GitModePopover({
   branch,
+  status,
   compact = false,
   intent,
   onIntentChange,
@@ -130,6 +138,7 @@ export function GitModePopover({
     : isWorktree
       ? t('gitMode.worktree')
       : branch;
+  const statusPhrases = status ? gitStatusPhrases(deriveStatus(status), t) : [];
 
   return (
     <span className={styles.wrap}>
@@ -143,18 +152,18 @@ export function GitModePopover({
                   className={`${styles.chip} ${isBranch ? styles.chipBranch : ''} ${isWorktree ? styles.chipWorktree : ''} ${compact ? styles.chipCompact : ''}`}
                   data-web-shell-git-branch
                   data-testid="git-mode-chip"
-                  aria-label={`${t('gitMode.title')}: ${chipLabel}`}
+                  aria-label={`${t('gitMode.title')}: ${chipLabel}${
+                    statusPhrases.length > 0
+                      ? ` — ${statusPhrases.join(', ')}`
+                      : ''
+                  }`}
                 >
-                  <span className={styles.chipIcon}>
-                    {isWorktree ? (
-                      <GitForkIcon size={14} strokeWidth={1.5} />
-                    ) : (
-                      <GitBranchIcon size={15} strokeWidth={1.5} />
-                    )}
-                  </span>
-                  {!compact && (
-                    <span className={styles.chipText}>{chipLabel}</span>
-                  )}
+                  <GitBranchChipContent
+                    branch={chipLabel}
+                    status={status}
+                    compact={compact}
+                    worktree={isWorktree}
+                  />
                   <svg
                     className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}
                     viewBox="0 0 16 16"
@@ -327,7 +336,7 @@ export function GitModePopover({
               {selectedMode === 'branch'
                 ? `$ git checkout -b ${branchName || '…'} ← ${branch}`
                 : selectedMode === 'worktree'
-                  ? '$ git worktree add .qwen/worktrees/<slug>'
+                  ? '$ git worktree add --detach .qwen/worktrees/<slug>'
                   : `$ git checkout ${branch}`}
             </span>
             {selectedMode === 'branch' && (

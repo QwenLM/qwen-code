@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import ts from 'typescript';
 import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
@@ -24,6 +25,36 @@ function readPackageJavascript(): string {
     .filter((fileName) => fileName.endsWith('.js'))
     .map((fileName) => readFileSync(resolve(DIST_DIR, fileName), 'utf8'))
     .join('\n');
+}
+
+function readStaticJavascript(entry: string): string {
+  const files = new Set([entry]);
+  const sources: string[] = [];
+  for (const file of files) {
+    const javascript = readFileSync(file, 'utf8');
+    sources.push(javascript);
+    const source = ts.createSourceFile(
+      file,
+      javascript,
+      ts.ScriptTarget.ESNext,
+    );
+    for (const statement of source.statements) {
+      if (
+        ts.isImportDeclaration(statement) ||
+        ts.isExportDeclaration(statement)
+      ) {
+        const specifier = statement.moduleSpecifier;
+        if (
+          specifier &&
+          ts.isStringLiteral(specifier) &&
+          specifier.text.startsWith('.')
+        ) {
+          files.add(resolve(dirname(file), specifier.text));
+        }
+      }
+    }
+  }
+  return sources.join('\n');
 }
 
 function readInjectedCss(bundle = readBundle()): string {
@@ -71,6 +102,37 @@ describe('build artifact — package boundary', () => {
       ).toBe(false);
     }
   });
+
+  it.each(['.', 'assets'])(
+    'ships the xterm runtime and stylesheet in a lazy chunk in dist/%s',
+    (directory) => {
+      const dir = resolve(DIST_DIR, directory);
+      const files = readdirSync(dir).filter((name) => /\.(js|css)$/.test(name));
+      const runtime = files.find((name) =>
+        /^terminal-runtime-.*\.js$/.test(name),
+      );
+      expect(runtime).toBeDefined();
+      const code = readFileSync(resolve(dir, runtime!), 'utf8');
+      expect(code).toContain('"xterm-helper-textarea"');
+      expect(code).toContain('.xterm-helper-textarea{');
+      if (directory === '.') {
+        expect(code).toMatch(/\)\.xterm \.xterm-helper-textarea\{/);
+      } else {
+        expect(
+          readFileSync(resolve(DIST_DIR, 'index.html'), 'utf8'),
+        ).not.toContain(runtime);
+      }
+      const otherChunks = files
+        .filter((name) => name !== runtime)
+        .map((name) => readFileSync(resolve(dir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks).toContain(`import("./${runtime}")`);
+      expect(otherChunks).not.toMatch(
+        /(?:from|import)\s*["']\.\/terminal-runtime-[^"']+\.js["']/,
+      );
+      expect(otherChunks.includes('xterm-helper-textarea')).toBe(false);
+    },
+  );
 
   it.each(['.', 'assets'])(
     'ships the spreadsheet worker in a lazy chunk in dist/%s',
@@ -537,6 +599,26 @@ describe('build artifact — transcript entry (#11031)', () => {
     }
   });
 
+  it('keeps artifact-library copy and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toMatch(/["'`]workspaceArtifactLibrary\./);
+    expect(js).not.toContain(
+      'No artifacts have been produced in this workspace yet.',
+    );
+    expect(js).not.toContain('此工作区还没有产出产物。');
+    expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('workspaceArtifactLibrary.title');
+    expect(interactive).toContain('Artifact library');
+    expect(interactive).toContain('产物库');
+    expect(interactive).toContain('Библиотека артефактов');
+  });
+
   it('keeps workspace mutations out of the read-only transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();
@@ -695,7 +777,7 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readPackageJavascript()).toContain('Search loaded records');
   });
 
-  it('keeps the Russian Web Shell catalog in the interactive entry only', () => {
+  it('keeps the Russian and Traditional Chinese catalogs in the interactive entry only', () => {
     const transcript = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
@@ -704,9 +786,24 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('Что вы хотите сделать?');
     expect(interactive).toContain('Недельный лимит кредитов исчерпан');
     expect(interactive).toContain('Вас @упомянули в комментарии');
+    expect(interactive).toContain('週額度已用完');
     expect(transcript).not.toContain('Что вы хотите сделать?');
     expect(transcript).not.toContain('Недельный лимит кредитов исчерпан');
     expect(transcript).not.toContain('Вас @упомянули в комментарии');
+    expect(transcript).not.toContain('週額度已用完');
+  });
+
+  it('loads translated catalogs outside the interactive entry static import graph', () => {
+    const interactive = readPackageJavascript();
+    const startup = readStaticJavascript(DIST_PATH);
+    for (const copy of [
+      '周额度已用完',
+      '週額度已用完',
+      'Недельный лимит кредитов исчерпан',
+    ]) {
+      expect(interactive).toContain(copy);
+      expect(startup).not.toContain(copy);
+    }
   });
 
   it('still carries what a transcript actually renders', () => {

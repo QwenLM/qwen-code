@@ -251,6 +251,12 @@ describe('assertFullIcuAvailable', () => {
     }
   });
 
+  it('drops underscore experimental loader hooks', () => {
+    expect(scrubNodeOptionsLoaderFlags('--experimental_loader=hook.mjs')).toBe(
+      '',
+    );
+  });
+
   it('drops only loader hooks from a NODE_OPTIONS value', () => {
     expect(
       scrubNodeOptionsLoaderFlags(

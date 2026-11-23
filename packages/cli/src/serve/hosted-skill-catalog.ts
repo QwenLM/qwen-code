@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { FunctionDeclaration } from '@google/genai';
+import { MANAGED_SKILL_BODY_MAX_BYTES } from '@qwen-code/qwen-code-core/extension/managed-skill-content.js';
 import { validateSkillName } from '@qwen-code/qwen-code-core/skills/types.js';
 import { renderAvailableSkillsBlock } from '@qwen-code/qwen-code-core/tools/skill-utils.js';
 import type { ManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
@@ -111,7 +112,7 @@ export function parseHostedSkills(value: unknown): readonly HostedSkill[] {
         ) ||
         !boundedText(skill['name'], 128) ||
         !boundedText(skill['description'], 4096) ||
-        !boundedText(skill['body'], 512 * 1024)
+        !boundedText(skill['body'], MANAGED_SKILL_BODY_MAX_BYTES)
       )
         invalid();
       for (const field of ['model_invocable', 'user_invocable']) {

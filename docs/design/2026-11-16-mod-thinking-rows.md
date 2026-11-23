@@ -2,7 +2,7 @@
 
 [English](2026-11-16-mod-thinking-rows.md) | [简体中文](2026-11-16-mod-thinking-rows.zh-CN.md)
 
-Status: implemented in the Ink and OpenTUI terminals. This adds the `Thinking` render site, tracked in #13749. It builds on the reply rows of [Mod reply rows](2026-11-10-mod-assistant-message-rows.md).
+Status: implemented in the Ink and OpenTUI terminals, and in the Web Shell by [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md). This adds the `Thinking` render site, tracked in #13749. It builds on the reply rows of [Mod reply rows](2026-11-10-mod-assistant-message-rows.md).
 
 ## Problem and current behavior
 
@@ -21,7 +21,7 @@ Goals:
 Non-goals:
 
 - The collapsed line (`Thought for 12s`), which the host draws.
-- Thoughts while they stream, subagent views, the session preview, headless runs and ACP hosts.
+- Thoughts while they stream, subagent views, the session preview, headless runs and ACP hosts. The Web Shell's ACP sessions gained the site later.
 - Trees drawn in place of a row, as with reply rows.
 
 ## Contract

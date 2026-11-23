@@ -31,10 +31,11 @@ final class LocalStorageOwners {
                     JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED, JdbcChildWorkspaceStore.DISCARDING,
                     JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.BLOCKED, JdbcChildWorkspaceStore.FAILED) + "'))) LIMIT 1";
     static final String HEAD_AUTHORITY_SQL = "SELECT /*! STRAIGHT_JOIN */ 1 FROM ma_session s USE INDEX (idx_ma_session_storage_scope)"
-            + " JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key"
+            + " JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.harness_session_id = s.session_id"
+            + " AND s.session_scope_key IS NOT NULL"
             + " JOIN ma_workspace w ON w.tenant_id = s.tenant_id AND w.workspace_id = h.workspace_id"
             + " WHERE s.tenant_id = ? AND s.workspace_storage_id IS NULL AND s.is_resource_gc_completed = FALSE"
-            + " AND h.tenant_key = ? AND h.head_kind = 'MANAGED_SESSION' AND w.tenant_id = ? AND w.storage_id = ? LIMIT 1";
+            + " AND h.head_kind = 'MANAGED_SESSION' AND w.tenant_id = ? AND w.storage_id = ? LIMIT 1";
 
     private LocalStorageOwners() {
     }
@@ -165,9 +166,9 @@ final class LocalStorageOwners {
                 || !(alias.get("physical_key") instanceof String physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
                 + lock, physical);
-        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
+        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("storage_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -237,8 +238,7 @@ final class LocalStorageOwners {
                         || exists(current, OPERATION_AUTHORITY_SQL, candidate[0])) {
                     throw uncovered();
                 }
-                if (exists(current, HEAD_AUTHORITY_SQL, candidate[1], RuntimeAdmissionFences.harnessDrainKey(candidate[1]),
-                        candidate[1], candidate[2])) {
+                if (exists(current, HEAD_AUTHORITY_SQL, candidate[1], candidate[1], candidate[2])) {
                     throw uncovered();
                 }
             }

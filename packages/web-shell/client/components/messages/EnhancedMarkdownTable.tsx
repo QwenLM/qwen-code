@@ -1678,12 +1678,13 @@ export function EnhancedTable({
   const copyButtonRef = useRef<HTMLButtonElement | null>(null);
   const densityButtonRef = useRef<HTMLButtonElement | null>(null);
   const inlineHeightRef = useRef(0);
-  const scrollPositionRef = useRef({ top: 0, left: 0 });
+  const scrollPositionRef = useRef<{ top: number; left: number } | null>(null);
   const attachScroller = useCallback((node: HTMLDivElement | null) => {
     containerRef.current = node;
-    if (node) {
-      node.scrollTop = scrollPositionRef.current.top;
-      node.scrollLeft = scrollPositionRef.current.left;
+    const position = scrollPositionRef.current;
+    if (node && position) {
+      node.scrollTop = position.top;
+      node.scrollLeft = position.left;
     }
   }, []);
   const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);

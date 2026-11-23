@@ -291,7 +291,10 @@ describe('Core System Prompt (prompts.ts)', () => {
   ] as const)(
     'keeps %s headless examples free of follow-up questions',
     (_name, model, codeMode) => {
-      vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+      vi.stubEnv(
+        'QWEN_CODE_TOOL_CALL_STYLE',
+        _name === 'general' ? 'general' : undefined,
+      );
       const prompt = corePrompt({ model, mode: 'headless', codeMode });
       const responses = [
         ...prompt.matchAll(
@@ -324,7 +327,10 @@ describe('Core System Prompt (prompts.ts)', () => {
 
     expect(prompt).toContain("use 'run_shell_command' with `rg`");
     expect(prompt).toContain('`rg --files`');
-    expect(prompt).toContain('rg --files | rg');
+    expect(prompt).toContain('pipe the list to another `rg`');
+    expect(prompt).toContain(
+      'Do not use positive `-g`/`--glob` filters when ignore behavior matters',
+    );
     expect(prompt).toContain('Qwen ignore files');
     expect(prompt).toContain("use 'grep_search' or 'glob'");
     expect(prompt).not.toContain("use 'glob' instead of find");
@@ -1309,7 +1315,11 @@ describe('Model-specific tool call formats', () => {
     ['gemma4', 'gemma-4'],
   ])(
     'reads the write target before establishing absence in the %s tool-call example',
-    (_style, model) => {
+    (style, model) => {
+      vi.stubEnv(
+        'QWEN_CODE_TOOL_CALL_STYLE',
+        style === 'generic' ? 'general' : undefined,
+      );
       const prompt = modelPrompt(model);
       const exampleStart = prompt.indexOf('user: Write tests for someFile.ts');
       const exampleEnd = prompt.indexOf('</example>', exampleStart);
@@ -1363,7 +1373,8 @@ describe('Model-specific tool call formats', () => {
     expect(prompt).toMatchSnapshot();
   });
 
-  it('should use bracket format for generic models', () => {
+  it('should use bracket format for an explicit general override', () => {
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', 'general');
     const prompt = modelPrompt('gpt-4');
     // Bracket-style calls, and neither the XML nor the JSON style.
     expectText(
@@ -1374,16 +1385,23 @@ describe('Model-specific tool call formats', () => {
     expect(prompt).toMatchSnapshot();
   });
 
-  it('should use bracket format when no model is specified', () => {
-    const prompt = modelPrompt();
-    // Bracket-style calls by default, and neither the XML nor the JSON style.
-    expectText(
-      prompt,
-      [BRACKET_CALL, 'because it must run in the background]'],
-      [XML_CALL, JSON_CALL],
-    );
-    expect(prompt).toMatchSnapshot();
-  });
+  it.each([undefined, 'gpt-4'])(
+    'omits automatic examples for the general model %s',
+    (model) => {
+      vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+      const prompt = modelPrompt(model);
+      expectText(
+        prompt,
+        [
+          '# Executing actions with care',
+          'If confirmation is needed and the current interaction mode cannot receive it, stop and report the blocker.',
+          'Prior approval applies only within its original scope.',
+          'Protect existing user work',
+        ],
+        ['# Examples', BRACKET_CALL, XML_CALL, JSON_CALL],
+      );
+    },
+  );
 
   it('should preserve model-specific formats with user memory', () => {
     const prompt = modelPrompt(
@@ -1435,6 +1453,7 @@ describe('Model-specific tool call formats', () => {
 describe('resident tool gating (#12032)', () => {
   beforeEach(() => {
     resetPromptEnv('QWEN_CODE_TOOL_CALL_STYLE', 'SANDBOX');
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', 'general');
     vi.mocked(isGitRepository).mockReturnValue(false);
   });
 
@@ -1496,6 +1515,10 @@ describe('resident tool gating (#12032)', () => {
   it.each(['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4'])(
     'omits the examples heading when no %s example tools are declared',
     (model) => {
+      vi.stubEnv(
+        'QWEN_CODE_TOOL_CALL_STYLE',
+        model === 'gpt-4' ? 'general' : undefined,
+      );
       const declaredTools = new Set([ToolNames.ASK_USER_QUESTION]);
       expectText(
         corePrompt({ model, declaredTools }),
@@ -1731,6 +1754,10 @@ describe('resident tool gating (#12032)', () => {
       // config-independent version of the invariant above, and the check that
       // would have caught the example notations going ungated.
       for (const model of ['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4']) {
+        vi.stubEnv(
+          'QWEN_CODE_TOOL_CALL_STYLE',
+          model === 'gpt-4' ? 'general' : undefined,
+        );
         for (const tool of everyTool) {
           // `ask_user_question` is exempt from `tools.eager`, so it is declared
           // in practice, and the interaction-mode bullet naming it also carries
@@ -1885,6 +1912,7 @@ describe('CodeModeOnly tool guidance', () => {
   });
 
   it('keeps direct calls and parallelism in Direct mode', () => {
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', 'general');
     expectText(
       getCoreSystemPrompt(undefined, 'gpt-4'),
       [
