@@ -5420,6 +5420,23 @@ describe('Session', () => {
       expect(requestCancel).not.toHaveBeenCalled();
     });
 
+    it('answers in the same turn when Send now repeats after the moved shells settled', async () => {
+      const { held } = useHeldSharedBatch([shellCall('only')]);
+      const done = prompt();
+      await vi.waitFor(() => expect(held.options).toBeDefined());
+      const options = held.options!;
+
+      moveShell(options, 0, 'bg_0123abcd');
+      options.onCallSettled?.(options.requests[0].callId, 'success');
+      await nextTick();
+      session.sendMidTurnInputNow();
+      const aborted = options.signal.aborted;
+      held.release!();
+
+      await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(aborted).toBe(false);
+    });
+
     it.each([
       ['keeps', 'cancelled', false],
       ['stops', 'error', true],

@@ -170,7 +170,9 @@ then interrupts the other tools.
    output and might run the command again. The drain and late-message checks
    of PR 1 apply to that interrupt only, and are checked when it fires. A
    later Send now request can move shells that have since started. It updates
-   the same batch's wait to include those shells.
+   the same batch's wait to include those shells. A request that arrives once
+   every call of the batch has settled, before the batch ends, leaves the
+   input to that tool boundary.
 3. The tool result gives the background ID, output location and status. It
    tells the model that the command kept running in the background to make
    room for the user's message. If `PostToolUse` rejects the tool result,

@@ -4143,7 +4143,9 @@ export class Session implements SessionContext {
         : undefined;
     if (!previous && !shouldInterrupt()) return;
     if (!previous && moving.length === 0) {
-      pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+      // With every call of the batch settled, the tool boundary is next and
+      // brings the input into this turn.
+      if (batch?.count() !== 0) pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
       return;
     }
     // A later Send now can move a shell that just started. It supersedes
@@ -17445,6 +17447,7 @@ export class Session implements SessionContext {
           })
           .finally(() => {
             executing.delete(p);
+            settledCalls++;
           });
         executing.add(p);
         if (executing.size >= maxConcurrency) {
@@ -17573,7 +17576,7 @@ export class Session implements SessionContext {
               undefined,
               finalizeNestedToolResult,
             ).finally(() => {
-              settledCalls = runnableCalls.indexOf(fc) + 1;
+              settledCalls++;
               this.#settleMovableShell(executionCallIds.get(fc)!);
             });
             parts.push(...r.parts);
