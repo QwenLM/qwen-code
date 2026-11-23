@@ -4202,8 +4202,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
           ? []
           : [`Command: ${this.params.command}`]),
         `Directory: ${this.params.directory || '(root)'}`,
-        `Output: ${result.output || '(empty)'}`,
-        `Error: ${finalError}`, // Use the cleaned error string.
+        `Output (stdout and stderr combined): ${result.output || '(empty)'}`,
+        `Execution Error: ${finalError}`, // Use the cleaned error string.
         `Exit Code: ${result.exitCode ?? '(none)'}`,
         `Signal: ${result.signal ?? '(none)'}`,
         `Process Group PGID: ${result.pid ?? '(none)'}`,

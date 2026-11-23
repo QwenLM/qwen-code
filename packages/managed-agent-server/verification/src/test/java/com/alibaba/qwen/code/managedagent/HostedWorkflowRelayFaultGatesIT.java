@@ -871,7 +871,7 @@ class HostedWorkflowRelayFaultGatesIT {
         List<String> bodies = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'child_run'",

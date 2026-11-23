@@ -39,6 +39,16 @@ public interface RuntimeBrokerOperations {
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId);
 
+    /**
+     * Closes a parked owner's MCP connections and hands back its mount, without
+     * a terminal release. Answers false when {@code parked} stops holding or
+     * this process does not hold the live binding.
+     */
+    public default CompletionStage<Boolean> reclaimParkedMcp(String bindingId, long generation,
+            String runtimeSessionId, java.util.function.BooleanSupplier parked) {
+        return java.util.concurrent.CompletableFuture.completedFuture(false);
+    }
+
     public CompletionStage<Map<String, Object>> extensionControl(String harnessSessionId, String expectedBindingId,
             Long expectedGeneration, Map<String, Object> operation);
 
@@ -101,7 +111,31 @@ public interface RuntimeBrokerOperations {
             String harnessSessionId);
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> publisher);
+            String runtimeSessionId, Map<String, Object> publisher, Long writerGeneration);
+
+    public default CompletionStage<Void> detachPublisher(
+            String harnessSessionId,
+            String runtimeSessionId,
+            Long writerGeneration,
+            Map<String, Long> appliedThrough) {
+        return java.util.concurrent.CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_publisher_detach_unsupported",
+                "Runtime Broker does not support Shell publisher detach.", false));
+    }
+
+    public default CompletionStage<List<Map<String, Object>>> listStagedDeliveries(
+            String harnessSessionId, String writerId, long writerGeneration) {
+        return java.util.concurrent.CompletableFuture.completedFuture(List.of());
+    }
+
+    public default CompletionStage<Void> acknowledgeStagedDeliveries(
+            String harnessSessionId,
+            String writerId,
+            long writerGeneration,
+            String executionCallId,
+            long throughSeq) {
+        return java.util.concurrent.CompletableFuture.completedFuture(null);
+    }
 
     public CompletionStage<Map<String, Object>> acknowledgeExecution(
             String harnessSessionId, String runtimeSessionId,

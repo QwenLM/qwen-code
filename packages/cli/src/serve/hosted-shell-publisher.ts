@@ -26,13 +26,21 @@ import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import {
+  HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
   ResourceToolResultSegmentStore,
   type DurableToolResultResourceStore,
 } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
   parseToolResultEnvelope,
+  parseToolResultManifest,
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import {
+  MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+  parseManagedDeliveryEntry,
+  type ManagedDeliveryEntry,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
+import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   boundedShellPreview,
   HOSTED_SHELL_PUBLISHER_PATH,
@@ -43,9 +51,12 @@ import {
 } from './managed-shell-publisher.js';
 
 interface RegisteredCapture {
-  readonly request: LocalShellCaptureRequest;
-  readonly modelCallId: string;
-  readonly admission: ManagedShellResultSession | LocalShellStreamResultSession;
+  readonly request?: LocalShellCaptureRequest;
+  readonly modelCallId?: string;
+  readonly admission?:
+    | ManagedShellResultSession
+    | LocalShellStreamResultSession;
+  readonly restored?: boolean;
   readonly store: ResourceToolResultSegmentStore;
   readonly offsets: { stdout: number; stderr: number };
   readonly ended: { stdout: boolean; stderr: boolean };
@@ -102,7 +113,10 @@ const REDRIVE_BACKOFF_MS = 250;
 export class HostedShellPublisher {
   private readonly token = randomBytes(32).toString('base64url');
   private readonly captures = new Map<string, RegisteredCapture>();
+  /** Phase 3b: the highest contiguous delivery sequence applied per run. */
+  private readonly appliedThrough = new Map<string, number>();
   private readonly operations = new Set<Promise<unknown>>();
+  private deliveryGate: Promise<void> | undefined;
   private server?: Server;
   private descriptor?: ShellPublisherDescriptor;
   private closing = false;
@@ -150,7 +164,10 @@ export class HostedShellPublisher {
         next();
       },
       express.json({
-        limit: SHELL_PUBLISHER_BODY_LIMIT,
+        limit: Math.max(
+          SHELL_PUBLISHER_BODY_LIMIT,
+          MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+        ),
         strict: true,
         inflate: false,
       }),
@@ -210,6 +227,8 @@ export class HostedShellPublisher {
     const previous = this.captures.get(id);
     if (previous) {
       if (
+        previous.restored ||
+        !previous.request ||
         managedToolDigest(previous.request) !== managedToolDigest(request) ||
         previous.modelCallId !== modelCallId
       )
@@ -269,6 +288,102 @@ export class HostedShellPublisher {
     });
   }
 
+  /**
+   * Restores a reloaded background capture slot for Phase 3b re-attach and
+   * staged-delivery drain without opening a new legacy stream session.
+   */
+  restoreBackgroundCapture(
+    executionCallId: string,
+    recordDomain: 'child_run' | 'monitor_run',
+    lastManifest: ManagedSessionDurableRef | null = null,
+  ): void {
+    if (this.captures.has(executionCallId)) return;
+    this.captures.set(executionCallId, {
+      restored: true,
+      store: new ResourceToolResultSegmentStore(this.resources),
+      offsets: { stdout: 0, stderr: 0 },
+      ended: { stdout: false, stderr: false },
+      background: {
+        lastManifest,
+        recordDomain,
+        remainder: '',
+        decoder: new StringDecoder('utf8'),
+      },
+    });
+  }
+
+  /**
+   * Holds incoming worker delivery pushes while re-attach drains staged rows,
+   * so staged entries commit before live pushes without flipping back to held.
+   */
+  holdDeliveries(): () => void {
+    let release!: () => void;
+    const previous = this.deliveryGate;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous ? previous.then(() => current) : current;
+    this.deliveryGate = chained;
+    return () => {
+      release();
+      if (this.deliveryGate === chained) {
+        this.deliveryGate = undefined;
+      }
+    };
+  }
+
+  appliedWatermarks(): Readonly<Record<string, number>> {
+    return Object.fromEntries(this.appliedThrough.entries());
+  }
+
+  async applyStagedDeliveries(
+    stagedEntries: readonly ManagedDeliveryEntry[],
+    observedRuns: Readonly<Record<string, number>>,
+    acknowledgeRun: (
+      executionCallId: string,
+      throughSeq: number,
+    ) => Promise<void>,
+  ): Promise<void> {
+    const byRun = new Map<string, ManagedDeliveryEntry[]>();
+    for (const entry of stagedEntries) {
+      let group = byRun.get(entry.executionCallId);
+      if (!group) {
+        group = [];
+        byRun.set(entry.executionCallId, group);
+      }
+      group.push(entry);
+    }
+    for (const [executionCallId, group] of byRun) {
+      group.sort((a, b) => a.deliverySeq - b.deliverySeq);
+      const capture = this.captures.get(executionCallId);
+      if (!capture?.background) {
+        throw new Error(
+          'Staged delivery names an unregistered background capture: ' +
+            executionCallId,
+        );
+      }
+      let applied =
+        this.appliedThrough.get(executionCallId) ?? group[0].deliverySeq - 1;
+      for (const delivered of group) {
+        if (delivered.deliverySeq <= applied) continue;
+        if (delivered.deliverySeq !== applied + 1) {
+          throw new Error('Staged delivery sequence is not contiguous.');
+        }
+        // The Broker stored a staged entry's resources itself and stripped
+        // them from the row, so only the entry applies here.
+        await this.applyDeliveryEntry(capture, delivered, executionCallId);
+        applied = delivered.deliverySeq;
+        this.appliedThrough.set(executionCallId, applied);
+      }
+      await acknowledgeRun(executionCallId, applied);
+    }
+    for (const [executionCallId, acked] of Object.entries(observedRuns)) {
+      if (acked > (this.appliedThrough.get(executionCallId) ?? 0)) {
+        this.appliedThrough.set(executionCallId, acked);
+      }
+    }
+  }
+
   private async handle(candidate: unknown): Promise<unknown> {
     const body = publisherObject(candidate);
     if (body['operation'] === 'prepare') {
@@ -278,6 +393,9 @@ export class HostedShellPublisher {
       const entry = this.captures.get(String(capture['executionCallId']));
       if (
         !entry ||
+        entry.restored ||
+        !entry.request ||
+        !entry.admission ||
         managedToolDigest(entry.request) !== managedToolDigest(request)
       )
         throw new Error('Unregistered Shell capture.');
@@ -312,9 +430,13 @@ export class HostedShellPublisher {
       entry.sink = (await prepared).sink;
       return entry.sink.identity;
     }
+    if (body['operation'] === 'deliver') {
+      return this.applyDelivery(body);
+    }
     const id = body['executionCallId'];
     const entry = typeof id === 'string' ? this.captures.get(id) : undefined;
-    if (!entry?.sink) throw new Error('Shell capture was not prepared.');
+    if (!entry?.sink || !entry.admission)
+      throw new Error('Shell capture was not prepared.');
     await entry.admission.assertWritable();
     const sink = entry.sink;
     if (body['operation'] === 'write') {
@@ -1005,6 +1127,301 @@ export class HostedShellPublisher {
     );
     if (typeof redrive.unref === 'function') redrive.unref();
     background.redrive = redrive;
+  }
+
+  /**
+   * Phase 3b: applies a batch of worker-owned delivery entries in order.
+   * Each entry carries the complete resources it introduces; the applier
+   * publishes them idempotently, then advances or settles the record exactly
+   * as the resident capture path does. A gap is refused; the worker re-sends
+   * from its oldest unacknowledged entry.
+   */
+  private async applyDelivery(body: Record<string, unknown>): Promise<unknown> {
+    if (this.deliveryGate) {
+      await this.deliveryGate;
+    }
+    publisherFields(body, ['operation', 'executionCallId', 'entries']);
+    const executionCallId = String(body['executionCallId']);
+    const entry = this.captures.get(executionCallId);
+    if (!entry?.background) {
+      throw new Error('Delivery names an unregistered background capture.');
+    }
+    if (!Array.isArray(body['entries']) || body['entries'].length === 0) {
+      throw new Error('Delivery batch is empty.');
+    }
+    const entries = body['entries'].map(parseManagedDeliveryEntry);
+    let applied = this.appliedThrough.get(executionCallId) ?? 0;
+    let receipt: LocalShellReceipt | undefined;
+    for (const delivered of entries) {
+      if (delivered.executionCallId !== executionCallId) {
+        throw new Error('Delivery entry names another execution.');
+      }
+      if (delivered.deliverySeq <= applied) continue; // already applied
+      if (delivered.deliverySeq !== applied + 1) {
+        throw new Error('Delivery sequence is not contiguous.');
+      }
+      await this.publishDeliveryResources(delivered);
+      receipt = await this.applyDeliveryEntry(
+        entry,
+        delivered,
+        executionCallId,
+      );
+      applied = delivered.deliverySeq;
+      this.appliedThrough.set(executionCallId, applied);
+    }
+    return {
+      appliedThrough: applied,
+      ...(receipt ? { receipt } : {}),
+    };
+  }
+
+  private async publishDeliveryResources(
+    entry: ManagedDeliveryEntry,
+  ): Promise<void> {
+    for (const resource of entry.resources) {
+      const bytes = Buffer.from(resource.bytesBase64, 'base64');
+      // The tool-result store only admits the capture kinds; an observation's
+      // notification resources belong to the session store, under the same
+      // worker-minted ids the staged drain path already preserves.
+      if (
+        Object.hasOwn(HOSTED_TOOL_RESULT_RESOURCE_LIMITS, resource.ref.kind)
+      ) {
+        await this.resources.publish(
+          resource.ref.kind,
+          bytes,
+          resource.ref.resourceId,
+        );
+      } else {
+        await this.session.resources.publish(
+          resource.ref.kind,
+          bytes,
+          resource.ref.resourceId,
+        );
+      }
+    }
+  }
+
+  private async applyDeliveryEntry(
+    entry: RegisteredCapture,
+    delivered: ManagedDeliveryEntry,
+    executionCallId: string,
+  ): Promise<LocalShellReceipt | undefined> {
+    const background = entry.background!;
+    const domain = background.recordDomain;
+    const owner =
+      domain === 'monitor_run'
+        ? this.monitors?.record(executionCallId)
+        : this.childRuns?.record(executionCallId);
+    if (!owner) {
+      throw new Error(
+        `The ${domain} record for ${executionCallId} is missing.`,
+      );
+    }
+    if (delivered.kind === 'output') {
+      if (owner.startReceiptRef === null || owner.run.execution === 'settled') {
+        return undefined;
+      }
+      if (
+        owner.outputRef !== null &&
+        (await this.manifestRevisionAtLeast(
+          owner.outputRef,
+          delivered.manifestRevision,
+        ))
+      ) {
+        background.lastManifest = owner.outputRef;
+        return undefined;
+      }
+      if (domain === 'monitor_run') {
+        await this.monitors!.advanceOutput(
+          executionCallId,
+          delivered.manifestRef,
+        );
+      } else {
+        await this.childRuns!.advanceOutput(
+          executionCallId,
+          delivered.manifestRef,
+        );
+      }
+      background.lastManifest = delivered.manifestRef;
+      return undefined;
+    }
+    if (delivered.kind === 'observation') {
+      if (domain !== 'monitor_run' || !this.monitors) {
+        throw new Error('Observation delivery requires a monitor_run record.');
+      }
+      if (owner.run.execution === 'settled') {
+        return undefined;
+      }
+      const currentSeq = (owner as { observationSequence: number })
+        .observationSequence;
+      if (delivered.sequence <= currentSeq) {
+        return undefined;
+      }
+      if (delivered.sequence !== currentSeq + 1) {
+        throw new Error('Observation sequence is not contiguous.');
+      }
+      const input: ManagedSessionInputRequest | undefined =
+        delivered.notification && !this.lifecyclePrepared
+          ? {
+              inputId: delivered.notification.inputId,
+              turnId: delivered.notification.turnId,
+              source: 'monitor',
+              contentRef: delivered.notification.contentRef,
+              admissionRef: delivered.notification.admissionRef,
+              deadline: null,
+              wakeReason: 'input',
+            }
+          : undefined;
+      await this.monitors.observe(
+        executionCallId,
+        { lines: delivered.lines },
+        input ? { input } : undefined,
+      );
+      if (input) this.onNotification?.();
+      return undefined;
+    }
+    // terminal: advance the final manifest, then settle the record (idempotent
+    // if an earlier attempt committed before acknowledging).
+    if (
+      delivered.manifestRef &&
+      owner.startReceiptRef !== null &&
+      owner.run.execution !== 'settled'
+    ) {
+      const targetManifest = parseToolResultManifest(
+        JSON.parse(
+          (await this.resources.read(delivered.manifestRef)).toString('utf8'),
+        ),
+      );
+      const alreadyAdvanced =
+        owner.outputRef !== null &&
+        (await this.manifestRevisionAtLeast(
+          owner.outputRef,
+          targetManifest.revision,
+        ));
+      if (!alreadyAdvanced) {
+        if (domain === 'monitor_run') {
+          await this.monitors!.advanceOutput(
+            executionCallId,
+            delivered.manifestRef,
+          );
+        } else {
+          await this.childRuns!.advanceOutput(
+            executionCallId,
+            delivered.manifestRef,
+          );
+        }
+      }
+      background.lastManifest = delivered.manifestRef;
+    }
+    entry.envelope = delivered.envelope;
+    if (owner.run.execution === 'settled') {
+      const settledRef =
+        delivered.manifestRef ?? owner.outputRef ?? background.lastManifest;
+      return {
+        executionCallId,
+        manifest: settledRef,
+        deliveryStatus: 'blocked',
+        historyRevision: null,
+        outcomeRef:
+          settledRef ??
+          (await this.session.resources.publish(
+            'managed-tool-outcome',
+            Buffer.from(
+              JSON.stringify({
+                schemaVersion: 1,
+                decision: 'blocked',
+                envelope: delivered.envelope,
+                manifestRef: null,
+              }),
+            ),
+          )),
+      };
+    }
+    if (domain === 'monitor_run') {
+      if (!this.monitors) {
+        throw new Error(
+          `The monitor_run record for ${executionCallId} has no session.`,
+        );
+      }
+      const record = this.monitors.record(executionCallId);
+      if (record?.run.state === 'recovery_blocked') {
+        if (delivered.evidence !== null) {
+          if (delivered.stopRequested) {
+            await this.monitors.settleStopRequested(executionCallId);
+          } else {
+            await this.monitors.settleQuiet(executionCallId, 'exited');
+          }
+        }
+      } else if (delivered.evidence === null) {
+        await this.monitors.settleFailed(executionCallId, {
+          stopReason: 'watch_failed',
+          started: true,
+        });
+      } else if (delivered.stopRequested) {
+        await this.monitors.settleStopRequested(executionCallId);
+      } else {
+        await this.monitors.settleQuiet(
+          executionCallId,
+          delivered.monitorStopReason ?? 'exited',
+        );
+      }
+    } else if (delivered.evidence === null) {
+      await this.childRuns?.settleFailed(executionCallId, {
+        stopReason: 'process_failed',
+        started: true,
+      });
+    } else if (delivered.stopRequested) {
+      await this.childRuns?.requestStop(executionCallId);
+      await this.childRuns?.settleStopRequested(executionCallId);
+    } else {
+      await this.childRuns?.settleExited(executionCallId, delivered.evidence);
+    }
+    const manifestRef = delivered.manifestRef ?? background.lastManifest;
+    return {
+      executionCallId,
+      manifest: manifestRef,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef:
+        manifestRef ??
+        (await this.session.resources.publish(
+          'managed-tool-outcome',
+          Buffer.from(
+            JSON.stringify({
+              schemaVersion: 1,
+              decision: 'blocked',
+              envelope: delivered.envelope,
+              manifestRef: null,
+            }),
+          ),
+        )),
+    };
+  }
+
+  private async manifestRevisionAtLeast(
+    ref: ManagedSessionDurableRef,
+    revision: number,
+  ): Promise<boolean> {
+    const manifest = parseToolResultManifest(
+      JSON.parse((await this.resources.read(ref)).toString('utf8')),
+    );
+    return manifest.revision >= revision;
+  }
+
+  /**
+   * Waits for the deliveries already in flight without closing the listener,
+   * so a suspension detach can carry the final applied watermark (§4.9).
+   * Deliberately one bounded round, not a wait for silence: a loud Shell
+   * keeps pushing while it is attached, and a push that lands after this
+   * snapshot is either applied before the close or refused and re-sent.
+   */
+  async quiesce(): Promise<void> {
+    await Promise.allSettled([...this.operations]);
+    await Promise.allSettled(
+      [...this.captures.values()].map(
+        (entry) => entry.background?.redriveInFlight,
+      ),
+    );
   }
 
   close(): Promise<void> {

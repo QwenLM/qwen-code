@@ -1441,6 +1441,20 @@ export function createDaemonWorkspaceActions({
         options?.timeoutMs,
       );
     },
+
+    async artifactLibrary(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Load artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibrary({ signal: options?.signal });
+    },
+
+    artifactLibraryStream(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Stream artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibraryStream({ signal: options?.signal });
+    },
   };
 }
 

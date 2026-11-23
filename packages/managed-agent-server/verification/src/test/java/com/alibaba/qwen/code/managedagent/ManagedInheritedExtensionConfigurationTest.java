@@ -278,12 +278,12 @@ class ManagedInheritedExtensionConfigurationTest {
     private void insert(String sessionId, String resourceId, String kind, byte[] bytes,
             String state) {
         String scopeKey = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
                         + " state, gmt_create, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, ?, ?, ?)",
-                ManagedSessionStore.resourceKey(scopeKey, resourceId), scopeKey, TENANT,
+                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, ?, ?, ?)",
+                ManagedSessionStore.resourceKey(scopeKey, resourceId), TENANT,
                 WORKSPACE, sessionId, resourceId, kind, bytes.length,
                 ExtensionRecordJournal.sha256(bytes), bytes, resourceId, state, 1_000L, 1_000L);
     }

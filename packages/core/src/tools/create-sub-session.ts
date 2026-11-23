@@ -41,6 +41,7 @@ import {
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import { buildPermissionCheckContext } from '../core/permission-helpers.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import type { Config, SubSessionWorkspaceBinding } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -60,6 +61,7 @@ export interface CreateSubSessionParams {
   model?: string;
   name?: string;
   workspace?: string;
+  sessionId?: string;
 }
 
 const DAEMON_ONLY_MESSAGE =
@@ -113,6 +115,10 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 > {
   private destination?: SubSessionWorkspaceBinding;
   private approvedDestination?: SubSessionWorkspaceBinding;
+  private automaticApprovalMode?: ApprovalMode;
+  private isAutomaticallyApproved = false;
+  private permissionApprovalMode?: ApprovalMode;
+  private requestedWorkspaceAsk = false;
 
   constructor(
     private config: Config,
@@ -130,9 +136,15 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     const cleaned = raw.replace(/[\r\n\t\x00-\x1f]/g, ' ').trim();
     const label = cleaned.length > 80 ? cleaned.slice(0, 77) + '…' : cleaned;
     const workspace = this.destination?.workspaceCwd ?? this.params.workspace;
-    return workspace
-      ? `[${mode}] in ${JSON.stringify(workspace)}: ${label}`
-      : `[${mode}] ${label}`;
+    const target = [
+      this.params.sessionId
+        ? `to ${JSON.stringify(this.params.sessionId)}`
+        : undefined,
+      workspace ? `in ${JSON.stringify(workspace)}` : undefined,
+    ]
+      .filter((part) => part !== undefined)
+      .join(' ');
+    return target ? `[${mode}] ${target}: ${label}` : `[${mode}] ${label}`;
   }
 
   /**
@@ -144,12 +156,49 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
    * so the delegated prompt would never be reviewed. `'ask'` lets AUTO route
    * the call through the classifier, which resolves it without a human.
    */
-  override async getDefaultPermission(): Promise<PermissionDecision> {
+  override async getDefaultPermission(
+    abortSignal?: AbortSignal,
+  ): Promise<PermissionDecision> {
+    abortSignal?.throwIfAborted();
+    if (this.params.workspace !== undefined) {
+      const permissions = this.config.getPermissionManager?.();
+      if (permissions) {
+        const context = buildPermissionCheckContext(
+          ToolNames.CREATE_SUB_SESSION,
+          { ...this.params },
+          this.config.getTargetDir?.() ?? '',
+        );
+        this.requestedWorkspaceAsk = permissions.hasMatchingAskRule(context);
+        if (permissions.findMatchingDenyRule(context)) return 'ask';
+      }
+      await this.resolveDestination(abortSignal);
+      this.permissionApprovalMode = this.config.getApprovalMode();
+    }
     return 'ask';
   }
 
+  override requiresAutoReviewOnAllow(): boolean {
+    return (
+      this.params.workspace !== undefined &&
+      this.destination?.sameWorkspace !== true
+    );
+  }
+
   override requiresUserInteraction(): boolean {
-    return this.params.workspace !== undefined;
+    if (this.params.workspace === undefined) return false;
+    if (this.destination) {
+      this.updateRequestedWorkspaceAsk(this.destination);
+    }
+    const approvalMode = this.config.getApprovalMode();
+    if (approvalMode === ApprovalMode.PLAN || this.requestedWorkspaceAsk) {
+      return true;
+    }
+    if (this.destination?.sameWorkspace === true) return false;
+    return !this.isYolo() && approvalMode !== ApprovalMode.AUTO;
+  }
+
+  private isYolo(): boolean {
+    return this.config.getApprovalMode() === ApprovalMode.YOLO;
   }
 
   override async getConfirmationDetails(
@@ -158,23 +207,67 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     if (this.params.workspace === undefined) {
       return super.getConfirmationDetails(abortSignal);
     }
-    const resolveWorkspace = this.config.getSubSessionWorkspaceResolver();
-    if (!resolveWorkspace) throw new Error(DAEMON_ONLY_MESSAGE);
-
-    const destination = await resolveWorkspace(this.params.workspace);
-    abortSignal.throwIfAborted();
-    this.assertWorkspaceAllowed(destination);
-    this.destination = destination;
+    const destination = await this.resolveDestination(abortSignal);
+    if (
+      destination.sameWorkspace &&
+      this.config.getApprovalMode() !== ApprovalMode.PLAN
+    ) {
+      const confirmation = await super.getConfirmationDetails(abortSignal);
+      return {
+        ...confirmation,
+        onAutoConfirm: async () => {
+          this.updateRequestedWorkspaceAsk(destination);
+          if (this.requestedWorkspaceAsk) {
+            throw new StructuredToolError(
+              'This named workspace requires one-time human approval under the current permission rules.',
+              ToolErrorType.EXECUTION_DENIED,
+            );
+          }
+          this.automaticApprovalMode = undefined;
+          this.approvedDestination = destination;
+          this.isAutomaticallyApproved = true;
+        },
+        onConfirm: async (outcome, payload) => {
+          this.automaticApprovalMode = undefined;
+          this.isAutomaticallyApproved = false;
+          this.approvedDestination =
+            outcome === ToolConfirmationOutcome.ProceedOnce ||
+            outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
+              ? destination
+              : undefined;
+          await confirmation.onConfirm(outcome, payload);
+        },
+      };
+    }
     return {
       type: 'exec',
       title: this.getDescription(),
       command: this.params.prompt.trim(),
-      approvalText: `Workspace: ${JSON.stringify(destination.workspaceCwd)}\n\n${this.params.prompt.trim()}`,
+      approvalText:
+        `Workspace: ${JSON.stringify(destination.workspaceCwd)}\n` +
+        (this.params.sessionId
+          ? `Session: ${JSON.stringify(this.params.sessionId)}\n`
+          : '') +
+        `\n${this.params.prompt.trim()}`,
       rootCommand: ToolNames.CREATE_SUB_SESSION,
       // A tool-wide rule cannot record which workspace the user approved.
       hideAlwaysAllow: true,
       permissionRules: [],
+      onAutoConfirm: async (approvalMode) => {
+        this.updateRequestedWorkspaceAsk(destination);
+        if (this.requestedWorkspaceAsk) {
+          throw new StructuredToolError(
+            'This named workspace requires one-time human approval under the current permission rules.',
+            ToolErrorType.EXECUTION_DENIED,
+          );
+        }
+        this.approvedDestination = destination;
+        this.automaticApprovalMode = approvalMode;
+        this.isAutomaticallyApproved = true;
+      },
       onConfirm: async (outcome) => {
+        this.automaticApprovalMode = undefined;
+        this.isAutomaticallyApproved = false;
         this.approvedDestination =
           outcome === ToolConfirmationOutcome.ProceedOnce ||
           outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
@@ -182,6 +275,55 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
             : undefined;
       },
     };
+  }
+
+  private async resolveDestination(
+    abortSignal?: AbortSignal,
+  ): Promise<SubSessionWorkspaceBinding> {
+    abortSignal?.throwIfAborted();
+    if (this.destination) {
+      this.assertWorkspaceAllowed(this.destination);
+      this.updateRequestedWorkspaceAsk(this.destination);
+      return this.destination;
+    }
+    const resolveWorkspace = this.config.getSubSessionWorkspaceResolver();
+    if (!resolveWorkspace) throw new Error(DAEMON_ONLY_MESSAGE);
+    const destination = abortSignal
+      ? await raceCancellation(
+          () => resolveWorkspace(this.params.workspace!),
+          abortSignal,
+        )
+      : await resolveWorkspace(this.params.workspace!);
+    if (destination === CANCELLED) throw abortSignal!.reason;
+    abortSignal?.throwIfAborted();
+    this.assertWorkspaceAllowed(destination);
+    this.updateRequestedWorkspaceAsk(destination);
+    this.destination = destination;
+    return destination;
+  }
+
+  private updateRequestedWorkspaceAsk(
+    destination: SubSessionWorkspaceBinding,
+  ): void {
+    const permissions = this.config.getPermissionManager?.();
+    if (!permissions) {
+      this.requestedWorkspaceAsk = false;
+      return;
+    }
+    const selectors = new Set([
+      this.params.workspace,
+      destination.workspaceCwd,
+      destination.workspaceId,
+    ]);
+    this.requestedWorkspaceAsk = [...selectors].some((workspace) => {
+      if (workspace === undefined) return false;
+      const context = buildPermissionCheckContext(
+        ToolNames.CREATE_SUB_SESSION,
+        { ...this.params, workspace },
+        this.config.getTargetDir?.() ?? '',
+      );
+      return permissions.hasMatchingAskRule(context);
+    });
   }
 
   private assertWorkspaceAllowed(
@@ -223,46 +365,121 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 
     const completion = this.params.completion ?? 'first-turn';
     const prompt = this.params.prompt.trim();
+    const followUp = this.params.sessionId !== undefined;
 
-    // Set only once the spawn actually starts, which tells the two cancellation
-    // outcomes apart: a turn cancelled before `execute` ran leaves nothing
-    // behind, while one cancelled mid-flight may have created a sub-session.
-    let spawnStarted = false;
+    let requestStarted = false;
 
     try {
-      const res = await raceCancellation(() => {
-        const destination = this.approvedDestination;
-        this.approvedDestination = undefined;
-        if (this.params.workspace !== undefined && !destination) {
-          throw new Error('A named workspace requires one-time approval.');
-        }
-        if (destination) this.assertWorkspaceAllowed(destination);
-        spawnStarted = true;
-        return spawner({
-          prompt,
-          completion,
-          ...(this.params.model ? { model: this.params.model } : {}),
-          ...(this.params.name ? { name: this.params.name } : {}),
-          ...(this.params.workspace !== undefined
-            ? {
-                workspace: this.params.workspace,
-                workspaceGeneration: destination?.workspaceGeneration,
+      const resolution =
+        this.params.workspace !== undefined && !this.destination
+          ? await raceCancellation(
+              () => this.resolveDestination(signal),
+              signal,
+            )
+          : undefined;
+      const res =
+        resolution === CANCELLED
+          ? CANCELLED
+          : await raceCancellation(async () => {
+              const approvedDestination = this.approvedDestination;
+              const isAutomaticallyApproved = this.isAutomaticallyApproved;
+              this.approvedDestination = undefined;
+              this.isAutomaticallyApproved = false;
+              const approvalMode = this.config.getApprovalMode();
+              this.permissionApprovalMode ??= approvalMode;
+              const autoApproved =
+                (approvalMode === ApprovalMode.AUTO &&
+                  this.permissionApprovalMode === ApprovalMode.AUTO) ||
+                (approvalMode === ApprovalMode.YOLO &&
+                  (this.permissionApprovalMode === ApprovalMode.AUTO ||
+                    this.permissionApprovalMode === ApprovalMode.YOLO));
+              const destination =
+                approvalMode === ApprovalMode.PLAN
+                  ? undefined
+                  : (approvedDestination ??
+                    (this.destination?.sameWorkspace === true || autoApproved
+                      ? this.destination
+                      : undefined));
+              const requiresYolo =
+                approvalMode === ApprovalMode.YOLO &&
+                (this.automaticApprovalMode === ApprovalMode.YOLO ||
+                  (approvedDestination === undefined && autoApproved));
+              const requiresAutoMode =
+                this.params.workspace !== undefined &&
+                this.destination?.sameWorkspace !== true &&
+                !requiresYolo &&
+                (this.automaticApprovalMode === ApprovalMode.AUTO ||
+                  (approvedDestination === undefined &&
+                    autoApproved &&
+                    approvalMode === ApprovalMode.AUTO));
+              const automaticApprovalMode = this.automaticApprovalMode;
+              if (
+                automaticApprovalMode !== undefined &&
+                automaticApprovalMode !== approvalMode
+              ) {
+                this.approvedDestination = undefined;
+                this.automaticApprovalMode = undefined;
+                throw new StructuredToolError(
+                  'Approval mode changed before execution. Please retry.',
+                  ToolErrorType.EXECUTION_DENIED,
+                );
               }
-            : {}),
-        });
-      }, signal);
+              this.automaticApprovalMode = undefined;
+              if (this.params.workspace !== undefined && !destination) {
+                throw new Error(
+                  'A named workspace requires one-time approval.',
+                );
+              }
+              if (destination) {
+                this.assertWorkspaceAllowed(destination);
+                if (
+                  !approvedDestination ||
+                  automaticApprovalMode !== undefined ||
+                  isAutomaticallyApproved
+                ) {
+                  this.updateRequestedWorkspaceAsk(destination);
+                  if (this.requestedWorkspaceAsk) {
+                    this.approvedDestination = undefined;
+                    this.automaticApprovalMode = undefined;
+                    throw new StructuredToolError(
+                      'This named workspace requires one-time human approval under the current permission rules.',
+                      ToolErrorType.EXECUTION_DENIED,
+                    );
+                  }
+                }
+              }
+              requestStarted = true;
+              return spawner({
+                prompt,
+                completion,
+                ...(this.params.model ? { model: this.params.model } : {}),
+                ...(this.params.name ? { name: this.params.name } : {}),
+                ...(this.params.workspace !== undefined
+                  ? {
+                      workspace: this.params.workspace,
+                      workspaceGeneration: destination?.workspaceGeneration,
+                      ...(requiresYolo ? { requiresYolo: true } : {}),
+                      ...(requiresAutoMode ? { requiresAutoMode: true } : {}),
+                    }
+                  : {}),
+                ...(this.params.sessionId
+                  ? { sessionId: this.params.sessionId }
+                  : {}),
+              });
+            }, signal);
 
       if (res === CANCELLED) {
-        // Return the caller's turn to it immediately. A sub-session that DID
-        // start is NOT cancelled — `sendPrompt` has no abort seam — so it keeps
-        // running and keeps its concurrency slot until its own turn drains.
-        // Freeing the slot here would let the caller over-admit against a
-        // sub-session that is still consuming a bridge session and model quota.
-        const message = spawnStarted
-          ? 'create_sub_session was cancelled. A sub-session may already have ' +
-            'been created; it runs independently and is not cancelled.'
-          : 'create_sub_session was cancelled before it started. No ' +
-            'sub-session was created.';
+        // Cancellation here stops the caller's wait. The daemon owns any
+        // admitted prompt and its concurrency slot.
+        const message = followUp
+          ? requestStarted
+            ? 'create_sub_session was cancelled. The follow-up prompt may already be queued and can still run.'
+            : 'create_sub_session was cancelled before sending the follow-up.'
+          : requestStarted
+            ? 'create_sub_session was cancelled. A sub-session may already have ' +
+              'been created; it runs independently and is not cancelled.'
+            : 'create_sub_session was cancelled before it started. No ' +
+              'sub-session was created.';
         return {
           llmContent: message,
           returnDisplay: 'Cancelled',
@@ -278,7 +495,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       const workspaceQuery = res.workspaceCwd
         ? `?${new URLSearchParams({ workspace: res.workspaceCwd })}`
         : '';
-      const sessionLink = `[🧵 ${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId}${workspaceQuery})`;
+      const sessionLink = `[${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId}${workspaceQuery})`;
 
       // The sub-session exists and is linked in memory, but the daemon reported
       // that the parent lineage was NOT durably written to its transcript — so
@@ -295,28 +512,44 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
         // Fire-and-forget: report the id; the caller did not wait for a result.
         return {
           llmContent:
-            `Sub-session ${sessionLink} created and the prompt was ` +
-            'dispatched. It runs independently — this call did not wait for a ' +
+            `Sub-session ${sessionLink} ` +
+            (followUp
+              ? 'accepted the prompt into its queue. '
+              : 'created and the prompt was dispatched. ') +
+            'It runs independently — this call did not wait for a ' +
             `result.${parentWarning}`,
-          returnDisplay: `${sessionLink} started`,
+          returnDisplay: `${sessionLink} ${followUp ? 'queued' : 'started'}`,
         };
       }
 
-      // first-turn: return the sub-session's first-turn output to the caller.
+      if (followUp && res.stopReason === 'timeout') {
+        return {
+          llmContent:
+            `Timed out waiting for ${sessionLink}. The original prompt may still be queued or running.` +
+            (res.result ? `\n\nPartial output:\n\n${res.result}` : '') +
+            parentWarning,
+          returnDisplay: `${sessionLink} timed out`,
+        };
+      }
+
+      // first-turn: return the output of the turn this prompt started.
       const stop = res.stopReason ? ` (stopReason: ${res.stopReason})` : '';
       const body =
         res.result && res.result.length > 0
           ? res.result
-          : `Sub-session ${sessionLink} completed its first turn but ` +
-            'produced no text output.';
+          : `Sub-session ${sessionLink} completed its ` +
+            `${followUp ? 'turn' : 'first turn'} but produced no text output.`;
       return {
-        llmContent: `Sub-session ${sessionLink} first-turn result${stop}:\n\n${body}${parentWarning}`,
+        llmContent: `Sub-session ${sessionLink} ${followUp ? 'result' : 'first-turn result'}${stop}:\n\n${body}${parentWarning}`,
         returnDisplay: `${sessionLink} completed${stop}`,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
-        llmContent: `Error creating sub-session: ${message}`,
+        llmContent:
+          this.params.sessionId !== undefined
+            ? `Error sending to sub-session ${this.params.sessionId}: ${message}`
+            : `Error creating sub-session: ${message}`,
         returnDisplay: message,
         error: {
           message,
@@ -339,29 +572,36 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
     super(
       CreateSubSessionTool.Name,
       ToolDisplayNames.CREATE_SUB_SESSION,
-      'Spawn a fresh, independent sub-session (its own clean context and ' +
-        'transcript) and run a prompt in it. Use to fan work out into a ' +
-        'separate session — e.g. a self-contained sub-task you want isolated ' +
-        'from this conversation.\n\n' +
+      'Run a prompt in a separate sub-session. Omit `sessionId` to create ' +
+        'a fresh session with its own context and transcript. Give a new ' +
+        'sub-session a self-contained prompt.\n\n' +
         'ONLY available when running under `qwen serve` (daemon mode); it is ' +
         'not declared at all in plain interactive or headless sessions.\n\n' +
         '## Completion modes\n' +
-        "- `first-turn` (default): waits for the sub-session's first turn to " +
-        'finish and returns its result to you. Use when you need the answer ' +
-        'back.\n' +
-        '- `sent`: returns immediately after dispatching the prompt, without ' +
-        'waiting. Use for fire-and-forget launches whose output you do not ' +
-        'need inline. When the sub-session runs in another workspace, ' +
-        'you are told when it finishes, with its result.\n\n' +
+        '- `first-turn` (default): waits for the turn started by this prompt ' +
+        'and returns its result.\n' +
+        '- `sent`: returns without waiting for the result. A follow-up ' +
+        'returns once queued. When the sub-session runs in another workspace, or ' +
+        'when you follow one up, you are told when it finishes, with its ' +
+        'result. That result comes back on its own, so do not ask the ' +
+        'sub-session to report back (for example with send_message).\n\n' +
         '## Another workspace\n' +
         'Set `workspace` to run the sub-session in another workspace ' +
         "registered with this daemon, with that workspace's own instructions, " +
-        'skills and settings. The user approves each call that names a ' +
-        'workspace. Both workspaces must be trusted; an unknown name is ' +
-        'refused with the list of workspaces you can use.\n\n' +
-        'The sub-session runs the prompt with full tool access, starting from ' +
-        'zero context — brief it completely in `prompt` (it cannot see this ' +
-        'conversation).',
+        'skills and settings. A selector for the current workspace follows ' +
+        'the ordinary permission flow; explicitly named workspaces stay ' +
+        'blocked in Plan mode. Cross-workspace calls need one-time ' +
+        'approval in default/auto-edit, use the classifier in auto, and are ' +
+        'auto-approved in yolo; deny and explicit ask rules still apply. ' +
+        'Both workspaces must be trusted; an unknown name is refused with ' +
+        'the list of workspaces you can use.' +
+        '\n\n' +
+        '## Following up\n' +
+        'Set `sessionId` to send the prompt to an existing session instead ' +
+        "of creating a new one; it keeps that session's context. Any session " +
+        'but this one can be named. The destination must support follow-ups ' +
+        'and have a compatible approval mode. Also set `workspace` if it is ' +
+        'in another workspace.',
       Kind.Other,
       {
         type: 'object',
@@ -369,17 +609,16 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
           prompt: {
             type: 'string',
             description:
-              'The full, self-contained prompt to run in the new sub-session. ' +
-              'It starts with no context from this conversation, so include ' +
-              'everything it needs.',
+              'The prompt to run. Give a new sub-session all the context ' +
+              "it needs. A follow-up can use the target session's prior turns.",
           },
           completion: {
             type: 'string',
             enum: ['sent', 'first-turn'],
             description:
-              "'first-turn' (default) waits for the sub-session's first turn " +
-              "and returns its result. 'sent' returns immediately after the " +
-              'prompt is dispatched (fire-and-forget).',
+              "'first-turn' (default) waits for this prompt's turn and " +
+              "returns its result. 'sent' submits the prompt and returns " +
+              'without waiting for the result.',
           },
           model: {
             type: 'string',
@@ -400,6 +639,13 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
               'Optional absolute path or id of another workspace registered ' +
               'with this daemon to run the sub-session in. Omit to use the ' +
               'current workspace.',
+          },
+          sessionId: {
+            type: 'string',
+            description:
+              'Optional id of an existing session to send this prompt to ' +
+              'instead of creating a new one. Cannot be combined ' +
+              'with `model` or `name`.',
           },
         },
         required: ['prompt'],
@@ -446,6 +692,18 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
     ) {
       return `Parameter "workspace" must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters.`;
     }
+    if (
+      params.sessionId !== undefined &&
+      !isValidCronTaskRoutingId(params.sessionId)
+    ) {
+      return `Parameter "sessionId" must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters.`;
+    }
+    if (
+      params.sessionId !== undefined &&
+      (params.model !== undefined || params.name !== undefined)
+    ) {
+      return 'Parameters "model" and "name" apply to a new sub-session and cannot be combined with "sessionId".';
+    }
     return null;
   }
 
@@ -463,6 +721,7 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
       completion: params.completion ?? 'first-turn',
       ...(params.model ? { model: params.model } : {}),
       ...(params.workspace ? { workspace: params.workspace } : {}),
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     };
   }
 }

@@ -4,7 +4,7 @@ import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
-import postcss from 'postcss';
+import postcss, { type Root } from 'postcss';
 import selectorParser from 'postcss-selector-parser';
 import pkg from './package.json' with { type: 'json' };
 import { WEB_SHELL_BUILD_TARGET } from './vite.config';
@@ -14,8 +14,7 @@ const COMPONENT_SCOPE =
 const COMPONENT_ROOT_SCOPE =
   ':is([data-web-shell-root]:where([data-web-shell-shadcn]), [data-web-shell-portal-root]:where([data-web-shell-shadcn]))';
 
-function scopeComponentCss(css: string): string {
-  const root = postcss.parse(css);
+function scopeComponentCss(root: Root): void {
   const scopeNode = selectorParser().astSync(COMPONENT_SCOPE).first.first;
   if (!scopeNode) throw new Error('Invalid WebShell component CSS scope');
   const keyframeNames = new Map<string, string>();
@@ -82,7 +81,6 @@ function scopeComponentCss(css: string): string {
       });
     }).processSync(rule.selector);
   });
-  return root.toString();
 }
 
 function escapeRegExp(value: string): string {
@@ -104,7 +102,9 @@ function injectCssModules(): Plugin {
             typeof item.source === 'string'
               ? item.source
               : Buffer.from(item.source).toString('utf8');
-          return scopeComponentCss(source);
+          const root = postcss.parse(source);
+          scopeComponentCss(root);
+          return root.toString();
         })
         .join('\n');
       if (!css) return;
@@ -166,6 +166,18 @@ function injectCssModules(): Plugin {
 // Windows build would blow the budget this exists to protect.
 const TRANSCRIPT_STUBS = new Map(
   [
+    [
+      './client/components/messages/AssistantMessageRow.tsx',
+      './client/components/messages/AssistantMessageRow.transcript-stub.tsx',
+    ],
+    [
+      './client/components/messages/ThinkingBody.tsx',
+      './client/components/messages/ThinkingBody.transcript-stub.tsx',
+    ],
+    [
+      './client/components/streaming-tail.ts',
+      './client/components/streaming-tail.transcript-stub.ts',
+    ],
     [
       './client/components/messages/HookStatistics.tsx',
       './client/components/messages/HookStatistics.transcript-stub.tsx',
@@ -243,6 +255,16 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/managed/managed-mcp-messages.ts',
       './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
+    [
+      './client/components/managed/managed-artifact-library-messages.ts',
+      './client/components/managed/managed-artifact-library-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/workspace-artifact-library-messages.ts',
+      './client/components/artifacts/workspace-artifact-library-messages.transcript-stub.ts',
+    ],
+    ['./client/i18n-catalogs.ts', './client/i18n-catalogs.eager.ts'],
+    ['./client/i18n-zh-tw.ts', './client/i18n-zh-tw.transcript-stub.ts'],
     ['./client/i18n-ru-part1.ts', './client/i18n-ru-part1.transcript-stub.ts'],
     ['./client/i18n-ru-part2.ts', './client/i18n-ru-part2.transcript-stub.ts'],
     ['./client/i18n-ru-part3.ts', './client/i18n-ru-part3.transcript-stub.ts'],
@@ -286,6 +308,24 @@ export default defineConfig(({ mode }) => ({
   ],
   worker: {
     plugins: () => [exceljsBrowser()],
+  },
+  css: {
+    postcss: {
+      plugins: [
+        {
+          postcssPlugin: 'scope-web-shell-terminal-css',
+          Once(root) {
+            const file = normalizePath(root.source?.input.file ?? '').replace(
+              /\?.*$/,
+              '',
+            );
+            if (file.endsWith('/@xterm/xterm/css/xterm.css')) {
+              scopeComponentCss(root);
+            }
+          },
+        },
+      ],
+    },
   },
   resolve: {
     alias: {

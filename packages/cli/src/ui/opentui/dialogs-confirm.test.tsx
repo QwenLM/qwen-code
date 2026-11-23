@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => {
           {
             ...(key === undefined ? null : { key }),
             ...(bg === undefined ? null : { 'data-bg': bg }),
+            'data-id': (config as { id?: string } | null)?.id,
           },
           children,
         );
@@ -463,6 +464,38 @@ describe('OpenTuiToolConfirmation', () => {
         />,
       ).container;
     }
+
+    it('provides selected state and decorative markers from actual question chips', () => {
+      const details = multiAskDetails(async () => {});
+      if (details.type === 'ask_user_question')
+        details.questions[0].header = '▸ Deploy';
+      const container = mount(details);
+      const first = container.querySelector(
+        '[data-id="screen-reader-selected-question-tab"]',
+      );
+      expect(first?.textContent).toContain('▸ ▸ Deploy');
+      press({ name: 'right', sequence: '' });
+      expect(first?.getAttribute('data-id')).toBe(
+        'screen-reader-unselected-question-tab',
+      );
+      expect(first?.textContent?.trim()).toBe('▸ Deploy');
+      expect(
+        container.querySelector(
+          '[data-id="screen-reader-selected-question-tab"]',
+        )?.textContent,
+      ).toContain('▸ Region');
+      press({ name: 'right', sequence: '' });
+      press({ name: 'right', sequence: '' });
+      const submit = container.querySelector(
+        '[data-id="screen-reader-selected-submit-tab"]',
+      );
+      expect(submit?.textContent).toBe('▸ Submit');
+      press({ name: 'left', sequence: '' });
+      expect(submit?.getAttribute('data-id')).toBe(
+        'screen-reader-unselected-submit-tab',
+      );
+      expect(submit?.textContent?.trim()).toBe('Submit');
+    });
 
     function typeChars(text: string) {
       for (const char of text) press({ name: char, sequence: char });

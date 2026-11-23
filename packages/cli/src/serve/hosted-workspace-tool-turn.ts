@@ -80,6 +80,7 @@ import {
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
+  isHostedWorkspaceExternalShellProfile,
   isHostedWorkspaceSearchProfile,
   isHostedWorkspaceGlobProfile,
   isHostedWorkspaceReadProfile,
@@ -163,6 +164,7 @@ import type {
   HostedApprovalContinuation,
   RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
+import { registerHostedActionPark } from './hosted-action-parking.js';
 import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
@@ -360,6 +362,13 @@ export interface HostedShellTurnOptions {
   // The embedded wake scheduler's tip: a notification input committed
   // under its observation revision asks the pump to deliver it.
   monitorWakeKick?: () => void;
+  /**
+   * Bindings whose worker took over the background capture, keyed
+   * `bindingId@generation`. A suspension may only exempt a run whose
+   * binding is here: an older worker cannot answer the pull, so its Session
+   * stays resident rather than fail a detach at teardown.
+   */
+  observationBindings?: Set<string>;
 }
 
 /**
@@ -737,6 +746,40 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
       additionalProperties: false,
     },
   },
+];
+
+const HOSTED_FOREGROUND_SHELL_DESCRIPTION =
+  'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.';
+
+/**
+ * The one foreground Shell declaration: the shared declaration without
+ * `is_background`, so both lanes tell the model the same thing about the same
+ * schema.
+ */
+function hostedForegroundShellTool(): FunctionDeclaration {
+  const shell = HOSTED_WORKSPACE_SHELL_TOOLS.find(
+    (tool) => tool.name === 'run_shell_command',
+  )!;
+  const schema = structuredClone(shell.parametersJsonSchema) as {
+    properties?: Record<string, unknown>;
+  };
+  delete schema.properties?.['is_background'];
+  return {
+    ...shell,
+    description: HOSTED_FOREGROUND_SHELL_DESCRIPTION,
+    parametersJsonSchema: schema,
+  };
+}
+
+/**
+ * The external placement's whole tool set (#15512 slice C). Foreground Shell
+ * only — no `is_background`, no `monitor` and no `web_fetch`, because this
+ * placement's drain can only prove one worker's foreground captures, and
+ * `web_fetch` would need an egress lane it does not have.
+ */
+export const HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  hostedForegroundShellTool(),
 ];
 
 const HOSTED_GLOB_TOOL: FunctionDeclaration = {
@@ -2205,6 +2248,9 @@ export class HostedWorkspaceToolTurn {
   private readonly agentDispatched = new Set<string>();
   private publisher?: HostedShellPublisher;
   private bindingGeneration?: string;
+  /** Phase 3b: the worker owns the background capture and Monitor policy, so
+   * this turn must not start its own observation loop. */
+  private workerOwnsObservation = false;
   private advertised?: FunctionDeclaration[];
   private readonly publication?: {
     owner: HttpToolPublicationOwner;
@@ -2366,32 +2412,44 @@ export class HostedWorkspaceToolTurn {
       recoveryBroker?: HostedWorkspaceBroker;
     },
   ) {
-    if (
-      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
-      (publicationOrShell !== undefined ||
+    const externalShellLane = isHostedWorkspaceExternalShellProfile(
+      extras?.profile,
+    );
+    const externalLane =
+      externalShellLane ||
+      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
+    // The Shell lane's publication is the capture its drain proves, so it is
+    // required there and forbidden on files; every other lane is closed on both.
+    const closedLane =
+      externalLane &&
+      ((externalShellLane
+        ? publicationOrShell === undefined
+        : publicationOrShell !== undefined) ||
         shell !== undefined ||
         [
-          extras.mcp,
-          extras.hooks,
-          extras.memory,
-          extras.childRuns,
-          extras.monitors,
-          extras.backgroundLane,
-          extras.childAgents,
-          extras.messages,
-          extras.teams,
-          extras.commands,
-          extras.skills,
-          extras.extensionConfig,
-          extras.allowedToolNames,
+          extras!.mcp,
+          extras!.hooks,
+          extras!.memory,
+          extras!.childRuns,
+          extras!.monitors,
+          extras!.backgroundLane,
+          extras!.childAgents,
+          extras!.messages,
+          extras!.teams,
+          extras!.commands,
+          extras!.skills,
+          extras!.extensionConfig,
+          extras!.allowedToolNames,
         ].some((lane) => lane !== undefined) ||
-        (extras.extensionAgents?.length ?? 0) > 0 ||
-        extras.memoryOnly === true ||
-        extras.publicPlanMode === true ||
-        extras.memberPlanMode === true)
-    )
+        (extras!.extensionAgents?.length ?? 0) > 0 ||
+        extras!.memoryOnly === true ||
+        extras!.publicPlanMode === true ||
+        extras!.memberPlanMode === true);
+    if (closedLane)
       throw new Error(
-        'External files profile does not support optional lanes.',
+        externalShellLane
+          ? 'External Shell profile requires a publication and no other lanes.'
+          : 'External files profile does not support optional lanes.',
       );
     this.configuredOptions = options;
     this.memory = extras?.memory;
@@ -2678,6 +2736,13 @@ export class HostedWorkspaceToolTurn {
       );
       return this.advertised;
     }
+    if (isHostedWorkspaceExternalShellProfile(this.profile)) {
+      this.advertised = hostedWorkspaceDeclarations(
+        [...HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS, HOSTED_GLOB_TOOL],
+        !this.fileBackupsEnabled,
+      );
+      return this.advertised;
+    }
     if (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
       (this.profile === undefined &&
@@ -2761,16 +2826,7 @@ export class HostedWorkspaceToolTurn {
             tool.name === 'run_shell_command' &&
             !this.backgroundShellAdmitted()
           ) {
-            const schema = structuredClone(tool.parametersJsonSchema) as {
-              properties?: Record<string, unknown>;
-            };
-            delete schema.properties?.['is_background'];
-            tool = {
-              ...tool,
-              description:
-                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
-              parametersJsonSchema: schema,
-            };
+            tool = hostedForegroundShellTool();
           }
           if (tool.name === 'cron_create' && !loopTool) {
             // The profile has no loop_wakeup to fall back to; do not name it.
@@ -3208,7 +3264,8 @@ export class HostedWorkspaceToolTurn {
           original === this.broker &&
           !this.hooks &&
           !this.mcp &&
-          !isHostedWorkspaceShellProfile(this.profile)
+          !isHostedWorkspaceShellProfile(this.profile) &&
+          !isHostedWorkspaceExternalShellProfile(this.profile)
         ) {
           await oweHostedTurnCleanup(this.session, this.promptId, original);
           this.cleanupOwed = original.runtime !== undefined;
@@ -3345,7 +3402,8 @@ export class HostedWorkspaceToolTurn {
             if (
               !this.cleanupOwed &&
               !this.mcp &&
-              !isHostedWorkspaceShellProfile(this.profile)
+              !isHostedWorkspaceShellProfile(this.profile) &&
+              !isHostedWorkspaceExternalShellProfile(this.profile)
             )
               await oweHostedTurnCleanup(
                 this.session,
@@ -3356,6 +3414,7 @@ export class HostedWorkspaceToolTurn {
               !this.mcp &&
               !this.hooks &&
               !isHostedWorkspaceShellProfile(this.profile) &&
+              !isHostedWorkspaceExternalShellProfile(this.profile) &&
               this.broker.runtime
             )
               this.cleanupOwed = true;
@@ -5757,6 +5816,7 @@ export class HostedWorkspaceToolTurn {
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
           );
+          this.workerOwnsObservation = this.broker.observationOwned;
         } else if (
           this.publication &&
           this.backgroundLane &&
@@ -5777,9 +5837,12 @@ export class HostedWorkspaceToolTurn {
               this.monitors,
               () => this.backgroundLane!.monitorWakeKick?.(),
             );
+          const writer = await this.publication.owner.owner();
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
+            writer.writerGeneration,
           );
+          this.workerOwnsObservation = this.broker.observationOwned;
         }
       };
       // A Hook can move a call to a background lane, so a Hook turn picks
@@ -6279,6 +6342,12 @@ export class HostedWorkspaceToolTurn {
           runtimeBindingId: saved.runtimeBindingId,
           generation: saved.bindingGeneration,
         };
+        const observationLane = this.backgroundLane ?? this.shell;
+        if (this.workerOwnsObservation && observationLane) {
+          (observationLane.observationBindings ??= new Set()).add(
+            `${saved.runtimeBindingId}@${saved.bindingGeneration}`,
+          );
+        }
         if (request.background)
           await this.childRuns!.dispatchStarted(executionCallId, runtime);
         if (request.monitoring)
@@ -9217,6 +9286,10 @@ export class HostedWorkspaceToolTurn {
     executionCallId: string,
     runtimeCallId: string,
   ): Promise<void> {
+    // Phase 3b: when the worker owns the observation, its policy runs the
+    // windows and the applier commits the observation entries; starting a
+    // Harness loop here would observe the same watch twice.
+    if (this.workerOwnsObservation) return;
     // The lane is Shell-mode or the publication lane, whichever this turn
     // owns — the detached family's loops park on it either way.
     const lane = this.shell ?? this.backgroundLane;
@@ -10434,20 +10507,14 @@ export class HostedWorkspaceToolTurn {
           questions: hostedQuestions(call.args),
         }
       : {
-          ...(continuationRef
-            ? {
-                v: 3 as const,
-                continuationRef,
-                ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-                  ? { inputRef }
-                  : {}),
-              }
-            : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-              ? { v: 2 as const, inputRef }
-              : { v: 1 as const }),
+          v: 3 as const,
           ...identity,
           policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
           options: HOSTED_APPROVAL_OPTIONS,
+          ...(continuationRef ? { continuationRef } : {}),
+          ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+            ? { inputRef }
+            : {}),
           ...(requiresHumanDecision
             ? { requiresHumanDecision: true as const }
             : {}),
@@ -10488,43 +10555,64 @@ export class HostedWorkspaceToolTurn {
         else signal.addEventListener('abort', release, { once: true });
       });
     }
-    if (originalRuntime) {
-      try {
-        await waitForHostedQuestion({
-          session: this.session,
-          broker: this.broker,
-          brokerOptions: this.options,
-          waiters: approval.waiters,
+    const parkable =
+      continuationRef !== undefined && this.nativeBatch?.uncaptured !== true;
+    const parkRegistration = parkable
+      ? {
+          promptId: this.promptId,
+          options,
+          settings: approval.settings,
+          livePoll: liveApproval && approval.readSettings !== undefined,
+          globProfile: this.globProfile,
+          freeze: () => approval.waiters.park(requestId),
+        }
+      : undefined;
+    if (parkRegistration)
+      registerHostedActionPark(this.session, parkRegistration);
+    try {
+      if (originalRuntime) {
+        try {
+          await waitForHostedQuestion({
+            session: this.session,
+            broker: this.broker,
+            brokerOptions: this.options,
+            waiters: approval.waiters,
+            requestId,
+            expiresAt: options.expiresAt,
+            signal,
+            released: () => {
+              this.acquired = false;
+            },
+            registerFreeze: (freeze) => {
+              if (parkRegistration) parkRegistration.freeze = freeze;
+            },
+          });
+        } catch (cause) {
+          throw new HostedToolRecoveryRequiredError(cause);
+        }
+      } else
+        await approval.waiters.wait(
           requestId,
-          expiresAt: options.expiresAt,
+          options.expiresAt,
           signal,
-          released: () => {
-            this.acquired = false;
-          },
-        });
-      } catch (cause) {
-        throw new HostedToolRecoveryRequiredError(cause);
-      }
-    } else
-      await approval.waiters.wait(
-        requestId,
-        options.expiresAt,
-        signal,
-        () =>
-          authority.action(requestId)?.state !== 'requested' ||
-          authority.writesStopped,
-        liveApproval && approval.readSettings
-          ? hostedLiveApprovalPoll(
-              this.session,
-              approval.waiters,
-              options,
-              () => this.readApprovalSettings(),
-              signal,
-              this.globProfile,
-              approval.isBlocked,
-            )
-          : undefined,
-      );
+          () =>
+            authority.action(requestId)?.state !== 'requested' ||
+            authority.writesStopped,
+          liveApproval && approval.readSettings
+            ? hostedLiveApprovalPoll(
+                this.session,
+                approval.waiters,
+                options,
+                () => this.readApprovalSettings(),
+                signal,
+                this.globProfile,
+                approval.isBlocked,
+              )
+            : undefined,
+        );
+    } finally {
+      if (parkable) registerHostedActionPark(this.session, undefined);
+    }
     if (authority.action(requestId)?.state === 'requested')
       await endHostedAction(
         this.session,

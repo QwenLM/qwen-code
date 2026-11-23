@@ -452,6 +452,46 @@ describe('AcpHttpTransport', () => {
       transport.dispose();
     });
 
+    it('overrides authorization case-insensitively at the request boundary', async () => {
+      const { fetch } = initAwareFetch({ connectionIdHeader: 'conn-1' });
+      let rawHeaders: Record<string, string> | undefined;
+      const captureFetch: typeof globalThis.fetch = async (input, init) => {
+        if (
+          typeof init?.body === 'string' &&
+          JSON.parse(init.body).method === 'session/new'
+        ) {
+          rawHeaders = init.headers as Record<string, string>;
+        }
+        return fetch(input, init);
+      };
+      const transport = new AcpHttpTransport(
+        'http://d',
+        'transport',
+        captureFetch,
+      );
+
+      try {
+        const response = await transport.fetch('http://d/session', {
+          method: 'POST',
+          headers: { authorization: 'Bearer caller' },
+          body: JSON.stringify({ model: 'test' }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(rawHeaders).toBeDefined();
+        const authorization = Object.entries(rawHeaders!).filter(
+          ([name]) => name.toLowerCase() === 'authorization',
+        );
+        expect(authorization).toHaveLength(1);
+        expect(authorization[0][1]).toBe('Bearer caller');
+        const headers = new Headers(rawHeaders);
+        expect(headers.get('authorization')).toBe('Bearer caller');
+        expect(headers.get('acp-connection-id')).toBe('conn-1');
+      } finally {
+        transport.dispose();
+      }
+    });
+
     it('returns 404 for unknown routes', async () => {
       const { fetch } = initAwareFetch();
       const transport = new AcpHttpTransport('http://d', undefined, fetch);

@@ -12,6 +12,7 @@ export { extractShellOperations } from './shell-semantics.js';
 export type { ShellOperation } from './shell-semantics.js';
 export {
   applyAutoModeDecision,
+  confirmAutomaticReviewOnAllow,
   decorateAutoModeFallbackConfirmation,
   decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
@@ -32,6 +33,7 @@ export {
   shouldFirePermissionDeniedForAutoMode,
   shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
+  shouldRequireAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 export {

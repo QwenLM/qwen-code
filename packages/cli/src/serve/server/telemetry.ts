@@ -51,6 +51,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/sessions/recovery',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery',
+  },
+  {
+    method: 'POST',
+    path: '/sessions/recovery/continue',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery/continue',
+  },
+  {
+    method: 'POST',
     path: '/sessions/catalog',
     attribution: 'handler_resolved',
     route: 'POST /sessions/catalog',
@@ -81,6 +93,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/worktree-branch',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-branch',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/worktree-handoff',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-handoff',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/branch',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/branch',
@@ -96,6 +120,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/side-task',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/side-task',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/sub-sessions',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/sub-sessions',
   },
   {
     method: 'POST',
@@ -435,6 +465,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/feedback',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/feedback',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/config-option',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/config-option',
@@ -444,6 +480,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/recap',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/recap',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/mod-row',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mod-row',
   },
   {
     method: 'POST',
@@ -830,6 +872,7 @@ export function resolveDaemonTelemetryRoute(
     if (req.method === 'POST') {
       if (
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/settings/vision-bridge' ||
         suffix === '/workspace/voice' ||
         suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||

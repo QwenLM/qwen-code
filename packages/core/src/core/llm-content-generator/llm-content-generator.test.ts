@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
+import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { GoogleGenAI } from '@google/genai';
 import type { GenerateContentConfig, Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
@@ -159,6 +160,158 @@ describe('LlmContentGenerator', () => {
       });
     },
   );
+
+  it.each([
+    [
+      'uses the built-in Gemini 4 Neon default',
+      'gemini-4-neon',
+      undefined,
+      'HIGH',
+    ],
+    [
+      'honors an explicit Gemini 4 Neon low tier',
+      'gemini-4-neon',
+      { effort: 'low' } as const,
+      'LOW',
+    ],
+    [
+      'honors an explicit Gemini 4 Neon medium tier',
+      'gemini-4-neon',
+      { effort: 'medium' } as const,
+      'MEDIUM',
+    ],
+    [
+      'honors an explicit Gemini 4 Neon xhigh tier',
+      'gemini-4-neon',
+      { effort: 'xhigh' } as const,
+      'XHIGH',
+    ],
+    [
+      'clamps a persisted legacy Gemini 4 Neon max tier to xhigh',
+      'gemini-4-neon',
+      { effort: 'max' } as const,
+      'XHIGH',
+    ],
+    [
+      'honors an explicit Gemini 4 Hydrogen xhigh tier',
+      'gemini-4-hydrogen-xhigh',
+      { effort: 'xhigh' } as const,
+      'XHIGH',
+    ],
+    [
+      'clamps Gemini 4 Argon xhigh to HIGH',
+      'gemini-4-argon-high',
+      { effort: 'xhigh' } as const,
+      'HIGH',
+    ],
+    [
+      'clamps Gemini 4 Argon max to HIGH',
+      'gemini-4-argon-high',
+      { effort: 'max' } as const,
+      'HIGH',
+    ],
+  ])('%s', async (_title, model, reasoning, thinkingLevel) => {
+    const config = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({}),
+    } as unknown as Config;
+    const builtIn = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      { model, authType: 'gemini' as AuthType, reasoning },
+      config,
+    );
+    await builtIn.generateContent({ model, contents: [] }, 'prompt');
+    expectSentConfig({
+      thinkingConfig: { includeThoughts: true, thinkingLevel },
+    });
+  });
+
+  it('honors explicit capabilities.reasoning xhigh on a custom alias and narrower overrides on Neon', async () => {
+    const xhighAliasConfig = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            profile: 'gemini',
+            efforts: ['low', 'medium', 'high', 'xhigh'],
+            defaultEffort: 'high',
+          },
+        },
+      }),
+    } as unknown as Config;
+    const aliasGen = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      {
+        model: 'company-alias',
+        authType: 'gemini' as AuthType,
+        reasoning: { effort: 'xhigh' },
+      },
+      xhighAliasConfig,
+    );
+    await aliasGen.generateContent(
+      { model: 'company-alias', contents: [] },
+      'prompt',
+    );
+    expectSentConfig({
+      thinkingConfig: { includeThoughts: true, thinkingLevel: 'XHIGH' },
+    });
+
+    const narrowNeonConfig = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            profile: 'gemini',
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'high',
+          },
+        },
+      }),
+    } as unknown as Config;
+    const narrowGen = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      {
+        model: 'gemini-4-neon',
+        authType: 'gemini' as AuthType,
+        reasoning: { effort: 'xhigh' },
+      },
+      narrowNeonConfig,
+    );
+    await narrowGen.generateContent(
+      { model: 'gemini-4-neon', contents: [] },
+      'prompt',
+    );
+    expectSentConfig({
+      thinkingConfig: { includeThoughts: true, thinkingLevel: 'HIGH' },
+    });
+  });
+
+  it('does not override thinking off on a built-in Gemini 4 route', async () => {
+    const config = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({}),
+    } as unknown as Config;
+    const builtIn = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      {
+        model: 'gemini-4-neon',
+        authType: 'gemini' as AuthType,
+        reasoning: false,
+      },
+      config,
+    );
+    const requestOptOut = () => ({ includeThoughts: false, thinkingBudget: 0 });
+    await builtIn.generateContent(
+      { model: 'gemini-4-neon', contents: [] },
+      'prompt',
+    );
+    expectSentConfig({ thinkingConfig: { includeThoughts: false } });
+    await builtIn.generateContent(
+      {
+        model: 'gemini-4-neon',
+        contents: [],
+        config: { thinkingConfig: requestOptOut() },
+      },
+      'prompt',
+    );
+    expectSentConfig({ thinkingConfig: requestOptOut() });
+  });
 
   it('should merge customHeaders into existing httpOptions.headers', async () => {
     vi.mocked(GoogleGenAI).mockClear();
@@ -358,6 +511,22 @@ describe('LlmContentGenerator', () => {
     });
   });
 
+  it('reports the request dispatch before the SDK call', async () => {
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue(
+      streamOf({ responseId: '1' }),
+    );
+    const onDispatch = vi.fn();
+
+    await observeRequestDispatch(onDispatch, () =>
+      generator.generateContentStream(flashReq(), 'prompt-id'),
+    );
+
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+    expect(onDispatch.mock.invocationCallOrder[0]).toBeLessThan(
+      mockGoogleGenAI.models.generateContentStream.mock.invocationCallOrder[0],
+    );
+  });
+
   it('forwards stream return without pre-consuming the SDK stream', async () => {
     const next = vi.fn();
     const close = vi.fn().mockResolvedValue({ done: true, value: undefined });
@@ -477,6 +646,27 @@ describe('LlmContentGenerator', () => {
       thinkingConfig: { includeThoughts: true, thinkingLevel },
     });
   });
+
+  it.each([
+    ['gemini-4-neon', 'xhigh', 'XHIGH'],
+    ['gemini-4-neon-xhigh', 'max', 'XHIGH'],
+    ['gemini-4-hydrogen', 'xhigh', 'XHIGH'],
+    ['gemini-4-hydrogen-xhigh', 'max', 'XHIGH'],
+    ['gemini-4-argon-high', 'xhigh', 'HIGH'],
+    ['gemini-4-argon-high', 'max', 'HIGH'],
+  ] as const)(
+    'maps %s effort %s to %s without cliConfig',
+    async (model, effort, thinkingLevel) => {
+      await withCg({
+        model,
+        reasoning: { effort },
+      }).generateContent({ model, contents: [] }, 'prompt-id');
+
+      expectSentConfig({
+        thinkingConfig: { includeThoughts: true, thinkingLevel },
+      });
+    },
+  );
 
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
     await generator.generateContent(

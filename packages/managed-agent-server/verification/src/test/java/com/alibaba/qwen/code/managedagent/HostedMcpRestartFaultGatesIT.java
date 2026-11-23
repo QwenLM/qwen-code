@@ -74,11 +74,15 @@ import static org.awaitility.Awaitility.await;
 // Its stopped-worker cell kills the durable worker after `drained` and
 // requires the close to retire the binding through the coordinator's
 // stop-proof recovery and the persisted drain receipt.
+// Its parking cells suspend an idle Session with MCP parking enabled: the
+// reopen reuses the original connection, idle reclamation closes it for a
+// replacement, and a killed worker stays recovery-required.
 class HostedMcpRestartFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
     // Per-case evidence letter: FG12c keeps its directory, FG12d's release
     // cell lands under its own so the two letters' artefacts never mix.
     private String caseLetter;
+    private String parkingIdle;
     private static final Map<String, String> CASE_LETTERS = Map.ofEntries(
             Map.entry("harnessKillDuringConfigureResolvesThroughStatusOnMySql",
                     "fg12c"),
@@ -102,7 +106,18 @@ class HostedMcpRestartFaultGatesIT {
             Map.entry("ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql",
                     "fg12d"),
             Map.entry("closeWithStoppedWorkerReleasesThroughTheStopProofOnMySql",
-                    "fg12d"));
+                    "fg12d"),
+            Map.entry("parkedSessionReopensOnItsOriginalConnectionOnMySql",
+                    "parking"),
+            Map.entry("idleReclamationClosesAParkedConnectionForAReplacementOnMySql",
+                    "parking"),
+            Map.entry("workerKillWhileParkedNeverMintsAFreshOwnerOnMySql",
+                    "parking"));
+    // The idle duration each parking cell runs with; the others never park.
+    private static final Map<String, String> PARKING_IDLE = Map.of(
+            "parkedSessionReopensOnItsOriginalConnectionOnMySql", "10m",
+            "idleReclamationClosesAParkedConnectionForAReplacementOnMySql", "1s",
+            "workerKillWhileParkedNeverMintsAFreshOwnerOnMySql", "10m");
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -174,6 +189,7 @@ class HostedMcpRestartFaultGatesIT {
         String methodName = info.getTestMethod()
                 .map(method -> method.getName()).orElse("");
         caseLetter = CASE_LETTERS.get(methodName);
+        parkingIdle = PARKING_IDLE.get(methodName);
         boolean twoServers = "firstReleaseRefusedWithTwoServersReleasesBothOnMySql"
                 .equals(methodName);
         assertThat(System.getProperty("mysql.url"))
@@ -623,6 +639,98 @@ class HostedMcpRestartFaultGatesIT {
         assertThat(fixtureEvents("mcp.start"))
                 .as("no fresh Runtime generation starts a second server")
                 .hasSize(1);
+    }
+
+    @Test
+    @Timeout(600)
+    void parkedSessionReopensOnItsOriginalConnectionOnMySql() throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        awaitSealed(session);
+        assertThat(fixtureEvents("mcp.exit"))
+                .as("suspension keeps the stdio server running").isEmpty();
+        assertThat(controls("mcp-release")).isEmpty();
+        assertThat(storageHolders(session))
+                .as("the parked owner keeps its storage membership").isEqualTo(1);
+
+        SessionRef reopened = load(session, null, 0);
+        assertThat(promptRaw(reopened, "PARKING_REOPEN").statusCode()).isEqualTo(202);
+        awaitSealed(session);
+        assertThat(controls("mcp-discover")).isNotEmpty();
+        assertThat(controls("mcp-configure"))
+                .as("the reopen reuses the parked connection").isEmpty();
+        assertThat(fixtureEvents("mcp.start")).hasSize(1);
+        assertThat(configurations(session.id())).singleElement()
+                .satisfies(row -> assertThat(row.path("releaseState").asText())
+                        .isEqualTo("active"));
+    }
+
+    @Test
+    @Timeout(600)
+    void idleReclamationClosesAParkedConnectionForAReplacementOnMySql()
+            throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        waitFor(() -> assertThat(fixtureEvents("mcp.exit"))
+                .as("idle reclamation closes the stdio server").hasSize(1));
+        waitFor(() -> assertThat(storageHolders(session))
+                .as("reclamation hands the storage membership back").isZero());
+        assertThat(controls("mcp-release"))
+                .as("the Broker reclaimed it, not a Harness drain").isEmpty();
+        assertThat(configuration(session.id()).path("releaseState").asText())
+                .as("reclamation leaves the journal row for the next load")
+                .isEqualTo("active");
+        assertThat(runtimeState(session)).anySatisfy(row -> assertThat(
+                row.get("session_state")).isEqualTo("READY"));
+        String parked = configuration(session.id()).path("configurationId").asText();
+
+        SessionRef reopened = load(session, null, 0);
+        assertThat(promptRaw(reopened, "PARKING_REPLACE").statusCode()).isEqualTo(202);
+        waitFor(() -> assertThat(fixtureEvents("mcp.start"))
+                .as("the reopen replaces the reclaimed connection").hasSize(2));
+        waitFor(() -> {
+            List<JsonNode> rows = configurations(session.id());
+            assertThat(rows).filteredOn(row -> parked.equals(
+                    row.path("configurationId").asText())).singleElement()
+                    .satisfies(row -> assertThat(row.path("releaseState").asText())
+                            .isEqualTo("released"));
+            assertThat(rows).filteredOn(row -> "active".equals(
+                    row.path("releaseState").asText())).hasSize(1);
+        });
+    }
+
+    @Test
+    @Timeout(600)
+    void workerKillWhileParkedNeverMintsAFreshOwnerOnMySql() throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        JsonNode identity = configuration(session.id()).path("run").path("runtime");
+        awaitSealed(session);
+        assertThat(fixtureEvents("mcp.exit"))
+                .as("the owner is parked when its worker dies").isEmpty();
+        kill(awaitWorkerPid());
+        waitFor(() -> assertThat(fixtureEvents("mcp.exit")).hasSize(1));
+
+        SessionRef reopened = load(session, null, 0);
+        int wireBefore = wireSequence.get();
+        HttpResponse<String> recovery = promptRaw(reopened, "PARKING_WORKER_LOST");
+        assertThat(recovery.statusCode()).isIn(202, 409, 503);
+        if (recovery.statusCode() == 202) {
+            waitFor(() -> assertThat(wire.stream()
+                    .filter(entry -> ((Number) entry.get("seq")).intValue() > wireBefore)
+                    .anyMatch(this::deadAcquireRefused))
+                    .as("the dead generation refuses the recovery acquire").isTrue());
+        }
+        assertThat(configuration(session.id()).path("run").path("runtime"))
+                .as("the parked row keeps the original generation").isEqualTo(identity);
+        assertThat(fixtureEvents("mcp.start"))
+                .as("no fresh Runtime generation starts a second server").hasSize(1);
+    }
+
+    private void awaitSealed(SessionRef session) {
+        waitFor(() -> assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant,
+                session.id())).isEqualTo("SEALED"));
     }
 
     @Test
@@ -1505,9 +1613,9 @@ class HostedMcpRestartFaultGatesIT {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND tenant_id = ? AND session_id = ?",
-                String.class, scope, ref.path("resourceId").asText(), tenant,
+                String.class, tenant, session, ref.path("resourceId").asText(), tenant,
                 session);
         assertThat(body).as("published response body").isNotBlank();
         try {
@@ -1764,6 +1872,11 @@ class HostedMcpRestartFaultGatesIT {
     private SessionRef reload(SessionRef session, String lifecycleOperation,
             long claimGeneration) throws Exception {
         startHarness();
+        return load(session, lifecycleOperation, claimGeneration);
+    }
+
+    private SessionRef load(SessionRef session, String lifecycleOperation,
+            long claimGeneration) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sessionScope", "thread");
         body.put("toolProfile", PROFILE);
@@ -1860,7 +1973,7 @@ class HostedMcpRestartFaultGatesIT {
     private void startSpring() {
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class)
-                .run("--server.address=127.0.0.1", "--server.port=" + port,
+                .run(withParking("--server.address=127.0.0.1", "--server.port=" + port,
                         "--spring.datasource.url="
                                 + System.getProperty("mysql.url"),
                         "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -1900,7 +2013,7 @@ class HostedMcpRestartFaultGatesIT {
                                 + tenant,
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root="
-                                + workspace.getParent());
+                                + workspace.getParent()));
         jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         store = spring.getBean(ManagedAgentStore.class);
         // The storage registration and the Workspace rows are durable, so a
@@ -1923,6 +2036,17 @@ class HostedMcpRestartFaultGatesIT {
                 + " workspace_id, actor_id, role) VALUES (?, 'workspace',"
                 + " ?, 'OPERATOR')", tenant,
                 "actor".getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String[] withParking(String... arguments) {
+        if (parkingIdle == null) {
+            return arguments;
+        }
+        List<String> all = new java.util.ArrayList<>(List.of(arguments));
+        all.add("--qwen.managed-agent.runtime-broker.mcp-parking.enabled=true");
+        all.add("--qwen.managed-agent.runtime-broker.mcp-parking.idle-duration=" + parkingIdle);
+        all.add("--qwen.managed-agent.runtime-broker.mcp-parking.scan-delay=200ms");
+        return all.toArray(String[]::new);
     }
 
     private void modelReply(HttpExchange exchange) throws IOException {
@@ -2163,6 +2287,9 @@ class HostedMcpRestartFaultGatesIT {
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", CAPABILITY,
                 "QWEN_HOSTED_LIFECYCLE_V2_PROFILES", PROFILE,
                 "QWEN_CODE_MODELS_DEV_REFRESH", "off"));
+        if (parkingIdle != null) {
+            env.put("QWEN_E2E_IDLE_SUSPEND_MS", "3000");
+        }
         for (String key : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH",
                 "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
                 "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {

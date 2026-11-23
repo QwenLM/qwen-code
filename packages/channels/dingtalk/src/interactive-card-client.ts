@@ -58,6 +58,16 @@ export interface DingtalkInteractiveCardClientOptions {
   getAccessToken(): Promise<string>;
   invalidateAccessToken(token: string): void;
   fetch?: typeof fetch;
+  /**
+   * Require a positive delivery verdict instead of treating any non-throwing
+   * call as proof (H5e, R1-2). Off by default so the Legacy callers keep their
+   * tolerant behaviour; the managed path opts in, where a receipt is write-once
+   * and an unreadable or unconfirmed answer must land `unknown`, never
+   * `accepted` for a card that was never delivered. In strict mode an
+   * unparseable 200 body throws (ambiguous), and a createAndDeliver answer with
+   * no deliverResults entry reporting success throws (ambiguous).
+   */
+  strictResponses?: boolean;
 }
 
 function stringifyCardParamMap(
@@ -136,6 +146,25 @@ export class DingtalkInteractiveCardClient {
         );
       }
     }
+    if (this.options.strictResponses) {
+      // createAndDeliver has a delivery step that can fail independently of the
+      // HTTP 200: require an entry that positively reports success. A missing or
+      // empty deliverResults is no proof of delivery, so it is ambiguous (R1-2).
+      const proved =
+        Array.isArray(deliveries) &&
+        deliveries.some(
+          (entry) =>
+            entry !== null &&
+            typeof entry === 'object' &&
+            (entry as { success?: unknown }).success === true,
+        );
+      if (!proved) {
+        throw new DingtalkCardRequestError(
+          `${input.templateId}: DingTalk card delivery was not confirmed; the outcome is unknown.`,
+          true,
+        );
+      }
+    }
   }
 
   async openOrUpdateStream(input: StreamCardInput): Promise<void> {
@@ -189,7 +218,16 @@ export class DingtalkInteractiveCardClient {
           isRetryableDingtalkStatus(response.status),
         );
       }
-      return response.json().catch(() => undefined);
+      const parsed = await response.json().catch(() => undefined);
+      if (this.options.strictResponses && parsed == null) {
+        // A 200 whose body cannot be read proves nothing about delivery; in
+        // strict mode that is ambiguous, not a silent success (R1-2).
+        throw new DingtalkCardRequestError(
+          `DingTalk Card OpenAPI ${method} ${path} answered without a readable body; the outcome is unknown.`,
+          true,
+        );
+      }
+      return parsed;
     }
   }
 }

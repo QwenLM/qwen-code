@@ -61,13 +61,13 @@ public class ToolPublicationRetentionStoreTest {
         scope = ToolPublicationRetentionStore.hash(tenant + session);
         key = new ObjectMapper().createObjectNode().put("tenantId", tenant)
                 .put("workspaceId", "workspace-1").put("sessionId", session);
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                 + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                + " VALUES (?, ?, ?, 'workspace-1', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
+                + " VALUES (?, ?, 'workspace-1', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
-                scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, scope, scope, scope);
+                scope, tenant, session, scope, scope, scope);
     }
 
     protected void retire() {
@@ -383,8 +383,26 @@ public class ToolPublicationRetentionStoreTest {
                 new ManagedSessionStoreModels.SealWriterRequest("workspace-1", "writer", 1)));
         assertThat(tx.<Boolean>execute(status -> publicStore.completeOperation(tenant, session, operation.operationId(),
                 "worker", claim.claimGeneration() - 1, false))).isFalse();
+        assertThatThrownBy(() -> tx.executeWithoutResult(status -> {
+            assertThat(publicStore.completeOperation(tenant, session, operation.operationId(),
+                    "worker", claim.claimGeneration(), false)).isTrue();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
+                    + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", Long.class)).isEqualTo(2);
+            throw new IllegalStateException("rollback public deletion");
+        })).hasMessage("rollback public deletion");
+        assertThat(publicStore.requireSession(tenant, session).status()).isEqualTo("DELETING");
+        assertThat(jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isNull();
+        assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture WHERE scope_key = ?",
+                String.class, scope)).isEqualTo("PINNED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
+                + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", Long.class)).isZero();
         assertThat(tx.<Boolean>execute(status -> publicStore.completeOperation(tenant, session, operation.operationId(),
                 "worker", claim.claimGeneration(), false))).isTrue();
+        assertThat(props.getToolPublication().isGcEnabled()).isFalse();
+        assertThat(jdbc.queryForList("SELECT operation_kind FROM ma_operation WHERE operation_kind IN"
+                + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", String.class))
+                .containsExactlyInAnyOrder("SESSION_RESOURCE_GC", "CAPTURE_GC");
         assertThat(publicStore.requireSession(tenant, session).status()).isEqualTo("DELETED");
         assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ?",
                 String.class, tenant)).isEqualTo("DELETED");
@@ -503,8 +521,8 @@ public class ToolPublicationRetentionStoreTest {
     protected void addCaptureObject(String captureScope, String publication, String captureSession,
             String slot, String resourceId, String objectKey, byte[] inline, String captureState) {
         String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, captureSession);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key, publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, 'op', " + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSchemaKeys.key(resourceScope, resourceId), resourceScope, tenant, captureSession, resourceId,
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key, publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, gmt_create) VALUES (?, ?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, 'op', " + ManagedSchemaTime.SQL_NOW + ")",
+                ManagedSchemaKeys.key(resourceScope, resourceId), tenant, captureSession, resourceId,
                 inline == null ? 1 : inline.length, ToolPublicationRetentionStore.hash(slot),
                 inline == null ? "TOOL_PUBLICATION" : "MYSQL_INLINE", captureScope, publication, slot,
                 captureState, objectKey, inline);
@@ -515,11 +533,11 @@ public class ToolPublicationRetentionStoreTest {
         String target = publication == null ? ManagedSchemaKeys.key(id) : ManagedSchemaKeys.key(publication);
         String operationKey = ManagedSchemaKeys.operationKey(kind, opScope, target, id);
         long time = ToolPublicationRetentionStore.now(jdbc);
-        jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id,"
                         + " tenant_id, workspace_id, session_id, publication_id, target_kind, target_key, request_digest,"
-                        + " request_json, state, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'workspace-1', ?, ?,"
+                        + " request_json, state, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'workspace-1', ?, ?,"
                         + " 'OUTPUT_CAPTURE', ?, ?, '{}', ?, 'TEST', ?, ?)",
-                operationKey, ManagedSessionStore.sessionScopeKey(tenant, targetSession), opScope, kind.name(), id,
+                operationKey, opScope, kind.name(), id,
                 tenant, targetSession, publication, target, "b".repeat(64), state, time, time);
         return operationKey;
     }
