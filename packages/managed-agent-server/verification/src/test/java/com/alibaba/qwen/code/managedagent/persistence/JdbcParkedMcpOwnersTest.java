@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.ParkedMcpOwners;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,21 +31,21 @@ class JdbcParkedMcpOwnersTest {
     }
 
     private void runtimeSession(String id, String state, String storageKey) {
-        jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_session (scope_id, runtime_session_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
                 + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at,"
-                + " execution_storage_key) VALUES (?, ?, ?, 'workspace', '1', '/workspace', 'digest', 'workspace',"
+                + " execution_storage_id) VALUES (?, ?, ?, 'workspace', '1', '/workspace', 'digest', 'workspace',"
                 + " 'session', 'bootstrap', 'binding', 1, ?, 1, 0, ?)",
                 "a".repeat(64), id, TENANT, state, storageKey);
     }
 
     private void head(String state, long sealedForMillis) {
         long now = System.currentTimeMillis();
-        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, tenant_key, harness_key,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, "
                 + " head_kind, state, writer_generation, journal_revision, committed_sequence,"
-                + " activation_epoch, gmt_create, gmt_modified) VALUES (?, 'session', 'session', ?, ?,"
+                + " activation_epoch, gmt_create, gmt_modified) VALUES (?, 'session', 'session',"
                 + " 'MANAGED_SESSION', ?, 1, 0, 0, 0, ?, ?)",
-                TENANT, RuntimeAdmissionFences.harnessDrainKey(TENANT), RuntimeAdmissionFences.harnessDrainKey("session"),
+                TENANT,
                 state, now, now - sealedForMillis);
     }
 

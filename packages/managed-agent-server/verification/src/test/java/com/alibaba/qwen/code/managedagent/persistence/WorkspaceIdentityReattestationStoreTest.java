@@ -94,7 +94,7 @@ class WorkspaceIdentityReattestationStoreTest {
         store.complete(plan);
         guard.verify(binding);
         assertThat(guard.fileRoot(binding).get("device")).isEqualTo(numeric.get().device());
-        assertThat(jdbc.queryForObject("SELECT physical_key FROM ma_storage", String.class))
+        assertThat(jdbc.queryForObject("SELECT physical_id FROM ma_storage", String.class))
                 .isEqualTo(LocalStorageOwners.physicalKey(observed.get())).isNotEqualTo(input.path("physicalKey").asText());
         assertThat(JSON.readTree(Files.readString(root.resolve(WorkspaceStorageMarkers.FILE_NAME))).path("version").asInt()).isEqualTo(3);
         assertThat(jdbc.queryForObject("SELECT phase FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", String.class))
@@ -154,15 +154,15 @@ class WorkspaceIdentityReattestationStoreTest {
         jdbc.update("UPDATE ma_storage_owner SET member_count = 1");
         assertThatThrownBy(() -> store.complete(plan)).hasMessageContaining("writers_active");
         assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Long.class)).isEqualTo(1);
-        jdbc.update("UPDATE ma_storage_owner SET member_count = 0, holder_key = ?", "a".repeat(64));
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 0, holder_id = ?", "a".repeat(64));
         assertThatThrownBy(() -> store.complete(plan)).hasMessageContaining("writers_active");
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isEqualTo("a".repeat(64));
+        assertThat(jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class)).isEqualTo("a".repeat(64));
     }
 
     @Test
     void copiedMarkerOnOverlappingOwnerDoesNotAuthorizeMerge() throws Exception {
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, mount_host_id, mount_root, storage_kind)"
-                + " VALUES (?, ?, 'host', ?, 'LOCAL')", "b".repeat(64), "b".repeat(64), root.toString());
+        jdbc.update("INSERT INTO ma_storage_owner (physical_id, mount_host_id, mount_root, storage_kind)"
+                + " VALUES (?, 'host', ?, 'LOCAL')", "b".repeat(64), root.toString());
         assertThatThrownBy(() -> store.plan(input)).hasMessageContaining("overlapping_owner");
     }
 
@@ -242,7 +242,7 @@ class WorkspaceIdentityReattestationStoreTest {
                 .isEqualTo(JSON.writeValueAsString(stableCheckout));
         assertThat(jdbc.queryForObject("SELECT identity_json FROM ma_session_worktree WHERE session_id = ?", String.class, "session-stable"))
                 .isEqualTo(stableCompletion);
-        assertThat(jdbc.queryForList("SELECT session_id FROM ma_session_worktree WHERE physical_key = ? AND state = 'READY' AND revision = 2",
+        assertThat(jdbc.queryForList("SELECT session_id FROM ma_session_worktree WHERE physical_id = ? AND state = 'READY' AND revision = 2",
                 String.class, nextKey)).containsExactlyInAnyOrder("session-legacy", "session-stable", "session-mixed");
     }
 
@@ -272,7 +272,7 @@ class WorkspaceIdentityReattestationStoreTest {
         String operationId = "worktree-op-" + worktreeId;
         new WorkspaceOperations(jdbc, "tenant").create(WorkspaceOperations.Kind.SESSION_WORKTREE, operationId,
                 WorkspaceOperations.values("storage_id", "storage", "session_id", sessionId, "state", "READY"));
-        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_id,"
                 + " worktree_id, owner_actor_key, state, revision, plan_json, identity_json, operation_id, failure_code,"
                 + " gmt_create, gmt_modified) VALUES ('tenant', ?, 'workspace', 'storage', ?, ?, 'actor', 'READY', 1, ?, ?, ?, NULL, 1, 1)",
                 sessionId, input.path("physicalKey").asText(), worktreeId, planJson, identityJson, operationId);

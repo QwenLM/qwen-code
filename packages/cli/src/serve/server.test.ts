@@ -130,6 +130,11 @@ import {
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
+import {
+  getSessionTranscriptIndexCacheStatsForTest,
+  resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptIndexBuildCompleteHookForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { GeneratedUiStateError } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
@@ -304,6 +309,20 @@ vi.mock('node:os', async (importOriginal) => {
     tmpdir: () => mockTmpdir.value ?? actual.tmpdir(),
   };
 });
+const { exportSessionTranscriptSpy } = vi.hoisted(() => ({
+  exportSessionTranscriptSpy: vi.fn(),
+}));
+
+// Delegates to the real exporter by default so existing export suites keep
+// their end-to-end behavior; individual cases can stub one call to observe
+// the config the daemon wiring passes down.
+vi.mock('./server/session-export.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./server/session-export.js')>();
+  exportSessionTranscriptSpy.mockImplementation(actual.exportSessionTranscript);
+  return { ...actual, exportSessionTranscript: exportSessionTranscriptSpy };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
   const wrapped = ((...args: [fs.PathLike, fs.EncodingOption?]) =>
@@ -597,6 +616,7 @@ function fakeDaemonLog(): DaemonLogger {
     warn: vi.fn(),
     error: vi.fn(),
     raw: vi.fn(),
+    setPort: vi.fn(),
     getLogPath: () => '',
     getDaemonId: () => 'test-daemon',
     getStatus: () => ({
@@ -715,6 +735,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
+  'session_turn_feedback',
   'session_attachments',
   'session_attachment_chunk_upload',
   'session_attachment_list',
@@ -1614,6 +1635,11 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  feedbackCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['rateSessionTurn']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
   setConfigOptionCalls: Array<{
     sessionId: string;
     req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
@@ -1831,6 +1857,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
@@ -2533,6 +2560,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    feedbackCalls,
     setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
@@ -2947,6 +2975,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async rateSessionTurn(sessionId, req, context) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
     },
     async setSessionConfigOption(sessionId, req, context) {
       setConfigOptionCalls.push({
@@ -4847,6 +4879,7 @@ describe('createServeApp', () => {
       '/scheduled-tasks',
       '/pr-watches',
       '/goals',
+      '/artifacts',
       '/settings',
     ])(
       'serves page document %s without bypassing API authentication',
@@ -35429,21 +35462,79 @@ describe('createServeApp', () => {
     ])('exports %s format', async (format, mimeType, marker) => {
       const sid = `55555555-bbbb-cccc-dddd-${format.padEnd(12, '0')}`;
       await writeExportSession(sid);
-      const app = createExportApp();
+      // The export label is resolved from the launch environment frozen at
+      // createServeApp entry, so the marker-free ambient must be pinned
+      // BEFORE the app is built, not after.
+      const attributionKeys = [
+        'QWEN_CODE_MANAGED_RUNTIME',
+        'QWEN_CODE_DESKTOP',
+        'QWEN_CODE_SERVE',
+      ];
+      const saved: Record<string, string | undefined> = {};
+      for (const key of attributionKeys) {
+        saved[key] = process.env[key];
+        delete process.env[key];
+      }
+      try {
+        const app = createExportApp();
+        const res = await request(app)
+          .get(`/session/${sid}/export?format=${format}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
 
-      const res = await request(app)
-        .get(`/session/${sid}/export?format=${format}`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-
-      expect(res.status).toBe(200);
-      expect(res.headers['content-type']).toContain(mimeType);
-      expect(res.headers['content-disposition']).toContain(`.${format}"`);
-      expect(res.text).toContain(marker);
-      expect(res.text).toContain('hello export');
-      if (format === 'json') {
-        expect(res.body.metadata.channel).toBe('daemon');
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toContain(mimeType);
+        expect(res.headers['content-disposition']).toContain(`.${format}"`);
+        expect(res.text).toContain(marker);
+        expect(res.text).toContain('hello export');
+        if (format === 'json') {
+          expect(res.body.metadata.channel).toBe('daemon');
+        }
+      } finally {
+        for (const key of attributionKeys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
       }
     });
+
+    it.each([
+      ['desktop', { QWEN_CODE_DESKTOP: '1' }],
+      ['daemon', {}],
+    ])(
+      'labels the export channel %s from the daemon launch markers',
+      async (channel, markers) => {
+        const sid = `55555555-bbbb-cccc-dddd-${channel.padEnd(12, '0')}`;
+        await writeExportSession(sid);
+        const keys = [
+          'QWEN_CODE_MANAGED_RUNTIME',
+          'QWEN_CODE_DESKTOP',
+          'QWEN_CODE_SERVE',
+        ];
+        const saved: Record<string, string | undefined> = {};
+        for (const key of keys) {
+          saved[key] = process.env[key];
+          delete process.env[key];
+        }
+        Object.assign(process.env, markers);
+        try {
+          // The export label is resolved once per daemon at boot (desktop
+          // launcher marker → desktop, else daemon); the hosted-harness
+          // label is pinned by the resolveDaemonExportChannel unit cases
+          // because its public API is gated by the private managed contract.
+          const app = createExportApp();
+          const res = await request(app)
+            .get(`/session/${sid}/export?format=json`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`);
+          expect(res.status).toBe(200);
+          expect(res.body.metadata.channel).toBe(channel);
+        } finally {
+          for (const key of keys) {
+            if (saved[key] === undefined) delete process.env[key];
+            else process.env[key] = saved[key];
+          }
+        }
+      },
+    );
 
     it('rejects invalid export format', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -35626,26 +35717,10 @@ describe('createServeApp', () => {
 
     it('returns a paged transcript and does not expose EventBus cursors', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaa';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [
-            {
-              v: 1,
-              type: 'session_update',
-              data: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'hello transcript' },
-              },
-            },
-          ],
-          nextCursor: 'cursor-2',
-          hasMore: true,
-          startTime: '2026-05-28T12:00:00.000Z',
-          lastUpdated: '2026-05-28T12:00:01.000Z',
-        }),
-      });
+      // The default route reads daemon-local (no ACP child), so the page is
+      // replayed from the persisted file and the bridge page method is never
+      // called for a non-live session.
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -35661,20 +35736,56 @@ describe('createServeApp', () => {
       expect(res.body).toMatchObject({
         v: 1,
         sessionId: sid,
-        nextCursor: 'cursor-2',
-        hasMore: true,
+        hasMore: false,
       });
       expect(res.body).not.toHaveProperty('lastEventId');
       expect(res.body.events[0]).not.toHaveProperty('id');
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        {
-          sessionId: sid,
-          limit: 2,
-          direction: 'backward',
-        },
-      ]);
+      expect(res.body.events[0].data).toMatchObject({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'hello transcript' },
+      });
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('reuses the daemon-side index across reads without an ACP child', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-cccccccccccc';
+      resetSessionTranscriptIndexCacheForTest();
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest(() => {
+        builds++;
+      });
+      try {
+        // No session is registered with the bridge: the ACP child is absent
+        // (as after a session switch, idle TTL, or daemon restart). The
+        // default route must still serve from the daemon-side index cache.
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { bridge, boundWorkspace: wsDir },
+        );
+
+        const first = await request(app)
+          .get(`/session/${sid}/transcript?limit=1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const second = await request(app)
+          .get(`/session/${sid}/transcript?limit=1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(first.status).toBe(200);
+        expect(second.status).toBe(200);
+        // One daemon-side index build, reused on the second read; the bridge
+        // page method is never called, so the read survives child exit.
+        expect(builds).toBe(1);
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+        expect(bridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(undefined);
+        resetSessionTranscriptIndexCacheForTest();
+      }
     });
 
     it('reads tool calls only from the qualified persisted workspace without attaching ACP', async () => {
@@ -35952,31 +36063,30 @@ describe('createServeApp', () => {
 
     it('returns sparse turn-index pages through the owning runtime', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaae';
-      const bridge = fakeBridge({
-        sessionTurnIndexImpl: async (req) => {
-          if (req.start !== undefined && req.start > 1) {
-            throw Object.assign(new Error('Invalid transcript cursor'), {
-              data: { errorKind: 'invalid_transcript_cursor' },
-            });
-          }
-          return {
-            v: 1,
-            sessionId: req.sessionId,
-            snapshot: 'snapshot-1',
-            totalTurns: 1,
-            start: 0,
-            turns: [
-              {
-                ordinal: 0,
-                turnId: 'record-1',
-                kind: 'prompt',
-                label: 'hello transcript',
-              },
-            ],
-          };
-        },
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const appendUser = async (n: number, parent: string, text: string) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            uuid: `${sid}-user-${n}`,
+            parentUuid: parent,
+            sessionId: sid,
+            timestamp: `2026-05-28T12:00:0${n}.000Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text }] },
+            cwd: wsDir,
+            version: '1.0.0',
+          }) + '\n',
+        );
+      };
+      await appendUser(2, `${sid}-user-1`, 'second turn');
+      await appendUser(3, `${sid}-user-2`, 'third turn');
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
@@ -35995,34 +36105,307 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      expect(res.body).toMatchObject({
-        snapshot: 'snapshot-1',
-        totalTurns: 1,
-      });
-      expect(bridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: sid, limit: 2 },
-      ]);
+      // Daemon-local read mints a real persisted-key snapshot and forwards
+      // limit (3 turns on disk, 2 returned).
+      expect(typeof res.body.snapshot).toBe('string');
+      expect(res.body.totalTurns).toBe(3);
+      expect(res.body.turns).toHaveLength(2);
+      expect(res.body.turns[0].label).toBe('second turn');
+      expect(res.body.turns[1].label).toBe('third turn');
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+
       const outOfRange = await request(app)
-        .get(`/session/${sid}/turn-index?snapshot=snapshot-1&start=2`)
+        .get(
+          `/session/${sid}/turn-index?snapshot=${encodeURIComponent(res.body.snapshot)}&start=4`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(outOfRange.status).toBe(400);
       expect(outOfRange.body.code).toBe('invalid_transcript_cursor');
       expect(bridge.loadCalls).toHaveLength(0);
     });
 
-    it('forwards snapshot-bound turn anchors and response metadata', async () => {
-      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaf';
+    it('reuses the daemon-side index for turn-index without an ACP child', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff1';
+      resetSessionTranscriptIndexCacheForTest();
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest(() => {
+        builds++;
+      });
+      try {
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { bridge, boundWorkspace: wsDir },
+        );
+        const first = await request(app)
+          .get(`/session/${sid}/turn-index`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const second = await request(app)
+          .get(`/session/${sid}/turn-index`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(first.status).toBe(200);
+        expect(second.status).toBe(200);
+        expect(builds).toBe(1);
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+        expect(bridge.sessionTurnIndexCalls).toEqual([]);
+        // Cold session (getSessionSummary throws SessionNotFoundError): the
+        // live-flush barrier stays gated behind liveness and never calls flush.
+        expect(bridge.flushSessionTranscriptCalls).toEqual([]);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(undefined);
+        resetSessionTranscriptIndexCacheForTest();
+      }
+    });
+
+    it('round-trips a singular-route cursor, propagates hasOlder, and crosses the turn-index snapshot key', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff3';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const appendUser = async (n: number, parent: string, text: string) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            uuid: `${sid}-user-${n}`,
+            parentUuid: parent,
+            sessionId: sid,
+            timestamp: `2026-05-28T12:00:0${n}.000Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text }] },
+            cwd: wsDir,
+            version: '1.0.0',
+          }) + '\n',
+        );
+      };
+      await appendUser(2, `${sid}-user-1`, 'second message');
+      await appendUser(3, `${sid}-user-2`, 'third message');
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const textOf = (page: {
+        events: Array<{ data?: Record<string, unknown> }>;
+      }) => {
+        const u = (page.events[0]?.data?.['update'] ?? page.events[0]?.data) as
+          | Record<string, unknown>
+          | undefined;
+        return (u?.['content'] as { text?: string } | undefined)?.text;
+      };
+
+      const page1 = await request(app)
+        .get(`/session/${sid}/transcript?limit=1&direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page1.status).toBe(200);
+      expect(textOf(page1.body)).toBe('third message');
+      expect(page1.body.hasMore).toBe(true);
+      expect(typeof page1.body.nextCursor).toBe('string');
+
+      // Cursor round-trip: the next page continues from the frozen cursor.
+      const page2 = await request(app)
+        .get(
+          `/session/${sid}/transcript?limit=1&cursor=${encodeURIComponent(page1.body.nextCursor)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page2.status).toBe(200);
+      expect(textOf(page2.body)).toBe('second message');
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
+
+      // Cross-route snapshot-key contract: the turn-index ROUTE mints a
+      // snapshot the transcript ROUTE consumes for an anchored read.
+      const ti = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(ti.status).toBe(200);
+      const anchored = await request(app)
+        .get(
+          `/session/${sid}/transcript?atRecordId=${sid}-user-2&snapshot=${encodeURIComponent(ti.body.snapshot)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(anchored.status).toBe(200);
+      expect(anchored.body.targetRecordId).toBe(`${sid}-user-2`);
+      // hasOlder propagates on the anchored read (user-1 precedes user-2).
+      expect(anchored.body.hasOlder).toBe(true);
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+    });
+
+    it('flushes the live recorder before a snapshot-less turn-index page', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff2';
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      // A live session whose recorder drains a just-accepted turn on flush:
+      // the snapshot-less turn-index page must include it (R11-1 barrier).
       const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-          targetRecordId: req.atRecordId,
-          hasOlder: true,
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
         }),
+        flushSessionTranscriptImpl: async (sessionId) => {
+          await fsp.appendFile(
+            chatsFile,
+            JSON.stringify({
+              uuid: `${sessionId}-user-2`,
+              parentUuid: `${sessionId}-user-1`,
+              sessionId,
+              timestamp: '2026-05-28T12:00:02.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'second turn' }] },
+              cwd: wsDir,
+              version: '1.0.0',
+            }) + '\n',
+          );
+        },
       });
       await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.totalTurns).toBe(2);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+    });
+
+    it('pins the daemon-local replay tool-metadata fallback (accepted trade)', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const append = async (rec: Record<string, unknown>) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            sessionId: sid,
+            cwd: wsDir,
+            version: '1.0.0',
+            timestamp: '2026-05-28T12:00:02.000Z',
+            ...rec,
+          }) + '\n',
+        );
+      };
+      await append({
+        uuid: `${sid}-a1`,
+        parentUuid: `${sid}-user-1`,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { absolute_path: '/tmp/file.txt' },
+              },
+            },
+          ],
+        },
+      });
+      await append({
+        uuid: `${sid}-r1`,
+        parentUuid: `${sid}-a1`,
+        type: 'tool_result',
+        toolCallResult: {
+          callId: 'call-1',
+          name: 'read_file',
+          status: 'success',
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      const events = res.body.events as Array<{
+        data?: Record<string, unknown>;
+      }>;
+      const toolEvent = events.find((e) => {
+        const u = (e.data?.['update'] ?? e.data) as
+          | Record<string, unknown>
+          | undefined;
+        return (
+          u?.['sessionUpdate'] === 'tool_call' && u?.['toolCallId'] === 'call-1'
+        );
+      });
+      if (!toolEvent) {
+        throw new Error('no tool_call for call-1: ' + JSON.stringify(events));
+      }
+      const update = (toolEvent.data?.['update'] ?? toolEvent.data) as Record<
+        string,
+        unknown
+      >;
+      // Daemon-local replay passes no Config, so resolveToolMetadata falls
+      // back to the persisted name, kind 'other', empty locations. This is
+      // the accepted trade documented in the design doc (the workspace route
+      // has always fallen back the same way).
+      expect(update['title']).toBe('read_file');
+      expect(update['kind']).toBe('other');
+      expect(update['locations']).toEqual([]);
+    });
+
+    it('throws page-too-large from daemon-local serialization (413 source)', async () => {
+      // The default route's 413 arises daemon-side when the serialized replay
+      // page exceeds the response budget (no bridge involved). Pin that throw
+      // with a small budget override; error-response maps the class to 413.
+      const { serializeWorkspaceTranscriptResponseForTesting } = await import(
+        './routes/session.js'
+      );
+      const { SessionTranscriptPageTooLargeError } = await import(
+        '@qwen-code/qwen-code-core/services/session-transcript-reader.js'
+      );
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff4';
+      const oversized = {
+        v: 1,
+        sessionId: sid,
+        events: [{ data: { text: 'x'.repeat(200) } }],
+      };
+      expect(() =>
+        serializeWorkspaceTranscriptResponseForTesting(oversized, sid, 100),
+      ).toThrow(SessionTranscriptPageTooLargeError);
+    });
+
+    it('forwards snapshot-bound turn anchors and response metadata', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaf';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      // A real turn-index snapshot signed with the persisted per-workspace
+      // key the daemon-local reader also uses.
+      const snapshot = (
+        await new qwenCore.SessionTranscriptReader(wsDir).readTurnIndexPage(sid)
+      ).snapshot;
+      const anchorUuid = `${sid}-user-1`;
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
@@ -36045,36 +36428,35 @@ describe('createServeApp', () => {
 
       const res = await request(app)
         .get(
-          `/session/${sid}/transcript?atRecordId=record-1&snapshot=snapshot-1`,
+          `/session/${sid}/transcript?atRecordId=${anchorUuid}&snapshot=${encodeURIComponent(snapshot)}`,
         )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        targetRecordId: 'record-1',
-        hasOlder: true,
+        targetRecordId: anchorUuid,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        {
-          sessionId: sid,
-          atRecordId: 'record-1',
-          snapshot: 'snapshot-1',
-        },
-      ]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('reads and exports the active copy of an exact persisted conflict', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
       await writeTranscriptSession(sid);
       await writeTranscriptSession(sid, 'archived');
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-        }),
-      });
+      // Give the archived copy distinct text so the response body proves the
+      // active copy was read rather than the archived one.
+      const archivedFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        'archive',
+        `${sid}.jsonl`,
+      );
+      const archivedRaw = await fsp.readFile(archivedFile, 'utf8');
+      await fsp.writeFile(
+        archivedFile,
+        archivedRaw.replace('hello transcript', 'archived-only transcript'),
+      );
+      const bridge = fakeBridge();
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
@@ -36088,39 +36470,19 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(transcript.status).toBe(200);
+      expect(JSON.stringify(transcript.body)).toContain('hello transcript');
+      expect(JSON.stringify(transcript.body)).not.toContain(
+        'archived-only transcript',
+      );
       expect(exported.status).toBe(200);
       expect(exported.text).toContain(sid);
-      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+      // Daemon-local read: the active copy is served without the bridge page.
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('redacts skill bodies from flat transcript events (#9234)', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [
-            {
-              v: 1,
-              type: 'session_update',
-              data: {
-                sessionUpdate: 'available_commands_update',
-                availableCommands: [
-                  { name: 'help', description: 'Help' },
-                  { name: 'workflows', description: 'Manage workflows' },
-                ],
-                _meta: {
-                  availableSkills: ['bugfix'],
-                  availableSkillDetails: [
-                    { name: 'bugfix', body: 'x'.repeat(600_000) },
-                  ],
-                },
-              },
-            },
-          ],
-          hasMore: false,
-        }),
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36141,16 +36503,39 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      const event = res.body.events[0] as { data: Record<string, unknown> };
-      expect(event.data['sessionUpdate']).toBe('available_commands_update');
-      expect(event.data['availableCommands']).toEqual([
+      // The default route reads daemon-local and applies the same SDK-surface
+      // redaction as the workspace route; persisted replay never carries the
+      // live available_commands_update skill bodies, so the redaction itself
+      // is pinned at the shared helper the route wires in.
+      const { omitSkillDetailsForSdkSurface } = await import(
+        './skill-details-redaction.js'
+      );
+      const shaped = omitSkillDetailsForSdkSurface({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: 'help', description: 'Help' },
+            { name: 'workflows', description: 'Manage workflows' },
+          ],
+          _meta: {
+            availableSkills: ['bugfix'],
+            availableSkillDetails: [
+              { name: 'bugfix', body: 'x'.repeat(600_000) },
+            ],
+          },
+        },
+      }) as { data: Record<string, unknown> };
+      expect(shaped.data['availableCommands']).toEqual([
         { name: 'help', description: 'Help' },
         { name: 'workflows', description: 'Manage workflows' },
       ]);
-      const meta = event.data['_meta'] as Record<string, unknown>;
+      const meta = shaped.data['_meta'] as Record<string, unknown>;
       expect(meta['availableSkills']).toEqual(['bugfix']);
       expect(meta).not.toHaveProperty('availableSkillDetails');
-      expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+      expect(JSON.stringify(shaped)).not.toContain('x'.repeat(64));
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('redacts workflows from untrusted transcript events', async () => {
@@ -36166,14 +36551,7 @@ describe('createServeApp', () => {
           ],
         },
       } satisfies Omit<BridgeEvent, 'id'>;
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [commandsEvent],
-          hasMore: false,
-        }),
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36194,22 +36572,22 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      expect(res.body.events[0].data.availableCommands).toEqual([
+      // Untrusted-workflow redaction is wired through the same shared helper
+      // as the workspace route; pin the redaction at that helper.
+      const { redactWorkflowsFromAvailableCommandsEvent } = await import(
+        './workflow-session-gate.js'
+      );
+      const redacted = redactWorkflowsFromAvailableCommandsEvent(commandsEvent);
+      expect(redacted.data.availableCommands).toEqual([
         { name: 'help', description: 'Help' },
       ]);
       expect(commandsEvent.data.availableCommands).toHaveLength(2);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('forwards an exclusive persisted-record boundary', async () => {
       const sid = '55555555-bbbb-cccc-dddd-bbbbbbbbbbbb';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-        }),
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36217,13 +36595,16 @@ describe('createServeApp', () => {
       });
 
       const res = await request(app)
-        .get(`/session/${sid}/transcript?limit=100&beforeRecordId=record-3`)
+        .get(
+          `/session/${sid}/transcript?limit=100&beforeRecordId=${sid}-user-1`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, limit: 100, beforeRecordId: 'record-3' },
-      ]);
+      // The boundary is exclusive: nothing precedes the first record.
+      expect(res.body.events).toEqual([]);
+      expect(res.body.hasMore).toBe(false);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('routes inactive active transcript pages through the owning workspace runtime', async () => {
@@ -36233,14 +36614,7 @@ describe('createServeApp', () => {
       const secondaryWs = realpathSync(secondaryDir);
       await writeTranscriptSession(sid, 'active', secondaryWs);
       const primaryBridge = fakeBridge();
-      const secondaryBridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-        }),
-      });
+      const secondaryBridge = fakeBridge();
       const registry = createWorkspaceRegistry([
         makeWorkspaceRuntimeForTest({
           workspaceId: 'primary',
@@ -36264,10 +36638,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
+      // Resolved to the owning secondary runtime and read daemon-local there;
+      // neither bridge's page method is called.
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
-      expect(secondaryBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid },
-      ]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('reads persisted transcript and turn index for an explicit standalone session', async () => {
@@ -36314,12 +36688,10 @@ describe('createServeApp', () => {
       expect(turnIndex.status).toBe(200);
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
-      expect(internalBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, direction: 'backward' },
-      ]);
-      expect(internalBridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: sid },
-      ]);
+      // Transcript and turn index both read daemon-local from the owning
+      // internal runtime; neither bridge method is called.
+      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
     it('rejects transcript and turn index for a child of an explicit standalone session', async () => {
@@ -36523,12 +36895,8 @@ describe('createServeApp', () => {
       expect(turnIndex.status).toBe(200);
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
-      expect(internalBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: childSid, direction: 'backward' },
-      ]);
-      expect(internalBridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: childSid },
-      ]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
     it('skips the internal runtime for a transcript from a non-conversation source', async () => {
@@ -36953,9 +37321,8 @@ describe('createServeApp', () => {
       expect(internalOnlyTranscript.body.code).toBe('session_archived');
       expect(internalOnlyExport.status).toBe(409);
       expect(internalOnlyExport.body.code).toBe('session_conflict');
-      expect(primaryBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: archivedSid },
-      ]);
+      // The active ordinary copy is read daemon-local; no bridge page call.
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(internalBridge.sessionTranscriptCalls).toEqual([]);
     });
 
@@ -37197,13 +37564,7 @@ describe('createServeApp', () => {
 
     it('maps child invalid cursor errors to 400', async () => {
       const sid = '55555555-bbbb-cccc-dddd-dddddddddddd';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
-          throw Object.assign(new Error('Invalid transcript cursor'), {
-            data: { errorKind: 'invalid_transcript_cursor' },
-          });
-        },
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -37216,31 +37577,48 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_transcript_cursor');
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, cursor: 'not-a-cursor' },
-      ]);
+      // The daemon-local reader rejects the malformed cursor itself.
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('maps frozen snapshot conflicts to 409', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
-          throw Object.assign(new Error('Transcript snapshot is unavailable'), {
-            data: {
-              errorKind: 'transcript_snapshot_unavailable',
-              sessionId: sid,
-            },
-          });
-        },
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
+      const filePath = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const snapshot = (
+        await new qwenCore.SessionTranscriptReader(wsDir).readTurnIndexPage(sid)
+      ).snapshot;
+      const anchorUuid = `${sid}-user-1`;
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
       });
 
+      const first = await request(app)
+        .get(
+          `/session/${sid}/transcript?atRecordId=${anchorUuid}&snapshot=${encodeURIComponent(snapshot)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(first.status).toBe(200);
+
+      // Equal-size rewrite at an advanced mtime: the frozen snapshot's mtime
+      // guard fails the anchored read closed with 409.
+      const raw = await fsp.readFile(filePath, 'utf8');
+      const rewritten = raw.replace('hello transcript', 'HELLO transcript');
+      expect(Buffer.byteLength(rewritten)).toBe(Buffer.byteLength(raw));
+      await fsp.writeFile(filePath, rewritten);
+      const st = await fsp.stat(filePath);
+      await fsp.utimes(filePath, st.atime, new Date(st.mtimeMs + 1000));
+
       const res = await request(app)
-        .get(`/session/${sid}/transcript?cursor=stale`)
+        .get(
+          `/session/${sid}/transcript?atRecordId=${anchorUuid}&snapshot=${encodeURIComponent(snapshot)}`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(409);
@@ -37248,15 +37626,22 @@ describe('createServeApp', () => {
         code: 'transcript_snapshot_unavailable',
         sessionId: sid,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, cursor: 'stale' },
-      ]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('maps oversized transcript snapshots to 413', async () => {
       const sid = '55555555-bbbb-cccc-dddd-ffffffffffff';
+      // A live backward page first flushes through the bridge; a too-large
+      // snapshot error from that flush is mapped by the route unchanged.
       const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+        }),
+        flushSessionTranscriptImpl: async () => {
           throw Object.assign(new Error('Transcript snapshot is too large'), {
             data: {
               errorKind: 'transcript_too_large',
@@ -37274,7 +37659,7 @@ describe('createServeApp', () => {
       });
 
       const res = await request(app)
-        .get(`/session/${sid}/transcript`)
+        .get(`/session/${sid}/transcript?direction=backward`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(413);
@@ -37284,13 +37669,21 @@ describe('createServeApp', () => {
         snapshotSize: 300,
         maxBytes: 200,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('maps oversized transcript pages to 413', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaa';
       const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+        }),
+        flushSessionTranscriptImpl: async () => {
           throw Object.assign(new Error('Transcript page is too large'), {
             data: {
               errorKind: 'transcript_page_too_large',
@@ -37308,7 +37701,7 @@ describe('createServeApp', () => {
       });
 
       const res = await request(app)
-        .get(`/session/${sid}/transcript`)
+        .get(`/session/${sid}/transcript?direction=backward`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(413);
@@ -37318,7 +37711,8 @@ describe('createServeApp', () => {
         pageBytes: 300,
         maxBytes: 200,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
   });
 
@@ -48028,6 +48422,7 @@ describe('Live conversation runtime lifecycle', () => {
       inodeVerifiable: boolean;
     }> = {},
     serveOverrides: Partial<ServeOptions> = {},
+    daemonEnvOverrides: NodeJS.ProcessEnv = {},
   ) {
     const primaryBridge = fakeBridge();
     const registry = createWorkspaceRegistry([
@@ -48138,7 +48533,7 @@ describe('Live conversation runtime lifecycle', () => {
       voiceCoordinator: new WorkspaceVoiceCoordinator(),
       getSessionBridges: () =>
         registry.listManaged().map((runtime) => runtime.bridge),
-      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1' },
+      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1', ...daemonEnvOverrides },
       runtimePlatform: 'darwin',
       webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
     } as Parameters<typeof createServeApp>[2]);
@@ -48171,6 +48566,54 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it.each([
+    ['desktop', { QWEN_CODE_DESKTOP: '1' }],
+    ['daemon', {}],
+  ] as const)(
+    'passes the boot-resolved export channel (%s) into the standalone service',
+    async (expectedChannel, daemonEnvOverrides) => {
+      // Pins the createServeApp -> StandaloneSessionService wiring: dropping
+      // exportChannel from that construction, or hardcoding it to 'daemon',
+      // must red this case, not just the service-level one (which builds its
+      // own harness).
+      const setup = setupLiveRuntime({}, {}, {}, daemonEnvOverrides);
+      const sid = '22222222-2222-4222-8222-222222222222';
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockResolvedValue(sid);
+      vi.spyOn(
+        SessionService.prototype,
+        'getSessionLocation',
+      ).mockResolvedValue('active');
+      vi.spyOn(
+        SessionService.prototype,
+        'readCreationMetadataIfReadable',
+      ).mockResolvedValue({ sourceType: 'standalone' });
+      exportSessionTranscriptSpy.mockResolvedValueOnce({
+        format: 'json',
+        mimeType: 'application/json',
+        filename: 'session.json',
+        content: '{}',
+        metadata: {},
+      });
+      const pending = request(setup.app)
+        .get(`/standalone/sessions/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+      const res = await pending;
+      expect(res.status).toBe(200);
+      const call = exportSessionTranscriptSpy.mock.calls.at(-1)?.[0] as {
+        config?: { getChannel?: () => string | undefined };
+      };
+      expect(call?.config?.getChannel?.()).toBe(expectedChannel);
+    },
+  );
 
   it.each([
     ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],

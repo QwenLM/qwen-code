@@ -250,6 +250,6 @@ class ManagedWebShellRenameTest {
     }
 
     private static String tenant() {
-        return "tenant-web-rename-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 }
