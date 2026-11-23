@@ -75,7 +75,7 @@
 
 ### 4.1 停靠资格：与恢复臂共用一个谓词
 
-只有当冷恢复会接受同一状态时，停靠才是安全的。因此把今天 takeover 恢复臂（`hosted-harness-session.ts:8385-8420`）的接受条件抽成一个函数，停靠与恢复都调用它，并用测试断言两者对同一 journal 状态给出相同答案。不另外复制一份"看起来一样"的条件。
+只有当冷恢复会接受同一状态时，停靠才是安全的。因此把今天 takeover 恢复臂（`hosted-harness-session.ts:8385-8420`）的接受条件抽成一个函数，停靠与恢复都调用它，并用测试断言两者对同一 journal 状态给出相同答案。不另外复制一份"看起来一样"的条件。首个增量共用的是 journal 状态条件：审批 continuation 查找，以及两个审批恢复臂恢复时所依赖的原始 Prompt 文本。Session 形态条件（Hooks、MCP、lineage、wake 拥有的输入）仍然对照 takeover 臂的守卫编写；把它们并入共用函数需要重构 load 路径，留到后续处理。
 
 在第一阶段谓词的基础上，Harness 只放宽以下各项：
 
@@ -139,7 +139,7 @@ teardown 失败与结果未知，沿用第一阶段与[有界恢复补篇](2026-
 - 该 Session 没有未完成的 `ACTION_RESPONSE` 操作；
 - `ma_session_record` 中该 Prompt 的 Action 投影仍为 `requested`。
 
-写入内容：`error_code = 'HARNESS_ACTION_PARKED'`，`retry_after = wake_seal_parked_until`，`dispatch_owner` 与 `dispatch_lease_until` 置空；不计入重试预算，也不计入连续失败次数。CAS 失败时按今天的 `transientFailure` 处理。
+写入内容：`error_code = 'hosted_action_parked'`，`retry_after = wake_seal_parked_until`，`dispatch_owner` 与 `dispatch_lease_until` 置空；不计入重试预算，也不计入连续失败次数。这个标记是派发簿记，不是 Turn 错误：公开与 Web Shell 的 Turn 读取不返回它。CAS 失败时按今天的 `transientFailure` 处理。
 
 `findDispatchable` 不用改：它本来就跳过 `retry_after` 未到的行，也不排除这个错误码，所以到期后已有的扫描（默认每秒一次）会重新派发。`claimTurn` 在认领停靠行时，于同一条 UPDATE 中清除该错误码，使这个标记只表示"无人持有、等待唤醒"，不会留在一个正在派发的 Turn 上。`runClaimed` 中按错误码分支的逻辑（`HARNESS_RECOVERY_BLOCKED`、`RUNTIME_RECOVERY_BLOCKED`、`WORKFLOW_RECOVERY_BLOCKED`）都只匹配各自的码，不受这个新码影响。`JdbcHostedCleanupDebtStore.OWED` 已经跳过带 `RUNNING` Turn 的 Session，所以停靠 Turn 欠下的清理不会触发 cleanup-only load。
 
@@ -147,7 +147,7 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 ### 4.6 解除停靠
 
-新增一个 store 方法，清除该 Session 所有 `HARNESS_ACTION_PARKED` 行的 `error_code` 与 `retry_after`。它在以下事务里与各自的主写入一起执行，同样先锁住 Turn 行：
+新增一个 store 方法，清除该 Session 所有 `hosted_action_parked` 行的 `error_code` 与 `retry_after`。它在以下事务里与各自的主写入一起执行，同样先锁住 Turn 行：
 
 - `ACTION_RESPONSE` 准入（`JdbcManagedActionStore`）；
 - Turn 取消准入：状态变为 `CANCELLING`，而 `findDispatchable` 对 `CANCELLING` 同样要求 `retry_after` 已到，所以必须清除；
@@ -164,7 +164,7 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 派发进入 `runClaimed` 的恢复路径（Turn 已有 `submission_attempted` 与事件 epoch）：
 
-- **决定。** 决定投递（`QwenHostedHarnessConnector.doResolveAction`）在缓存缺失时先加载 Session 再 resolve，同时协调器的派发做一次 drive load。两次加载按 #17521 的 attachment 规则收敛到同一个 resident。该加载必须走 takeover 恢复臂，而不是得到停靠 Session 的 409；这一点要用测试确认。恢复臂先注册 waiter 再读 Action，从而覆盖在注册前就已胜出的决定（G3 §4.2 第 3 步）。
+- **决定。** 决定投递（`QwenHostedHarnessConnector.doResolveAction`）在缓存缺失时先加载 Session 再 resolve，同时协调器的派发做一次 drive load。两次加载按 #17521 的 attachment 规则收敛到同一个 resident。该加载必须走 takeover 恢复臂，而不是得到停靠 Session 的 409。对 Workspace Session，已有测试确认这一点（[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md) §4.7）；没有 Workspace 的 Session 从不停靠，因为它没有审批策略（该设计 §3）。恢复臂先注册 waiter 再读 Action，从而覆盖在注册前就已胜出的决定（G3 §4.2 第 3 步）。
 - **取消。** 沿用 G3：恢复后的 Turn 看到 `cancel.requested`，关闭等待，按取消结算。
 - **审批模式变更。** 恢复后的 driver 重建 live poll，按新模式代用户放行或继续等待。恢复臂今天是否重建 live poll 必须用测试确认；如果没有，这是第四阶段需要补上的。
 - **到期或 deadline。** 恢复后的 driver 立即以 `expired` 结束 Action，或因 deadline 而 abort，然后写取消终态。
@@ -175,7 +175,18 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 ### 4.8 恢复视图与状态
 
-停靠 Session 的 head 是 `SEALED` + `released`，但它有一个 `RUNNING` 的 Turn。[恢复视图补篇](2026-11-18-managed-suspension-recovery-view.zh-CN.md)的"干净挂起 → `ready`"分支本来就要求没有未结算 Turn，因此不会把它报成就绪。要补的是另一侧：停靠证书与 Turn 行上的 `HARNESS_ACTION_PARKED` 一致时，视图报告"Turn 进行中，等待 Action"，不能落到 `recovery_evidence_unavailable` 或运维分支；两者不一致时，保持现有的保守答案。公开 Session、Web Shell Session 与 Turn 读取都经过这个视图，需要用测试固定。
+停靠 Session 的 head 是 `SEALED` + `released`，但它有一个 `RUNNING` 的 Turn。[恢复视图补篇](2026-11-18-managed-suspension-recovery-view.zh-CN.md)的"干净挂起 → `ready`"分支本来就要求没有未结算 Turn，因此不会把它报成就绪。另一侧不需要新增分支：现有的活跃 Turn 分支排在 `recovery_evidence_unavailable` 与运维分支之前，无论停靠证书是否仍然有效，都报告"Turn 进行中"。之后的任何 writer 获取都会清除证书，而 Turn 行在重新派发前一直保持 `hosted_action_parked`，所以视图根本不应读取证书。公开 Session、Web Shell Session 与 Turn 读取都经过这个视图，需要用测试固定。
+
+### 4.9 生命周期细化（第二轮评审）
+
+第二轮评审用实跑探针核验了六个生命周期细节，现均由回归测试固定：
+
+1. **resolution 互斥按重叠计数（§4.2）。** 冻结拒绝标记是按 Action 的计数，而非存在位：同一 Action 的两个重叠 resolution 在最后一个结束前始终拒绝停靠。
+2. **cleanup 排除复核 journal 序号（§4.3）。** 债务快照取自某个已提交序号；若读取 descriptor 期间序号前进，检查保守地报告有债务，而不是基于过期快照放行挂起。
+3. **staged wake 不是客户端矛盾（§4.4）。** 只有客户端自己声明的 `wake.pending()` 或 background 证书才拒绝停靠证书。Broker 在证书之后写入的 wake-worthy staged 行走既有 staged-wake 路径盖章，并清空停靠字段。
+4. **审批模式变更接纳全匹配的停靠证书（§4.6）。** 停靠 head 是 `SEALED`/`released`，忙碌准入本会在解除停靠之前拒绝变更。只有全匹配证书——seal revision、停靠 prompt、approval revision，且停靠 Turn 是 Session 唯一的活跃工作——获得窄豁免；任何不匹配保持拒绝。
+5. **冷恢复的等待可以再次停靠（§4.7）。** 恢复臂安装与原始等待相同的停靠注册、freeze 覆盖与 finally 注销生命周期，保留原 Action 身份与过期时间；下一次 idle 第二次停靠，之后单次 Allow 仍只执行工具一次。
+6. **digest-match 重放在同事务内解除停靠（§4.6）。** 两条失败投递修复路径（delivery-failed 与 decision-expired）在条件修复 UPDATE 后清除停靠标记，用户已作出的决定不再等到原唤醒期限。
 
 ## 5. 决定与理由
 
@@ -240,7 +251,7 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 - 不满足资格的等待，行为与现在完全相同。
 - 满足资格的等待，在一个空闲周期后被干净停靠：Session 移出 `attachedSessions` 并停止续约；`ma_turn` 行释放派发租约，`retry_after` 等于证书中的唤醒时间。
 - 停靠后的决定、取消、模式变更与到期，各自经一次冷恢复完成原 Turn：Action、Prompt 与批次身份不变，不重复询问，Allow 恰好执行一次，Deny 零次。
-- 停靠从不消耗 Turn 的重试预算；任何已提交的决定、取消或审批模式变更都不会让 Turn 一直停到到期。
+- 完成的停靠从不消耗 Turn 的重试预算。因决定、取消或审批模式变更与之竞争而被 CAS 拒绝的停靠，退回为一次普通重试，Turn 下一次有 journal 进展时该计数即清零。任何已提交的决定、取消或审批模式变更都不会让 Turn 一直停到到期。
 - 停靠 Session 的所有状态读取都如实报告进行中的 Turn。
 - §11 要求的真实进程、MySQL 与故障用例在 CI 中通过，且 §7 的测量完成之后，才打开开关。
 
@@ -248,6 +259,6 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 1. 是否为停靠单设一个更短的延迟。默认值下停靠几乎不发生（§1.4），而更短的延迟会把更多决定变成冷打开。由 §7 决定。
 2. 长时间停靠期间，是否像提问等待那样交还 Turn 的 Runtime 成员资格。
-3. 冷恢复扩展后再纳入的范围：Hooks、MCP、子 Session、wake 触发的 Turn、团队计划审批。
-4. 与 3b 后台 hold 同时存在时，两种证书如何合并。
+3. 冷恢复扩展后再纳入的范围：Hooks、MCP、子 Session、wake 触发的 Turn、团队计划审批。除团队计划审批外，其余各项的方案见[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md)。
+4. 与 3b 后台 hold 同时存在时，两种证书如何合并。方案见[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md)的 S2 切片。
 5. 已离开池的成员上停靠 Session 的 placement 回收，与父设计的待解决问题 1 相同。

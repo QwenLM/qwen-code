@@ -165,6 +165,10 @@ import type {
   RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import {
+  type HostedContinuationCaptureRefusal,
+  registerHostedActionPark,
+} from './hosted-action-parking.js';
+import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
 } from './managed-workspace-binding.js';
@@ -361,6 +365,13 @@ export interface HostedShellTurnOptions {
   // The embedded wake scheduler's tip: a notification input committed
   // under its observation revision asks the pump to deliver it.
   monitorWakeKick?: () => void;
+  /**
+   * Bindings whose worker took over the background capture, keyed
+   * `bindingId@generation`. A suspension may only exempt a run whose
+   * binding is here: an older worker cannot answer the pull, so its Session
+   * stays resident rather than fail a detach at teardown.
+   */
+  observationBindings?: Set<string>;
 }
 
 /**
@@ -2197,7 +2208,7 @@ export class HostedWorkspaceToolTurn {
     definitionRefs: Map<number, ManagedSessionDurableRef>;
     actionIds: Map<number, string>;
     releaseQuestionMount: boolean;
-    uncaptured?: boolean;
+    uncaptured?: HostedContinuationCaptureRefusal;
   };
   hookStopReason?: string;
   private readonly runtimeBroker?: HostedWorkspaceBroker;
@@ -2240,6 +2251,9 @@ export class HostedWorkspaceToolTurn {
   private readonly agentDispatched = new Set<string>();
   private publisher?: HostedShellPublisher;
   private bindingGeneration?: string;
+  /** Phase 3b: the worker owns the background capture and Monitor policy, so
+   * this turn must not start its own observation loop. */
+  private workerOwnsObservation = false;
   private advertised?: FunctionDeclaration[];
   private readonly publication?: {
     owner: HttpToolPublicationOwner;
@@ -4489,7 +4503,7 @@ export class HostedWorkspaceToolTurn {
     actionId: string | null,
     approvalOrdinal: number,
     commandStep?: HostedApprovalContinuation['commandStep'],
-  ): Promise<ManagedSessionDurableRef | undefined> {
+  ): Promise<ManagedSessionDurableRef | HostedContinuationCaptureRefusal> {
     const batch = this.nativeBatch;
     const memoryBatch =
       this.memory !== undefined &&
@@ -4503,18 +4517,22 @@ export class HostedWorkspaceToolTurn {
       batch.requests[0].planExit === true;
     const singleQuestion =
       batch?.requests.length === 1 && batch.requests[0].question === true;
+    if (!batch) return 'not_native_batch';
+    if (batch.uncaptured) return batch.uncaptured;
+    if (batch.requests.some((request) => request.todo)) return 'todo_batch';
+    if (!runtime && !memoryBatch) return 'no_runtime';
     if (
-      !batch ||
-      batch.uncaptured ||
-      batch.requests.some((request) => request.todo) ||
-      (!runtime && !memoryBatch) ||
-      (!commandStep &&
-        isHostedWorkspaceShellProfile(this.profile) &&
-        !singlePlanExit &&
-        !singleQuestion &&
-        !memoryBatch &&
-        !this.publicChildren) ||
-      (!commandStep && (this.hooks || this.mcp)) ||
+      !commandStep &&
+      isHostedWorkspaceShellProfile(this.profile) &&
+      !singlePlanExit &&
+      !singleQuestion &&
+      !memoryBatch &&
+      !this.publicChildren
+    )
+      return 'shell_profile';
+    if (!commandStep && this.hooks) return 'hooks';
+    if (!commandStep && this.mcp) return 'mcp';
+    if (
       batch.requests.some(
         (request) =>
           !(
@@ -4532,15 +4550,20 @@ export class HostedWorkspaceToolTurn {
               'todo_write',
               'web_fetch',
             ].includes(request.call.name)
-          ) ||
+          ),
+      )
+    )
+      return 'unsupported_tool';
+    if (
+      batch.requests.some(
+        (request) =>
           // A call refused at the canonical-digest ceiling (#13803 D1) has
           // no argument digest a restore could re-verify, and one refused
           // past the inline limit has no encoding to publish.
-          request.argsDigest === undefined ||
-          request.inputBytes.length === 0,
+          request.argsDigest === undefined || request.inputBytes.length === 0,
       )
     )
-      return undefined;
+      return 'undigested_call';
     const authority = this.session.authority;
     const header = authority.sessionHeader;
     const assistant = authority
@@ -4636,7 +4659,7 @@ export class HostedWorkspaceToolTurn {
       planBytes.byteLength >
       HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
     )
-      return undefined;
+      return 'plan_oversize';
     const planRef = await this.session.resources.publish(
       'hosted-approval-continuation',
       planBytes,
@@ -5805,6 +5828,7 @@ export class HostedWorkspaceToolTurn {
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
           );
+          this.workerOwnsObservation = this.broker.observationOwned;
         } else if (
           this.publication &&
           this.backgroundLane &&
@@ -5825,9 +5849,12 @@ export class HostedWorkspaceToolTurn {
               this.monitors,
               () => this.backgroundLane!.monitorWakeKick?.(),
             );
+          const writer = await this.publication.owner.owner();
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
+            writer.writerGeneration,
           );
+          this.workerOwnsObservation = this.broker.observationOwned;
         }
       };
       // A Hook can move a call to a background lane, so a Hook turn picks
@@ -6327,6 +6354,12 @@ export class HostedWorkspaceToolTurn {
           runtimeBindingId: saved.runtimeBindingId,
           generation: saved.bindingGeneration,
         };
+        const observationLane = this.backgroundLane ?? this.shell;
+        if (this.workerOwnsObservation && observationLane) {
+          (observationLane.observationBindings ??= new Set()).add(
+            `${saved.runtimeBindingId}@${saved.bindingGeneration}`,
+          );
+        }
         if (request.background)
           await this.childRuns!.dispatchStarted(executionCallId, runtime);
         if (request.monitoring)
@@ -9265,6 +9298,10 @@ export class HostedWorkspaceToolTurn {
     executionCallId: string,
     runtimeCallId: string,
   ): Promise<void> {
+    // Phase 3b: when the worker owns the observation, its policy runs the
+    // windows and the applier commits the observation entries; starting a
+    // Harness loop here would observe the same watch twice.
+    if (this.workerOwnsObservation) return;
     // The lane is Shell-mode or the publication lane, whichever this turn
     // owns — the detached family's loops park on it either way.
     const lane = this.shell ?? this.backgroundLane;
@@ -10334,7 +10371,7 @@ export class HostedWorkspaceToolTurn {
               configRevision: this.extensionConfig!.revision,
             },
           );
-          if (!continuationRef)
+          if (typeof continuationRef === 'string')
             throw new HostedToolRecoveryRequiredError(
               'Command approval continuation is unavailable.',
             );
@@ -10373,25 +10410,38 @@ export class HostedWorkspaceToolTurn {
             { turnId: this.promptId, promptId: this.promptId },
           );
         }
-        await this.approval.waiters.wait(
-          actionRequestId,
-          options.expiresAt,
-          signal,
-          () =>
-            authority.action(actionRequestId!)?.state !== 'requested' ||
-            authority.writesStopped,
-          this.approval.readSettings
-            ? hostedLiveApprovalPoll(
-                this.session,
-                this.approval.waiters,
-                options,
-                () => this.readApprovalSettings(),
-                signal,
-                this.globProfile,
-                this.approval.isBlocked,
-              )
-            : undefined,
-        );
+        registerHostedActionPark(this.session, {
+          promptId: this.promptId,
+          options,
+          settings,
+          livePoll: this.approval.readSettings !== undefined,
+          globProfile: this.globProfile,
+          refusal: 'command_step',
+          freeze: () => false,
+        });
+        try {
+          await this.approval.waiters.wait(
+            actionRequestId,
+            options.expiresAt,
+            signal,
+            () =>
+              authority.action(actionRequestId!)?.state !== 'requested' ||
+              authority.writesStopped,
+            this.approval.readSettings
+              ? hostedLiveApprovalPoll(
+                  this.session,
+                  this.approval.waiters,
+                  options,
+                  () => this.readApprovalSettings(),
+                  signal,
+                  this.globProfile,
+                  this.approval.isBlocked,
+                )
+              : undefined,
+          );
+        } finally {
+          registerHostedActionPark(this.session, undefined);
+        }
         if (authority.action(actionRequestId)?.state === 'requested')
           await endHostedAction(
             this.session,
@@ -10453,11 +10503,13 @@ export class HostedWorkspaceToolTurn {
         (request) => request.call.callId === call.callId,
       ) ?? -1;
     if (ordinal >= 0) this.nativeBatch!.actionIds.set(ordinal, requestId);
-    const continuationRef =
+    const captured =
       ordinal < 0
-        ? undefined
+        ? 'not_native_batch'
         : await this.captureNativeBatch('approval', requestId, ordinal);
-    if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
+    const continuationRef = typeof captured === 'string' ? undefined : captured;
+    if (ordinal >= 0 && typeof captured === 'string')
+      this.nativeBatch!.uncaptured = captured;
     if (question && !continuationRef)
       throw new HostedToolRecoveryRequiredError(
         'Question continuation is unavailable.',
@@ -10530,43 +10582,64 @@ export class HostedWorkspaceToolTurn {
         else signal.addEventListener('abort', release, { once: true });
       });
     }
-    if (originalRuntime) {
-      try {
-        await waitForHostedQuestion({
-          session: this.session,
-          broker: this.broker,
-          brokerOptions: this.options,
-          waiters: approval.waiters,
+    // Every durable wait registers; one that can never park carries the
+    // reason, so a suspension attempt counts why the Session stays resident.
+    const refusal =
+      typeof captured === 'string' ? captured : this.nativeBatch?.uncaptured;
+    const parkRegistration = {
+      promptId: this.promptId,
+      options,
+      settings: approval.settings,
+      livePoll: liveApproval && approval.readSettings !== undefined,
+      globProfile: this.globProfile,
+      ...(refusal ? { refusal } : {}),
+      freeze: refusal ? () => false : () => approval.waiters.park(requestId),
+    };
+    registerHostedActionPark(this.session, parkRegistration);
+    try {
+      if (originalRuntime) {
+        try {
+          await waitForHostedQuestion({
+            session: this.session,
+            broker: this.broker,
+            brokerOptions: this.options,
+            waiters: approval.waiters,
+            requestId,
+            expiresAt: options.expiresAt,
+            signal,
+            released: () => {
+              this.acquired = false;
+            },
+            registerFreeze: (freeze) => {
+              if (!parkRegistration.refusal) parkRegistration.freeze = freeze;
+            },
+          });
+        } catch (cause) {
+          throw new HostedToolRecoveryRequiredError(cause);
+        }
+      } else
+        await approval.waiters.wait(
           requestId,
-          expiresAt: options.expiresAt,
+          options.expiresAt,
           signal,
-          released: () => {
-            this.acquired = false;
-          },
-        });
-      } catch (cause) {
-        throw new HostedToolRecoveryRequiredError(cause);
-      }
-    } else
-      await approval.waiters.wait(
-        requestId,
-        options.expiresAt,
-        signal,
-        () =>
-          authority.action(requestId)?.state !== 'requested' ||
-          authority.writesStopped,
-        liveApproval && approval.readSettings
-          ? hostedLiveApprovalPoll(
-              this.session,
-              approval.waiters,
-              options,
-              () => this.readApprovalSettings(),
-              signal,
-              this.globProfile,
-              approval.isBlocked,
-            )
-          : undefined,
-      );
+          () =>
+            authority.action(requestId)?.state !== 'requested' ||
+            authority.writesStopped,
+          liveApproval && approval.readSettings
+            ? hostedLiveApprovalPoll(
+                this.session,
+                approval.waiters,
+                options,
+                () => this.readApprovalSettings(),
+                signal,
+                this.globProfile,
+                approval.isBlocked,
+              )
+            : undefined,
+        );
+    } finally {
+      registerHostedActionPark(this.session, undefined);
+    }
     if (authority.action(requestId)?.state === 'requested')
       await endHostedAction(
         this.session,

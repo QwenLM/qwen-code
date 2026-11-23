@@ -10,7 +10,7 @@ final class ChildSessionCreation {
     private ChildSessionCreation() {}
 
     static String childActorOf(String parentSessionId) {
-        return "child:" + parentSessionId;
+        return com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId.of(parentSessionId);
     }
 
     static Object[] childInsertArgs(String sessionId, String title,
