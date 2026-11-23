@@ -5414,6 +5414,52 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('requires snapshot capability before posting a pinned prompt and verifies its receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'hi' }],
+        pinSkills: true,
+        expectedSkillDigest: digest,
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: [] })
+          : jsonResponse(500, { error: 'unexpected prompt' }),
+      );
+      await expect(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }).promptNonBlocking(
+          's-1',
+          body,
+        ),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+
+      let admittedDigest = digest;
+      const { fetch: supported } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['turn_skill_file_snapshot'] })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 1,
+              skillDigest: admittedDigest,
+            }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: supported,
+      });
+      await expect(
+        client.promptNonBlocking('s-1', body),
+      ).resolves.toMatchObject({
+        promptId: 'p-1',
+        skillDigest: digest,
+      });
+      admittedDigest = 'b'.repeat(64);
+      await expect(client.promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm',
+      );
+    });
+
     it('maps invalid client id responses on non-blocking prompts', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/s-1/prompt')) {

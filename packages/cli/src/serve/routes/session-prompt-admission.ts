@@ -58,23 +58,40 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 export const PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH = 200;
 const PROMPT_IDEMPOTENCY_KEYS_PER_SESSION = 128;
 const PROMPT_IDEMPOTENCY_MAX_SESSIONS = 1024;
-const promptIdempotencyBySession = new Map<string, Map<string, string>>();
+interface PromptReceipt {
+  promptId: string;
+  skillDigest?: string;
+  skillPromptHash?: string;
+}
+const promptIdempotencyBySession = new Map<
+  string,
+  Map<string, PromptReceipt>
+>();
+
+export function findPromptReceipt(
+  sessionId: string,
+  key?: string,
+): PromptReceipt | undefined {
+  return key === undefined
+    ? undefined
+    : promptIdempotencyBySession.get(sessionId)?.get(key);
+}
 
 function rememberPromptIdempotencyKey(
   sessionId: string,
   key: string,
-  promptId: string,
+  receipt: PromptReceipt,
 ): void {
   let keys = promptIdempotencyBySession.get(sessionId);
   if (!keys) {
-    keys = new Map<string, string>();
+    keys = new Map<string, PromptReceipt>();
     promptIdempotencyBySession.set(sessionId, keys);
     if (promptIdempotencyBySession.size > PROMPT_IDEMPOTENCY_MAX_SESSIONS) {
       const oldest = promptIdempotencyBySession.keys().next().value;
       if (oldest !== undefined) promptIdempotencyBySession.delete(oldest);
     }
   }
-  keys.set(key, promptId);
+  keys.set(key, receipt);
   if (keys.size > PROMPT_IDEMPOTENCY_KEYS_PER_SESSION) {
     const oldest = keys.keys().next().value;
     if (oldest !== undefined) keys.delete(oldest);
@@ -258,10 +275,13 @@ export interface SessionPromptAdmissionInput {
    * and the session's cursor reads, just before the enqueue.
    */
   onPromptId?: (promptId: string) => void;
+  turnSkillLease?: string;
+  skillDigest?: string;
+  skillPromptHash?: string;
   onPromptAdmitted?: () => void;
 }
 
-export type SessionPromptAdmission =
+export type SessionPromptAdmission = { skillDigest?: string } & (
   | {
       deduplicated: true;
       promptId: string;
@@ -275,7 +295,8 @@ export type SessionPromptAdmission =
       eventEpoch: ReturnType<AcpSessionBridge['getSessionEventEpoch']>;
       /** Settles, never rejecting, once the turn has finished either way. */
       settled: Promise<void>;
-    };
+    }
+);
 
 /**
  * Admit a prompt into a live session: deduplicate a repeated idempotency
@@ -310,10 +331,8 @@ export function admitSessionPrompt(
   }
   const promptId = crypto.randomUUID();
   if (idempotencyKey !== undefined) {
-    const admittedPromptId = promptIdempotencyBySession
-      .get(sessionId)
-      ?.get(idempotencyKey);
-    if (admittedPromptId !== undefined) {
+    const receipt = findPromptReceipt(sessionId, idempotencyKey);
+    if (receipt !== undefined) {
       // A retry of an already-admitted event (lost acceptance mark or
       // lost 202 on the caller side): return the original admission
       // without enqueueing a second turn — and before any delivery
@@ -322,7 +341,8 @@ export function admitSessionPrompt(
       // resume from this response.
       return {
         deduplicated: true,
-        promptId: admittedPromptId,
+        promptId: receipt.promptId,
+        skillDigest: receipt.skillDigest,
         lastEventId: ownerBridge.getSessionLastEventId(sessionId),
         eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
       };
@@ -378,6 +398,9 @@ export function admitSessionPrompt(
       {
         ...(clientId !== undefined ? { clientId } : {}),
         promptId,
+        ...(input.turnSkillLease
+          ? { turnSkillLease: input.turnSkillLease }
+          : {}),
         ...(effectiveDeadlineMs !== undefined
           ? { deadlineMs: effectiveDeadlineMs }
           : {}),
@@ -435,7 +458,11 @@ export function admitSessionPrompt(
     // slip past the check above (the whole check-admit-remember
     // sequence is synchronous). A deferred pre-admission rejection
     // forgets it again in the failure handler below.
-    rememberPromptIdempotencyKey(sessionId, idempotencyKey, promptId);
+    rememberPromptIdempotencyKey(sessionId, idempotencyKey, {
+      promptId,
+      skillDigest: input.skillDigest,
+      skillPromptHash: input.skillPromptHash,
+    });
   }
 
   // A `/review` or `/verify-pr` prompt binds the PR to this session as
@@ -549,5 +576,12 @@ export function admitSessionPrompt(
   if (daemonLog) {
     daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
   }
-  return { deduplicated: false, promptId, lastEventId, eventEpoch, settled };
+  return {
+    deduplicated: false,
+    promptId,
+    skillDigest: input.skillDigest,
+    lastEventId,
+    eventEpoch,
+    settled,
+  };
 }

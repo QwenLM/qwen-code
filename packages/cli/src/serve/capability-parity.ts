@@ -115,6 +115,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed sub-session send surface',
   ),
   session_prompt: { standing: 'managed', evidence: 'surface:TURN_SUBMIT' },
+  turn_skill_file_snapshot: NO_MANAGED_EQUIVALENT(
+    'optional snapshot support is restricted to trusted local daemon sessions',
+  ),
   session_turn_status: NO_MANAGED_EQUIVALENT(
     'Managed reads Turns by list and get, not a status route',
   ),

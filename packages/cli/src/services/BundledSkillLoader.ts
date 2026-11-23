@@ -6,6 +6,8 @@
 
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  getTurnSkillSnapshot,
+  getSkillSource,
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
@@ -98,6 +100,23 @@ export class BundledSkillLoader implements ICommandLoader {
           level: skill.level,
         },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
+          const snapshot = getTurnSkillSnapshot();
+          const selected = snapshot
+            ? snapshot.skills.find(
+                (candidate) =>
+                  candidate.name === skill.name &&
+                  candidate.level === skill.level &&
+                  candidate.extensionName === skill.extensionName,
+              )
+            : skill;
+          if (!selected || selected.userInvocable === false) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: `Skill "${skill.name}" is unavailable in this turn.`,
+            };
+          }
+
           if (this.config?.getShellExecutionSandbox?.()) {
             return {
               type: 'message',
@@ -110,7 +129,10 @@ export class BundledSkillLoader implements ICommandLoader {
           // `skills.disabled` can change after the command registry was built,
           // and a stale command must not install a disabled skill's side
           // effects. `SkillCommandLoader` refuses the same way.
-          if (this.config && !this.config.isSkillEnabled(skill)) {
+          if (
+            this.config &&
+            !this.config.isSkillEnabled(getSkillSource(selected))
+          ) {
             return {
               type: 'message',
               messageType: 'error',
@@ -120,10 +142,10 @@ export class BundledSkillLoader implements ICommandLoader {
           // Apply the skill's declared side effects — allowedTools and
           // frontmatter hooks — before its body is submitted, matching the
           // Skill tool's model-invocation path (#11067).
-          await applySkillSideEffects(this.config, skill);
+          await applySkillSideEffects(this.config, selected);
 
           // Resolve template variables in skill body
-          let body = skill.body;
+          let body = selected.body;
           const modelId = this.config?.getModel()?.trim() || '';
           const cliVersion = this.config?.getCliVersion()?.trim() || 'unknown';
           body = body.replaceAll('{{cliVersion}}', cliVersion);
@@ -138,7 +160,7 @@ export class BundledSkillLoader implements ICommandLoader {
           }
 
           const skillPrompt = buildSkillLlmContent(
-            dirname(skill.filePath),
+            dirname(selected.filePath),
             body,
           );
 

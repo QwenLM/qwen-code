@@ -194,6 +194,7 @@ import { checkSseAdmission, countSseStream } from '../sse-occupancy.js';
 import {
   PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH,
   admitSessionPrompt,
+  findPromptReceipt,
   classifyPromptRequest,
   type SessionPromptAdmission,
 } from './session-prompt-admission.js';
@@ -925,6 +926,7 @@ export function registerSessionRoutes(
   deps: RegisterSessionRoutesDeps,
 ): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
   const btwStreams = new BtwStreamRequests();
+  const skillPreparations = new Map<string, Promise<void>>();
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -9721,7 +9723,132 @@ export function registerSessionRoutes(
         res.once('finish', onResFinish);
 
         let admission: SessionPromptAdmission;
+        let turnSkillLease: string | undefined;
+        let skillDigest: string | undefined;
+        let releasePreparation: (() => void) | undefined;
+        const releaseLease = async () => {
+          if (turnSkillLease)
+            await runtime.bridge.updateTurnSkillLease?.(
+              sessionId,
+              turnSkillLease,
+              'release',
+            );
+        };
         try {
+          const pinSkills = body['pinSkills'];
+          const expectedDigest = body['expectedSkillDigest'];
+          if (
+            (pinSkills !== undefined && typeof pinSkills !== 'boolean') ||
+            (expectedDigest !== undefined &&
+              (pinSkills !== true ||
+                typeof expectedDigest !== 'string' ||
+                !/^[a-f0-9]{64}$/.test(expectedDigest)))
+          ) {
+            res.status(400).json({
+              error:
+                'Use a boolean pinSkills and an optional SHA-256 expectedSkillDigest with pinSkills enabled',
+              code: 'invalid_turn_skill_options',
+            });
+            return;
+          }
+          delete forwardedBody['pinSkills'];
+          delete forwardedBody['expectedSkillDigest'];
+          const skillPromptHash =
+            pinSkills === true && idempotencyKey !== undefined
+              ? crypto
+                  .createHash('sha256')
+                  .update(JSON.stringify(prompt))
+                  .digest('hex')
+              : undefined;
+          const key =
+            idempotencyKey === undefined
+              ? undefined
+              : JSON.stringify([sessionId, idempotencyKey]);
+          // Serialize only same-key preparations. A synchronous admit below
+          // publishes its receipt before waiting retries can capture again.
+          if (key && !findPromptReceipt(sessionId, idempotencyKey)) {
+            for (
+              let pending = skillPreparations.get(key);
+              pending;
+              pending = skillPreparations.get(key)
+            ) {
+              await pending;
+              abort.signal.throwIfAborted();
+            }
+            if (
+              pinSkills === true &&
+              !findPromptReceipt(sessionId, idempotencyKey)
+            ) {
+              const pending = new Promise<void>((resolve) => {
+                releasePreparation = () => {
+                  skillPreparations.delete(key);
+                  resolve();
+                };
+              });
+              skillPreparations.set(key, pending);
+            }
+          }
+          const hasIncompatibleReceipt = () => {
+            const previous = findPromptReceipt(sessionId, idempotencyKey);
+            if (
+              !previous ||
+              (pinSkills !== true && previous.skillDigest === undefined) ||
+              (previous.skillDigest !== undefined &&
+                previous.skillPromptHash === skillPromptHash &&
+                (expectedDigest === undefined ||
+                  expectedDigest === previous.skillDigest))
+            )
+              return false;
+            res.status(409).json({
+              code: 'turn_skill_receipt_conflict',
+              error:
+                'The idempotency key belongs to a different prompt or skill revision',
+            });
+            return true;
+          };
+          if (hasIncompatibleReceipt()) return;
+          // An accepted retry uses its original receipt even after an update.
+          if (
+            pinSkills === true &&
+            !findPromptReceipt(sessionId, idempotencyKey)
+          ) {
+            if (
+              !runtime.trusted ||
+              runtime.routeFileSystemFactory.sshWorkspace ||
+              !runtime.bridge.updateTurnSkillLease
+            ) {
+              res.status(409).json({
+                code: 'turn_skill_snapshot_unavailable',
+                error: 'The session runtime cannot pin skill files',
+              });
+              return;
+            }
+            turnSkillLease = crypto.randomUUID();
+            const receipt = await runtime.bridge.updateTurnSkillLease(
+              sessionId,
+              turnSkillLease,
+              'prepare',
+            );
+            skillDigest = receipt.digest;
+            if (
+              !skillDigest ||
+              !/^[a-f0-9]{64}$/.test(skillDigest) ||
+              (expectedDigest && expectedDigest !== skillDigest)
+            ) {
+              await releaseLease().catch(() => {});
+              res.status(409).json({
+                code: 'turn_skill_digest_mismatch',
+                error: 'Runtime did not confirm the requested skill revision',
+              });
+              return;
+            }
+            abort.signal.throwIfAborted();
+            runtime.generationGuard?.assertOpen();
+            if (hasIncompatibleReceipt()) {
+              await releaseLease().catch(() => {});
+              return;
+            }
+          }
           admission = admitSessionPrompt(
             {
               archiveCoordinator: deps.archiveCoordinator,
@@ -9734,6 +9861,9 @@ export function registerSessionRoutes(
               sessionId,
               prompt,
               request: forwardedBody,
+              turnSkillLease,
+              skillDigest,
+              skillPromptHash,
               classification,
               idempotencyKey,
               requestDeadlineMs,
@@ -9746,6 +9876,7 @@ export function registerSessionRoutes(
             },
           );
         } catch (err) {
+          await releaseLease().catch(() => {});
           res.off('close', onResClose);
           res.off('finish', onResFinish);
           sendBridgeError(res, err, {
@@ -9753,8 +9884,14 @@ export function registerSessionRoutes(
             sessionId,
           });
           return;
+        } finally {
+          releasePreparation?.();
         }
         res.off('close', onResClose);
+        if (turnSkillLease) {
+          if (admission.deduplicated) await releaseLease().catch(() => {});
+          else void admission.settled.then(releaseLease).catch(() => {});
+        }
         if (admission.deduplicated) {
           res.off('finish', onResFinish);
           res.status(202).json({
@@ -9762,10 +9899,12 @@ export function registerSessionRoutes(
             lastEventId: admission.lastEventId,
             eventEpoch: admission.eventEpoch,
             deduplicated: true,
+            skillDigest: admission.skillDigest,
           });
           return;
         }
         res.status(202).json({
+          skillDigest: admission.skillDigest,
           promptId: admission.promptId,
           lastEventId: admission.lastEventId,
           eventEpoch: admission.eventEpoch,

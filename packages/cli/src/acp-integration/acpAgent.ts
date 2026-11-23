@@ -345,6 +345,12 @@ import { restoreSessionModelThenAuthenticate } from './session-model-persistence
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
+import { TurnSkillLeases } from './session/turn-skill-leases.js';
+import {
+  canApplySkillSideEffects,
+  prepareTurnSkillSnapshot,
+  runWithTurnSkillSnapshot,
+} from '@qwen-code/qwen-code-core';
 import { ActiveWorkReporter } from './active-work-reporter.js';
 import {
   shouldProbeChildHeap,
@@ -525,6 +531,8 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
+  TURN_SKILL_LEASE_META_KEY,
+  TURN_SKILL_LEASE_METHOD,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -3985,6 +3993,7 @@ async function assertManagedConversationDirectoryIdentity(
 
 class QwenAgent implements Agent {
   private readonly workspaceSettings: LoadedSettings;
+  private readonly turnSkillLeases = new TurnSkillLeases();
   private sessions: Map<string, Session> = new Map();
   /**
    * Cross-session messaging for every session this process hosts.
@@ -4820,6 +4829,11 @@ class QwenAgent implements Agent {
     }
     try {
       uiTelemetryService.removeSession(sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await this.turnSkillLeases.collect(sessionId, true);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -7424,6 +7438,12 @@ class QwenAgent implements Agent {
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    const skillLeaseKey =
+      this.privateParentState === 'trusted' &&
+      typeof meta[TURN_SKILL_LEASE_META_KEY] === 'string'
+        ? (meta[TURN_SKILL_LEASE_META_KEY] as string)
+        : undefined;
+    delete meta[TURN_SKILL_LEASE_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedApprovalMode = meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
     const suppliedModeBeforeStart =
@@ -7576,12 +7596,24 @@ class QwenAgent implements Agent {
     }
     calls.add(call);
     try {
-      return await session.prompt(
-        sanitizedParams,
-        invocationContext,
-        call.controller.signal,
-        modelPrompt,
-      );
+      const execute = () =>
+        session.prompt(
+          sanitizedParams,
+          invocationContext,
+          call.controller.signal,
+          modelPrompt,
+        );
+      if (!skillLeaseKey) return await execute();
+      const lease = this.turnSkillLeases.claim(sessionId, skillLeaseKey);
+      try {
+        return await runWithTurnSkillSnapshot(lease.snapshot, execute);
+      } finally {
+        this.turnSkillLeases.settle(sessionId, skillLeaseKey);
+        this.turnSkillLeases.collectWhenDrained(
+          sessionId,
+          () => session.collectActiveWorkHolds().length === 0,
+        );
+      }
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
@@ -10383,6 +10415,76 @@ class QwenAgent implements Agent {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
     switch (method) {
+      case TURN_SKILL_LEASE_METHOD: {
+        const key = params['key'];
+        if (
+          this.privateParentState !== 'trusted' ||
+          typeof key !== 'string' ||
+          !UUID_V4_RE.test(key) ||
+          typeof sessionId !== 'string' ||
+          !sessionConfig
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation',
+          );
+        if (params['action'] === 'release') {
+          await this.turnSkillLeases.releaseQueued(sessionId, key);
+        } else if (params['action'] === 'prepare') {
+          const session = this.sessions.get(sessionId)!;
+          if (!session.collectActiveWorkHolds().length)
+            await this.turnSkillLeases.collect(sessionId);
+          const expectedDigest = params['expectedDigest'];
+          if (
+            expectedDigest !== undefined &&
+            (typeof expectedDigest !== 'string' ||
+              !/^[a-f0-9]{64}$/.test(expectedDigest))
+          )
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected skill digest',
+            );
+          const digest = await this.turnSkillLeases.prepare(
+            sessionId,
+            key,
+            async () => {
+              const manager = sessionConfig.getSkillManager();
+              if (!manager) throw new Error('Skill manager unavailable');
+              const skills = await manager.listSkills({ force: true });
+              if (manager.hasDiscoveryReadErrors())
+                throw new Error('Skill discovery incomplete');
+              const enabled = skills.filter((skill) =>
+                sessionConfig.isSkillEnabled(skill),
+              );
+              if (
+                !sessionConfig.isWorkspaceAgentSession() &&
+                enabled.some(
+                  (skill) =>
+                    canApplySkillSideEffects(skill, sessionConfig) &&
+                    (skill.allowedTools?.length ||
+                      Object.keys(skill.hooks ?? {}).length),
+                )
+              ) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'Skill hooks or allow rules cannot be pinned',
+                );
+              }
+              return prepareTurnSkillSnapshot(enabled, {
+                baseDirectory: sessionConfig.storage.getProjectTempDir(),
+                skillManager: manager,
+                expectedDigest,
+              });
+            },
+          );
+          return { digest };
+        } else
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation action',
+          );
+        return {};
+      }
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
         if (

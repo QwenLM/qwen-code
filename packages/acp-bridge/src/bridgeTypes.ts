@@ -1559,6 +1559,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** Server-owned child reservation, never taken from prompt metadata. */
+  turnSkillLease?: string;
   /** Original text explicitly declared by a supported submission producer. */
   submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
@@ -1615,6 +1617,8 @@ export interface BridgeClientRequestContext {
   deadlineMs?: number;
 }
 
+export const TURN_SKILL_LEASE_META_KEY = 'qwen.daemon.turnSkillLease';
+export const TURN_SKILL_LEASE_METHOD = 'qwen/control/session/turnSkillLease';
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
   'qwen.daemon.expectedApprovalMode';
@@ -2863,6 +2867,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context: { clientId: string },
   ): Promise<McpAppToolResult>;
 
+  /** Reserve or release native skill files before prompt admission. */
+  updateTurnSkillLease?(
+    sessionId: string,
+    key: string,
+    action: 'prepare' | 'release',
+    expectedDigest?: string,
+  ): Promise<{ digest?: string }>;
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,

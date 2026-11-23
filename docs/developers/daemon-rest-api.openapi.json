@@ -3817,6 +3817,22 @@
               "$ref": "#/components/schemas/PromptContentBlock"
             }
           },
+          "pinSkills": {
+            "type": "boolean",
+            "x-qwen-capability": "turn_skill_file_snapshot",
+            "description": "Retain the admitted turn's managed Skill files."
+          },
+          "expectedSkillDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Expected admitted Skill file digest. Requires pinSkills."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Bounded, process-local prompt admission retry identity."
+          },
           "deadlineMs": {
             "type": "integer",
             "minimum": 1,
@@ -3882,6 +3898,15 @@
           },
           "eventEpoch": {
             "type": "string"
+          },
+          "skillDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "The admitted skill-file snapshot digest."
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "description": "An existing admission receipt was returned for this key."
           }
         },
         "additionalProperties": false

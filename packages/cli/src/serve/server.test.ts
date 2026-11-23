@@ -3749,6 +3749,18 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'turn_skill_file_snapshot') {
+          expect(predicate({ turnSkillFileSnapshotAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              turnSkillFileSnapshotAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
         if (feature === 'require_auth') {
           expect(predicate({ requireAuth: true })).toBe(true);
           expect(predicate({ requireAuth: false })).toBe(false);
@@ -21459,6 +21471,84 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(2);
       // The key is route-level admission metadata, never prompt content.
       expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
+    });
+
+    it('pins one skill snapshot for concurrent retries and returns its original receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const bridge = fakeBridge();
+      let completeCapture!: () => void;
+      const capturing = new Promise<void>((resolve) => {
+        completeCapture = resolve;
+      });
+      const update = vi.fn(
+        async (_session: string, _key: string, action: string) => {
+          if (action === 'prepare') {
+            await capturing;
+            return { digest };
+          }
+          return {};
+        },
+      );
+      bridge.updateTurnSkillLease = update;
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const capability = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(capability.body.features).toContain('turn_skill_file_snapshot');
+      const body = {
+        prompt: [{ type: 'text', text: 'pinned' }],
+        pinSkills: true,
+        idempotencyKey: 'pin-1',
+        expectedSkillDigest: digest,
+      };
+      const submit = (params = body) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send(params);
+      const first = submit().then((response) => response);
+      const retry = submit().then((response) => response);
+      try {
+        await vi.waitFor(() => expect(update).toHaveBeenCalled());
+      } finally {
+        completeCapture();
+      }
+      const receipts = await Promise.all([first, retry]);
+      expect(receipts.map((r) => r.status)).toEqual([202, 202]);
+      expect(receipts.map((r) => r.body.skillDigest)).toEqual([digest, digest]);
+      expect(new Set(receipts.map((r) => r.body.promptId)).size).toBe(1);
+      expect(receipts.filter((r) => r.body.deduplicated)).toHaveLength(1);
+      expect(
+        update.mock.calls.filter(([, , action]) => action === 'prepare'),
+      ).toHaveLength(1);
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('pinSkills');
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty(
+        'expectedSkillDigest',
+      );
+
+      const wrong = await submit({
+        ...body,
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(wrong.status).toBe(409);
+      expect(wrong.body.code).toBe('turn_skill_receipt_conflict');
+      const differentPayload = await submit({
+        ...body,
+        prompt: [{ type: 'text', text: 'other' }],
+      });
+      expect(differentPayload.status).toBe(409);
+      const mismatchedNew = await submit({
+        ...body,
+        idempotencyKey: 'pin-other',
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(mismatchedNew.status).toBe(409);
+      expect(mismatchedNew.body.code).toBe('turn_skill_digest_mismatch');
+      expect(bridge.promptCalls).toHaveLength(1);
     });
 
     it('scopes idempotency keys per session (W4)', async () => {

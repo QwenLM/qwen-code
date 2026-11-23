@@ -31,6 +31,7 @@ export {
 export interface AdvertiseFeatureToggles {
   hostedHarness?: boolean;
   requireAuth?: boolean;
+  turnSkillFileSnapshotAvailable?: boolean;
   /**
    * Whether the daemon is serving the workspace-agent collaboration routes
    * (`agent_collaboration_v1`) for this response. Resolved from
@@ -147,6 +148,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.hostedHarness === true,
   ],
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'turn_skill_file_snapshot',
+    (toggles) => toggles.turnSkillFileSnapshotAvailable === true,
+  ],
   [
     'agent_collaboration_v1',
     (toggles) => toggles.agentCollaborationEnabled === true,

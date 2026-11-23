@@ -1226,6 +1226,15 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      turnSkillFileSnapshotAvailable: () =>
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              typeof runtime.bridge.updateTurnSkillLease === 'function',
+          ),
       userSkillActivationAvailable:
         deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:

@@ -72,6 +72,7 @@ interface CreateServeFeaturesDeps {
   localTerminalOpenAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
+  turnSkillFileSnapshotAvailable?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
   getEnv?: () => Readonly<Record<string, string | undefined>>;
 }
@@ -144,6 +145,7 @@ export function createServeFeatures(
       return getAdvertisedServeFeatures(undefined, {
         hostedHarness: opts.profile === 'hosted-harness',
         requireAuth: opts.requireAuth === true,
+        turnSkillFileSnapshotAvailable: deps.turnSkillFileSnapshotAvailable?.(),
         mcpPoolActive: opts.mcpPoolActive !== false,
         allowOriginActive:
           opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,

@@ -979,6 +979,12 @@ export interface PromptRequest {
   /** Per-prompt projection for all subscribers and ring replay; defaults to full. */
   eventDetailMode?: 'full' | 'summary';
   prompt: PromptContentBlock[];
+  /** Opt in when the daemon advertises `turn_skill_file_snapshot`. */
+  pinSkills?: boolean;
+  /** Lowercase SHA-256 of the intended skill material. Requires pinSkills. */
+  expectedSkillDigest?: string;
+  /** Identifies a REST admission retry in the current daemon session. */
+  idempotencyKey?: string;
   /** Deliver the successful final answer directly through a channel worker. */
   delivery?: DaemonChannelDelivery;
   /** Optional ACP _meta passthrough. */
@@ -1006,6 +1012,10 @@ export interface PromptRequest {
  */
 export interface NonBlockingPromptAccepted {
   promptId: string;
+  /** The admitted skill-file digest, present when pinSkills was accepted. */
+  skillDigest?: string;
+  /** The same process-local admission receipt was returned for this key. */
+  deduplicated?: boolean;
   lastEventId: number;
   /**
    * Epoch token of the bus that produced `lastEventId`. Clients that seed
@@ -7454,7 +7464,7 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    signal?.throwIfAborted();
+    await this.requirePinnedPromptCapability(req, signal);
     const releasePromptSlot = this.reservePromptSlot(sessionId);
     let releaseOnExit = true;
     try {
@@ -7472,7 +7482,7 @@ export class DaemonClient {
       );
 
       if (res.status === 202) {
-        const accept = (await res.json()) as NonBlockingPromptAccepted;
+        const accept = await this.readPromptAcceptance(res, req);
         releaseOnExit = false;
         try {
           return await this._awaitTurnComplete(
@@ -7495,6 +7505,8 @@ export class DaemonClient {
           sessionId,
         );
       }
+      if (req.pinSkills)
+        throw new Error('Expected a skill snapshot admission receipt');
       return (await res.json()) as PromptResult;
     } finally {
       if (releaseOnExit) releasePromptSlot();
@@ -7525,6 +7537,7 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
+    await this.requirePinnedPromptCapability(req, signal);
     const res = await this.transport.fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
@@ -7536,13 +7549,43 @@ export class DaemonClient {
     );
 
     if (res.status === 202) {
-      return (await res.json()) as NonBlockingPromptAccepted;
+      return this.readPromptAcceptance(res, req);
     }
 
     if (!res.ok) {
       throw await this.failOnError(res, 'POST /session/:id/prompt', sessionId);
     }
+    if (req.pinSkills)
+      throw new Error('Expected a skill snapshot admission receipt');
     return (await res.json()) as PromptResult;
+  }
+
+  private async requirePinnedPromptCapability(
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    if (req.pinSkills) {
+      await this.requireCapability('turn_skill_file_snapshot');
+      signal?.throwIfAborted();
+    }
+  }
+
+  private async readPromptAcceptance(
+    res: Response,
+    req: PromptRequest,
+  ): Promise<NonBlockingPromptAccepted> {
+    const accepted = (await res.json()) as NonBlockingPromptAccepted;
+    if (
+      req.pinSkills &&
+      (typeof accepted.skillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(accepted.skillDigest) ||
+        (req.expectedSkillDigest &&
+          accepted.skillDigest !== req.expectedSkillDigest))
+    ) {
+      throw new Error('Daemon did not confirm the requested skill snapshot');
+    }
+    return accepted;
   }
 
   private async _awaitTurnComplete(

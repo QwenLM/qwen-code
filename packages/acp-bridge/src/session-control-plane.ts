@@ -176,6 +176,8 @@ import {
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
+  TURN_SKILL_LEASE_META_KEY,
+  TURN_SKILL_LEASE_METHOD,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
@@ -12177,6 +12179,9 @@ export function createSessionControlPlane(
                     meta[DAEMON_SUBMITTED_PROMPT_META_KEY] =
                       context.submittedPrompt;
                   }
+                  delete meta[TURN_SKILL_LEASE_META_KEY];
+                  if (context?.turnSkillLease)
+                    meta[TURN_SKILL_LEASE_META_KEY] = context.turnSkillLease;
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
                   delete meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
@@ -14894,6 +14899,17 @@ export function createSessionControlPlane(
       }
     },
 
+    async updateTurnSkillLease(sessionId, key, action, expectedDigest) {
+      return requestSessionStatus<{ digest?: string }>(
+        sessionId,
+        TURN_SKILL_LEASE_METHOD,
+        {
+          key,
+          action,
+          expectedDigest,
+        },
+      );
+    },
     async getSessionResourcesStatus(sessionId) {
       return requestSessionStatus<ServeSessionResourcesStatus>(
         sessionId,
