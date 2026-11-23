@@ -164,7 +164,7 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 派发进入 `runClaimed` 的恢复路径（Turn 已有 `submission_attempted` 与事件 epoch）：
 
-- **决定。** 决定投递（`QwenHostedHarnessConnector.doResolveAction`）在缓存缺失时先加载 Session 再 resolve，同时协调器的派发做一次 drive load。两次加载按 #17521 的 attachment 规则收敛到同一个 resident。该加载必须走 takeover 恢复臂，而不是得到停靠 Session 的 409；这一点要用测试确认。恢复臂先注册 waiter 再读 Action，从而覆盖在注册前就已胜出的决定（G3 §4.2 第 3 步）。
+- **决定。** 决定投递（`QwenHostedHarnessConnector.doResolveAction`）在缓存缺失时先加载 Session 再 resolve，同时协调器的派发做一次 drive load。两次加载按 #17521 的 attachment 规则收敛到同一个 resident。该加载必须走 takeover 恢复臂，而不是得到停靠 Session 的 409。对 Workspace Session，已有测试确认这一点（[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md) §4.7）；没有 Workspace 且未开启 verified recovery 的 Session 发出的是普通加载，该设计 §4.4 将其列为待验证。恢复臂先注册 waiter 再读 Action，从而覆盖在注册前就已胜出的决定（G3 §4.2 第 3 步）。
 - **取消。** 沿用 G3：恢复后的 Turn 看到 `cancel.requested`，关闭等待，按取消结算。
 - **审批模式变更。** 恢复后的 driver 重建 live poll，按新模式代用户放行或继续等待。恢复臂今天是否重建 live poll 必须用测试确认；如果没有，这是第四阶段需要补上的。
 - **到期或 deadline。** 恢复后的 driver 立即以 `expired` 结束 Action，或因 deadline 而 abort，然后写取消终态。
