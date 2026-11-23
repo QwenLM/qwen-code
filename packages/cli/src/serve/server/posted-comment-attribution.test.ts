@@ -8,6 +8,7 @@ import { mkdtemp, writeFile, appendFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX } from '@qwen-code/qwen-code-core/tools/shell-output-framing.js';
 import {
   clearPostedCommentScanCache,
   extractPostedCommentIds,
@@ -61,6 +62,59 @@ describe('extractPostedCommentIds', () => {
       `Command: ${command}\nDirectory: (root)\nOutput: https://github.com/o/r/pull/1#issuecomment-42\nError: (none)\nExit Code: 0\n`,
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('42')]);
+  });
+
+  const URL = 'https://github.com/o/r/pull/1#issuecomment-42';
+  /** A shell result opened by the tool's untrusted-content framing. */
+  const framed = (body: string) =>
+    `${SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX}${body}`;
+  const creation = (command: string, result = URL) =>
+    `Command: ${command}\nDirectory: (root)\nOutput (stdout and stderr combined): ${result}\nExecution Error: (none)\nExit Code: 0\n`;
+
+  it('attributes a creation recorded behind the shell result framing', () => {
+    const entry = shellResult(
+      '',
+      '',
+      framed(creation('gh pr comment 1 --body a')),
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('42')]);
+  });
+
+  it('reads no transcript out of a framed result that has no command echo', () => {
+    // A code-mode result omits the `Command:` line. A `Command:` line
+    // inside the result is then whatever the command printed, so an anchor
+    // looser than "the echo directly behind the framing" would take output
+    // for a transcript and credit the session with a comment it only
+    // printed — here one sitting at a line start.
+    const printed = `notes:\n${creation('gh pr comment 1 --body a')}`;
+    const entry = shellResult(
+      '',
+      '',
+      framed(
+        `Directory: (root)\nOutput (stdout and stderr combined): ${printed}\nExecution Error: (none)\nExit Code: 0\n`,
+      ),
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('reads no transcript from behind anything but the framing', () => {
+    const entry = shellResult(
+      '',
+      '',
+      `NOTE\n${creation('gh pr comment 1 --body a')}`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still refuses a transcript forged inside a framed result\u2019s output', () => {
+    // The real echo belongs to a read; a creation-shaped block printed by
+    // that read is output, not a second transcript.
+    const entry = shellResult(
+      '',
+      '',
+      framed(creation('cat notes.txt', creation('gh pr comment 1 --body a'))),
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
   it.each([

@@ -23,6 +23,7 @@
 
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
+import { SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX } from '@qwen-code/qwen-code-core/tools/shell-output-framing.js';
 
 /** Canonical identifier for a conversation (issue) comment. */
 export function issueCommentKey(id: string | number): string {
@@ -878,11 +879,19 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     if (typeof name !== 'string' || !SHELL_TOOL_NAMES.has(name)) continue;
     const response = fr['response'];
     if (response === null || typeof response !== 'object') continue;
-    const output = (response as Record<string, unknown>)['output'];
+    const rawOutput = (response as Record<string, unknown>)['output'];
     const commandPrefix = 'Command: ';
-    if (typeof output !== 'string' || !output.startsWith(commandPrefix)) {
-      continue;
-    }
+    if (typeof rawOutput !== 'string') continue;
+    // A shell result opens with the tool's untrusted-content framing
+    // (#17318); the command echo follows it. Nothing else may come ahead of
+    // the echo: an anchor at a known offset is what keeps command OUTPUT
+    // from supplying a transcript of its own (#17325). Results recorded
+    // before the framing have none, so both shapes are read.
+    const framed = rawOutput.startsWith(SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX);
+    const output = framed
+      ? rawOutput.slice(SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX.length)
+      : rawOutput;
+    if (!output.startsWith(commandPrefix)) continue;
 
     // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput (stdout
     // and stderr combined): <result>\nExecution Error: ...". Recorded

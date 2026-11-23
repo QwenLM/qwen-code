@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX } from '@qwen-code/qwen-code-core/tools/shell-output-framing.js';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../../adapters/types';
@@ -261,6 +262,9 @@ describe('shell result presentation', () => {
   it.each([
     envelope(),
     envelope() + '\nNote: long running',
+    // A result recorded since #17318 opens with the shell tool's
+    // untrusted-content framing; the echo still sits right behind it.
+    `${SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX}${envelope()}`,
     'plain output',
     '{"ansiOutput":[],"message":"important"}',
   ])('keeps legacy text verbatim without parsing: %s', (text) => {

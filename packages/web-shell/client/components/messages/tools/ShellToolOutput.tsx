@@ -1,4 +1,5 @@
 import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
+import { SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX } from '@qwen-code/qwen-code-core/tools/shell-output-framing.js';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   CheckIcon,
@@ -97,11 +98,16 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
       : '';
   const command =
     typeof tool.args?.command === 'string' ? tool.args.command : '';
+  // A legacy result opens with the shell tool's untrusted-content framing
+  // (#17318); results recorded before it have none.
   const legacyOutputRepeatsCommand =
     !active &&
     !result &&
     command !== '' &&
-    output.startsWith(`Command: ${command}`);
+    (output.startsWith(`Command: ${command}`) ||
+      output.startsWith(
+        `${SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX}Command: ${command}`,
+      ));
   const showTimeout =
     !!command &&
     !tool.args?.is_background &&
