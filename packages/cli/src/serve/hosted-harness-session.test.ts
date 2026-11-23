@@ -48834,4 +48834,160 @@ describe('idle suspension', () => {
     expect(busy.body.code).toBe('hosted_ownership_release_busy');
     release();
   });
+
+  // The crash aftermath must leave a checkpoint the next turn can start
+  // from: a wait left at await_action failed every later wake turn.
+  it('settles a monitor wake that died in its approval wait so its continuation can run', async () => {
+    domainEnablement.monitorRun = true;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const turnId = 'monitor-1:notify:1';
+    mockApprovalTurn();
+    state.model.mockImplementation(async ({ toolTurn, promptId, signal }) => {
+      if (promptId !== turnId)
+        return { text: 'continued', model: 'test-model' };
+      const call = {
+        name: 'write_file',
+        callId: 'aftermath-original-call',
+        args: { file_path: 'notes.txt', content: 'hello' },
+        isClientInitiated: false,
+        prompt_id: turnId,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      throw new Error('The waiting Turn unexpectedly continued.');
+    });
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const read = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+    const settledOf = async (id: string) =>
+      (await read()).events.find(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === id,
+      )?.payload;
+    try {
+      const original = await app(true);
+      await headers(supertest(original).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const live = (
+        wakeDeps.last as {
+          session: {
+            managed: ManagedSession;
+            monitorWake?: { kick(): void; close(): void };
+          };
+        }
+      ).session;
+      const monitors = new HostedMonitorSession(
+        {
+          authority: live.managed.authority,
+          resources: live.managed.resources,
+        },
+        key,
+      );
+      const binding = { runtimeBindingId: 'binding-1', generation: '1' };
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: key.sessionId,
+        executionCallId: 'call-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await monitors.dispatchStarted('monitor-1', binding);
+      await monitors.attach('monitor-1', binding, { watch: 'started' });
+      await monitors.observe(
+        'monitor-1',
+        { lines: ['one'] },
+        {
+          input: {
+            inputId: turnId,
+            turnId,
+            source: 'monitor',
+            contentRef: await live.managed.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            admissionRef: await live.managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+          },
+        },
+      );
+      live.monitorWake?.kick();
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      // The generation dies at the wait point: its pump stops and nothing
+      // after it reaches the journal, exactly as after a SIGKILL.
+      live.monitorWake?.close();
+      await live.managed.close();
+      const requestId = (await read()).events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          passiveManagedRuntimeRecovery: true,
+        })
+        .expect(200);
+      const continuation = hostedWakeContinuationId(turnId);
+      await vi.waitFor(
+        async () => {
+          expect(await settledOf(continuation)).toMatchObject({
+            outcome: 'completed',
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(await settledOf(turnId)).toMatchObject({ outcome: 'error' });
+      expect(
+        (await read()).events.findLast(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['requestId'] === requestId,
+        )?.payload['state'],
+      ).toBe('cancelled');
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .expect(204);
+    } finally {
+      waiting.mockRestore();
+      state.approvalSelections.clear();
+    }
+  });
 });
