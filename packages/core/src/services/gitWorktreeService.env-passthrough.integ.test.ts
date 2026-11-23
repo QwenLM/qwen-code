@@ -40,6 +40,9 @@ describe('GitWorktreeService — gitEnv passthrough under the simple-git 4 env g
     git(repoRoot, 'config', 'user.email', 't@e.com');
     git(repoRoot, 'config', 'user.name', 't');
     git(repoRoot, 'config', 'commit.gpgsign', 'false');
+    // An ambient core.autocrlf=true rewrites the carried file to CRLF and
+    // fails the content assertion; pin the fixture to LF.
+    git(repoRoot, 'config', 'core.autocrlf', 'false');
     await fs.writeFile(path.join(repoRoot, 'README.md'), 'base\n');
     git(repoRoot, 'add', '.');
     git(repoRoot, 'commit', '-q', '-m', 'init', '--no-verify');

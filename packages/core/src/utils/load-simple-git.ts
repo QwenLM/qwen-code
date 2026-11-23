@@ -37,7 +37,8 @@ export const GIT_ENV_RESTORED_KEYS = [
  * restores for `.env()` clients, plus the ambient operator configuration a
  * client that inherits `process.env` would otherwise lose to the v4 guard —
  * transport credentials, TLS client certificates, the SSH variant, the
- * no-prompt switch and a dedicated global config. Naming a key only lets a
+ * no-prompt switch and the operator's config-tier pins (global, system and
+ * the no-system switch). Naming a key only lets a
  * value already in the child environment survive; it never injects one, so
  * the `.env(gitEnv())` clients keep their scrub. Exec-capable keys
  * (GIT_EXEC_PATH, GIT_PROXY_COMMAND, editors, …) stay unnamed on purpose:
@@ -51,6 +52,8 @@ export const LOADER_ALLOWED_ENVIRONMENT_KEYS = [
   'GIT_SSH_VARIANT',
   'GIT_TERMINAL_PROMPT',
   'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_CONFIG_SYSTEM',
 ] as const;
 
 let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;

@@ -166,6 +166,8 @@ describe('loadSimpleGit', () => {
         GIT_SSH_VARIANT: 'ssh',
         GIT_TERMINAL_PROMPT: '0',
         GIT_CONFIG_GLOBAL: '/tmp/operator-gitconfig',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_SYSTEM: '/tmp/operator-system-gitconfig',
       };
       fs.writeFileSync(shim, `#!/bin/sh\nenv > '${dump}'\nexit 1\n`);
       fs.chmodSync(shim, 0o755);
@@ -205,5 +207,10 @@ describe('loadSimpleGit', () => {
       key.startsWith('GIT_'),
     );
     expect(restored.sort()).toEqual([...GIT_ENV_RESTORED_KEYS].sort());
+    // The loader's own list is what reaches allowEnvironment; deriving both
+    // sides from the same constant would keep a dropped key green.
+    expect(LOADER_ALLOWED_ENVIRONMENT_KEYS).toEqual(
+      expect.arrayContaining(restored),
+    );
   });
 });
