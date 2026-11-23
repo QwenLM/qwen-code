@@ -626,7 +626,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 'auto',
         description:
-          'Controls startup update behavior. "auto" checks for updates on startup and installs them in the background; "notify" checks and shows how to update without ever installing; "off" skips the startup check entirely. A legacy general.enableAutoUpdate resolves automatically: false behaves as "off", true as "auto".',
+          'Controls startup update behavior. "auto" checks for updates on startup and installs them in the background; "notify" checks and shows how to update without installing unattended; "off" skips the startup check entirely. A legacy general.enableAutoUpdate resolves automatically: false behaves as "off", true as "auto".',
         showInDialog: true,
         options: [
           { value: 'auto', label: 'Auto (check + install)' },

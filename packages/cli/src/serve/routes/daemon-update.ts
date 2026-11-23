@@ -104,8 +104,10 @@ function createUpdateController(deps: UpdateRouteDeps) {
   const enabled = async () => {
     if (!deps.restartForUpdate || closed) return false;
     const { loadSettings } = await import('../../config/settings.js');
-    // The daemon only checks and prepares updates (never installs), so any
-    // mode other than 'off' keeps it enabled (#14274).
+    // The route's periodic check only stages a prepared update; activation
+    // happens solely on the explicit restart request, mirroring how an
+    // explicit /update installs in notify mode. So any mode other than 'off'
+    // keeps it enabled (#14274).
     return (
       resolveUpdateMode(
         loadSettings(startupDirectory, {

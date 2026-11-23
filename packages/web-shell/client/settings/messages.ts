@@ -234,7 +234,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '启动时自动检查并安装更新。（已弃用：请使用 general.updateMode）',
   'settings.label.general.updateMode': '更新模式',
   'settings.description.general.updateMode':
-    '控制启动时的更新行为："auto" 检查并自动安装；"notify" 只检查并提示更新命令、从不安装；"off" 完全跳过启动检查。旧键 enableAutoUpdate 会自动换算：false 等同 "off"，true 等同 "auto"；显式 updateMode 优先生效。',
+    '控制启动时的更新行为："auto" 检查并自动安装；"notify" 只检查并提示更新命令、从不自动安装；"off" 完全跳过启动检查。旧键 enableAutoUpdate 会自动换算：false 等同 "off"，true 等同 "auto"；显式 updateMode 优先生效。',
   'settings.option.general.updateMode.auto': '自动（检查并安装）',
   'settings.option.general.updateMode.notify': '仅通知（检查，不安装）',
   'settings.option.general.updateMode.off': '关闭（不做启动检查）',
@@ -624,7 +624,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'При запуске автоматически проверять и устанавливать обновления.',
   'settings.label.general.updateMode': 'Режим обновления',
   'settings.description.general.updateMode':
-    'Управляет обновлением при запуске: "auto" — проверять обновления и устанавливать их в фоновом режиме; "notify" — только проверять и показывать команду обновления, никогда не устанавливать; "off" — полностью пропускать проверку при запуске. Старый ключ enableAutoUpdate пересчитывается автоматически: false эквивалентен "off", true — "auto"; явный updateMode имеет приоритет.',
+    'Управляет обновлением при запуске: "auto" — проверять обновления и устанавливать их в фоновом режиме; "notify" — только проверять и показывать команду обновления, никогда не устанавливать автоматически; "off" — полностью пропускать проверку при запуске. Старый ключ enableAutoUpdate пересчитывается автоматически: false эквивалентен "off", true — "auto"; явный updateMode имеет приоритет.',
   'settings.option.general.updateMode.auto': 'Авто (проверка и установка)',
   'settings.option.general.updateMode.notify':
     'Только уведомление (проверять, не устанавливать)',

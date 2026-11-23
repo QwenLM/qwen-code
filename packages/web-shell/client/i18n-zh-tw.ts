@@ -5876,7 +5876,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.description.general.enableAutoUpdate': '啟動時自動檢查並安裝更新。',
   'settings.label.general.updateMode': '更新模式',
   'settings.description.general.updateMode':
-    '控制啟動時的更新行為："auto" 檢查並自動安裝；"notify" 只檢查並提示更新命令、從不安裝；"off" 完全跳過啟動檢查。舊鍵 enableAutoUpdate 會自動換算：false 等同 "off"，true 等同 "auto"；顯式 updateMode 優先生效。',
+    '控制啟動時的更新行為："auto" 檢查並自動安裝；"notify" 只檢查並提示更新命令、從不自動安裝；"off" 完全跳過啟動檢查。舊鍵 enableAutoUpdate 會自動換算：false 等同 "off"，true 等同 "auto"；顯式 updateMode 優先生效。',
   'settings.option.general.updateMode.auto': '自動（檢查並安裝）',
   'settings.option.general.updateMode.notify': '僅通知（檢查，不安裝）',
   'settings.option.general.updateMode.off': '關閉（不做啟動檢查）',
