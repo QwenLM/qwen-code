@@ -3236,8 +3236,8 @@
   margin-left: 0;
 }
 
-.editorShell[data-web-shell-mobile-composer] .modelToolBtn,
-.editorShell[data-web-shell-mobile-composer] .modeToolBtn {
+.editorShell[data-web-shell-mobile-composer] .modelToolBtn:not(.toolBtnCompact),
+.editorShell[data-web-shell-mobile-composer] .modeToolBtn:not(.toolBtnCompact) {
   min-width: 0;
   max-width: 100%;
   flex: 0 1 auto;
@@ -3284,8 +3284,8 @@
 .mobileContextRow {
   flex: 1 1 0;
   min-width: 0;
-  height: 36px;
-  min-height: 36px;
+  height: 44px;
+  min-height: 44px;
   padding-right: 1px;
   flex-wrap: nowrap;
   overflow: hidden;
@@ -3298,8 +3298,8 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .mobileContextRow button {
-  height: 36px;
-  min-width: 34px;
+  height: 44px;
+  min-width: 44px;
   max-width: 100%;
   flex: 0 1 auto;
 }
@@ -3340,6 +3340,7 @@
 
 .mobileEditingActions:has(.mobileContextRow) .mobileEditingKeys {
   flex: 0 1 auto;
+  min-height: 44px;
 }
 
 .mobileEditingTail {
@@ -3383,52 +3384,6 @@
   flex: 0 1 36px;
 }
 
-.editorShell[data-web-shell-mobile-composer] .mobileEditingTextBtn {
-  height: 36px;
-  min-width: 0;
-  padding: 0 8px;
-  white-space: nowrap;
-  flex: 0 0 auto;
-}
-
-.editorShell[data-web-shell-mobile-composer]
-  .mobileEditingActions:has(.mobileEditingTextBtn) {
-  gap: 1px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.editorShell[data-web-shell-mobile-composer]
-  .mobileEditingActions:has(.mobileEditingTextBtn)::-webkit-scrollbar {
-  display: none;
-}
-
-.editorShell[data-web-shell-mobile-composer]
-  .mobileEditingActions:has(.mobileEditingTextBtn)
-  .mobileEditingKeys,
-.editorShell[data-web-shell-mobile-composer]
-  .mobileEditingActions:has(.mobileEditingTextBtn)
-  .mobileEditingTail {
-  gap: 1px;
-  min-width: 0;
-}
-
-.editorShell[data-web-shell-mobile-composer]
-  .mobileEditingActions:has(.mobileEditingTextBtn)
-  .mobileEditingActionBtn {
-  width: auto;
-  min-width: 0;
-  flex: 1 1 0;
-}
-
-.editorShell[data-web-shell-mobile-composer]
-  .mobileEditingActions:has(.mobileEditingTextBtn)
-  .mobileEditingTextBtn {
-  height: 34px;
-  padding: 0 4px;
-  font-size: 12px;
-}
-
 .mobileEditingActions > button > svg,
 :is(.mobileEditingKeys, .mobileEditingTail) > button > svg {
   width: 18px;
@@ -3440,7 +3395,7 @@
   overflow-x: auto;
   scrollbar-width: none;
   margin-top: -10px;
-  padding: 14px 6px 4px;
+  padding: 2px 6px;
 }
 
 .editorShell[data-web-shell-mobile-composer] .contextRow::-webkit-scrollbar {
@@ -3454,8 +3409,8 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .contextRow button {
-  height: 30px;
-  min-width: 0;
+  height: 44px;
+  min-width: 44px;
   flex: 0 1 auto;
 }
 
@@ -3496,8 +3451,8 @@
   @container (max-width: 260px) {
     .editorShell[data-web-shell-mobile-composer] .mobileEditingActions {
       gap: 1px;
-      overflow-x: auto;
-      scrollbar-width: none;
+      padding-block: 4px;
+      margin-block: -4px;
     }
 
     .editorShell[data-web-shell-mobile-composer]

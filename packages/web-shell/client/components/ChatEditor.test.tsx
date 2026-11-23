@@ -6291,12 +6291,15 @@ describe('ChatEditor mobile composer actions', () => {
       container.querySelector('[data-web-shell-mobile-editing-actions]'),
     ).not.toBeNull();
     const shellButton = () =>
-      [...container.querySelectorAll('button')].find(
-        (button) => button.textContent === 'Shell mode',
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Shell mode"]',
       );
-    expect(shellButton()).toBeUndefined();
+    expect(shellButton()).toBeNull();
     rerenderChatEditor(container, { visibleToolbarActions: [] });
-    expect(shellButton()).toBeDefined();
+    expect(shellButton()).not.toBeNull();
+    expect(
+      shellButton()!.closest('[data-web-shell-mobile-editing-actions]'),
+    ).toBe(null);
   });
 
   it('returns focus to the composer after entering Shell from the drawer', async () => {
@@ -6316,15 +6319,22 @@ describe('ChatEditor mobile composer actions', () => {
     mobileComposer('draft');
     renderChatEditor({ visibleToolbarActions: [] });
 
-    const actions = document.querySelector(
-      '[data-web-shell-mobile-editing-actions]',
+    expect(
+      document
+        .querySelector('[data-web-shell-mobile-editing-actions]')!
+        .querySelectorAll('button'),
+    ).toHaveLength(6);
+    const historyButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Input history"]',
     )!;
-    const historyButton = actions.querySelector<HTMLButtonElement>(
-      '[aria-label="Input history"]',
+    const shellButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Shell mode"]',
     )!;
-    const shellButton = Array.from(actions.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Shell mode',
-    )!;
+    for (const button of [historyButton, shellButton]) {
+      expect(
+        button.closest('[data-web-shell-mobile-editing-actions]'),
+      ).toBeNull();
+    }
 
     const expectMousedownPrevented = (button: HTMLButtonElement) => {
       const pointerDown = new Event('pointerdown', {
@@ -7035,6 +7045,16 @@ describe('ChatEditor mobile composer actions', () => {
       expect(
         container.querySelector('[data-web-shell-composer-context-row]'),
       ).toBeNull();
+      for (const [width, tier] of [
+        [419, 'narrow'],
+        [420, 'medium'],
+        [559, 'medium'],
+        [560, 'wide'],
+      ] as const) {
+        containerWidth = width;
+        act(() => fireResize(observers, surface));
+        expect(actions().getAttribute('data-mobile-layout')).toBe(tier);
+      }
     } finally {
       rectSpy.mockRestore();
       restore();

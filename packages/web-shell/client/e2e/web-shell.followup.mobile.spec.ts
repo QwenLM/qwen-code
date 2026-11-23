@@ -435,14 +435,31 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
             const expand = rects.at(-1)!;
             const expandRight = expand.x + expand.width;
             // All six stays strictly on one compact row; the tail never wraps.
+            const groupBounds = group.getBoundingClientRect();
             if (
               !rects.every(
                 (rect) =>
                   expandRight >= rect.x + rect.width - 1 &&
                   rect.width >= buttonMinWidth &&
                   rect.height === 36 &&
-                  Math.abs(rect.y - expand.y) <= 1,
+                  Math.abs(rect.y - expand.y) <= 1 &&
+                  rect.left >= groupBounds.left - 1 &&
+                  rect.x + rect.width <= groupBounds.right + 1,
               )
+            ) {
+              return false;
+            }
+            // Geometry declarations alone do not prove hit-testability.
+            // The 4px band must resolve to the actual key above and below.
+            if (
+              !buttons.every((button) => {
+                const rect = button.getBoundingClientRect();
+                const x = rect.x + rect.width / 2;
+                return [rect.y - 3, rect.y + rect.height + 3].every((y) => {
+                  const hit = document.elementFromPoint(x, y);
+                  return hit === button || button.contains(hit);
+                });
+              })
             ) {
               return false;
             }

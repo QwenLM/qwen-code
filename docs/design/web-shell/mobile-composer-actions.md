@@ -59,15 +59,25 @@ when there is a draft; stopping never clears that draft. Voice capture retains
 its existing reduced toolbar and hides the context and editing rows.
 
 The editing row stays permanently single-row (`flex-wrap: nowrap`) across all
-widths, shrinking keys smoothly down to 240px viewports without page overflow
-and keeping Shell mode's exit control on the same row. Hide keyboard reserves
-its trailing slot so focus changes never shift the row, and blurs without
-returning focus through the composer surface click handler. Hosts without Add
-retain Shell and history-search entries in the editing row. A modal expanded
+widths without page overflow or horizontally clipped editing keys. Hide
+keyboard reserves its trailing slot so focus changes never shift the row, and
+blurs without returning focus through the composer surface click handler.
+Hosts without Add keep Shell and history-search entries in the bottom toolbar.
+A modal expanded
 editor edits the same controlled draft, preserves its selection when returning,
 and does not submit when closed. Its Done and keyboard controls are touch
 sized. Shell mode gets an explicit exit action. Session/workspace changes and
 disabled state close expanded editing.
+
+Up and down move the caret within the draft and right moves to the next
+grapheme or accepts a completion when offered. They never step through prompt
+history on touch: restoring entries into a plain textarea cannot rebuild the
+rich inline tag chips, so history recall stays in the dedicated search panel.
+Shell entry/exit and history search live in the Add drawer; hosts that omit
+Add keep both entries in the bottom toolbar instead of squeezing extra
+controls into the editing keys' line. The narrow editing row therefore holds
+exactly the six editing controls even during Shell mode. Inline and
+below-composer workspace and Git controls retain 44px targets.
 
 ### Touch add menu
 
@@ -98,8 +108,8 @@ Reuse the existing Dialog and Drawer primitives and
 Web Shell portal root. No new dependency or public customization API is needed.
 The add control remains host opt-in. A host that explicitly enables a command
 button retains a reachable command picker on mobile outside Shell mode.
-Hosts without Add retain Shell and history-search buttons in the editing row;
-this fallback does not enable file ingestion or references.
+Hosts without Add retain Shell and history-search buttons in the bottom
+toolbar; this fallback does not enable file ingestion or references.
 
 The history search must have a visible close action and remain touch usable.
 It opens upward from the composer, so its height is also capped by the room
@@ -138,21 +148,25 @@ harness for deterministic UI coverage. Verify local bundled UI when available.
 Record any runtime limitations separately from mocked browser results.
 
 - At phone widths, the old 18-action grid and Tab/Esc keys are absent; the
-  editing row stays strictly single-row with the 6 editing keys (`↑`, `↓`,
-  `→`, `/`, hide keyboard, expand editor), while workspace/Git move below the
-  composer while blurred on narrow widths (`< 420px`) and stay inline on
-  medium (`420px–559px`, compact Git) and wide (`≥ 560px`, full Git) iPad
-  widths. Toolbar actions are reachable with no horizontal overflow. Desktop
-  toolbar behavior remains.
+  editing row contains only the 6 editing keys (`↑`, `↓`, `→`, `/`, hide
+  keyboard, expand editor). Workspace/Git move below the composer while
+  blurred at narrow container widths (`< 420px`) and remain inline at medium
+  container widths (`420px–559px`, compact Git) or wide container widths
+  (`≥ 560px`, full Git). These thresholds are measured against the composer
+  container, not the viewport; an open sidebar can keep an iPad in the narrow
+  tier. Existing sessions whose header already owns the workspace do not
+  duplicate it below the composer. Toolbar actions remain reachable without
+  horizontal overflow; desktop toolbar behavior remains unchanged.
 - Desktop Ctrl+R keeps the search field visible and focused in a short window
   (1280x300), overlapping the composer when necessary. Escape preserves the
   draft and returns focus to the editor. With enough room, the panel remains
   above the composer.
 - With a soft keyboard open at a Pixel 7 keyboard height (about 412x450),
-  attachments stay reachable beside the context row, and the history search
-  field and close action stay reachable below the header. Below roughly 430px
-  of viewport height the composer is already at its cap, so the attachments
-  strip shrinks toward a sliver.
+  attachments stay reachable as the narrow below-composer strip unmounts on
+  focus; medium/wide inline context also receives its measured height back
+  inside the cap. The history search field and close action remain reachable
+  below the header. Below roughly 430px of viewport height the composer is
+  already at its cap, so the attachments strip shrinks toward a sliver.
 - Stop works with a pending draft and keeps the draft; send still queues it.
 - Hide keyboard blurs the editor; expand/edit/Done preserves text, selection,
   attachments, and references. Switching sessions cannot leak expanded drafts.
@@ -162,9 +176,13 @@ Record any runtime limitations separately from mocked browser results.
 - Commands and skills preserve existing drafts and tags; history can be opened,
   selected, or dismissed. Live voice remains accessible.
 - History search restores a selected input and the draft focus without
-  submitting. All 6 permanent editing-row keys stay on one row and inside the
-  viewport at 1024px, 480px, 390px, 345px, 320px, 310px, and 240px widths with
-  zero horizontal page overflow.
+  submitting. The composer container boundaries resolve narrow at 419px,
+  medium at 420px and 559px, and wide at 560px. At 1024px, 480px, 390px,
+  345px, 320px, 310px, and 240px viewport widths, all 6 keys remain on one
+  row inside the editing container, respect their width floors, and produce
+  no horizontal page overflow. Coordinate hit tests must resolve the actual
+  key three pixels above and below its 36px visual box, confirming the 44px
+  touch band is effective rather than merely declared.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

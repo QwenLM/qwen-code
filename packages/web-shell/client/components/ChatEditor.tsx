@@ -4296,6 +4296,45 @@ export const ChatEditor = memo(
                 : undefined
             }
           >
+            {isMobile &&
+              !isSimple &&
+              !mobileVoiceActive &&
+              !showAddMenuAction && (
+                <>
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.history')}
+                    title={t('composerMobile.history')}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={core.searchState.openHistorySearch}
+                  >
+                    <HistoryIcon />
+                  </button>
+                  {shellModeEnabled && (
+                    <button
+                      type="button"
+                      className={styles.toolBtn}
+                      disabled={disabled}
+                      aria-label={t(
+                        core.shellMode
+                          ? 'quickActions.exitShellMode'
+                          : 'quickActions.shellMode',
+                      )}
+                      title={t(
+                        core.shellMode
+                          ? 'quickActions.exitShellMode'
+                          : 'quickActions.shellMode',
+                      )}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={core.toggleShellMode}
+                    >
+                      <span aria-hidden="true">!</span>
+                    </button>
+                  )}
+                </>
+              )}
             {!isSimple && toolbarSecondary}
             {modeToggle}
             {showToolbarAction('voice') && (
@@ -4951,33 +4990,6 @@ export const ChatEditor = memo(
                       compactGit: mobileLayoutTier === 'medium',
                     })}
                   </div>
-                )}
-                {!showAddMenuAction && (
-                  <button
-                    type="button"
-                    className={`${styles.toolBtn} ${styles.mobileEditingActionBtn}`}
-                    disabled={disabled}
-                    aria-label={t('composerMobile.history')}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={core.searchState.openHistorySearch}
-                  >
-                    <HistoryIcon />
-                  </button>
-                )}
-                {shellModeEnabled && (core.shellMode || !showAddMenuAction) && (
-                  <button
-                    type="button"
-                    className={`${styles.toolBtn} ${styles.mobileEditingTextBtn}`}
-                    disabled={disabled}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={core.toggleShellMode}
-                  >
-                    {t(
-                      core.shellMode
-                        ? 'quickActions.exitShellMode'
-                        : 'quickActions.shellMode',
-                    )}
-                  </button>
                 )}
                 <div
                   className={styles.mobileEditingKeys}

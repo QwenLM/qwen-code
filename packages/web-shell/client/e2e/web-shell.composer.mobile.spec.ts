@@ -1641,6 +1641,14 @@ test('mobile context icon is centered in a compact toolbar target @smoke', async
   const icon = (await context.locator('svg').boundingBox())!;
   expect(button.width).toBe(44);
   expect(button.height).toBe(44);
+  for (const selector of [
+    '[data-web-shell-model-button]',
+    '[data-web-shell-mode-button]',
+  ]) {
+    const target = (await page.locator(selector).boundingBox())!;
+    expect(target.width).toBeGreaterThanOrEqual(44);
+    expect(target.height).toBeGreaterThanOrEqual(44);
+  }
   expect(
     Math.abs(icon.x + icon.width / 2 - button.x - button.width / 2),
   ).toBeLessThanOrEqual(1);
@@ -1711,8 +1719,11 @@ test('iPad touch composer shares the single editing row with workspace and git w
   const branchBox = (await branch.boundingBox())!;
   const caretUpBox = (await caretUp.boundingBox())!;
   const expandBox = (await expand.boundingBox())!;
-  expect(Math.abs(workspaceBox.y - expandBox.y)).toBeLessThanOrEqual(1);
-  expect(Math.abs(branchBox.y - expandBox.y)).toBeLessThanOrEqual(1);
+  const workspaceCenterY = workspaceBox.y + workspaceBox.height / 2;
+  const branchCenterY = branchBox.y + branchBox.height / 2;
+  const expandCenterY = expandBox.y + expandBox.height / 2;
+  expect(Math.abs(workspaceCenterY - expandCenterY)).toBeLessThanOrEqual(1);
+  expect(Math.abs(branchCenterY - expandCenterY)).toBeLessThanOrEqual(1);
   expect(branchBox.x + branchBox.width).toBeLessThanOrEqual(caretUpBox.x);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
     1024,
@@ -1753,6 +1764,11 @@ for (const width of [240, 310, 320, 345, 390, 480]) {
     const idleEditingHeight = (await editingKeys.boundingBox())!.height;
 
     const workspaceBeforeTap = (await workspace.boundingBox())!;
+    expect(workspaceBeforeTap.height).toBeGreaterThanOrEqual(44);
+    const gitHeight = await composer
+      .locator('[data-web-shell-git-branch]')
+      .evaluate((element) => element.getBoundingClientRect().height);
+    expect(gitHeight).toBeGreaterThanOrEqual(44);
     const value = workspace.locator('[data-slot="select-value"]');
     const initialWorkspaceLabel = await value.innerText();
     if (await value.isVisible()) {
@@ -1785,6 +1801,9 @@ for (const width of [240, 310, 320, 345, 390, 480]) {
         actions.locator('button[aria-label="Workspace"]'),
       ).toHaveCount(1);
       await expect(
+        actions.locator('[data-web-shell-git-branch]'),
+      ).toBeVisible();
+      await expect(
         composer.locator('[data-web-shell-composer-context-row]'),
       ).toHaveCount(0);
     } else {
@@ -1797,14 +1816,22 @@ for (const width of [240, 310, 320, 345, 390, 480]) {
       await expect(
         actions.locator('button[aria-label="Workspace"]'),
       ).toHaveCount(0);
-      if (width <= 320) {
+      const composerWidth = await composer.evaluate(
+        (element) =>
+          element
+            .querySelector('[data-web-shell-composer-surface]')!
+            .getBoundingClientRect().width,
+      );
+      if (width <= 320 || composerWidth <= 320) {
         await expect(value).toBeHidden();
         await expect(branchLabel).toBeHidden();
-        await expect(workspace).toBeVisible();
-        await expect(
-          belowRow.locator('[data-web-shell-git-branch]'),
-        ).toBeVisible();
+      } else {
+        await expect(branchLabel).toBeVisible();
       }
+      await expect(workspace).toBeVisible();
+      await expect(
+        belowRow.locator('[data-web-shell-git-branch]'),
+      ).toBeVisible();
     }
 
     await textarea.tap();
@@ -1831,7 +1858,9 @@ for (const width of [240, 310, 320, 345, 390, 480]) {
       const caretUpBox = (await editingKeys
         .locator('[data-web-shell-mobile-caret-up]')
         .boundingBox())!;
-      expect(Math.abs(workspaceBox.y - firstKeyY)).toBeLessThanOrEqual(1);
+      const workspaceCenterY = workspaceBox.y + workspaceBox.height / 2;
+      const caretCenterY = caretUpBox.y + caretUpBox.height / 2;
+      expect(Math.abs(workspaceCenterY - caretCenterY)).toBeLessThanOrEqual(1);
       expect(workspaceBox.x + workspaceBox.width).toBeLessThanOrEqual(
         caretUpBox.x,
       );
@@ -1961,8 +1990,12 @@ test('mobile workspace row does not shrink the attachments strip @smoke', async 
     target: Page,
     scenario: WebShellDaemonScenario,
     withRow: boolean,
-  ): Promise<number> => {
-    await target.setViewportSize({ width: 412, height: 360 });
+  ): Promise<{
+    height: number;
+    inlineContextCount: number;
+    inlineContextHeight: string;
+  }> => {
+    await target.setViewportSize({ width: 480, height: 360 });
     await installScenario(target, scenario, testInfo);
     await target.goto('/');
     const textarea = target.locator(COMPOSER_TEXTAREA);
@@ -1978,7 +2011,20 @@ test('mobile workspace row does not shrink the attachments strip @smoke', async 
     // Attached, not visible: when the cap rule is broken the strip collapses
     // to 0px, and the comparison below — not the wait — should be what fails.
     await expect(strip).toBeAttached();
-    return strip.evaluate((element) => element.getBoundingClientRect().height);
+    return {
+      height: await strip.evaluate(
+        (element) => element.getBoundingClientRect().height,
+      ),
+      inlineContextCount: await target
+        .locator('[data-web-shell-mobile-editing-actions]')
+        .locator('[data-web-shell-git-branch]')
+        .count(),
+      inlineContextHeight: await target.evaluate(() =>
+        getComputedStyle(
+          document.querySelector('[data-web-shell-mobile-editing-actions]')!,
+        ).getPropertyValue('--chat-editor-context-row-height'),
+      ),
+    };
   };
   const withRow = await stripHeight(page, createGitWorkspaceScenario(), true);
   const secondPage = await page.context().newPage();
@@ -1988,7 +2034,10 @@ test('mobile workspace row does not shrink the attachments strip @smoke', async 
       createWebShellDaemonScenario(),
       false,
     );
-    expect(withRow).toBeGreaterThanOrEqual(withoutRow);
+    expect(withRow.inlineContextCount).toBe(1);
+    expect(withRow.inlineContextHeight).toBe('44px');
+    expect(withoutRow.inlineContextCount).toBe(0);
+    expect(withRow.height).toBeGreaterThanOrEqual(withoutRow.height);
   } finally {
     await secondPage.close();
   }
@@ -2160,8 +2209,10 @@ test('mobile Shell entry closes the drawer and returns editor focus @smoke', asy
   await expect(textarea).toBeFocused();
   await expect(textarea).toHaveValue('keep draft');
   await expect(
-    page.getByRole('button', { name: 'Exit Shell', exact: true }),
-  ).toBeVisible();
+    page
+      .locator('[data-web-shell-mobile-editing-actions]')
+      .getByRole('button', { name: 'Exit Shell', exact: true }),
+  ).toHaveCount(0);
   await page.getByRole('button', { name: 'Add to message', exact: true }).tap();
   const drawer = page.locator('[data-web-shell-mobile-add-menu]');
   await expect(
@@ -2191,30 +2242,50 @@ for (const width of [240, 360]) {
       .tap();
     await page.getByRole('button', { name: 'Shell mode', exact: true }).tap();
     const actions = page.locator('[data-web-shell-mobile-editing-actions]');
-    const exitShell = actions.getByRole('button', {
-      name: 'Exit Shell',
-      exact: true,
-    });
-    await expect(exitShell).toBeVisible();
     await expect(page.locator('[data-web-shell-mobile-add-menu]')).toHaveCount(
       0,
     );
+    await expect(
+      actions.getByRole('button', { name: 'Exit Shell', exact: true }),
+    ).toHaveCount(0);
 
     const buttons = actions.getByRole('button');
-    await expect(buttons).toHaveCount(7);
-    const boxes = await Promise.all(
-      (await buttons.all()).map((button) => button.boundingBox()),
-    );
-    const firstY = boxes[0]!.y;
-    for (const box of boxes) {
-      expect(box).not.toBeNull();
-      expect(Math.abs(box!.y - firstY)).toBeLessThanOrEqual(1);
-      expect(box!.x).toBeGreaterThanOrEqual(0);
-      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+    await expect(buttons).toHaveCount(6);
+    const actionBox = (await actions.boundingBox())!;
+    for (const button of await buttons.all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.width).toBeGreaterThanOrEqual(width <= 260 ? 26 : 34);
+      expect(box.height).toBe(36);
+      expect(Math.abs(box.y - actionBox.y)).toBeLessThanOrEqual(5);
+      expect(box.x).toBeGreaterThanOrEqual(actionBox.x - 1);
+      expect(box.x + box.width).toBeLessThanOrEqual(
+        actionBox.x + actionBox.width + 1,
+      );
+      const hitAreas = await button.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const x = rect.x + rect.width / 2;
+        return [rect.y - 3, rect.y + rect.height + 3].every((y) => {
+          const hit = document.elementFromPoint(x, y);
+          return hit === element || element.contains(hit);
+        });
+      });
+      expect(hitAreas).toBe(true);
     }
+    expect(
+      await actions.evaluate((el) => el.scrollWidth - el.clientWidth <= 1),
+    ).toBe(true);
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBe(width);
+
+    // The shell exit stays available in the Add drawer, outside the 6-key row.
+    await page
+      .getByRole('button', { name: 'Add to message', exact: true })
+      .tap();
+    const drawer = page.getByRole('dialog', { name: 'Add to message' });
+    await drawer.getByRole('button', { name: 'Exit Shell', exact: true }).tap();
+    await expect(textarea).toBeFocused();
+    await expect(textarea).toHaveValue('!pwd');
 
     // The trailing Expand editor action is directly tappable without scrolling
     // the editing row horizontally on a 240px viewport.
