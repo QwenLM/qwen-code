@@ -483,6 +483,9 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(screen.queryByText(/unsaved-id/)).toBeNull();
     expect(screen.queryByText(/discard-me/)).toBeNull();
     expect(
+      screen.getByText('Could not list models. Enter model IDs manually.'),
+    ).toBeTruthy();
+    expect(
       screen.getByText('Enter model IDs separated by commas.'),
     ).toBeTruthy();
     await typeText('fallback-model');

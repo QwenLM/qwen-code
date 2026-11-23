@@ -24,6 +24,8 @@ export default {
   Retry: 'Retry',
   'Connecting…': 'Connecting…',
   'Loading models from provider…': 'Loading models from provider…',
+  'Could not list models. Enter model IDs manually.':
+    'Could not list models. Enter model IDs manually.',
   'Recommended models · provider list unavailable, showing built-ins':
     'Recommended models · provider list unavailable, showing built-ins',
   'Generated UI': 'Generated UI',

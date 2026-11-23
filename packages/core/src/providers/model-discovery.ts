@@ -118,6 +118,10 @@ export async function discoverProviderModels({
     let base = normalizedBaseUrl.replace(/\/+$/, '');
     if (protocol !== 'openai') base = base.replace(/\/v1$/, '') + '/v1';
     const modelsUrl = `${base}/models${protocol === 'anthropic' ? '?limit=1000' : ''}`;
+    const hostname = new URL(base).hostname.toLowerCase();
+    const useAnthropicApiKey =
+      protocol === 'anthropic' &&
+      (hostname === 'api.anthropic.com' || hostname.endsWith('.anthropic.com'));
     const result = await fetchWithPolicy(modelsUrl, {
       timeoutMs: DISCOVERY_TIMEOUT_MS,
       maxBytes: DISCOVERY_MAX_BYTES,
@@ -125,7 +129,10 @@ export async function discoverProviderModels({
       headers: {
         Accept: 'application/json',
         ...(protocol === 'anthropic'
-          ? { 'x-api-key': normalizedApiKey, 'anthropic-version': '2023-06-01' }
+          ? { 'anthropic-version': '2023-06-01' }
+          : {}),
+        ...(useAnthropicApiKey
+          ? { 'x-api-key': normalizedApiKey }
           : { Authorization: `Bearer ${normalizedApiKey}` }),
       },
       signal,

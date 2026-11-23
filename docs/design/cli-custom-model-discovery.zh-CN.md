@@ -34,7 +34,9 @@ CLI 已为部分内置预设提供模型发现，但自定义供应商仍须手�
 复用 core `providers/model-discovery.ts` 的有界请求、解析、ID 校验、
 去重及预设元数据保留。增加可选协议，默认保留现有 OpenAI 行为。
 Chat Completions 追加 `/models`；Responses 与 Anthropic 归一化末尾
-`/v1` 后追加 `/v1/models`。Anthropic 使用对应版本与 API-key 认证头。
+`/v1` 后追加 `/v1/models`。Anthropic 保留版本头并对齐运行时认证：
+原生 Anthropic 主机使用 `x-api-key`，代理使用 Bearer 认证。
+两种渲染器均在自定义列表不可用时明确提示手动填写。
 支持标准 `data` 数组及网关 `models` 映射。保持五秒、一 MiB 上限及
 失败返回 null 的约定，兼容现有预设调用者。
 

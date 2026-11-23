@@ -40,7 +40,9 @@ Reuse core `providers/model-discovery.ts` for bounded network requests, parsing,
 ID validation, deduplication and curated-model preservation. Add an optional
 protocol with the existing OpenAI behavior as default. Chat Completions appends
 `/models`; Responses and Anthropic normalize a trailing `/v1` before appending
-`/v1/models`. Anthropic uses its version and API-key headers. Accept standard
+`/v1/models`. Anthropic sends its version header and matches runtime authentication:
+native Anthropic hosts use `x-api-key`, while proxies use Bearer authentication.
+Unavailable custom listings show a manual-entry notice in both renderers. Accept standard
 `data` lists and gateway `models` maps. Keep the five-second/one-MiB limits and
 failure-to-null contract for existing preset consumers.
 

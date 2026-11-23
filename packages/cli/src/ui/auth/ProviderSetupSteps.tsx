@@ -582,6 +582,11 @@ function ModelIdsStep({
 
   return (
     <Box marginTop={1} flexDirection="column">
+      {recommendationSource === 'fallback' && config.uiGroup === 'custom' && (
+        <Text color={theme.text.secondary}>
+          {t('Could not list models. Enter model IDs manually.')}
+        </Text>
+      )}
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
           {defaultIds

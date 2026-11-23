@@ -61,7 +61,7 @@ describe('discoverProviderModels', () => {
     [
       'anthropic',
       'https://example.com/prefix/v1/models?limit=1000',
-      'x-api-key',
+      'Authorization',
     ],
   ] as const)(
     'uses %s listing conventions and accepts gateway maps',
@@ -80,13 +80,34 @@ describe('discoverProviderModels', () => {
         url,
         expect.objectContaining({
           headers: expect.objectContaining({
-            [authHeader]:
-              protocol === 'anthropic' ? 'secret-key' : 'Bearer secret-key',
+            [authHeader]: 'Bearer secret-key',
           }),
         }),
       );
     },
   );
+
+  it.each([
+    ['https://api.anthropic.com', true],
+    ['https://sandbox.anthropic.com/prefix', true],
+    ['https://API.ANTHROPIC.COM:443/v1/', true],
+    ['https://proxy.example.com/prefix', false],
+    ['https://api.anthropic.com.evil.example/v1', false],
+    ['https://api.anthropic.com@proxy.example.com/v1', false],
+  ])('matches runtime Anthropic auth for %s', async (baseUrl, native) => {
+    fetchWithPolicyMock.mockResolvedValue(response({ data: ids('model') }));
+    await discoverProviderModels({
+      ...options,
+      baseUrl,
+      protocol: 'anthropic',
+    });
+    const headers = fetchWithPolicyMock.mock.calls[0][1].headers;
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(headers['x-api-key']).toBe(native ? 'secret-key' : undefined);
+    expect(headers.Authorization).toBe(
+      native ? undefined : 'Bearer secret-key',
+    );
+  });
 
   it('ignores malformed gateway map entries instead of offering their keys', async () => {
     fetchWithPolicyMock.mockResolvedValue(

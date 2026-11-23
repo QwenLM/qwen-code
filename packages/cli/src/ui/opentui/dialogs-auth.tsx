@@ -1050,6 +1050,12 @@ function ModelsStep({
       .join(', ');
     return (
       <box flexDirection="column" marginTop={1}>
+        {recommendationSource === 'fallback' &&
+          provider.uiGroup === 'custom' && (
+            <text fg={C.dim}>
+              {t('Could not list models. Enter model IDs manually.')}
+            </text>
+          )}
         <box marginTop={1}>
           <text fg={C.dim}>
             {defaultIds

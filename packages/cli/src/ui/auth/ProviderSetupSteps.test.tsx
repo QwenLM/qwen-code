@@ -858,6 +858,26 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('explains unavailable custom discovery and keeps manual submission usable', async () => {
+    discoverProviderModelsMock.mockResolvedValue(null);
+    const submitModelIds = vi.fn();
+    const flow = createCustomModelIdsFlow({
+      modelIds: 'manual-model',
+      submitModelIds,
+    });
+    flow.state.provider = customProvider;
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+    expect(lastFrame()).toContain(
+      'Could not list models. Enter model IDs manually.',
+    );
+    pressKey('return', '\r');
+    expect(submitModelIds).toHaveBeenCalled();
+    unmount();
+  });
+
   it('falls back to built-ins after an unavailable catalog', async () => {
     discoverProviderModelsMock.mockResolvedValue(null);
     const submitModelIds = vi.fn();
