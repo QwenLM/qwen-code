@@ -9,9 +9,12 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -550,5 +553,99 @@ describe('verify-pr-vm-collector', () => {
       { encoding: 'utf8' },
     );
     expect(badDeadline.status).toBe(2);
+  });
+
+  it('commits a contract-max 8 x 2 MiB evidence set plus mandatory reports under the default 20 MiB budget and tolerates pre-existing non-dir reserved names', async () => {
+    const makeChunkedFile = (name, buf) => {
+      const sha = createHash('sha256').update(buf).digest('hex');
+      const parts = [makeFileBegin(name, buf.length)];
+      for (let off = 0; off < buf.length; off += 2048) {
+        parts.push(
+          makeFrame('C', buf.subarray(off, Math.min(off + 2048, buf.length))),
+        );
+      }
+      parts.push(makeFrame('E', sha));
+      return Buffer.concat(parts);
+    };
+
+    // 1. Default 20 MiB total cap accepts 8 x 2 MiB PNGs + report/verdict/assertions/log (> 16 MiB)
+    const dir = makeTmpDir('qc-20m-');
+    const sock = join(dir, 'v.sock');
+    const vault = join(dir, 'vault');
+    const srv = startCollectorServer({
+      socketPath: sock,
+      vaultDir: vault,
+      readDeadlineMs: 15000,
+    });
+    await srv.ready;
+
+    const twoMibPng = Buffer.alloc(2 * 1024 * 1024, 0x42);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(
+      twoMibPng,
+      0,
+    );
+    const frames = [makeFrame('H', 'report-v1')];
+    for (let i = 1; i <= 8; i += 1) {
+      frames.push(makeChunkedFile(`evidence/0${i}-img.png`, twoMibPng));
+    }
+    frames.push(
+      makeWholeFile('report.md', 'merge-ready report\n'),
+      makeWholeFile('verdict.txt', 'merge-ready\n'),
+      makeWholeFile('assertions.json', '{"pass":1,"fail":0,"total":1}\n'),
+      makeWholeFile('logs/run.log', 'ok\n'),
+      makeFrame('R'),
+    );
+    const reply = await sendTransaction(sock, () => Buffer.concat(frames));
+    const sum = await srv.done;
+    expect(reply).toEqual({ kind: 'O', reason: 'complete' });
+    expect(sum.outputStatus).toBe('complete');
+    expect(sum.vaultEntries).toHaveLength(12);
+
+    // 2. Exceeding the default 20 MiB total cap (11 x 2 MiB > 20 MiB) is still rejected
+    const dOver = makeTmpDir('qc-over20m-');
+    const sOver = join(dOver, 'v.sock');
+    const vOver = join(dOver, 'vault');
+    const srvOver = startCollectorServer({
+      socketPath: sOver,
+      vaultDir: vOver,
+      readDeadlineMs: 15000,
+    });
+    await srvOver.ready;
+    const overFrames = [makeFrame('H', 'report-v1')];
+    for (let i = 1; i <= 10; i += 1) {
+      const idx = String(i).padStart(2, '0');
+      overFrames.push(makeChunkedFile(`evidence/${idx}-img.png`, twoMibPng));
+    }
+    overFrames.push(makeFileBegin('report.md', 1));
+    const rOver = await sendTransaction(sOver, () => Buffer.concat(overFrames));
+    const sumOver = await srvOver.done;
+    expect(rOver).toEqual({ kind: 'E', reason: 'total-too-large' });
+    expect(sumOver.outputStatus).toBe('rejected');
+    expect(sumOver.vaultEntries).toEqual([]);
+
+    // 3. Pre-existing non-directory `logs` file and symlink `evidence` in vault do not crash finalisation or follow symlinks
+    const dPre = makeTmpDir('qc-predir-');
+    const sPre = join(dPre, 'v.sock');
+    const vPre = join(dPre, 'vault');
+    const outside = join(dPre, 'outside-dir');
+    mkdirSync(vPre, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.txt'), 'outside\n');
+    writeFileSync(join(vPre, 'logs'), 'plain-file-not-dir\n');
+    symlinkSync(outside, join(vPre, 'evidence'));
+
+    const srvPre = startCollectorServer({ socketPath: sPre, vaultDir: vPre });
+    await srvPre.ready;
+    const rPre = await sendTransaction(sPre, () =>
+      Buffer.concat([
+        makeFrame('H', 'report-v1'),
+        makeWholeFile('report.md', 'ok\n'),
+        makeFrame('R'),
+      ]),
+    );
+    const sumPre = await srvPre.done;
+    expect(rPre).toEqual({ kind: 'O', reason: 'complete' });
+    expect(sumPre.outputStatus).toBe('complete');
+    expect(sumPre.vaultEntries).toEqual(['evidence', 'logs', 'report.md']);
   });
 });

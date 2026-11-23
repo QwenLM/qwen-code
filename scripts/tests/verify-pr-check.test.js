@@ -3803,6 +3803,22 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(checkTrustClassification(null, HEAD).errors.join('\n')).toMatch(
       /trustClassification must be a JSON object/,
     );
+    const directNullArtifacts = checkArtifacts({
+      files: validFiles(),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      trustClassification: null,
+    });
+    expect(directNullArtifacts.errors.join('\n')).toMatch(
+      /trustClassification must be a JSON object/,
+    );
+    const directUndefArtifacts = checkArtifacts({
+      files: validFiles(),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      trustClassification: undefined,
+    });
+    expect(directUndefArtifacts.errors).toEqual([]);
     const nullTcCtx = join(base, 'null-tc.json');
     const nullTcText = JSON.stringify({ ...ctxObj, trustClassification: null });
     writeFileSync(nullTcCtx, nullTcText);
