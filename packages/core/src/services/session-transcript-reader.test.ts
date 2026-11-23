@@ -2455,6 +2455,38 @@ describe('SessionTranscriptReader', () => {
     );
   });
 
+  it('marks a mid-scan heap spike retryable and does not poison the prompt cache', async () => {
+    const records = longTurn(4, () => 'answer');
+    await writeRecords(records);
+    const expectedPromptTime = records[0]?.timestamp;
+    setSessionTranscriptMaxIndexEstimateBytesForTest(64 * 1024);
+    const original = process.memoryUsage.bind(process);
+    let calls = 0;
+    const spy = vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
+      calls += 1;
+      const usage = original();
+      return calls === 1
+        ? usage
+        : { ...usage, heapUsed: usage.heapUsed + 128 * 1024 };
+    });
+    const reader = newReader();
+    try {
+      await expect(reader.getLastUserPromptAt(sessionId)).rejects.toMatchObject(
+        {
+          dimension: 'index',
+          retryable: true,
+        },
+      );
+    } finally {
+      spy.mockRestore();
+      setSessionTranscriptMaxIndexEstimateBytesForTest(undefined);
+    }
+
+    expect(await reader.getLastUserPromptAt(sessionId)).toBe(
+      expectedPromptTime,
+    );
+  });
+
   it('rejects a single oversized transcript line before buffering it whole', async () => {
     expect(SESSION_TRANSCRIPT_MAX_LINE_BYTES).toBe(32 * 1024 * 1024);
 
@@ -5128,6 +5160,26 @@ describe('SessionTranscriptReader', () => {
     ).toBeGreaterThan(physicalBytes + bigText.length);
     await reader.readPage(sessionId, { limit: 3 });
     expect(projectionReads.count).toBe(1);
+  });
+
+  it('rejects Managed replay.kind=all when projected bodies exceed the replay budget', async () => {
+    const { authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'x'.repeat(4096) },
+    ]);
+    await authority.close();
+
+    setSessionTranscriptMaxAllReplayBytesForTest(1);
+    try {
+      await expect(
+        newReader().readRestoreProjection(sessionId, all(false)),
+      ).rejects.toMatchObject({ dimension: 'replay' });
+      await expect(
+        newReader().readLiveRestoreProjection(sessionId, all(false)),
+      ).rejects.toMatchObject({ dimension: 'replay' });
+    } finally {
+      setSessionTranscriptMaxAllReplayBytesForTest(undefined);
+    }
   });
 
   it('retains a projection that moves its entry from the shared into the oversized class', async () => {

@@ -2761,10 +2761,21 @@ async function buildIndex(params: {
           // Always sample the first record so a depleted process cannot admit
           // a build even if there are fewer than 1024 records.
           if ((sequence & 1023) === 1) {
-            estimatedIndexBytes = Math.max(
-              estimatedIndexBytes,
-              process.memoryUsage().heapUsed - buildHeapUsedStart,
-            );
+            const heapGrowth =
+              process.memoryUsage().heapUsed - buildHeapUsedStart;
+            if (heapGrowth > maxIndexBuildBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                snapshotSize,
+                maxIndexBuildBytes,
+                {
+                  dimension: 'index',
+                  measuredBytes: heapGrowth,
+                  retryable: true,
+                },
+              );
+            }
+            estimatedIndexBytes = Math.max(estimatedIndexBytes, heapGrowth);
           }
           if (estimatedIndexBytes > maxIndexBuildBytes) {
             throw new SessionTranscriptTooLargeError(
@@ -2918,9 +2929,22 @@ async function buildIndex(params: {
     byUuid,
     branchPointsByAssistantUuid,
   };
+  const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
+  if (finalHeapGrowth > maxIndexBuildBytes) {
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      maxIndexBuildBytes,
+      {
+        dimension: 'index',
+        measuredBytes: finalHeapGrowth,
+        retryable: true,
+      },
+    );
+  }
   const finalEstimatedBytes = Math.max(
     estimateIndexCacheBytes(builtIndex),
-    process.memoryUsage().heapUsed - buildHeapUsedStart,
+    finalHeapGrowth,
   );
   if (finalEstimatedBytes > maxIndexBuildBytes) {
     throw new SessionTranscriptTooLargeError(
@@ -3487,6 +3511,28 @@ function indexHasManagedHeader(index: TranscriptIndex): boolean {
   return index.physicalRecords.some(
     (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
   );
+}
+
+function assertManagedAllReplayBudget(
+  records: readonly ChatRecord[],
+  sessionId: string,
+  snapshotSize: number,
+  replay: SessionRestoreReplaySelection,
+): void {
+  if (replay.kind !== 'all') return;
+  const maxBytes = getMaxAllReplayBytes();
+  let total = 0;
+  for (const record of records) {
+    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
+    if (total > maxBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxBytes,
+        { dimension: 'replay', measuredBytes: total },
+      );
+    }
+  }
 }
 
 /**
@@ -4803,6 +4849,12 @@ export class SessionTranscriptReader {
       index,
       readOptions,
     );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
+    );
     // Read from the whole log: a session whose title the session list no
     // longer finds in its windows must not restore, and then re-anchor, an
     // older one. Read from managedProjectionTitles first so a budget refusal
@@ -4844,6 +4896,12 @@ export class SessionTranscriptReader {
       sessionId,
       index,
       readOptions,
+    );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
     );
     const replay = managedReplayPage(records, options.replay);
     await assertIndexSnapshotUnchanged(index, sessionId);
