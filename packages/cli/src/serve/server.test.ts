@@ -24518,7 +24518,9 @@ describe('createServeApp', () => {
           expect.objectContaining({ sessionId }),
         ]);
         expect(result.sessions[0]).not.toHaveProperty('worktree');
-        expect(mockWt.readSidecar).toHaveBeenCalledOnce();
+        // A historical missing checkout needs an ownership reread before
+        // considering its snapshot, but must not be enriched for this owner.
+        expect(mockWt.readSidecar).toHaveBeenCalledTimes(2);
         expect(mockWt.readMarkerLenient).toHaveBeenCalledOnce();
       } finally {
         mockWt.readSidecar = undefined;
