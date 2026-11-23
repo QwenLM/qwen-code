@@ -51,10 +51,14 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -78,7 +82,7 @@ const FIELDS = [
   'commits',
 ].join(',');
 
-const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> [--context-out <path>] [--local-owner] [--sponsored]
        node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
@@ -193,22 +197,134 @@ const ESCALATION_RULES = [
 ];
 
 /**
+ * Parses `git diff --raw --no-renames -z` output into changed paths plus
+ * git-mode escalation sets (100755 executables, 120000 symlinks, 160000
+ * submodules) and extensionless live files eligible for magic-byte sniffing.
+ */
+export function parseRawDiffEntries(rawStdout) {
+  const changedPaths = [];
+  const executablePaths = [];
+  const specialModePaths = [];
+  const extensionlessLivePaths = [];
+  if (typeof rawStdout !== 'string' || rawStdout.length === 0) {
+    return {
+      changedPaths,
+      executablePaths,
+      specialModePaths,
+      extensionlessLivePaths,
+    };
+  }
+  const tokens = rawStdout.split('\0');
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const header = tokens[i];
+    const filePath = tokens[i + 1];
+    if (!header.startsWith(':') || !filePath) continue;
+    const parts = header.slice(1).split(' ');
+    const newMode = parts[1] ?? '';
+    const status = (parts[4] ?? '').charAt(0);
+    changedPaths.push(filePath);
+    if (status === 'D') continue;
+    if (newMode === '100755') {
+      executablePaths.push(filePath);
+    } else if (newMode === '120000' || newMode === '160000') {
+      specialModePaths.push(filePath);
+    } else if (!/\.[^/]+$/.test(basename(filePath))) {
+      extensionlessLivePaths.push(filePath);
+    }
+  }
+  return {
+    changedPaths,
+    executablePaths,
+    specialModePaths,
+    extensionlessLivePaths,
+  };
+}
+
+/**
+ * Checks the first 4 bytes of a regular file without following symlinks for
+ * shebang (`#!`), ELF (`\x7fELF`), Mach-O, or PE (`MZ`) executable headers.
+ */
+export function hasExecutableMagic(filePath) {
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let fd;
+  try {
+    fd = openSync(filePath, flags);
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(4);
+    const n = readSync(fd, buf, 0, 4, 0);
+    if (n >= 2 && buf[0] === 0x23 && buf[1] === 0x21) return true; // #!
+    if (n >= 2 && buf[0] === 0x4d && buf[1] === 0x5a) return true; // MZ (PE)
+    if (
+      n >= 4 &&
+      buf[0] === 0x7f &&
+      buf[1] === 0x45 &&
+      buf[2] === 0x4c &&
+      buf[3] === 0x46
+    ) {
+      return true; // ELF
+    }
+    if (n >= 4) {
+      const hex = buf.toString('hex');
+      if (
+        hex === 'feedface' ||
+        hex === 'cefaedfe' ||
+        hex === 'feedfacf' ||
+        hex === 'cffaedfe' ||
+        hex === 'cafebabe'
+      ) {
+        return true; // Mach-O / fat binary
+      }
+    }
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Returns every mandatory high-assurance escalation trigger matched by the
  * changed file paths in `base..head` (§4.3). These triggers force
  * `hardware-isolated` regardless of author trust; their absence is NOT proof
  * that other changes are benign.
  */
-export function detectMandatoryEscalations(changedPaths = []) {
+export function detectMandatoryEscalations(
+  changedPaths = [],
+  { executablePaths = [], specialModePaths = [] } = {},
+) {
+  const normalizePath = (p) =>
+    p.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  const execSet = new Set(
+    executablePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
+  const specialSet = new Set(
+    specialModePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
   const hits = [];
   for (const raw of changedPaths) {
     if (typeof raw !== 'string') continue;
-    const normalized = raw.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+    const normalized = normalizePath(raw);
     if (!normalized) continue;
+    let matched = false;
     for (const rule of ESCALATION_RULES) {
       if (rule.test(normalized)) {
         hits.push({ path: normalized, reason: rule.reason });
+        matched = true;
         break;
       }
+    }
+    if (!matched && specialSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'symlink-or-submodule' });
+    } else if (!matched && execSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'executable-or-binary' });
     }
   }
   return hits;
@@ -226,6 +342,8 @@ export function classifyPrTrust({
   isLocalOwner = false,
   isFork = null,
   changedPaths = null,
+  executablePaths = [],
+  specialModePaths = [],
   forceHardware = false,
   sponsored = false,
 } = {}) {
@@ -254,7 +372,10 @@ export function classifyPrTrust({
   if (!Array.isArray(changedPaths)) {
     escalationReasons.push('changed-files-unavailable');
   } else {
-    for (const hit of detectMandatoryEscalations(changedPaths)) {
+    for (const hit of detectMandatoryEscalations(changedPaths, {
+      executablePaths,
+      specialModePaths,
+    })) {
       escalationReasons.push(`${hit.reason}:${hit.path}`);
     }
   }
@@ -480,6 +601,8 @@ export function parseArgs(argv) {
     requireIsolation: false,
     artifactDir: null,
     contextOut: null,
+    localOwner: false,
+    sponsored: false,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -488,6 +611,10 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--require-isolation') {
       options.requireIsolation = true;
+    } else if (arg === '--local-owner') {
+      options.localOwner = true;
+    } else if (arg === '--sponsored') {
+      options.sponsored = true;
     } else if (arg === '--artifact-dir') {
       options.artifactDir = argv[(index += 1)] ?? null;
       if (!options.artifactDir) {
@@ -946,26 +1073,42 @@ function main(argv) {
   // Classify PR trust and mandatory hardware-isolation escalations host-side
   // before writing the digest-bound snapshot (§4.1–§4.4). Failure to read
   // permission or changed files fails closed to hardware-isolated.
-  // Use -z (NUL-delimited, never C-quoted) so non-ASCII or quote-bearing
-  // filenames like `.github/workflows/测试.yml` cannot bypass prefix rules via
-  // core.quotePath=true.
+  // Use `--raw --no-renames -z` (NUL-delimited, never C-quoted) so non-ASCII
+  // filenames cannot bypass prefix rules via core.quotePath=true AND git file
+  // modes (100755 executables, 120000 symlinks, 160000 submodules) are captured
+  // in the same command. Extensionless 100644 files are also magic-sniffed
+  // (4 bytes, O_NOFOLLOW) for shebang/ELF/Mach-O/PE headers.
   const diffRes = runGitRoot([
     'diff',
-    '--name-only',
+    '--raw',
     '--no-renames',
     '-z',
     `${context.base}..${context.head}`,
   ]);
-  const changedPaths =
-    diffRes.status === 0
-      ? diffRes.stdout.split('\0').filter((line) => line.length > 0)
-      : null;
+  let changedPaths = null;
+  let executablePaths = [];
+  let specialModePaths = [];
+  if (diffRes.status === 0) {
+    const parsedDiff = parseRawDiffEntries(diffRes.stdout);
+    changedPaths = parsedDiff.changedPaths;
+    executablePaths = [...parsedDiff.executablePaths];
+    specialModePaths = [...parsedDiff.specialModePaths];
+    for (const rel of parsedDiff.extensionlessLivePaths) {
+      if (hasExecutableMagic(join(root, rel))) {
+        executablePaths.push(rel);
+      }
+    }
+  }
   const authorPerm = fetchAuthorPermission(owner, name, snapshot.author?.login);
   const trust = classifyPrTrust({
     permission: authorPerm.permission,
+    isLocalOwner: options.localOwner,
     isFork: snapshot.isCrossRepository === true ? true : null,
     changedPaths,
+    executablePaths,
+    specialModePaths,
     forceHardware: process.env[FORCE_HARDWARE_ENV] === '1',
+    sponsored: options.sponsored,
   });
   const trustClassification = {
     ...trust,

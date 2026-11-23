@@ -114,10 +114,30 @@ function sendTransaction(
 }
 
 describe('verify-pr-vm-collector', () => {
-  it('validates flat filenames and UDS sun_path byte budgets', () => {
-    expect(validateCollectorFilename(Buffer.from('report.md'))).toEqual({
+  it('validates flat filenames, bounded evidence/logs namespaces, and UDS sun_path byte budgets', () => {
+    expect(validateCollectorFilename(Buffer.from('report.md'))).toMatchObject({
       ok: true,
       name: 'report.md',
+      kind: 'text',
+      subdir: null,
+    });
+    expect(
+      validateCollectorFilename(Buffer.from('evidence/01-ab-cells.png')),
+    ).toMatchObject({
+      ok: true,
+      name: 'evidence/01-ab-cells.png',
+      kind: 'image',
+      subdir: 'evidence',
+      leaf: '01-ab-cells.png',
+    });
+    expect(
+      validateCollectorFilename(Buffer.from('logs/harness.log')),
+    ).toMatchObject({
+      ok: true,
+      name: 'logs/harness.log',
+      kind: 'log',
+      subdir: 'logs',
+      leaf: 'harness.log',
     });
     for (const bad of [
       Buffer.from('../../escape.txt'),
@@ -125,6 +145,10 @@ describe('verify-pr-vm-collector', () => {
       Buffer.from('..\\escape.txt'),
       Buffer.from('report\0.md'),
       Buffer.from([0xff, 0xfe]),
+      Buffer.from('evidence/../boundary.json'),
+      Buffer.from('evidence/not-numbered.png'),
+      Buffer.from('other/01-cells.png'),
+      Buffer.from('logs/nested/deep.log'),
     ]) {
       expect(validateCollectorFilename(bad)).toEqual({
         ok: false,
@@ -137,6 +161,7 @@ describe('verify-pr-vm-collector', () => {
       'boundary-gate.json',
       'execution-record.json',
       'EXECUTION-RECORD.JSON',
+      'logs/boundary.json',
     ]) {
       expect(validateCollectorFilename(Buffer.from(auth), null)).toEqual({
         ok: false,
@@ -145,6 +170,81 @@ describe('verify-pr-vm-collector', () => {
     }
     expect(validateSocketPathLength('/a'.repeat(54), 'linux').ok).toBe(false);
     expect(validateSocketPathLength('/tmp/v.sock', 'linux').ok).toBe(true);
+  });
+
+  it('commits binary PNG evidence and log files byte-exactly while refusing spoofed PNG signatures and authority --allowed-files', async () => {
+    const dir = makeTmpDir('qc-png-');
+    const sock = join(dir, 'v.sock');
+    const vault = join(dir, 'vault');
+    const srv = startCollectorServer({ socketPath: sock, vaultDir: vault });
+    await srv.ready;
+
+    // Minimal PNG header + arbitrary binary bytes (including 0x00 and 0x1b control bytes)
+    const pngBytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x1b, 0x7f, 0x01, 0x02,
+    ]);
+    const pngSha = createHash('sha256').update(pngBytes).digest('hex');
+    const reply = await sendTransaction(sock, () =>
+      Buffer.concat([
+        makeFrame('H', 'report-v1'),
+        makeWholeFile('verdict.txt', 'merge-ready\n'),
+        makeFileBegin('evidence/01-ab-cells.png', pngBytes.length),
+        makeFrame('C', pngBytes),
+        makeFrame('E', pngSha),
+        makeWholeFile('logs/harness.log', 'step 1 ok\n'),
+        makeFrame('R'),
+      ]),
+    );
+    const summary = await srv.done;
+    expect(reply).toEqual({ kind: 'O', reason: 'complete' });
+    expect(summary.outputStatus).toBe('complete');
+    expect(summary.vaultEntries).toEqual([
+      'evidence/01-ab-cells.png',
+      'logs/harness.log',
+      'verdict.txt',
+    ]);
+    expect(
+      readFileSync(join(vault, 'evidence', '01-ab-cells.png')).equals(pngBytes),
+    ).toBe(true);
+    expect(readFileSync(join(vault, 'logs', 'harness.log'), 'utf8')).toBe(
+      'step 1 ok\n',
+    );
+
+    // Spoofed PNG signature must be refused and leave zero vault files
+    const dBad = makeTmpDir('qc-badpng-');
+    const sBad = join(dBad, 'v.sock');
+    const vBad = join(dBad, 'vault');
+    const srvBad = startCollectorServer({ socketPath: sBad, vaultDir: vBad });
+    await srvBad.ready;
+    const fakePng = Buffer.from('not-a-real-png-header');
+    const rBad = await sendTransaction(sBad, () =>
+      Buffer.concat([
+        makeFrame('H', 'report-v1'),
+        makeFileBegin('evidence/01-fake.png', fakePng.length),
+        makeFrame('C', fakePng),
+      ]),
+    );
+    const sumBad = await srvBad.done;
+    expect(rBad).toEqual({ kind: 'E', reason: 'invalid-png-signature' });
+    expect(sumBad.outputStatus).toBe('rejected');
+    expect(sumBad.vaultEntries).toEqual([]);
+
+    // CLI refuses authority filenames in --allowed-files
+    const badAllow = spawnSync(
+      process.execPath,
+      [
+        COLLECTOR_SCRIPT,
+        '--socket',
+        sBad,
+        '--vault',
+        vBad,
+        '--allowed-files',
+        'report.md,boundary.json',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(badAllow.status).toBe(2);
   });
 
   it('commits valid regular files on round-end and closes cleanly without polling lag', async () => {

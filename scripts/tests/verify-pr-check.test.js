@@ -28,6 +28,7 @@ import {
   checkBoundary,
   checkExecutionRecord,
   checkMutationCoverage,
+  checkTrustClassification,
   containerNonceErrors,
   isFilesystemRoot,
 } from '../../scripts/verify-pr-check.mjs';
@@ -3739,5 +3740,62 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(downgradeRes.stdout).toMatch(
       /mode container violates host context requirement executionClass=hardware-isolated/,
     );
+
+    // 8e. Self-contradictory trustClassification (external/unknown or non-empty
+    // escalationReasons paired with trusted-shared-kernel) is refused by CLI & pure gate
+    for (const [label, contradictoryTc, expectedRe] of [
+      [
+        'external-shared',
+        {
+          prTrust: 'external',
+          executionClass: 'trusted-shared-kernel',
+          escalationReasons: [],
+          headRefOid: HEAD,
+        },
+        /prTrust=external cannot pair with executionClass="trusted-shared-kernel"/,
+      ],
+      [
+        'unknown-shared',
+        {
+          prTrust: 'unknown',
+          executionClass: 'trusted-shared-kernel',
+          escalationReasons: [],
+          headRefOid: HEAD,
+        },
+        /prTrust=unknown cannot pair with executionClass="trusted-shared-kernel"/,
+      ],
+      [
+        'escalated-shared',
+        {
+          prTrust: 'collaborator',
+          executionClass: 'trusted-shared-kernel',
+          escalationReasons: ['ci-workflow:.github/workflows/ci.yml'],
+          headRefOid: HEAD,
+        },
+        /non-empty escalationReasons cannot pair with executionClass="trusted-shared-kernel"/,
+      ],
+    ]) {
+      const pure = checkTrustClassification(contradictoryTc, HEAD);
+      expect(pure.errors.join('\n')).toMatch(expectedRe);
+      expect(pure.requiredExecutionClass).toBe('hardware-isolated');
+
+      const badCtx = join(base, `contradictory-${label}.json`);
+      const badCtxText = JSON.stringify({
+        ...ctxObj,
+        trustClassification: contradictoryTc,
+      });
+      writeFileSync(badCtx, badCtxText);
+      const cliBad = run([
+        '--context',
+        badCtx,
+        '--context-sha256',
+        sha256(badCtxText),
+        '--context-root',
+        clone,
+        containerDir,
+      ]);
+      expect(cliBad.status).toBe(1);
+      expect(cliBad.stderr).toMatch(expectedRe);
+    }
   });
 });

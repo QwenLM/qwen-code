@@ -2,7 +2,7 @@
 
 [English](2026-11-23-verify-pr-tiered-microvm.md) | [简体中文](2026-11-23-verify-pr-tiered-microvm.zh-CN.md)
 
-**Status: proposal, 2026-11-23.** This document defines a design and PoC acceptance boundary. It does not claim that the backend, gates, or performance goals have been implemented or verified.
+**Status: design + opt-in host building blocks implemented, 2026-11-23.** Host-side trust classification, bounded collector, crash reaper, execution-record finalizer, publication gate, and backend launch-plan builders live in `scripts/verify-pr-{prepare,check,vm-collector,vm-lifecycle,vm-runner}.mjs` with unit tests; CI workflow wiring and `/review` remain unchanged. Note on cited `.qwen/e2e-tests/*.md` paths below: per repository `.gitignore` conventions, `.qwen/` holds git-ignored local PoC notes that are intentionally not committed to the repository and are not part of the reviewable git record; reviewers should treat those PoC notes as local author context and verify all shipped behavior via the tracked scripts and unit tests.
 
 ## 1. Shortest reading path and decision summary
 

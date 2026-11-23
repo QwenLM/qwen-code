@@ -2008,4 +2008,130 @@ describe('trust classification and mandatory escalation (§4)', () => {
       'ci-workflow:.github/workflows/测试.yml',
     );
   });
+
+  it('CLI supports explicit --local-owner and --sponsored flags and escalates extensionless 100755/ELF/symlink files', () => {
+    // 1. Explicit --local-owner on non-fork ordinary tree -> local-owner -> trusted-shared-kernel
+    const { dir, base, head } = makeRepo();
+    const fakeDir = makeTmpDir();
+    const bin = join(fakeDir, 'bin');
+    mkdirSync(bin);
+    const snapPath = join(fakeDir, 'snap.json');
+    const writeSnap = (extra = {}) =>
+      writeFileSync(
+        snapPath,
+        JSON.stringify({
+          number: 101,
+          title: 'Local owner test',
+          body: '',
+          author: { login: 'owner-user' },
+          baseRefName: 'main',
+          baseRefOid: base,
+          headRefOid: head,
+          isCrossRepository: false,
+          commits: [],
+          ...extra,
+        }),
+      );
+    const gh = join(bin, 'gh');
+    writeFileSync(
+      gh,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = api ] && [ "$2" = graphql ]; then exit 1; fi',
+        'if [ "$1" = api ]; then printf \'{"permission":"read"}\\n\'; exit 0; fi',
+        'cat "$FAKE_SNAP"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(gh, 0o755);
+    const envBase = {
+      ...gitEnv,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      FAKE_SNAP: snapPath,
+    };
+
+    writeSnap();
+    const localOut = join(fakeDir, 'local-owner.json');
+    const rLocal = runPrepare(
+      dir,
+      ['101', '--repo', REPO, '--local-owner', '--context-out', localOut],
+      envBase,
+    );
+    expect(rLocal.status).toBe(0);
+    expect(
+      JSON.parse(readFileSync(localOut, 'utf8')).trustClassification,
+    ).toMatchObject({
+      prTrust: 'local-owner',
+      executionClass: 'trusted-shared-kernel',
+      sponsored: false,
+    });
+
+    // 2. --local-owner on a fork PR still fails closed to external -> hardware-isolated; --sponsored never lowers tier
+    writeSnap({ isCrossRepository: true });
+    const forkOut = join(fakeDir, 'fork-sponsored.json');
+    const rFork = runPrepare(
+      dir,
+      [
+        '101',
+        '--repo',
+        REPO,
+        '--local-owner',
+        '--sponsored',
+        '--context-out',
+        forkOut,
+      ],
+      envBase,
+    );
+    expect(rFork.status).toBe(0);
+    expect(
+      JSON.parse(readFileSync(forkOut, 'utf8')).trustClassification,
+    ).toMatchObject({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      sponsored: true,
+    });
+
+    // 3. Extensionless 100755 executable (tools/release) and 100644 ELF binary (native/agent) escalate even for --local-owner
+    mkdirSync(join(dir, 'tools'), { recursive: true });
+    mkdirSync(join(dir, 'native'), { recursive: true });
+    writeFileSync(join(dir, 'tools', 'release'), 'echo hi\n');
+    chmodSync(join(dir, 'tools', 'release'), 0o755);
+    writeFileSync(
+      join(dir, 'native', 'agent'),
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]),
+    );
+    chmodSync(join(dir, 'native', 'agent'), 0o644);
+    execFileSync('git', ['add', 'tools/release', 'native/agent'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    execFileSync('git', ['commit', '-qm', 'add extensionless executables'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const execHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    writeSnap({ headRefOid: execHead, isCrossRepository: false });
+    const execOut = join(fakeDir, 'exec-escalated.json');
+    const rExec = runPrepare(
+      dir,
+      ['101', '--repo', REPO, '--local-owner', '--context-out', execOut],
+      envBase,
+    );
+    expect(rExec.status).toBe(0);
+    const tcExec = JSON.parse(
+      readFileSync(execOut, 'utf8'),
+    ).trustClassification;
+    expect(tcExec.prTrust).toBe('local-owner');
+    expect(tcExec.executionClass).toBe('hardware-isolated');
+    expect(tcExec.escalationReasons).toContain(
+      'executable-or-binary:tools/release',
+    );
+    expect(tcExec.escalationReasons).toContain(
+      'executable-or-binary:native/agent',
+    );
+  });
 });

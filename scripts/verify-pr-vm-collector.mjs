@@ -37,6 +37,7 @@ import {
   openSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -62,6 +63,10 @@ export const DEFAULT_ALLOWED_FILES = new Set([
 ]);
 
 const FLAT_FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const EVIDENCE_PNG_RE = /^evidence\/([0-9]{2}-[a-z0-9][a-z0-9-]{0,61}\.png)$/;
+const LOG_FILE_RE =
+  /^logs\/([A-Za-z0-9][A-Za-z0-9._-]{0,62}\.(?:log|txt|json))$/;
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const VALID_HELLOS = new Set(['collector-v1', 'report-v1']);
 
@@ -73,7 +78,12 @@ class CollectorRejected extends Error {
   }
 }
 
-/** Validates flat filename, rejecting traversal, NUL, invalid UTF-8, and authority names. */
+/**
+ * Validates collector relative paths: top-level contracted text/JSON files,
+ * `evidence/<NN>-<kebab>.png` screenshots, and `logs/<flat>.{log,txt,json}`
+ * logs. Rejects traversal, backslashes, NUL, invalid UTF-8, deep nesting, and
+ * host authority filenames (case-insensitively).
+ */
 export function validateCollectorFilename(
   nameBytes,
   allowedFiles = DEFAULT_ALLOWED_FILES,
@@ -88,7 +98,36 @@ export function validateCollectorFilename(
   if (!Buffer.from(decoded, 'utf8').equals(nameBytes)) {
     return { ok: false, reason: 'invalid-name' };
   }
-  if (!FLAT_FILENAME_RE.test(decoded) || decoded.includes('..')) {
+  if (decoded.includes('..') || decoded.includes('\\')) {
+    return { ok: false, reason: 'invalid-name' };
+  }
+  if (decoded.includes('/')) {
+    const evMatch = EVIDENCE_PNG_RE.exec(decoded);
+    if (evMatch) {
+      return {
+        ok: true,
+        name: decoded,
+        kind: 'image',
+        subdir: 'evidence',
+        leaf: evMatch[1],
+      };
+    }
+    const logMatch = LOG_FILE_RE.exec(decoded);
+    if (logMatch) {
+      if (AUTHORITY_FILENAMES.has(logMatch[1].toLowerCase())) {
+        return { ok: false, reason: 'authority-file' };
+      }
+      return {
+        ok: true,
+        name: decoded,
+        kind: 'log',
+        subdir: 'logs',
+        leaf: logMatch[1],
+      };
+    }
+    return { ok: false, reason: 'invalid-name' };
+  }
+  if (!FLAT_FILENAME_RE.test(decoded)) {
     return { ok: false, reason: 'invalid-name' };
   }
   if (AUTHORITY_FILENAMES.has(decoded.toLowerCase())) {
@@ -97,7 +136,7 @@ export function validateCollectorFilename(
   if (allowedFiles && !allowedFiles.has(decoded)) {
     return { ok: false, reason: 'disallowed-filename' };
   }
-  return { ok: true, name: decoded };
+  return { ok: true, name: decoded, kind: 'text', subdir: null, leaf: decoded };
 }
 
 /** Checks that a Unix socket path fits within the OS sun_path byte budget. */
@@ -145,9 +184,9 @@ export function startCollectorServer({
   socketPath,
   vaultDir,
   allowedFiles = DEFAULT_ALLOWED_FILES,
-  maxFiles = 5,
-  maxFileBytes = 64 * 1024,
-  maxTotalBytes = 256 * 1024,
+  maxFiles = 32,
+  maxFileBytes = 2 * 1024 * 1024,
+  maxTotalBytes = 16 * 1024 * 1024,
   maxFrameBytes = 4096,
   maxChunkBytes = 2048,
   maxOversizeDrainBytes = 2048,
@@ -198,7 +237,26 @@ export function startCollectorServer({
       } catch {
         // Already unlinked.
       }
-      const vaultEntries = readdirSync(vaultDir).sort();
+      const vaultEntries = [];
+      for (const entry of readdirSync(vaultDir).sort()) {
+        if (entry === 'evidence' || entry === 'logs') {
+          const sub = join(vaultDir, entry);
+          const children = readdirSync(sub).sort();
+          if (children.length === 0) {
+            try {
+              rmdirSync(sub);
+            } catch {
+              // Ignore cleanup failure.
+            }
+          } else {
+            for (const child of children) {
+              vaultEntries.push(`${entry}/${child}`);
+            }
+          }
+        } else {
+          vaultEntries.push(entry);
+        }
+      }
       resolveDone({ ...summary, vaultEntries });
     });
   };
@@ -367,6 +425,9 @@ export function startCollectorServer({
           if (!nameCheck.ok) {
             throw new CollectorRejected('rejected', nameCheck.reason);
           }
+          if (nameCheck.kind === 'image' && size < PNG_MAGIC.length) {
+            throw new CollectorRejected('rejected', 'invalid-png-signature');
+          }
           if (completed.length >= maxFiles) {
             throw new CollectorRejected('rejected', 'too-many-files');
           }
@@ -376,8 +437,24 @@ export function startCollectorServer({
           if (completed.some((item) => item.name === nameCheck.name)) {
             throw new CollectorRejected('rejected', 'duplicate-name');
           }
-          const partial = join(vaultDir, `${nameCheck.name}.pending`);
-          const destination = join(vaultDir, nameCheck.name);
+          let targetDir = vaultDir;
+          if (nameCheck.subdir) {
+            targetDir = join(vaultDir, nameCheck.subdir);
+            try {
+              const st = lstatSync(targetDir);
+              if (st.isSymbolicLink() || !st.isDirectory()) {
+                throw new CollectorRejected('rejected', 'vault-subdir-invalid');
+              }
+            } catch (error) {
+              if (error instanceof CollectorRejected) throw error;
+              if (error.code !== 'ENOENT') {
+                throw new CollectorRejected('rejected', 'vault-subdir-invalid');
+              }
+              mkdirSync(targetDir, { mode: 0o700 });
+            }
+          }
+          const partial = join(targetDir, `${nameCheck.leaf}.pending`);
+          const destination = join(targetDir, nameCheck.leaf);
           const flags =
             fsConstants.O_WRONLY |
             fsConstants.O_CREAT |
@@ -386,6 +463,8 @@ export function startCollectorServer({
           const fd = openSync(partial, flags, 0o600);
           openFile = {
             name: nameCheck.name,
+            kind: nameCheck.kind,
+            headerPrefix: Buffer.alloc(0),
             partial,
             destination,
             fd,
@@ -400,7 +479,24 @@ export function startCollectorServer({
           if (length > maxChunkBytes || length > openFile.remaining) {
             throw new CollectorRejected('rejected', 'file-size-mismatch');
           }
-          if (rejectControlChars && hasDisallowedControlByte(payload)) {
+          if (openFile.kind === 'image') {
+            if (openFile.headerPrefix.length < PNG_MAGIC.length && length > 0) {
+              const need = PNG_MAGIC.length - openFile.headerPrefix.length;
+              openFile.headerPrefix = Buffer.concat([
+                openFile.headerPrefix,
+                payload.subarray(0, need),
+              ]);
+              if (
+                openFile.headerPrefix.length === PNG_MAGIC.length &&
+                !openFile.headerPrefix.equals(PNG_MAGIC)
+              ) {
+                throw new CollectorRejected(
+                  'rejected',
+                  'invalid-png-signature',
+                );
+              }
+            }
+          } else if (rejectControlChars && hasDisallowedControlByte(payload)) {
             throw new CollectorRejected('rejected', 'control-character');
           }
           if (length > 0) {
@@ -417,6 +513,12 @@ export function startCollectorServer({
           }
           if (openFile.remaining !== 0) {
             throw new CollectorRejected('rejected', 'file-size-mismatch');
+          }
+          if (
+            openFile.kind === 'image' &&
+            !openFile.headerPrefix.equals(PNG_MAGIC)
+          ) {
+            throw new CollectorRejected('rejected', 'invalid-png-signature');
           }
           const expectedHex = payload.toString('ascii');
           const actualHex = openFile.digest.digest('hex');
@@ -533,6 +635,7 @@ async function main(argv) {
   let summaryOut = null;
   let vmmUidRaw = null;
   let vmmGidRaw = null;
+  let allowedFilesRaw = null;
   let readDeadlineMs = 5000;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -541,6 +644,8 @@ async function main(argv) {
     else if (arg === '--summary-out') summaryOut = argv[(i += 1)] ?? null;
     else if (arg === '--vmm-uid') vmmUidRaw = argv[(i += 1)] ?? null;
     else if (arg === '--vmm-gid') vmmGidRaw = argv[(i += 1)] ?? null;
+    else if (arg === '--allowed-files')
+      allowedFilesRaw = argv[(i += 1)] ?? null;
     else if (arg === '--read-deadline-ms') {
       const val = Number(argv[(i += 1)]);
       if (!Number.isInteger(val) || val <= 0) {
@@ -557,9 +662,31 @@ async function main(argv) {
   }
   if (!socketPath || !vaultDir) {
     process.stderr.write(
-      'Usage: node scripts/verify-pr-vm-collector.mjs --socket <uds> --vault <dir> [--summary-out <file>] [--vmm-uid <uid> --vmm-gid <gid>]\n',
+      'Usage: node scripts/verify-pr-vm-collector.mjs --socket <uds> --vault <dir> [--summary-out <file>] [--allowed-files <csv>] [--vmm-uid <uid> --vmm-gid <gid>]\n',
     );
     return 2;
+  }
+  let allowedFiles = DEFAULT_ALLOWED_FILES;
+  if (allowedFilesRaw !== null) {
+    const names = allowedFilesRaw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (
+      names.length === 0 ||
+      names.some(
+        (n) =>
+          !FLAT_FILENAME_RE.test(n) ||
+          n.includes('..') ||
+          AUTHORITY_FILENAMES.has(n.toLowerCase()),
+      )
+    ) {
+      process.stderr.write(
+        'verify-pr vm-collector: --allowed-files requires comma-separated flat non-authority filenames\n',
+      );
+      return 2;
+    }
+    allowedFiles = new Set(names);
   }
   let vmmUid = null;
   let vmmGid = null;
@@ -587,6 +714,7 @@ async function main(argv) {
   const srv = startCollectorServer({
     socketPath,
     vaultDir,
+    allowedFiles,
     vmmUid,
     vmmGid,
     readDeadlineMs,

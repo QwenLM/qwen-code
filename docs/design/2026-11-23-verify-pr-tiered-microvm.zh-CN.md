@@ -2,7 +2,7 @@
 
 [English](2026-11-23-verify-pr-tiered-microvm.md) | [简体中文](2026-11-23-verify-pr-tiered-microvm.zh-CN.md)
 
-**状态：提案，2026-11-23。** 本文是设计与 PoC 验收边界，不表示后端、门禁或性能目标已经实现或验证。
+**状态：设计定稿 + 宿主侧可选基础模块已实现，2026-11-23。** 宿主信任分档、受限 collector、独立恢复器、执行记录落盘器、发布门及后端计划构造器已落地于 `scripts/verify-pr-{prepare,check,vm-collector,vm-lifecycle,vm-runner}.mjs` 与配套单测；CI workflow 接线与 `/review` 仍未改动。关于下文提及的 `.qwen/e2e-tests/*.md` 路径：按仓库 `.gitignore` 约定，`.qwen/` 为不入库的本地 PoC 工作日志，不构成可审阅的仓库记录；审阅者应将其视为作者本地背景记录，并以仓库内已提交的脚本与单元测试作为全部可复验依据。
 
 ## 1. 最短阅读路径与决策摘要
 

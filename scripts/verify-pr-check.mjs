@@ -555,6 +555,64 @@ function parseIsoTimestamp(value) {
 }
 
 /**
+ * Independently cross-checks a host snapshot's `trustClassification` object so
+ * a self-contradictory classification (e.g. `prTrust: "external"` or non-empty
+ * `escalationReasons` paired with `executionClass: "trusted-shared-kernel"`)
+ * cannot pass the publication gate even if the upstream classifier were faulty.
+ */
+export function checkTrustClassification(tc, expectedHead = null) {
+  if (tc === null || tc === undefined) {
+    return { errors: [], requiredExecutionClass: null };
+  }
+  if (typeof tc !== 'object' || Array.isArray(tc)) {
+    return {
+      errors: ['trustClassification must be a JSON object'],
+      requiredExecutionClass: 'hardware-isolated',
+    };
+  }
+  const errors = [];
+  if (tc.headRefOid && expectedHead && tc.headRefOid !== expectedHead) {
+    errors.push(
+      `stale trustClassification.headRefOid ${tc.headRefOid} (expected ${expectedHead})`,
+    );
+  }
+  if (!PR_TRUST_LEVELS.includes(tc.prTrust)) {
+    errors.push(
+      `trustClassification.prTrust must be one of ${PR_TRUST_LEVELS.join(' | ')} (got ${JSON.stringify(tc.prTrust)})`,
+    );
+  }
+  if (!EXECUTION_CLASSES.includes(tc.executionClass)) {
+    errors.push(
+      `trustClassification.executionClass must be one of ${EXECUTION_CLASSES.join(' | ')} (got ${JSON.stringify(tc.executionClass)})`,
+    );
+  }
+  if (
+    tc.escalationReasons !== undefined &&
+    !Array.isArray(tc.escalationReasons)
+  ) {
+    errors.push('trustClassification.escalationReasons must be an array');
+  }
+  const hasEscalations =
+    Array.isArray(tc.escalationReasons) && tc.escalationReasons.length > 0;
+  const untrustedAuthor = tc.prTrust === 'external' || tc.prTrust === 'unknown';
+  if (untrustedAuthor && tc.executionClass !== 'hardware-isolated') {
+    errors.push(
+      `trustClassification contradicts itself: prTrust=${tc.prTrust} cannot pair with executionClass=${JSON.stringify(tc.executionClass)} (must be hardware-isolated)`,
+    );
+  }
+  if (hasEscalations && tc.executionClass !== 'hardware-isolated') {
+    errors.push(
+      `trustClassification contradicts itself: non-empty escalationReasons cannot pair with executionClass=${JSON.stringify(tc.executionClass)} (must be hardware-isolated)`,
+    );
+  }
+  const requiredExecutionClass =
+    untrustedAuthor || hasEscalations || errors.length > 0
+      ? 'hardware-isolated'
+      : tc.executionClass;
+  return { errors, requiredExecutionClass };
+}
+
+/**
  * Validates the host-held execution-record.json that replaces guest
  * self-certification for microVM and provider-VM rounds (D9/D10).
  */
@@ -1254,6 +1312,7 @@ export function checkArtifacts({
   executionRecordSha256 = null,
   expectedContextSha256 = null,
   requiredExecutionClass = null,
+  trustClassification = null,
 }) {
   const errors = [];
   const warnings = [];
@@ -1422,6 +1481,17 @@ export function checkArtifacts({
   }
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
+  let effectiveRequiredClass = requiredExecutionClass;
+  if (trustClassification !== null && trustClassification !== undefined) {
+    const tcCheck = checkTrustClassification(trustClassification, expectedHead);
+    errors.push(...tcCheck.errors);
+    if (
+      tcCheck.requiredExecutionClass === 'hardware-isolated' ||
+      effectiveRequiredClass === null
+    ) {
+      effectiveRequiredClass = tcCheck.requiredExecutionClass;
+    }
+  }
   let executionRecord = null;
   let actualExecutionRecordSha256 = null;
   if (executionRecordText !== null && executionRecordText !== undefined) {
@@ -1435,14 +1505,14 @@ export function checkArtifacts({
       expectedSha256: executionRecordSha256,
       actualSha256: actualExecutionRecordSha256,
       expectedContextSha256,
-      requiredExecutionClass,
+      requiredExecutionClass: effectiveRequiredClass,
     });
     errors.push(...execCheck.errors);
     executionRecord = execCheck.record;
   }
 
   if (
-    requiredExecutionClass === 'hardware-isolated' &&
+    effectiveRequiredClass === 'hardware-isolated' &&
     files.boundary &&
     files.boundary.trim() !== ''
   ) {
@@ -1822,6 +1892,7 @@ function main(argv) {
   let expectedBase = null;
   let hostContextSha256 = null;
   let requiredExecutionClass = null;
+  let trustClassification = null;
   if (contextPath) {
     // A host-held snapshot: the PR clone is mounted read-write, so the round
     // can write ANY path inside it — the artifact dir AND the
@@ -1946,16 +2017,16 @@ function main(argv) {
         }
         coordinates = coordinatesFrom(snapshot);
         const tc = snapshot?.trustClassification;
-        if (tc && typeof tc === 'object' && !Array.isArray(tc)) {
-          if (tc.headRefOid && expectedHead && tc.headRefOid !== expectedHead) {
+        if (tc !== undefined) {
+          trustClassification = tc;
+          const tcCheck = checkTrustClassification(tc, expectedHead);
+          if (tcCheck.errors.length > 0) {
             process.stderr.write(
-              `verify-pr check: --context ${contextPath} carries stale trustClassification.headRefOid ${tc.headRefOid} (expected ${expectedHead})\n`,
+              `verify-pr check: --context ${contextPath} has invalid trustClassification: ${tcCheck.errors.join('; ')}\n`,
             );
             return 1;
           }
-          if (EXECUTION_CLASSES.includes(tc.executionClass)) {
-            requiredExecutionClass = tc.executionClass;
-          }
+          requiredExecutionClass = tcCheck.requiredExecutionClass;
         }
       } catch {
         // Reported below; never falls back to the writable artifact copy.
@@ -2101,6 +2172,7 @@ function main(argv) {
     executionRecordSha256: executionRecordSha,
     expectedContextSha256: contextSha ?? hostContextSha256,
     requiredExecutionClass,
+    trustClassification,
   });
   // The container nonce corroboration (R16-1) needs the round dir to scan the
   // battery's logs, so it lives here rather than in checkArtifacts. It runs
