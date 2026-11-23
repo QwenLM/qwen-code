@@ -120,8 +120,8 @@ public interface RuntimeTransport {
     public CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
 
-    public default CompletionStage<Void> installPublisher(RuntimeLease lease,
-            RuntimeSession session, Map<String, Object> publisher) {
+    public default CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher, Long writerGeneration) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_tool_publisher_unavailable",
                 "Runtime transport does not support output publication.", false));
@@ -145,6 +145,21 @@ public interface RuntimeTransport {
     public default CompletionStage<Void> acknowledgeV2(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {
         return CompletableFuture.completedFuture(null);
+    }
+
+    public default CompletionStage<Void> detachPublisher(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_publisher_detach_unsupported",
+                "Runtime transport does not support Shell publisher detach.", false));
+    }
+
+    public default CompletionStage<Map<String, Object>> pullObservations(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_observation_pull_unsupported",
+                "Runtime transport does not support observation pull.", false));
     }
 
     public default CompletionStage<Void> installPublication(RuntimeLease lease,

@@ -117,16 +117,15 @@ class ManagedMessageSnapshotRemovalTest {
         String nativeId = "native-snapshot-manifest";
         String nativeKey = ManagedSessionStore.resourceKey(scope, nativeId);
         byte[] nativeBytes = {123, 125};
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
                         + " inline_bytes, state, gmt_create, retention_until)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0, 0)",
-                nativeKey, scope, TENANT, session, nativeId, ManagedNativeJournalSnapshots.MANIFEST_KIND,
+                        + " VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0, 0)",
+                nativeKey, TENANT, session, nativeId, ManagedNativeJournalSnapshots.MANIFEST_KIND,
                 nativeBytes.length, ToolPublicationContract.sha256(nativeBytes), nativeBytes);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create)"
-                        + " VALUES (?, 'NATIVE_SNAPSHOT', ?, 1, ?, ?, ?, ?, 0)",
-                scope, ManagedSchemaKeys.key(scope, nativeId), nativeKey, TENANT, session, nativeId);
+                        + " VALUES ('NATIVE_SNAPSHOT', ?, 1, ?, ?, ?, ?, 0)", ManagedSchemaKeys.key(scope, nativeId), nativeKey, TENANT, session, nativeId);
         jdbc.update("UPDATE ma_resource SET retention_until = 0 WHERE resource_key = ?", currentBody);
 
         assertThat(new ManagedProjectionResourceCollector(jdbc, manager).runOnce()).isTrue();

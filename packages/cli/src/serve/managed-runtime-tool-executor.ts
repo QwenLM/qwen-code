@@ -99,6 +99,10 @@ import {
 import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
 import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import { ManagedMonitorWatcher } from './managed-monitor-watcher.js';
+import {
+  WorkerBackgroundCaptureSink,
+  WorkerMonitorPolicy,
+} from './managed-background-delivery.js';
 
 const debugLogger = createDebugLogger('MANAGED_TOOL_EXECUTOR');
 
@@ -363,6 +367,8 @@ export interface ManagedShellCapturePublisher {
     identity: ToolResultExpectedIdentity,
     result: ToolResultEnvelope,
   ): Promise<void>;
+  /** Releases a prepared run that never started, so no terminal will retire it. */
+  discardWorkerRun?(executionCallId: string): void;
   /**
    * Whether this lane's retirement is proven by the publisher itself rather
    * than by an acknowledgement naming the worker's own manifest. The external
@@ -1549,6 +1555,9 @@ export class ManagedToolExecutor {
       });
     }
     if (this.closing || tools.isActive?.() === false) {
+      (prepared.publisher ?? this.capturePublisher)?.discardWorkerRun?.(
+        capture.executionCallId,
+      );
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1628,6 +1637,7 @@ export class ManagedToolExecutor {
           launchStarted === undefined ? 0 : performance.now() - launchStarted,
         ),
       );
+      publisher.discardWorkerRun?.(capture.executionCallId);
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1796,6 +1806,11 @@ export class ManagedToolExecutor {
       });
     }
     if (this.closing || tools.isActive?.() === false) {
+      // The composite capturePublisher does not forward discardWorkerRun;
+      // prepared.publisher is the registry that owns the prepared run.
+      (prepared.publisher ?? this.capturePublisher)?.discardWorkerRun?.(
+        capture.executionCallId,
+      );
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1808,6 +1823,46 @@ export class ManagedToolExecutor {
     const sink = prepared.sink;
     const publisher = prepared.publisher ?? this.capturePublisher;
     const unitName = `qwen-mon-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
+    // Phase 3b: when the worker owns the capture, it also owns the Monitor
+    // policy (line split, debounce, idle timeout, maxEvents). The sink routes
+    // stdout to the policy itself; a quota or idle stop terminates the unit,
+    // whose exit then settles the record through the terminal delivery entry.
+    if (sink instanceof WorkerBackgroundCaptureSink) {
+      const description =
+        typeof normalized['description'] === 'string' &&
+        normalized['description'].trim()
+          ? normalized['description']
+          : typeof normalized['command'] === 'string'
+            ? normalized['command']
+            : capture.executionCallId;
+      sink.attachMonitorPolicy(
+        new WorkerMonitorPolicy(
+          sink.run,
+          {
+            monitorId: capture.executionCallId,
+            executionCallId: capture.executionCallId,
+            description,
+            maxEvents: Math.min(
+              Math.max((normalized['max_events'] as number) ?? 1_000, 1),
+              10_000,
+            ),
+            idleTimeoutMs: Math.min(
+              Math.max((normalized['idle_timeout_ms'] as number) ?? 300_000, 1),
+              600_000,
+            ),
+            debounceMs: 1_000,
+            startSequence: 0,
+          },
+          async () => {
+            const receipt = await this.monitorRegistry.terminate(
+              unitName,
+              5_000,
+            );
+            return receipt?.evidence != null;
+          },
+        ),
+      );
+    }
     let watchHandle: Awaited<ReturnType<ManagedMonitorWatcher['start']>>;
     let bufferedBytes = 0;
     let paused = false;
@@ -1863,6 +1918,7 @@ export class ManagedToolExecutor {
           launchStarted === undefined ? 0 : performance.now() - launchStarted,
         ),
       );
+      publisher.discardWorkerRun?.(capture.executionCallId);
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1877,6 +1933,7 @@ export class ManagedToolExecutor {
     }
     const watchProcess = watchHandle.process;
     if (watchProcess === undefined) {
+      publisher.discardWorkerRun?.(capture.executionCallId);
       return settle({
         executionStatus: 'not_started',
         responseParts: [],

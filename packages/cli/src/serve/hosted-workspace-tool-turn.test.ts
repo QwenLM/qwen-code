@@ -109,7 +109,6 @@ import {
   LOOP_PROMPT_MAX_CHARS,
 } from './hosted-loop-session.js';
 import { HostedCronSession } from './hosted-cron-session.js';
-import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
@@ -3705,30 +3704,19 @@ it.each([
   );
 });
 
-it('keeps PDF pages out of resident and private CSI declarations', async () => {
+it('keeps PDF pages out of resident declarations', async () => {
   broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
   turn = createTurn();
-  const resident = await turn.declarations(new AbortController().signal);
-  const csi = await new HostedCsiToolTurn(
-    session,
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    { bindingId: 'binding', generation: '1' },
-    'prompt',
-    commit,
-    harness,
-    messageFitsInline,
-  ).declarations(new AbortController().signal);
-  for (const declarations of [resident, csi]) {
-    expect(declarations.map((tool) => tool.name)).toEqual([
-      'read_file',
-      'write_file',
-      'edit',
-    ]);
-    expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
-    expect(declarations[0]).not.toHaveProperty(
-      'parametersJsonSchema.properties.pages',
-    );
-  }
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+  ]);
+  expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
+  expect(declarations[0]).not.toHaveProperty(
+    'parametersJsonSchema.properties.pages',
+  );
 });
 
 it('dispatches PDF pages with the original input and declaration persisted', async () => {
@@ -13166,7 +13154,7 @@ it('registers the Session capture lane for a background turn in publication mode
   // installed on the Runtime, fed this call's register, and its
   // settleAttached is the hook the attach arm drives — it fires right
   // after the attach, without any client retry anywhere in the turn.
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(broker.registerPublisher).toHaveBeenCalledTimes(1);
   const register = lane.publisher!.register as ReturnType<typeof vi.fn>;
   expect(register).toHaveBeenCalledTimes(1);
@@ -13243,7 +13231,7 @@ it('picks the background lane from the input a PreToolUse Hook left, not the mod
   expect(result[0]?.functionResponse?.response).toMatchObject({
     executionStatus: 'success',
   });
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(register).toHaveBeenCalledOnce();
   expect(register.mock.calls[0]![0]).toMatchObject({
     capture: { background: true },

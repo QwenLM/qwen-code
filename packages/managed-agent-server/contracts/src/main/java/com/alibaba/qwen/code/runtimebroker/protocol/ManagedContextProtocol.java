@@ -36,6 +36,8 @@ public final class ManagedContextProtocol {
     public static final String PROTOCOL = "managed-context/1";
     public static final String ATTEST_PATH = "/internal/managed-runtime/v3/attest";
     public static final String CONTEXT_PATH = "/internal/managed-runtime/v3/context";
+    public static final String PUBLISHER_DETACH_PATH = "/internal/managed-runtime/v3/publisher/detach";
+    public static final String OBSERVATION_PULL_PATH = "/internal/managed-runtime/v3/observations/pull";
     private static final long MAX_EPOCH = 9_007_199_254_740_991L;
     private static final Pattern IDENTIFIER = Pattern.compile(
             "[A-Za-z0-9._:-]{1,128}");
