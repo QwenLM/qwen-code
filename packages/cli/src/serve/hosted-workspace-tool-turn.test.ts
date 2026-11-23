@@ -3579,7 +3579,10 @@ it('refuses a still-closed lane on an external files Turn before warming the Bro
 it('refuses an external Shell Turn without its publication', async () => {
   const build = (
     publication?: { owner: HttpToolPublicationOwner; captureBytes: number },
-    extras?: { skills?: ReturnType<typeof publishedSkills> },
+    extras?: {
+      skills?: ReturnType<typeof publishedSkills>;
+      mcp?: unknown;
+    },
   ) =>
     new HostedWorkspaceToolTurn(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -3596,6 +3599,16 @@ it('refuses an external Shell Turn without its publication', async () => {
   // Deleting the Shell arm of the closedLane ternary (testing presence, not
   // which member) lets the no-publication construction through: red here.
   expect(() => build()).toThrow(
+    'External Shell profile requires a publication and no other lanes.',
+  );
+  // Skills are turn content on this lane; every other optional lane stays
+  // closed, so the shared lane list must still refuse them.
+  expect(() =>
+    build(
+      { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
+      { mcp: {} },
+    ),
+  ).toThrow(
     'External Shell profile requires a publication and no other lanes.',
   );
   const withSkills = build(

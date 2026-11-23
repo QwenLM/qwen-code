@@ -1006,8 +1006,15 @@ class QwenHostedHarnessConnectorTest {
         connector.createOrLoad("tenant-a", SESSION_ID, false);
         ArgumentCaptor<CreateHarnessSession> create = ArgumentCaptor.forClass(CreateHarnessSession.class);
         verify(client).createSession(create.capture());
-        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(create.getValue(), "toJson"))
-                .containsKey("sessionSkillsRef");
+        var created = ReflectionTestUtils.<Map<String, Object>>invokeMethod(create.getValue(), "toJson");
+        @SuppressWarnings("unchecked")
+        var ref = (Map<String, Object>) created.get("sessionSkillsRef");
+        byte[] expected = com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions
+                .skillsBytes(pinned);
+        String digest = org.apache.commons.codec.digest.DigestUtils.sha256Hex(expected);
+        assertThat(ref).containsEntry("digest", digest)
+                .containsEntry("byteLength", expected.length)
+                .containsEntry("resourceId", "agent-skills-" + digest);
 
         when(skills.initialSelection("tenant-a", SESSION_ID))
                 .thenReturn(Map.of("skills", List.of("review")));
