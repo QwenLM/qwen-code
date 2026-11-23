@@ -48,7 +48,8 @@ Out of scope (recorded as follow-ups, not silently dropped):
   restart) while a detached background shell keeps running. The shell registry
   is in-memory, so no `hasRunningBackgroundTasks` reaches the client at all.
   Evidence: a remote session whose shell pid had been alive ~26h was absent
-  from live-state and carried no background field in the catalog.
+  from live-state and carried no background field in the catalog. Tracked in
+  #17819.
 - Re-grading the Session Overview panel's cards. A background-only session
   still reads `idle` there, which keeps the panel's sort order and displayed
   status unchanged; its two destructive card actions are gated separately (see
@@ -120,12 +121,22 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   both states. A live-starting row swaps the dot for its own spinner, so the
   marker takes the name back there rather than leaving the state unnamed.
 - In `SessionDetailsTooltip`, append ` · background.running` to the approval,
-  question and running arms whenever background tasks are running. The
-  background-only arm already names it and is left alone, and blocked-state
-  precedence is unchanged.
+  question, running and completed-unread arms whenever background tasks are
+  running, and to an override label (`statusLabel`, e.g. the voice starting
+  cue) for the same hidden-background reason. The background-only arm
+  (`!hasActivePrompt && hasRunningBackgroundTasks`) already names it and is
+  left alone. The completed-unread arm mirrors the row's dot precedence: it
+  outranks the running, active-work and unknown arms, the background-only arm
+  outranks it, and blocked-state precedence is unchanged (#18070).
 
-The status dot precedence is unchanged: green while a turn runs, amber for
-background-only, blue for other active work.
+The status dot precedence mirrors that chain (#18070): the live-starting
+spinner replaces the dots; the background-only dot
+(`!hasActivePrompt && hasRunningBackgroundTasks`) outranks the unread dot; the
+unread dot outranks the running and active-work dots (an in-flight turn gates
+off the background-only dot). Tints: green while a turn runs or other work is
+active (updated from blue in #18072 so blue stays reserved for
+completed-unread sessions), amber for background-only, blue for
+completed-unread.
 
 ## Design decisions and rationale
 
@@ -223,17 +234,30 @@ row. No page errors.
 2. A row with a turn in flight and background work shows the amber marker with
    `Running` as its accessible name and the composed `title`.
 3. The details popover names both states whenever they coexist, including
-   behind an approval or a question, without reordering blocked-state
-   precedence.
+   behind an approval or a question and under an override label such as the
+   voice starting cue, without reordering blocked-state precedence; the
+   unread arm outranks running/active-work/unknown and sits below the
+   background-only arm.
 4. Archive and delete are not offered for a session with background work — on
    the project rows (whether or not it is the attached session), the recent
    rows, the Session Overview cards, and in the delete dialog. An idle attached
    session stays deletable. Bulk Archive follows the flag as it changes after a
    row is ticked; a row that turns busy after selection is unchecked, stops
    being counted, and is dropped from the request.
-5. Dot precedence, the touch layout, and the existing hover contracts are
-   unchanged.
-6. Every assertion above dies under the corresponding mutation.
+5. Dot precedence mirrors the hover chain (starting spinner over all,
+   background-only amber over unread, unread over running/active-work, with an
+   in-flight turn gating off the background-only dot and active work sharing
+   the running green per #18072 so blue stays reserved for completed-unread);
+   the touch layout and the existing hover contracts hold.
+6. Every pinned assertion dies under its corresponding mutation: the tooltip
+   matrix (including per-arm suffix occurrence counts and the
+   unread-over-running row) covers the composed hover chains, and the row-side
+   witnesses pin the running→idle promotion via a control phase, the
+   background-over-unread slot, the unread-over-active-work slot (with an
+   active-only control row), and the tracker clearing unread when a completed
+   session starts running again. The running dot's `!completedUnread` guard is
+   defensive for the render-before-effect transient, with the
+   unread-over-running leg pinned at hover level by the tooltip matrix.
 
 ## Open questions / follow-ups
 

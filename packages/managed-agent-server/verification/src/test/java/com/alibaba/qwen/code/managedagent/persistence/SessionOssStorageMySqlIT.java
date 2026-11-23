@@ -188,10 +188,10 @@ class SessionOssStorageMySqlIT {
         String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         JournalPackTransactions transactions = new JournalPackTransactions(jdbc, objects);
         byte[] value = new byte[1];
-        transactions.insertBuilding("racing", scope, TENANT, WORKSPACE, SESSION, 1, 1,
+        transactions.insertBuilding("racing", TENANT, WORKSPACE, SESSION, 1, 1,
                 "racing", value.length, JournalStoreRows.sha256(value), 1, "builder", 0);
         objects.putIfAbsent("racing", value);
-        transactions.markPutClosed("racing", scope, TENANT, SESSION, "racing");
+        transactions.markPutClosed("racing", TENANT, SESSION, "racing");
         CountDownLatch publisherRoot = new CountDownLatch(1);
         CountDownLatch collectorRoot = new CountDownLatch(1);
         JournalPackTransactions publisher = new JournalPackTransactions(rootObservedJdbc(publisherRoot), objects);
@@ -278,14 +278,12 @@ class SessionOssStorageMySqlIT {
     }
 
     private void insertHead(long revision) {
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                 + " workspace_id, session_id, harness_session_id, head_kind, state,"
-                + " storage_version, writer_generation, journal_revision, committed_sequence,"
+                + " writer_generation, journal_revision, committed_sequence,"
                 + " last_commit_digest, activation_epoch, packed_through_revision, gmt_create,"
-                + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1, 1,"
+                + " gmt_modified) VALUES (?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1,"
                 + " ?, ?, 'digest', 0, 0, 0, 0)",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(SESSION),
                 TENANT, WORKSPACE, SESSION, SESSION, revision, revision);
     }
 

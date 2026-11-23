@@ -177,18 +177,17 @@ class ManagedExtensionCommandVerifierTest {
         byte[] bytes = JSON.writeValueAsBytes(body);
         String id = UUID.randomUUID().toString();
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind,"
                         + " schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0)",
-                ManagedSchemaKeys.key(scope, id), scope, id, kind, bytes.length, DigestUtils.sha256Hex(bytes), bytes);
+                        + " VALUES (?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0)",
+                ManagedSchemaKeys.key(scope, id), id, kind, bytes.length, DigestUtils.sha256Hex(bytes), bytes);
         return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length)
                 .put("digest", DigestUtils.sha256Hex(bytes));
     }
 
     private void project(String domain, String id, String opening, JsonNode ref) {
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id, gmt_create) VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, ?, 1, ?, 0)",
-                ManagedSessionStore.sessionScopeKey("tenant", "harness"), ManagedExtensionProjection.recordKey("harness", domain, id),
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id, gmt_create) VALUES (?, 'tenant', 'workspace', 'harness', ?, ?, ?, 1, ?, 0)", ManagedExtensionProjection.recordKey("harness", domain, id),
                 domain, id, DigestUtils.sha256Hex(opening), ref.get("resourceId").textValue());
     }
 

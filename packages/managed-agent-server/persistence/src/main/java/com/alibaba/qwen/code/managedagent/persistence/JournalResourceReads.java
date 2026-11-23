@@ -63,9 +63,9 @@ final class JournalResourceReads {
             storeRows.verifyStoredResource(resource);
             if (updateVerification) {
                 jdbc.update("UPDATE ma_resource SET"
-                            + " last_verified_at = ? WHERE session_scope_key = ?"
+                            + " last_verified_at = ? WHERE tenant_id = ? AND session_id = ?"
                             + " AND resource_id = ?",
-                        storeRows.databaseNow(), scopeKey, resourceId);
+                        storeRows.databaseNow(), tenantId, sessionId, resourceId);
             }
             byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
                     ? readPublicationObject(resource, lease, updateVerification)

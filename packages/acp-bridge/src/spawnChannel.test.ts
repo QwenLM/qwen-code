@@ -328,6 +328,9 @@ describe('createSpawnChannelFactory env policy', () => {
       pipeHooks: { onMessageSent, onMessageReceived },
     });
     const channel = await factory('/tmp/project');
+    // The published pid is the link that switches the liveness busy grace
+    // on; losing it silently reverts the feature to pre-grace accounting.
+    expect(channel.pid).toBe(12345);
     const writer = channel.stream.writable.getWriter();
     const reader = channel.stream.readable.getReader();
 
