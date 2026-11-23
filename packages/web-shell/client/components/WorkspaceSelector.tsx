@@ -65,6 +65,8 @@ interface WorkspaceSelectorProps {
   onSelectStandalone?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
+  /** Touch activation can otherwise release over a newly opened option. */
+  contentSide?: 'top' | 'bottom';
 }
 
 /** Radio-group value that stands for the projectless target. */
@@ -91,6 +93,7 @@ export function WorkspaceSelector({
   onSelectStandalone,
   onCreateScratch,
   onOpenExistingFolder,
+  contentSide = 'top',
 }: WorkspaceSelectorProps) {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -189,7 +192,7 @@ export function WorkspaceSelector({
           <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent
-          side="top"
+          side={contentSide}
           align="start"
           className="min-w-56"
           onPointerDownCapture={() => {

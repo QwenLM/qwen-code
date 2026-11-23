@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -100,7 +99,6 @@ public class JdbcJournalPacks {
             throw new IllegalStateException("Pack compaction requires no ambient transaction");
         }
         ManagedAgentSettings.SessionResources config = config();
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         Map<String, Object> head = headSnapshot(tenant, session);
         if (head == null || !"ACTIVE".equals(head.get("state"))
                 || ((Number) head.get("compacted_through_revision")).longValue() != 0) {
@@ -130,7 +128,7 @@ public class JdbcJournalPacks {
             }
             through--;
         }
-        publishPack(config, scope, tenant, workspace, session, from, through, built);
+        publishPack(config, tenant, workspace, session, from, through, built);
         return true;
     }
 
@@ -194,24 +192,24 @@ public class JdbcJournalPacks {
                 }, tenant, session, from, through);
     }
 
-    private void publishPack(ManagedAgentSettings.SessionResources config, String scope,
+    private void publishPack(ManagedAgentSettings.SessionResources config,
             String tenant, String workspace, String session, long from, long through, Built built) {
         byte[] objectBytes = built.objectBytes();
         String packId = "pack-" + UUID.randomUUID();
-        String objectKey = config.getOssKeyPrefix() + "packs/" + scope + "/" + packId;
+        String objectKey = config.getOssKeyPrefix() + "packs/" + tenant + "/" + session + "/" + packId;
         long now = System.currentTimeMillis();
         String objectSha = JournalStoreRows.sha256(objectBytes);
         // S1: the BUILDING catalog row commits on its own before the object PUT, so a
         // build that rolls back or crashes still leaves a row collectOrphans can reclaim. Only
         // BUILDING rows past the lease are reclaimable, so a live concurrent builder on another
         // replica is never displaced; a same-range collision aborts on the unique key instead.
-        transactions.insertBuilding(packId, scope, tenant, workspace, session, from, through,
+        transactions.insertBuilding(packId, tenant, workspace, session, from, through,
                 objectKey, objectBytes.length, objectSha, now, builderId,
                 now - BUILDING_LEASE_MILLIS);
         try {
             // Exactly one invocation for this UUID, even if PUT or the closed receipt fails.
             store().putIfAbsent(objectKey, objectBytes);
-            transactions.markPutClosed(packId, scope, tenant, session, objectKey);
+            transactions.markPutClosed(packId, tenant, session, objectKey);
             byte[] readBack = readFully(store().open(objectKey, () -> {}));
             if (readBack.length != objectBytes.length
                     || !JournalStoreRows.sha256(readBack).equals(objectSha)) {
@@ -224,10 +222,10 @@ public class JdbcJournalPacks {
                     + built.compressedBytes() + ",\"packSha256\":\"" + objectSha
                     + "\",\"indexSha256\":\"" + JournalStoreRows.sha256(built.indexBytes()) + "\"}")
                     .getBytes(StandardCharsets.UTF_8);
-            transactions.publish(packId, scope, tenant, workspace, session, from, through, manifest);
+            transactions.publish(packId, tenant, workspace, session, from, through, manifest);
         } catch (RuntimeException error) {
             try {
-                transactions.retireBuilding(packId, scope, tenant, session);
+                transactions.retireBuilding(packId, tenant, session);
             } catch (RuntimeException retirementFailure) {
                 error.addSuppressed(retirementFailure);
             }
@@ -242,12 +240,11 @@ public class JdbcJournalPacks {
         if (head == null || revision > ((Number) head.get("packed_through_revision")).longValue()) {
             return null;
         }
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         List<Map<String, Object>> packs = jdbc.queryForList(
                 "SELECT pack_id, object_key, byte_length FROM ma_journal_pack WHERE"
-                        + " session_scope_key = ? AND state IN ('PUBLISHED', 'EVICTED') AND"
+                        + " tenant_id = ? AND session_id = ? AND state IN ('PUBLISHED', 'EVICTED') AND"
                         + " from_revision <= ? AND through_revision >= ? ORDER BY from_revision",
-                scope, revision, revision);
+                tenant, session, revision, revision);
         if (packs.isEmpty()) {
             throw JournalStoreRows.conflict("managed_journal_pack_corrupt",
                     "A covered journal revision has no published pack.");

@@ -58,7 +58,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedPrWatchServiceTest {
-    private static final String TENANT = "tenant-prwatch-" + UUID.randomUUID();
+    private static final String TENANT = UUID.randomUUID().toString();
     private static final String WORKSPACE = "ws-prwatch";
     private static final String OTHER_WORKSPACE = "ws-prwatch-other";
     private static final String ACTOR = "prwatch-owner";

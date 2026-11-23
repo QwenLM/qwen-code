@@ -4,12 +4,17 @@
 
 ## Status and scope
 
-- Status: **proposal**. No code or schema is changed by this document. Implementation
-  requires its own change, baseline reproduction, and MySQL evidence.
+- Status: **in progress (core migration landed, pending full CI verification)**.
+  The mixed identity representation is maintainer-approved; DDL, production SQL,
+  and verification fixtures have been de-hashed. Local focused H2 and dual
+  Checkstyle pass; MySQL, full H2, and performance evidence remain pending CI.
 - Revision (2026-11-20): a follow-up survey of the hash keys that duplicate another unique
   key in their own table corrected the `workspace_id` budget and added constraints for
   receipts, operations, Session hash columns and read leases, then decided the three
   questions it raised (see [Duplicate business keys](#duplicate-business-keys)).
+- Revision (2026-11-21): increment 2 removes the hash keys that only restate raw
+  columns of their own row, ahead of the VARCHAR conversion (see
+  [Increment 2](#increment-2-redundant-same-row-hash-keys)).
 - Date: 2026-11-20. Source baseline: `origin/main` at `7ef9d6decb`. Analysis was
   executed at `f10299764e`; the three intervening commits touch no
   `packages/managed-agent-server` file, and the shared V1 schema and
@@ -263,10 +268,11 @@ categories need explicit redesign beyond the index rebuild:
   `(tenant_id, session_id, resource_id)`) with lexicographic row-value cursor
   comparisons, and the same total order must hold across every transaction that
   locks those rows.
-- **Generated columns over hash keys.** `ma_request_receipt.decision_scope_key`
-  (`GENERATED … RTRIM(scope_key)`, V1:681) and `ma_side_query.active_slot`
-  (`GENERATED … actor_scope_key`, V1:1333) derive from hash columns; both must be
-  redefined over the raw scope columns or dropped together with their consumers.
+- **Generated column over a hash key.** `ma_side_query.active_slot`
+  (`GENERATED … actor_scope_key`, V1:1333) derives from a hash column; it must be
+  redefined over the raw scope columns or dropped together with its consumers.
+  `ma_request_receipt.decision_scope_key` was removed by
+  [dead schema objects](2026-11-21-managed-schema-dead-objects.md).
 - **CHECK constraints over hash keys.** `ck_ma_resource_capture` (scope_key/slot_key
   nullability coupling, V1:508), `ck_ma_ref_binding` (runtime_binding_key, V1:536),
   and `ck_ma_storage_registered` (physical_key, V1:989) reference hash columns and
@@ -350,6 +356,72 @@ confirms that the remaining work is one atomic cluster
    uniqueness. The kind list lives in the DDL, so a new tenant-addressed kind must be
    added there.
 
+## Increment 2: redundant same-row hash keys
+
+A hash column is redundant when it is derived only from raw columns of its own row,
+no other table joins on it, and it mints no identifier. Increment 2 drops those
+columns, rebuilds their uniques and indexes on the raw columns with the same column
+order, and rewrites every query to filter the raw columns. The VARBINARY types are
+unchanged; the VARCHAR conversion, the cross-table references and the decisions above
+remain the cluster described in the
+[implementation plan](../plans/2026-11-20-managed-identity-dehash-cluster-impl.md).
+
+| Table                                                        | Removed                            | Replaced by                                                      |
+| ------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------------------------- |
+| `ma_session_head`                                            | `tenant_key`, `harness_key`        | `UNIQUE (tenant_id, harness_session_id)`                         |
+| `ma_session_record`, `ma_resource`, `ma_resource_ref`        | `session_scope_key`                | `(tenant_id, session_id)` prefix                                 |
+| `ma_operation`, `ma_journal_pack`, `ma_client_files_binding` | `session_scope_key`                | `(tenant_id, session_id)` prefix                                 |
+| `ma_client_files_request`                                    | `session_scope_key`, `request_key` | `UNIQUE (tenant_id, session_id, binding_generation, request_id)` |
+| `ma_side_query`                                              | `session_scope_key`, `query_key`   | `UNIQUE (tenant_id, query_id)`; session index on raw columns     |
+| `ma_memory_entry`                                            | `entry_key`                        | `UNIQUE (tenant_id, memory_store_id, memory_id)`                 |
+| `ma_extension_package`, `_settings`, `_operation`            | `scope_key`                        | `(tenant_id, workspace_id, extension_id, …)`                     |
+| `ma_output_capture`                                          | `tenant_key`                       | `idx_ma_capture_tenant (tenant_id, state)`                       |
+
+Width. Several raw replacements fit only because the child identity column is
+narrowed to its parent's width, 512 bytes: `ma_session_head.tenant_id` and
+`workspace_id`, `session_id` in `ma_session_record`, `ma_resource` and
+`ma_resource_ref`, and `ma_operation.tenant_id`. Their tenant and Session ids are those
+of `ma_session` and `ma_workspace` (512 bytes), and the journal writer, the only head
+writer that sets a workspace, already rejects tenant ids over 128 bytes and workspace
+and Session ids over 512 bytes, so no accepted value is lost. This supersedes the Session-head part of the `ma_session` row
+above: with the head tenant at 512 bytes the raw head key is 2560 bytes. Three
+non-unique indexes use a key prefix, `idx_ma_record_identity`, `idx_ma_ref_journal`
+and `idx_ma_delivery_source` (`record_id`, `resource_id` and `delivery_id` limited
+to 1024 bytes, MySQL only); every unique uses full columns. The widest rebuilt keys, `uk_ma_resource_id` and `idx_ma_head_workspace`,
+are exactly 3072 bytes, which InnoDB accepts.
+
+Kept, because they are not redundant:
+
+- `ma_session.tenant_key`, `session_key` and `session_scope_key` are the registration
+  marker written by the publication-retention CONTROL upsert. Every join moved off them
+  joins the raw columns and keeps `s.session_scope_key IS NOT NULL`, so a Session that
+  path never registered still does not match.
+- `ma_output_capture.scope_key` anchors the publication scope that `ma_operation`,
+  `ma_resource` and `ma_artifact` reference.
+- `resource_key`, `record_key`, `operation_key`, `target_key`, the delivery keys, actor
+  keys, storage keys and runtime request and scope keys are cross-table references,
+  minted identifiers or non-uniform derivations (see above).
+- `ma_request_receipt.tenant_key`: its raw replacement in the ingress keyset index
+  would be 3208 bytes. `ma_read_lease` stores no raw identity.
+
+Query rules:
+
+- Every Session head writer sets `session_id` to `harness_session_id`, so the former
+  `tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?` lookups
+  become `tenant_id = ? AND harness_session_id = ?`: the same unique row and the same
+  `FOR UPDATE` lock.
+- A cross-table join that compared hash columns either binds the derived value
+  (`l.source_scope_key = ?`) or joins the raw columns through an index path. The
+  Session-message handover join needed one new index,
+  `idx_ma_delivery_source (delivery_kind, tenant_id, source_session_id, delivery_id)`.
+- Session retirement locks side queries and client-files requests in the order of
+  their rebuilt unique keys (`query_id`; `binding_generation, request_id`) instead of
+  hash order. It is the only multi-row locker that orders those rows, and the other
+  multi-row lock (live side queries by state) keeps its index order, so the change
+  adds no lock cycle.
+- Collision re-checks against the removed hashes are deleted with them; capacity logs
+  still print the tenant hash, never the raw tenant id.
+
 ## Invariants preserved
 
 - Tenant/actor/workspace authorization precedes LIMIT and pagination; no
@@ -420,3 +492,162 @@ confirms that the remaining work is one atomic cluster
 - Production tenant/actor injection: confirm the decimal-string contract and the
   maximum digit count across deployments before fixing `VARCHAR(36)`.
 - Whether any external platform id can exceed 512 chars (residual compaction case).
+
+## 2026-11-21 implementation supplement (maintainer-approved)
+
+### Mixed identity representation
+
+Simple identities (tenant/session/actor and similar) use bounded `VARCHAR` with
+explicit `utf8mb4_0900_bin`. Overly wide or polymorphic cross-table identities no
+longer duplicate many nullable raw columns; they use a **reversible canonical
+readable reference**. This is not SHA-256 and loses no component information.
+Every index is accepted at **<= 3072 bytes**, and encoded length is fail-closed.
+
+`ManagedIdentityRef` encodes:
+
+```text
+v1|<component-count>|<component>|...
+component := "-" | <utf8-byte-length>:<escaped-payload>
+```
+
+- A null component encodes as `-`; an empty string encodes as `0:`.
+- Payloads are percent-escaped UTF-8 bytes; only ASCII alphanumerics and
+  `. _ ~ : -` remain literal.
+- Decoding strictly validates version, arity, lengths, canonical escapes, and
+  UTF-8 well-formedness, and rejects non-canonical encodings.
+- `encode(maximumBytes, components...)` enforces the final ASCII byte budget
+  before writing.
+
+### Table-level decisions
+
+- `ma_session` gains a monotonic boolean
+  `is_publication_retention_registered`, set by the publication-retention
+  CONTROL upsert; the former `session_scope_key IS NOT NULL` filters use this
+  marker. The old hash columns are dropped in the full atomic cluster.
+- `ma_operation` gains raw `scope_kind/scope_id`; cross-table references use
+  `operation_ref`. Tenant-addressed operation uniqueness is preserved by the
+  same reference mechanism, so no extra `tenant_operation_id` generated column
+  is needed.
+- `ma_resource_ref` owners are polymorphic and use a non-null `owner_ref`; the
+  resource side prefers raw `(tenant_id, session_id, resource_id)` and falls
+  back to `resource_ref` when too wide.
+- Runtime request/scope use `request_id/scope_id` canonical references while
+  authoritative tables keep raw components for validation;
+  `ma_tool_execution.runtime_session_key` is a single-value hash and is replaced
+  directly by raw `runtime_session_id`.
+- Delivery gains `source_scope_id`; channel segments gain raw `delivery_id`;
+  `ma_delivery.source_record_key` has no production consumer and has been
+  removed.
+- The synthetic child-Session actor uses the bounded derived ID
+  `ChildActorId.of(parentSessionId)`: `c:` plus the first 32 hex characters of
+  the parent Session id's UTF-8 SHA-256 (34 characters), keeping the 36-character
+  actor budget; persistence and control-plane share the same derivation.
+- Preserve `receipt_key`, workspace/storage generated identities,
+  extension/automation/CSI protocol-derived IDs, content/commit/token digests,
+  and binary payloads.
+
+### Current checkpoint
+
+Completed and verified:
+
+- tenant/actor 36-character/code-point admission boundaries;
+- the `ma_session` publication-retention registration marker and four filter
+  migrations;
+- conversion of all baseline `tenant_id`/`session_id` columns (including the
+  session-family columns) to `VARCHAR(36)/VARCHAR(64)` under the table-default
+  PAD SPACE collation with uniform trailing-space rejection at admission (see
+  the 2026-11-22 final policy below, which supersedes the NO PAD proposal);
+- Runtime Broker identity binding that distinguishes text from bytes by JDBC
+  parameter type;
+- the `ManagedIdentityRef` codec and its unit tests;
+- removal of `ma_delivery.source_record_key` and projection synchronization;
+- the bounded synthetic child-Session actor (`ChildActorId`) and related
+  regression fixes;
+- H2 schema/catalog/projection, core business/session/retention/side-query/
+  client-files/channel/workspace/SSH stores, and the failing Runtime Broker
+  regression suites;
+- both Checkstyle executions;
+- the canonical readable reference layer (`operation_ref`/`scope_ref`/`owner_ref`,
+  `request_id`/`scope_id`) replacing the identity-hash key columns, and the
+  cross-table SQL/lock-order migration;
+- admission-time canonical-reference budget validation (RuntimeScope and
+  RuntimeProvisionRequest construction, journal command and owner refs), so an
+  over-budget tuple is a named 4xx at the boundary rather than a raw INSERT or
+  replay error;
+- column-bounded Harness/Runtime Session admission (`VARCHAR(64)`/`VARCHAR(128)`);
+- Tier B identity columns `resource_id`/`record_id`/`child_run_id`/
+  `execution_call_id` `VARCHAR(256)`;
+- the duplicate-index cleanup (dropped `idx_ma_operation_target_raw` and
+  `idx_ma_resource_scope_page`) and the resource-GC page index path;
+- the retention-registration marker row decode and the byte-bounded recovery
+  work-key guard.
+
+Remaining: complete MySQL 8.4 type/collation/index-width gates and
+race/performance evidence (no local MySQL; pending CI), the full H2 suite (did
+not finish within the 10-minute local budget), SQL performance benchmarks, and
+TypeScript consumer synchronization. Canonical `*_ref`, `record_resource_id`
+and `ma_runtime_stage.execution_call_id` stay `VARBINARY` by design, not as
+outstanding conversions.
+
+## 2026-11-22 final policy (supersedes the earlier NO PAD proposal)
+
+This section records the maintainer-approved policy that has landed. It
+supersedes the earlier "NO PAD / `utf8mb4_0900_bin` / byte-exact trailing-space
+equality" proposal above, and the interim decision to keep actor columns at
+`VARBINARY(144)`.
+
+### Collation and trailing spaces
+
+- All column-level `COLLATE utf8mb4_0900_bin` clauses were removed; identity
+  columns inherit the table default `utf8mb4_bin` (PAD SPACE).
+- Uniform policy: **every identity admission rejects trailing spaces**
+  (`requireActor` and
+  `requireBindingId/requireOperationId/requireShortId/requireWorkspaceId/requireStorageId/requireInstanceId/requireWorkerOwner`).
+  Because admission never lets a trailing space into the system, PAD SPACE
+  folding cannot occur for a legal identity.
+- Exact equality "including trailing spaces" is now guaranteed by admission,
+  not by collation; case sensitivity is still provided by `utf8mb4_bin`. The
+  earlier trailing-space-distinction tests became trailing-space-rejection
+  tests; case-distinction tests are preserved.
+
+### Actor columns
+
+- Raw-actor (≤36 code points) authorization/idempotency key columns are uniformly
+  `VARCHAR(36)`: ma_user_message, ma_user_message_command, ma_workspace_access,
+  ma_schedule, ma_client_files_binding, plus the existing
+  ma_session.creator/owner_actor_key, ma_operation, ma_session_record, extension,
+  delivery, memory_store, and session_worktree columns.
+- `ma_channel_instance.actor_id` is `VARCHAR(512)` (adapter contract
+  `@Size(max=512)`, register rejects trailing spaces). The binary/text actor
+  split is gone.
+
+### Tier A conversions completed
+
+- Operation family + `publication_command_id` `VARCHAR(128)`
+  (`uk_ma_publication_operation` 3136→1600B); short minted IDs `VARCHAR(64)`
+  (`decision_receipt_id` 128); action/run/channel/route/artifact/publication/
+  capture/task/stream/instance/creation/worker-owner `VARCHAR(128)`; `memory_id`
+  `VARCHAR(256)`; `slot_key`/`occurrence_key` `VARCHAR(144)`; workspace/storage/
+  extension split registry 128 / runtime 512 / storage 256.
+- Canonical refs, digests, ciphertext, object keys, and `source_key` stay
+  `VARBINARY`.
+
+### Cross-engine note
+
+- H2 2.3.232 measures `VARCHAR(n)` in UTF-16 units while MySQL measures code
+  points; 36 code points of supplementary-plane characters (emoji) exceed 36
+  units on H2. Actor boundary tests use BMP characters (CJK) to exercise the
+  36-code-point budget; the production target MySQL counts code points.
+
+### Still outstanding
+
+- Tier B core identities (`resource_id`/`record_id`/`child_run_id`/
+  `execution_call_id`) shipped `VARCHAR(256)`; residual Tier B/C identities and
+  their admission/index design remain.
+- The earlier wenshao blockers are resolved: the record_id 1024B prefix
+  (dropped), the Action owner_ref retirement leak (shared three-component owner
+  ref), Hook width (128-char admission) and PAD SPACE (uniform trailing-space
+  rejection), and the N9 schema gate zero-row match. N7 `lockPlacementDomain`
+  lock ordering is implemented; its MySQL deadlock/race evidence is pending CI.
+- Semantic merge conflict with #18048; full H2 and MySQL 8.4 gates/races/
+  performance pending CI.

@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -82,6 +81,7 @@ final class AgentTurnExecution {
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
                         + " dispatch_owner = ?, dispatch_lease_until = ?,"
+                        + " error_code = CASE WHEN error_code = ? THEN NULL ELSE error_code END,"
                         + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ? AND turn_id = ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
@@ -90,8 +90,8 @@ final class AgentTurnExecution {
                         + " NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR NOT EXISTS"
                         + " (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id"
                         + " AND w.session_id = ma_turn.session_id AND w.state <> 'READY'))",
-                owner, now + leaseDuration.toMillis(), now, tenantId,
-                sessionId, turnId, now, now);
+                owner, now + leaseDuration.toMillis(), AgentStateStore.HARNESS_ACTION_PARKED,
+                now, tenantId, sessionId, turnId, now, now);
         return updated == 0 ? Optional.empty()
                 : storeRows.findTurn(tenantId, sessionId, turnId);
     }
@@ -422,13 +422,13 @@ final class AgentTurnExecution {
         }
         jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " ma_event_stream WHERE tenant_id"
-                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " FOR UPDATE",
                 Long.class, tenantId, sessionId);
         List<EventRecord> deltas =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
-                            + " = X'' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
+                            + " = '' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
                             + " event_type IN ('item.output_text.delta', 'item.reasoning.delta')"
                             + " ORDER BY sequence_id ASC",
                         eventJournal.eventMapper,
@@ -445,7 +445,7 @@ final class AgentTurnExecution {
             data.put("text", "");
             jdbc.update(
                     "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND session_id ="
-                        + " ? AND stream_kind = 'SESSION' AND stream_id = X'' AND sequence_id = ?",
+                        + " ? AND stream_kind = 'SESSION' AND stream_id = '' AND sequence_id = ?",
                     storeRows.writeJson(data),
                     tenantId,
                     sessionId,
@@ -497,7 +497,7 @@ final class AgentTurnExecution {
         if (!eventJournal.hasSourceEvent(tenantId, sessionId, reconciliationKey)) {
             jdbc.queryForObject(
                     "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                         + " UPDATE",
                     Long.class,
                     tenantId,
@@ -505,7 +505,7 @@ final class AgentTurnExecution {
             List<EventRecord> deltas =
                     jdbc.query(
                             "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                                + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
+                                + " stream_id = '' AND tenant_id = ? AND session_id = ? AND"
                                 + " turn_id = ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
                             eventJournal.eventMapper,
@@ -524,7 +524,7 @@ final class AgentTurnExecution {
                 data.put("text", "");
                 jdbc.update(
                         "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' AND"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' AND"
                             + " sequence_id = ?",
                         storeRows.writeJson(data),
                         tenantId,
@@ -677,10 +677,9 @@ final class AgentTurnExecution {
         }
         var heads = WorkspaceOperations.rows(jdbc,
                 "SELECT tenant_id, session_id, state, writer_lease_until FROM"
-                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ?"
+                        + " ma_session_head WHERE tenant_id = ? AND harness_session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId));
+                tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         if (heads.size() != 1 || !tenantId.equals(heads.getFirst().get("tenant_id"))
                 || !sessionId.equals(heads.getFirst().get("session_id"))

@@ -181,12 +181,12 @@ public class JdbcManagedAgentDefinitionStore
     private Admission record(String tenantId, String idempotencyKey,
             String requestDigest, DefinitionRevision revision, long now) {
         try {
-            jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
-                            + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
+            jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_id,"
+                            + " scope_kind, scope_ref, scope_id, idempotency_key, idempotency_digest, request_digest,"
                             + " state, agent_id, agent_revision, gmt_create, gmt_modified)"
-                            + " VALUES (?, 'AGENT_DEFINITION', ?, ?, 'TENANT', ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)",
-                    receiptKey(tenantId, idempotencyKey), ManagedSchemaKeys.key(tenantId), tenantId,
-                    ManagedSchemaKeys.key("TENANT", tenantId), tenantId, idempotencyKey,
+                            + " VALUES (?, 'AGENT_DEFINITION', ?, 'TENANT', ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)",
+                    receiptKey(tenantId, idempotencyKey), tenantId,
+                    ManagedSchemaKeys.identity(ManagedReceipts.scope(tenantId, tenantId)), tenantId, idempotencyKey,
                     ManagedSchemaKeys.key(idempotencyKey), requestDigest, revision.agentId(), revision.revision(), now, now);
         } catch (DuplicateKeyException error) {
             // A concurrent request recorded this key first.
