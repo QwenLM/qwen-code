@@ -7034,6 +7034,14 @@ describe('ChatEditor mobile composer actions', () => {
       expect(
         headerBelowRow.querySelector('[data-web-shell-git-branch]'),
       ).not.toBeNull();
+      for (const width of [480, 560]) {
+        containerWidth = width;
+        act(() => fireResize(observers, surface));
+        expect(actions().querySelector('[aria-label="Workspace"]')).toBeNull();
+        expect(
+          actions().querySelector('[data-web-shell-git-branch]'),
+        ).not.toBeNull();
+      }
 
       // Without git either, existing sessions render zero rows below.
       rerenderChatEditor(container, {
@@ -7054,6 +7062,12 @@ describe('ChatEditor mobile composer actions', () => {
         containerWidth = width;
         act(() => fireResize(observers, surface));
         expect(actions().getAttribute('data-mobile-layout')).toBe(tier);
+        if (tier !== 'narrow') {
+          expect(
+            actions().querySelector('[class*="mobileContextRow"]'),
+          ).toBeNull();
+        }
+        expect(container.querySelector('[aria-label="Workspace"]')).toBeNull();
       }
     } finally {
       rectSpy.mockRestore();

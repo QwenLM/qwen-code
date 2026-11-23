@@ -114,6 +114,20 @@ button retains a reachable command picker on mobile outside Shell mode.
 Hosts without Add retain Shell and history-search buttons in the bottom
 toolbar; this fallback does not enable file ingestion or references.
 
+The mobile context controls have a single mutually exclusive menu owner, while
+the Git mode's unconfirmed branch draft is owned above the inline/below
+placements. Crossing a container-width tier must retain the open menu and
+unconfirmed input; closing and reopening still initializes from the current
+intent. A header-owned workspace is excluded from both mobile context
+placements. Host-provided Git controls with their own rendering may shrink with text
+ellipsis in the medium tier rather than being clipped after intrinsic width. In the
+narrow below-composer row, top padding absorbs the negative margin so each
+44px control starts outside the composer surface; do not lift the row's opaque
+background with z-index above the surface. The text-only Git tooltip does not
+receive pointer events, so its arrow cannot retarget a touch compatibility
+mouseup and suppress the component's click. The no-Add Shell/history fallback
+buttons must not forward activation to the draft while history search is open.
+
 The history search must have a visible close action and remain touch usable.
 It opens upward from the composer, so its height is also capped by the room
 between the composer and the top of the visible chat area. When even its
@@ -186,6 +200,12 @@ Record any runtime limitations separately from mocked browser results.
   no horizontal page overflow. Coordinate hit tests must resolve the actual
   key 3.5px above and below its 36px visual box, confirming that the 44px
   vertical touch band is effective rather than merely declared.
+- At narrow widths, verify the full 44px context buttons lie outside the
+  composer surface and actual `top + 2px` taps open their menus. Cross width
+  tiers with a live menu and unconfirmed Git text, checking state retention.
+  In the medium tier, verify a host-provided long-branch control keeps its
+  chevron inside and clickable. Wide long-workspace fixtures must supply real
+  labels and demonstrate actual text overflow, not a generic fallback label.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

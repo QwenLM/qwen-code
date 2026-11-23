@@ -2690,7 +2690,13 @@ export const ChatEditor = memo(
       if (modelControlsDisabled && !mobileModelSheet)
         setModelDropdownOpen(false);
     }, [modelControlsDisabled, mobileModelSheet]);
-    const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+    const [activeContextMenu, setActiveContextMenu] = useState<
+      'workspace' | 'git' | 'branch' | null
+    >(null);
+    const [gitModeDraft, setGitModeDraft] = useState({
+      selectedMode: gitModeIntent?.mode ?? ('current' as const),
+      branchName: gitModeIntent?.mode === 'branch' ? gitModeIntent.name : '',
+    });
     const isMobile = Boolean(core.mobileComposer);
     // Touch-down blur guard shared by the mobile Send and Stop controls. Do
     // not dismiss the software keyboard between touch-down and click: the
@@ -3241,6 +3247,10 @@ export const ChatEditor = memo(
           onSelectStandalone={onSelectStandaloneTarget}
           onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
           onOpenExistingFolder={onOpenExistingWorkspace ?? (() => {})}
+          open={activeContextMenu === 'workspace'}
+          onOpenChange={(open) =>
+            setActiveContextMenu(open ? 'workspace' : null)
+          }
         />
       ) : null;
     const renderGitBranchChip = (compact: boolean) =>
@@ -3252,11 +3262,17 @@ export const ChatEditor = memo(
             compact={compact}
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
+            open={activeContextMenu === 'git'}
+            onOpenChange={(open) => setActiveContextMenu(open ? 'git' : null)}
+            draft={gitModeDraft}
+            onDraftChange={setGitModeDraft}
           />
         ) : (
           <BranchPickerPopover
-            open={branchPickerOpen}
-            onOpenChange={setBranchPickerOpen}
+            open={activeContextMenu === 'branch'}
+            onOpenChange={(open) =>
+              setActiveContextMenu(open ? 'branch' : null)
+            }
             workspaceCwd={selectedWorkspace?.cwd ?? ''}
             gitCwd={gitCwd}
             gitSessionId={gitCwd ? sessionId : undefined}
@@ -3316,8 +3332,8 @@ export const ChatEditor = memo(
     }, [isMobile, isSimple, mobileVoiceActive]);
 
     const mobileHasInlineContext =
-      workspaceSelectVisible ||
-      workspaceIndicatorVisible ||
+      (contextChipPlacement !== 'header' &&
+        (workspaceSelectVisible || workspaceIndicatorVisible)) ||
       gitBranchVisible ||
       Boolean(gitContextControl);
     const mobileHasBelowContext =
@@ -3335,7 +3351,7 @@ export const ChatEditor = memo(
       !isSimple &&
       !mobileVoiceActive &&
       mobileLayoutTier === 'narrow' &&
-      (!mobileFocused || branchPickerOpen) &&
+      (!mobileFocused || activeContextMenu !== null) &&
       mobileHasBelowContext;
     // The workspace/Git row lives inside the capped box on wide/medium touch
     // layouts, so its measured height is added back to the cap.
@@ -4331,7 +4347,10 @@ export const ChatEditor = memo(
                           : 'quickActions.shellMode',
                       )}
                       onMouseDown={(event) => event.preventDefault()}
-                      onClick={core.toggleShellMode}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        core.toggleShellMode();
+                      }}
                     >
                       <span aria-hidden="true">!</span>
                     </button>
@@ -4991,6 +5010,7 @@ export const ChatEditor = memo(
                   >
                     {workspaceControls(false, {
                       compactGit: mobileLayoutTier === 'medium',
+                      includeWorkspace: contextChipPlacement !== 'header',
                     })}
                   </div>
                 )}

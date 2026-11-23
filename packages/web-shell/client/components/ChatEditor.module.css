@@ -3314,6 +3314,13 @@
 .mobileEditingActions[data-mobile-layout='medium']
   .mobileContextRow
   > [data-web-shell-git-branch] {
+  flex: 0 1 auto;
+}
+
+/* Host Git can shrink, but the built-in wrapper must fit its 44px chip. */
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > :has([data-web-shell-git-branch-label]) {
   flex: 0 0 auto;
 }
 
@@ -3399,7 +3406,7 @@
   overflow-x: auto;
   scrollbar-width: none;
   margin-top: -10px;
-  padding: 2px 6px;
+  padding: 12px 6px 2px;
 }
 
 .editorShell[data-web-shell-mobile-composer] .contextRow::-webkit-scrollbar {

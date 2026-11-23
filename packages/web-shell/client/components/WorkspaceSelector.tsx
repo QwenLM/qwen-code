@@ -67,6 +67,8 @@ interface WorkspaceSelectorProps {
   onOpenExistingFolder: () => void;
   /** Touch activation can otherwise release over a newly opened option. */
   contentSide?: 'top' | 'bottom';
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /** Radio-group value that stands for the projectless target. */
@@ -94,9 +96,16 @@ export function WorkspaceSelector({
   onCreateScratch,
   onOpenExistingFolder,
   contentSide = 'top',
+  open: openProp,
+  onOpenChange,
 }: WorkspaceSelectorProps) {
   const { t } = useI18n();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [internalMenuOpen, setInternalMenuOpen] = useState(false);
+  const menuOpen = openProp ?? internalMenuOpen;
+  const setMenuOpen = (value: boolean) => {
+    setInternalMenuOpen(value);
+    onOpenChange?.(value);
+  };
   const [tooltipOpen, setTooltipOpen] = useState(false);
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);

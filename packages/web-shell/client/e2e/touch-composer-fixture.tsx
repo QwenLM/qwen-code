@@ -4,19 +4,64 @@ import { ChatEditor } from '../components/ChatEditor';
 import { I18nProvider } from '../i18n';
 import { ThemeProvider } from '../themeContext';
 import { WebShellCustomizationProvider } from '../customization';
+import { ManagedWorktreePopover } from '../components/managed/ManagedWorktreePopover';
 import '../styles/globals.css';
 import '../styles/standalone.css';
 
 const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario');
 const primaryCwd = '/tmp/qwen-code-x1-mobile-demo';
-const longCwd = `/tmp/${'long-workspace-name-'.repeat(15)}`;
+const longWorkspaceName = 'long-workspace-name-'.repeat(15);
+const longCwd = `/tmp/${longWorkspaceName}`;
 
 function Fixture() {
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
-    scenario === 'wide-git' ? longCwd : primaryCwd,
+    scenario === 'wide-git' || scenario === 'interactive-git'
+      ? longCwd
+      : primaryCwd,
   );
-  if (scenario === 'wide-git') {
+  const [managedOpen, setManagedOpen] = useState(false);
+  const [managedWorktree, setManagedWorktree] = useState(false);
+  if (scenario === 'managed-worktree') {
+    return (
+      <ChatEditor
+        onSubmit={() => undefined}
+        commands={[]}
+        attachmentsEnabled={false}
+        visibleToolbarActions={['workspace']}
+        gitContextControl={
+          <ManagedWorktreePopover
+            worktree={managedWorktree}
+            currentBranch={`feature/${'long-branch-'.repeat(6)}`}
+            open={managedOpen}
+            onOpenChange={setManagedOpen}
+            disabled={false}
+            onWorktreeChange={setManagedWorktree}
+            onManage={() => undefined}
+          />
+        }
+        workspaces={[
+          {
+            id: 'primary',
+            label: longWorkspaceName,
+            cwd: longCwd,
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'other',
+            label: 'another-project',
+            cwd: '/tmp/another-project',
+            primary: false,
+            trusted: true,
+          },
+        ]}
+        selectedWorkspaceCwd={selectedWorkspaceCwd}
+        onSelectWorkspace={(cwd) => setSelectedWorkspaceCwd(cwd ?? longCwd)}
+      />
+    );
+  }
+  if (scenario === 'wide-git' || scenario === 'interactive-git') {
     return (
       <ChatEditor
         onSubmit={() => undefined}
@@ -36,16 +81,23 @@ function Fixture() {
           computedAt: Date.now(),
         }}
         workspaces={[
-          { id: 'primary', cwd: longCwd, primary: true, trusted: true },
+          {
+            id: 'primary',
+            label: longWorkspaceName,
+            cwd: longCwd,
+            primary: true,
+            trusted: true,
+          },
           {
             id: 'other',
+            label: 'another-project',
             cwd: '/tmp/another-project',
             primary: false,
             trusted: true,
           },
         ]}
         selectedWorkspaceCwd={selectedWorkspaceCwd}
-        onSelectWorkspace={setSelectedWorkspaceCwd}
+        onSelectWorkspace={(cwd) => setSelectedWorkspaceCwd(cwd ?? longCwd)}
         gitModeIntent={{ mode: 'current' }}
         onGitModeIntentChange={() => undefined}
       />
