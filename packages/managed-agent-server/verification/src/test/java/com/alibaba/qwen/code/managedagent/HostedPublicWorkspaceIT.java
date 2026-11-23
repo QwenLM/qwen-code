@@ -79,7 +79,7 @@ class HostedPublicWorkspaceIT {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
-    private final String tenant = "g0-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     // Holds the model reply to a G0_CANCEL prompt so the test can cancel a running Turn.
@@ -239,7 +239,7 @@ class HostedPublicWorkspaceIT {
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_runtime_session rs JOIN ma_runtime_binding rb ON rs.binding_id=rb.binding_id"
                             + " AND rs.runtime_generation=rb.runtime_generation WHERE rs.tenant_id=? AND rs.harness_session_id=?"
-                            + " AND rs.runtime_session_id=? AND rs.session_state='READY' AND rs.execution_storage_key IS NULL"
+                            + " AND rs.runtime_session_id=? AND rs.session_state='READY' AND rs.execution_storage_id IS NULL"
                             + " AND rb.binding_state='READY' AND rb.provisioner_kind='local-process'",
                     Integer.class, tenant, child, runtimeSession)).isEqualTo(1));
             originalBindings.put(child, jdbc.queryForObject(
@@ -281,7 +281,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(remaining.path(0).path("sessionId")).isEqualTo(first.path("sessionId"));
                 assertThat(root.resolve("question-A.txt")).doesNotExist();
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=?"
-                        + " AND runtime_session_id=? AND binding_id=? AND session_state='READY' AND execution_storage_key IS NULL",
+                        + " AND runtime_session_id=? AND binding_id=? AND session_state='READY' AND execution_storage_id IS NULL",
                         Integer.class, tenant, first.path("sessionId").asText(), runtimeSessions.get(first.path("sessionId").asText()),
                         originalBindings.get(first.path("sessionId").asText()))).isEqualTo(1);
             }
@@ -1031,7 +1031,7 @@ class HostedPublicWorkspaceIT {
         assertThat(publications).hasSize(1);
         var output = jdbc.queryForList("SELECT o.capture_object_key AS object_key, o.byte_length, o.sha256,"
                 + " o.capture_state AS state, o.slot_key FROM ma_resource o JOIN ma_output_capture p"
-                + " ON p.scope_key = o.scope_key AND p.publication_id = o.publication_id"
+                + " ON p.scope_ref = o.scope_ref AND p.publication_id = o.publication_id"
                 + " WHERE p.tenant_id = ? AND p.session_id = ? AND o.capture_object_key IS NOT NULL", tenant, session);
         assertThat(output).as("the public Shell captured real stdout before deletion").isNotEmpty();
         boolean stdout = false;
@@ -1104,7 +1104,7 @@ class HostedPublicWorkspaceIT {
                 spring.getBean(EmbeddedRuntimeBroker.class), storeRelay);
         String trigger = "public_shell_" + UUID.randomUUID().toString().replace("-", "");
         if ("receipt-failure".equals(fault)) {
-            assertThat(tenant).matches("g0-[0-9a-f-]{36}");
+            assertThat(tenant).matches("[0-9a-f-]{36}");
             assertThat(session).matches("[0-9a-f-]{36}");
             jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON ma_session_journal_tx FOR EACH ROW BEGIN IF"
                     + " NEW.tenant_id = '" + tenant + "' AND NEW.session_id = '" + session + "'"
@@ -1253,7 +1253,7 @@ class HostedPublicWorkspaceIT {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
-                    + " AND execution_storage_key IS NOT NULL", Integer.class, binding)).isZero();
+                    + " AND execution_storage_id IS NOT NULL", Integer.class, binding)).isZero();
             assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? ORDER BY resource_id", tenant, session)).containsAll(retained);
             assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString())

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -69,7 +70,7 @@ public final class WorkspaceOperatorRecoveryStore {
 
     public String prepare(String bindingId, long generation, String expectedHolder,
             String operator, String reason) {
-        if (expectedHolder == null || !expectedHolder.matches("[0-9a-f]{64}")
+        if (expectedHolder == null || expectedHolder.length() > ManagedIdentityRefs.HOLDER_REF_BYTES
                 || StringUtils.isBlank(operator) || operator.length() > 512
                 || StringUtils.isBlank(reason) || reason.length() > 2048) {
             throw blocked();
@@ -136,7 +137,7 @@ public final class WorkspaceOperatorRecoveryStore {
                     WorkspaceOperations.values("state", "PREPARED", "binding_id", bindingId,
                             "session_id", sessionOwner(saved, current.runtimeSessionId()),
                             "runtime_generation", generation, "storage_id", saved.getRequest().getStorageId(),
-                            "storage_key", current.storageKey(), "holder_key", current.holderKey(),
+                            "physical_id", current.storageKey(), "holder_id", current.holderKey(),
                             "runtime_session_id", current.runtimeSessionId(),
                             "provision_request_id", saved.getProvisionSeed().getProvisionRequestId(),
                             "resource_handle_json", json.valueToTree(saved.getResourceHandle().getValue()).toString(),
@@ -158,8 +159,8 @@ public final class WorkspaceOperatorRecoveryStore {
     public Operation operation(String recoveryId) {
         Map<String, Object> row = row(recoveryId, false);
         return new Operation(recoveryId, (String) row.get("binding_id"),
-                ((Number) row.get("runtime_generation")).longValue(), (String) row.get("storage_key"),
-                (String) row.get("holder_key"), (String) row.get("runtime_session_id"),
+                ((Number) row.get("runtime_generation")).longValue(), (String) row.get("physical_id"),
+                (String) row.get("holder_id"), (String) row.get("runtime_session_id"),
                 Instant.parse((String) row.get("prepared_at")), (String) row.get("attestation_sha256"),
                 "COMPLETED".equals(row.get("state")));
     }
@@ -177,16 +178,15 @@ public final class WorkspaceOperatorRecoveryStore {
             requireHeld(operation);
             RuntimeBindingRecord binding = requireBinding(operation.bindingId(), operation.generation());
             WorkspaceOperations operations = new WorkspaceOperations(jdbc, (String) row.get("tenant_id"));
-            String target = digest((String) row.get("blocked_execution_call_id"));
+            String target = (String) row.get("blocked_execution_call_id");
             String owner = WorkspaceOperations.hash(operations.key(KIND, operation.recoveryId()), "RECOVERY_EVIDENCE", target);
             String sessionId = HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                     ? (String) row.get("session_id") : binding.getRequest().getIsolationKey();
             String resource = WorkspaceEvidenceResources.publish(jdbc, (String) row.get("tenant_id"),
                     binding.getRequest().getScope().getWorkspaceId(), sessionId, owner, evidence);
-            operations.insertWork(KIND, operation.recoveryId(), "RECOVERY_EVIDENCE", target,
-                    (String) row.get("blocked_execution_call_id"), sessionId,
-                    WorkspaceOperations.values("evidence_resource_key", resource, "evidence_sha256", digest), "COMPLETE");
-            operations.update(KIND, operation.recoveryId(), WorkspaceOperations.values("attestation_resource_key", resource,
+            operations.insertWork(KIND, operation.recoveryId(), "RECOVERY_EVIDENCE", target, sessionId,
+                    WorkspaceOperations.values("evidence_resource_ref", resource, "evidence_sha256", digest), "COMPLETE");
+            operations.update(KIND, operation.recoveryId(), WorkspaceOperations.values("attestation_resource_ref", resource,
                     "attestation_sha256", digest, "attested_at", Instant.now().toString(), "state", "ATTESTED"));
         });
     }
@@ -208,10 +208,10 @@ public final class WorkspaceOperatorRecoveryStore {
                 || !binding.getLease().getLeaseId().equals(row.get("runtime_lease_id"))
                 || binding.getLease().getEpoch() != ((Number) row.get("runtime_epoch")).longValue()
                 || !LocalStorageOwners.key(jdbc, binding.getRequest().getScope().getTenantId(),
-                        binding.getRequest().getStorageId()).equals(row.get("storage_key"))
-                || !operation.holderKey().equals(row.get("holder_key"))
-                || !operation.holderKey().equals(digest(binding.getBindingId() + "\u0000"
-                        + binding.getGeneration() + "\u0000" + row.get("runtime_session_id")))) {
+                        binding.getRequest().getStorageId()).equals(row.get("physical_id"))
+                || !operation.holderKey().equals(row.get("holder_id"))
+                || !operation.holderKey().equals(holderKey(binding.getBindingId(),
+                        binding.getGeneration(), (String) row.get("runtime_session_id")))) {
             throw blocked();
         }
     }
@@ -260,9 +260,9 @@ public final class WorkspaceOperatorRecoveryStore {
 
     private Map<String, Object> findBindingOperation(RuntimeBindingRecord binding, boolean lock) {
         List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = ?"
-                + " AND tenant_id = ? AND target_key = ? AND target_revision = ?" + (lock ? " FOR UPDATE" : ""),
+                + " AND tenant_id = ? AND target_id = ? AND target_revision = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> WorkspaceOperations.operation(row), KIND.name(), binding.getRequest().getScope().getTenantId(),
-                WorkspaceOperations.hash(binding.getBindingId()), binding.getGeneration());
+                binding.getBindingId(), binding.getGeneration());
         if (rows.size() > 1) {
             throw blocked();
         }
@@ -297,19 +297,24 @@ public final class WorkspaceOperatorRecoveryStore {
         String bindingId = binding.getBindingId();
         long generation = binding.getGeneration();
         String storageKey = LocalStorageOwners.key(jdbc, binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId());
-        var owners = jdbc.queryForList("SELECT storage_key FROM ma_storage_owner"
-                + " WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+        var owners = jdbc.queryForList("SELECT physical_id FROM ma_storage_owner"
+                + " WHERE physical_id = ? AND storage_kind = 'LOCAL'"
                 + (locked ? " FOR UPDATE" : ""),
                 String.class, storageKey);
         var members = jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
-                + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
+                + " WHERE execution_storage_id = ? AND binding_id = ? AND runtime_generation = ?"
                 + (locked ? " FOR UPDATE" : ""), String.class, storageKey, bindingId, generation);
         if (owners.size() != 1 || members.size() != 1 || !StorageOwnerMembership.membersAllowed(jdbc, storageKey)) {
             throw blocked();
         }
         String sessionId = members.getFirst();
-        return new Holder(storageKey, digest(bindingId + "\u0000" + generation + "\u0000" + sessionId),
+        return new Holder(storageKey, holderKey(bindingId, generation, sessionId),
                 bindingId, generation, sessionId);
+    }
+
+    private static String holderKey(String bindingId, long generation, String runtimeSessionId) {
+        return ManagedIdentityRefs.ref(ManagedIdentityRefs.HOLDER_REF_BYTES,
+                "external-workspace-holder/1", bindingId, Long.toString(generation), runtimeSessionId);
     }
 
     private Capture capture(String bindingId, long generation, String sessionId) {
@@ -340,10 +345,6 @@ public final class WorkspaceOperatorRecoveryStore {
                 }, bindingId, generation, sessionId);
         return captures.stream().filter(item -> item != null).findFirst().orElseThrow(
                 WorkspaceOperatorRecoveryStore::blocked);
-    }
-
-    private static String digest(String value) {
-        return digest(value.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String digest(byte[] value) {

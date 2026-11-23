@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.OccurrenceRow;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
 import org.junit.jupiter.api.AfterEach;
@@ -155,9 +154,8 @@ class AutomationLedgerStoreTest {
     private void seedRunState(String tenantId, String sessionId, String runId, String state) {
         jdbc.update("INSERT INTO ma_session_record"
                         + " (tenant_id, workspace_id, session_id, domain, record_id,"
-                        + " record_key, revision, task_kind, task_state, record_resource_id, gmt_create)"
-                        + " VALUES (?, 'w', ?, 'automation_run', ?, ?, 1, 'automation_run', ?, 'res', 42)", tenantId, sessionId, runId,
-                ManagedExtensionProjection.recordKey(sessionId, "automation_run", runId), state);
+                        + " revision, task_kind, task_state, record_resource_id, gmt_create)"
+                        + " VALUES (?, 'w', ?, 'automation_run', ?, 1, 'automation_run', ?, 'res', 42)", tenantId, sessionId, runId, state);
         // Direct fixtures must carry the same derived flag as a journal projection.
         jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = ?"
                         + " WHERE tenant_id = ? AND session_id = ? AND run_id = ?",
@@ -168,9 +166,9 @@ class AutomationLedgerStoreTest {
     private void seedForeignRecords(int count) {
         for (int index = 0; index < count; index += 1) {
             jdbc.update("INSERT INTO ma_session_record"
-                            + " (tenant_id, workspace_id, session_id, domain, record_id, record_key, revision, task_state, record_resource_id, gmt_create) VALUES ('t', 'w',"
+                            + " (tenant_id, workspace_id, session_id, domain, record_id, revision, task_state, record_resource_id, gmt_create) VALUES ('t', 'w',"
                             + " 's', 'schedule', 'asch_" + index + "',"
-                            + " 'rk-" + index + "', 1, 'completed', 'res', ?)",
+                            + " 1, 'completed', 'res', ?)",
                     System.nanoTime() + index);
         }
     }
