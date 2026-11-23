@@ -1154,8 +1154,8 @@ describe('live scheduled-task labels', () => {
   } as const;
   const byTurn = new Map([['turn-1', [syntheticOnly, knownId, knownPaused]]]);
 
-  it('marks only recognized ids from the current snapshots', () => {
-    const knownGone = { ...knownId, id: 'cron-gone' };
+  it('keeps the historical snapshot for a consumed one-shot rather than calling it cancelled', () => {
+    const knownGone = { ...knownId, id: 'cron-gone', recurring: false };
     const merged = enrichScheduledTasksByTurn(
       new Map([
         ['turn-1', [knownId, knownPaused]],
@@ -1174,7 +1174,7 @@ describe('live scheduled-task labels', () => {
       'active',
       'paused',
     ]);
-    expect(merged.get('turn-2')?.[0]?.liveStatus).toBe('cancelled');
+    expect(merged.get('turn-2')?.[0]?.liveStatus).toBeUndefined();
   });
 
   it('never infers cancellation from a synthetic tool-call id fallback', () => {
@@ -1186,5 +1186,22 @@ describe('live scheduled-task labels', () => {
     // Known ids are labeled; an unidentifiable historical tool call is not.
     expect(merged.get('turn-1')?.[0]).toEqual(syntheticOnly);
     expect(merged.get('turn-1')?.[0]).not.toHaveProperty('liveStatus');
+  });
+
+  it('does not infer cancellation from absence in a session-filtered durable snapshot', () => {
+    const unboundOrConsumed = {
+      ...knownId,
+      durable: true as const,
+      recurring: false as const,
+    };
+    const merged = enrichScheduledTasksByTurn(
+      new Map([['turn-unbound', [unboundOrConsumed]]]),
+      {
+        taskStatusById: new Map(),
+        hasLiveDurableSnapshot: true,
+        hasLiveSessionSnapshot: false,
+      },
+    );
+    expect(merged.get('turn-unbound')?.[0]?.liveStatus).toBeUndefined();
   });
 });

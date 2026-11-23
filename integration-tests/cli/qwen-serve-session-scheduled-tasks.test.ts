@@ -210,6 +210,7 @@ afterAll(async () => {
 
 const CREATE_MANUAL_PROMPT = 'RUN_BOUND_SESSION_MANUALLY';
 let sessionId: string;
+let boundPersistentTaskId: string;
 
 describe('real daemon session scheduled tasks', () => {
   it('enumerates and cancels session cron/jobs and preserves durable tasks', async () => {
@@ -269,13 +270,24 @@ describe('real daemon session scheduled tasks', () => {
         sessionMode: 'persistent',
       },
     })) as DaemonScheduledTask;
+    boundPersistentTaskId = created.id;
 
     // Negative control: previous environment-panel behavior, a bare /run
-    // POST, records but cannot ever send this bound-session prompt.
-    await scheduledTaskRequest(`/scheduled-tasks/${created.id}/run`, {
-      method: 'POST',
+    // POST, records but cannot ever send this bound-session prompt. Freeze
+    // both the request count and prompt bytes at this call's boundary.
+    const requestsBeforeBareRun = fake.requests.length;
+    const bareRun = (await scheduledTaskRequest(
+      `/scheduled-tasks/${created.id}/run`,
+      { method: 'POST' },
+    )) as DaemonScheduledTask;
+    expect(fake.requests).toHaveLength(requestsBeforeBareRun);
+    await client.prompt(sessionId, {
+      prompt: [{ type: 'text', text: 'POST_BARE_RUN_QUIESCENCE' }],
     });
-    expect(JSON.stringify(fake.requests)).not.toContain(MANUAL_MARKER);
+    expect(JSON.stringify(fake.requests)).not.toContain(CREATE_MANUAL_PROMPT);
+    expect(bareRun.runs.filter((run) => run.kind === 'manual')).toHaveLength(
+      (created.runs ?? []).filter((run) => run.kind === 'manual').length + 1,
+    );
 
     const order: string[] = [];
     const onRunPrompt: ScheduledTaskRunPrompt = async (
@@ -320,7 +332,6 @@ describe('real daemon session scheduled tasks', () => {
       },
     );
     expect(order).toEqual(['fresh', 'enqueue', 'record']);
-    expect(JSON.stringify(fake.requests)).toContain(MANUAL_MARKER);
 
     const transcript = await client.getSessionTranscriptPage(sessionId);
     expect(JSON.stringify(transcript)).toContain(
@@ -329,12 +340,19 @@ describe('real daemon session scheduled tasks', () => {
     const after = (await scheduledTaskRequest('/scheduled-tasks')) as {
       tasks: DaemonScheduledTask[];
     };
-    expect(after.tasks.find((task) => task.id === created.id)).toMatchObject({
+    const actualRun = after.tasks.find((task) => task.id === created.id)!;
+    expect(actualRun).toMatchObject({
       id: created.id,
       enabled: true,
       recurring: true,
       sessionId,
     });
+    expect(actualRun.runs.filter((run) => run.kind === 'manual')).toHaveLength(
+      bareRun.runs.filter((run) => run.kind === 'manual').length + 1,
+    );
+    expect(actualRun.lastFiredAt).toBeGreaterThanOrEqual(
+      bareRun.lastFiredAt ?? 0,
+    );
 
     // The control and actual run both recorded, yet only the shared manual
     // flow reached the ACP session/model and returned visible output.
@@ -344,12 +362,19 @@ describe('real daemon session scheduled tasks', () => {
 
   it('does not let the cron task cancel route cancel a durable task', async () => {
     const tasks = await scheduledTaskRequest('/scheduled-tasks');
-    const durable = (tasks as { tasks: DaemonScheduledTask[] }).tasks[0]!;
+    const durable = (tasks as { tasks: DaemonScheduledTask[] }).tasks.find(
+      (task) => task.id === boundPersistentTaskId,
+    )!;
+    expect(durable).toBeDefined();
+    expect(durable.sessionId).toBe(sessionId);
     const result = (await scheduledTaskRequest(
       `/session/${sessionId}/tasks/${durable.id}/cancel`,
       { method: 'POST', body: { kind: 'cron' } },
     )) as { cancelled: boolean; reason?: string };
-    expect(result.cancelled).toBe(false);
+    expect(result).toMatchObject({
+      cancelled: false,
+      reason: 'not_session_scoped',
+    });
     expect(
       (
         (await scheduledTaskRequest('/scheduled-tasks')) as {

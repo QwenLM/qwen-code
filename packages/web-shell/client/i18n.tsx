@@ -4385,9 +4385,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'environment.scheduledTasks.viewAll': 'Manage all',
   'scheduledTasks.sessionScopedActive':
     'Active in this session. Stopping cancels future runs immediately.',
+  'scheduledTasks.sessionScopedPaused':
+    'Paused in this session. Stopping removes the remaining schedule.',
   'scheduledTasks.sessionScopedCancelled':
     'This session-scoped scheduled task is no longer active.',
   'scheduledTasks.stopSessionTask': 'Stop task',
+  'scheduledTasks.error.cancelFailed': 'Failed to stop the scheduled task',
   'tasks.pill.scheduled': (v) =>
     `${v?.count ?? 0} ${(v?.count ?? 0) === 1 ? 'scheduled task' : 'scheduled tasks'}`,
   'environment.title': 'Environment',

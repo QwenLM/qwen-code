@@ -247,6 +247,7 @@ export function EnvironmentPanel({
   const [scheduledTasksExpanded, setScheduledTasksExpanded] = useState(true);
   const [artifactsExpanded, setArtifactsExpanded] = useState(true);
   const scheduledSectionRef = useRef<HTMLElement | null>(null);
+  const lastFocusScheduledTasksNonceRef = useRef(focusScheduledTasksNonce);
   const hasVisibleScheduledCountdown =
     !hidden &&
     scheduledTasksExpanded &&
@@ -260,6 +261,10 @@ export function EnvironmentPanel({
 
   useEffect(() => {
     if (!focusScheduledTasksNonce) return;
+    if (focusScheduledTasksNonce === lastFocusScheduledTasksNonceRef.current) {
+      return;
+    }
+    lastFocusScheduledTasksNonceRef.current = focusScheduledTasksNonce;
     setScheduledTasksExpanded(true);
     const sectionEl = scheduledSectionRef.current;
     if (sectionEl && typeof sectionEl.scrollIntoView === 'function') {
@@ -559,7 +564,9 @@ export function EnvironmentPanel({
             className={styles.section}
             data-testid="environment-scheduled-tasks-section"
           >
-            <div className={styles.sectionHeaderRow}>
+            <div
+              className={`${styles.sectionHeaderRow} ${styles.scheduledTaskHeaderRow}`}
+            >
               <button
                 type="button"
                 className={styles.sectionHeader}
@@ -591,10 +598,11 @@ export function EnvironmentPanel({
                       : entry.source === 'wakeup'
                         ? t('environment.scheduledTasks.scopeWakeup')
                         : t('environment.scheduledTasks.scopeSession');
-                  const scheduleText =
-                    entry.scope === 'session' && entry.source === 'wakeup'
-                      ? t('environment.scheduledTasks.scopeWakeup')
-                      : describeCron(entry.cronExpr, t);
+                  const isWakeup =
+                    entry.scope === 'session' && entry.source === 'wakeup';
+                  const scheduleText = isWakeup
+                    ? t('scheduledTasks.runsOnce')
+                    : describeCron(entry.cronExpr, t);
                   const countdown =
                     entry.enabled && entry.nextRunAt !== null
                       ? formatCountdown(entry.nextRunAt - now, t)
@@ -604,9 +612,11 @@ export function EnvironmentPanel({
                     !entry.enabled
                       ? t('environment.scheduledTasks.statusPaused')
                       : countdown
-                        ? t('environment.scheduledTasks.nextRun', {
-                            when: countdown,
-                          })
+                        ? countdown === t('scheduledTasks.dueNow')
+                          ? countdown
+                          : t('environment.scheduledTasks.nextRun', {
+                              when: countdown,
+                            })
                         : null,
                   ]
                     .filter(Boolean)
@@ -648,7 +658,7 @@ export function EnvironmentPanel({
                           </span>
                           <span
                             className={styles.scheduledItemMeta}
-                            title={entry.cronExpr}
+                            title={isWakeup ? undefined : entry.cronExpr}
                           >
                             {metaText}
                           </span>

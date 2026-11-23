@@ -1080,10 +1080,11 @@ describe('buildSessionTasksStatus workflow graph', () => {
       expiresAt: null,
       lastFiredAt: null,
       nextRunAt: now + 90_000,
+      enabled: true,
     });
   });
 
-  it('omits scheduledTasks when cron is disabled or only durable tasks exist', () => {
+  it('returns an authoritative empty scheduledTasks snapshot when cron is disabled', () => {
     const cfg = {
       ...configWith([]),
       isCronEnabled: () => false,
@@ -1104,6 +1105,38 @@ describe('buildSessionTasksStatus workflow graph', () => {
     } as unknown as Config;
 
     const snapshot = buildSessionTasksStatus('session-1', cfg, 2_000);
-    expect(snapshot).not.toHaveProperty('scheduledTasks');
+    expect(snapshot.scheduledTasks).toEqual([]);
+  });
+
+  it('marks a scheduler-disabled pending wakeup as not enabled', () => {
+    const cfg = {
+      ...configWith([]),
+      isCronEnabled: () => true,
+      getCronScheduler: () => ({
+        disabled: true,
+        list: () => [
+          {
+            id: 'stopped-wakeup',
+            cronExpr: '@wakeup',
+            prompt: 'must not run',
+            recurring: false,
+            durable: false,
+            createdAt: 100,
+            expiresAt: Infinity,
+            fireAtMs: 50_000,
+            jitterMs: 0,
+          },
+        ],
+      }),
+    } as unknown as Config;
+
+    const snapshot = buildSessionTasksStatus('session-1', cfg, 2_000);
+    expect(snapshot.scheduledTasks).toEqual([
+      expect.objectContaining({
+        id: 'stopped-wakeup',
+        source: 'wakeup',
+        enabled: false,
+      }),
+    ]);
   });
 });

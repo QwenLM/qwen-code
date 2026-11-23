@@ -334,6 +334,7 @@ function serializeWorkflowSnapshot(
 
 function serializeSessionScheduledTask(
   job: CronJob,
+  schedulerDisabled: boolean,
 ): ServeSessionScheduledTaskStatus {
   return {
     id: job.id,
@@ -345,6 +346,7 @@ function serializeSessionScheduledTask(
     expiresAt: Number.isFinite(job.expiresAt) ? job.expiresAt : null,
     lastFiredAt: job.lastFiredAt ?? null,
     nextRunAt: nextCronJobFireMs(job),
+    enabled: !schedulerDisabled,
     ...optionalField('gate', job.gate),
   };
 }
@@ -386,20 +388,24 @@ export function buildSessionTasksStatus(
       : []),
   ].sort((a, b) => a.startTime - b.startTime);
 
-  const scheduledTasks: ServeSessionScheduledTaskStatus[] =
-    config.isCronEnabled?.()
-      ? (config.getCronScheduler?.()?.list?.() ?? [])
-          .filter((job) => !job.durable)
-          .map(serializeSessionScheduledTask)
-          .sort((a, b) => a.createdAt - b.createdAt)
-      : [];
+  const scheduler = config.isCronEnabled?.()
+    ? config.getCronScheduler?.()
+    : undefined;
+  const scheduledTasks: ServeSessionScheduledTaskStatus[] = (
+    scheduler?.list() ?? []
+  )
+    .filter((job) => !job.durable)
+    .map((job) =>
+      serializeSessionScheduledTask(job, scheduler?.disabled === true),
+    )
+    .sort((a, b) => a.createdAt - b.createdAt);
 
   return {
     v: STATUS_SCHEMA_VERSION,
     sessionId,
     now,
     tasks,
-    ...(scheduledTasks.length > 0 ? { scheduledTasks } : {}),
+    scheduledTasks,
   };
 }
 

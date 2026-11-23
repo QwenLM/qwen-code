@@ -4,6 +4,7 @@ import {
   isBackgroundSubAgentToolCall,
 } from '../adapters/toolClassification';
 import { isWorkflowToolName } from '../components/messages/toolFormatting';
+import { isAutomaticTriggerSource } from './automatic-trigger.js';
 
 function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
@@ -110,7 +111,7 @@ export function getScheduledTaskActivityKey(
       visit(message.tools);
     } else if (
       message.role === 'user' &&
-      (message.source === 'cron' || message.source === 'loop')
+      isAutomaticTriggerSource(message.source)
     ) {
       parts.push(`turn:${message.id}:${message.source}`);
     }

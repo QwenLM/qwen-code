@@ -2330,6 +2330,8 @@ type PersistedArtifactPanelTab =
       kind: 'scheduled_task';
       title: string;
       toolCallId: string;
+      taskId?: string;
+      taskScope?: 'durable' | 'session';
       sourceSessionId?: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -2382,6 +2384,48 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'sessionId'
     >;
 
+interface ScheduledTaskRestoreReference {
+  id: string;
+  scope: 'durable' | 'session';
+}
+
+function getScheduledTaskRestoreReference(tab: {
+  toolCallId?: string;
+  taskId?: unknown;
+  taskScope?: unknown;
+}): ScheduledTaskRestoreReference | undefined {
+  if (
+    typeof tab.taskId === 'string' &&
+    tab.taskId &&
+    (tab.taskScope === 'durable' || tab.taskScope === 'session')
+  ) {
+    return { id: tab.taskId, scope: tab.taskScope };
+  }
+  const legacy = /^scheduled:(durable|session):(.+)$/u.exec(
+    tab.toolCallId ?? '',
+  );
+  return legacy?.[1] && legacy[2]
+    ? { id: legacy[2], scope: legacy[1] as 'durable' | 'session' }
+    : undefined;
+}
+
+function findRestoredScheduledTask(
+  tasks: readonly TurnOutputScheduledTask[],
+  tab: { toolCallId?: string; taskId?: unknown; taskScope?: unknown },
+): TurnOutputScheduledTask | undefined {
+  const reference = getScheduledTaskRestoreReference(tab);
+  // A stopped or consumed task is absent live, but its backend id can still
+  // identify the original creation record even with a synthetic toolCallId.
+  return (
+    tasks.find(
+      (task) =>
+        reference &&
+        task.id === reference.id &&
+        task.durable === (reference.scope === 'durable'),
+    ) ?? tasks.find((task) => task.toolCallId === tab.toolCallId)
+  );
+}
+
 function parsePersistedArtifactPanelTab(
   value: unknown,
 ): PersistedArtifactPanelTab | undefined {
@@ -2403,6 +2447,7 @@ function parsePersistedArtifactPanelTab(
     'sessionId',
     'rootToolCallId',
     'taskId',
+    'taskScope',
     'parentSessionId',
     'recordId',
     'promptId',
@@ -2485,11 +2530,19 @@ function parsePersistedArtifactPanelTab(
         sourceSessionId: tab['sourceSessionId'],
       } as PersistedArtifactPanelTab;
     case 'scheduled_task':
-      if (typeof tab['toolCallId'] !== 'string') return;
+      if (
+        typeof tab['toolCallId'] !== 'string' ||
+        (tab['taskScope'] !== undefined &&
+          tab['taskScope'] !== 'durable' &&
+          tab['taskScope'] !== 'session')
+      )
+        return;
       return {
         ...common,
         kind: 'scheduled_task',
         toolCallId: tab['toolCallId'],
+        taskId: tab['taskId'],
+        taskScope: tab['taskScope'],
         sourceSessionId: tab['sourceSessionId'],
         workspaceCwd: tab['workspaceCwd'],
         workspaceId: tab['workspaceId'],
@@ -2700,6 +2753,8 @@ function serializeArtifactPanelTabs(
             kind: tab.kind,
             title,
             toolCallId: tab.task.toolCallId,
+            taskId: tab.task.id,
+            taskScope: tab.task.durable ? 'durable' : 'session',
             sourceSessionId: tab.sourceSessionId,
             workspaceCwd: tab.workspaceCwd,
             workspaceId: tab.workspaceId,
@@ -2828,7 +2883,8 @@ function serializeArtifactPanelTabs(
                   },
                 ]
               : [];
-          case 'scheduled_task':
+          case 'scheduled_task': {
+            const reference = getScheduledTaskRestoreReference(tab);
             return tab.toolCallId
               ? [
                   {
@@ -2836,11 +2892,15 @@ function serializeArtifactPanelTabs(
                     kind: 'scheduled_task',
                     sourceSessionId: tab.sourceSessionId,
                     toolCallId: tab.toolCallId,
+                    ...(reference
+                      ? { taskId: reference.id, taskScope: reference.scope }
+                      : {}),
                     workspaceCwd: tab.workspaceCwd,
                     workspaceId: tab.workspaceId,
                   },
                 ]
               : [];
+          }
           case 'subagent':
             return tab.rootToolCallId
               ? [
@@ -7528,6 +7588,53 @@ export function App({
     sessionOwnerGuard,
     workspace.capabilities,
   ]);
+  const restoreScheduledTaskFromLiveSource = useCallback(
+    async (
+      sourceSessionId: string,
+      reference: ScheduledTaskRestoreReference,
+      workspaceId?: string,
+    ): Promise<TurnOutputScheduledTask | undefined> => {
+      if (reference.scope === 'durable') {
+        const tasks = await workspaceActions.listScheduledTasks?.(workspaceId);
+        const task = tasks?.find(
+          (item) =>
+            item.id === reference.id && item.sessionId === sourceSessionId,
+        );
+        return task
+          ? {
+              id: task.id,
+              toolCallId: `scheduled:durable:${task.id}`,
+              title: task.name?.trim() || task.prompt || task.id,
+              cron: task.cron,
+              prompt: task.prompt,
+              recurring: task.recurring,
+              durable: true,
+              ...(workspaceId ? { workspaceId } : {}),
+            }
+          : undefined;
+      }
+      const snapshot =
+        sourceSessionId === connection.sessionId
+          ? await sessionActions.getTasks({ silent: true })
+          : await workspace.client.sessionTasks(sourceSessionId);
+      if (snapshot.sessionId !== sourceSessionId) return undefined;
+      const task = snapshot.scheduledTasks?.find(
+        (item) => item.id === reference.id,
+      );
+      return task
+        ? {
+            id: task.id,
+            toolCallId: `scheduled:session:${task.id}`,
+            title: task.prompt || task.id,
+            cron: task.cronExpr,
+            prompt: task.prompt,
+            recurring: task.recurring,
+            durable: false,
+          }
+        : undefined;
+    },
+    [connection.sessionId, sessionActions, workspace.client, workspaceActions],
+  );
   const hydratePendingArtifactPanelTab = useCallback(
     async (tab: Extract<ArtifactPanelTab, { kind: 'pending' }> | undefined) => {
       if (!tab) return;
@@ -7733,11 +7840,12 @@ export function App({
               };
             }
           } else if (tab.targetKind === 'scheduled_task') {
-            const task = Array.from(
-              getScheduledTasksByTurn(sourceMessages).values(),
-            )
-              .flat()
-              .find((item) => item.toolCallId === tab.toolCallId);
+            const task = findRestoredScheduledTask(
+              Array.from(
+                getScheduledTasksByTurn(sourceMessages).values(),
+              ).flat(),
+              tab,
+            );
             if (task) {
               restored = {
                 id: tab.id,
@@ -8247,6 +8355,27 @@ export function App({
                       }
                     : tab;
                 case 'scheduled_task': {
+                  const reference = getScheduledTaskRestoreReference(tab);
+                  const liveSourceSessionId =
+                    tab.sourceSessionId ?? connection.sessionId;
+                  if (reference && liveSourceSessionId) {
+                    const task = await restoreScheduledTaskFromLiveSource(
+                      liveSourceSessionId,
+                      reference,
+                      tab.workspaceId,
+                    ).catch(() => undefined);
+                    if (task) {
+                      return {
+                        id: tab.id,
+                        kind: 'scheduled_task',
+                        title: tab.title,
+                        task,
+                        sourceSessionId: liveSourceSessionId,
+                        workspaceCwd: tab.workspaceCwd,
+                        workspaceId: tab.workspaceId,
+                      };
+                    }
+                  }
                   if (
                     tab.sourceSessionId &&
                     tab.sourceSessionId !== connection.sessionId
@@ -8258,11 +8387,12 @@ export function App({
                       sourceSessionId: tab.sourceSessionId,
                     };
                   }
-                  const task = Array.from(
-                    restoreInputs.scheduledTasksByTurn.values(),
-                  )
-                    .flat()
-                    .find((item) => item.toolCallId === tab.toolCallId);
+                  const task = findRestoredScheduledTask(
+                    Array.from(
+                      restoreInputs.scheduledTasksByTurn.values(),
+                    ).flat(),
+                    tab,
+                  );
                   if (!task) {
                     const sourceSessionId =
                       tab.sourceSessionId ?? connection.sessionId;
@@ -8529,6 +8659,7 @@ export function App({
     hydrateRestoredAttachmentTab,
     panelStateKey,
     resetEmptyArtifactPanel,
+    restoreScheduledTaskFromLiveSource,
     rightPanelItems,
     sessionAgentTraceSupported,
     sessionActions,
@@ -9553,15 +9684,22 @@ export function App({
     },
     [activeWorkspaceCwd, connection.sessionId, openScheduledTaskPanel],
   );
-  const enrichedScheduledTasksByTurn = useMemo(() => {
-    const { taskStatusById, hasLiveDurableSnapshot, hasLiveSessionSnapshot } =
-      sessionScheduledTasks;
-    return enrichScheduledTasksByTurn(scheduledTasksByTurn, {
+  const { taskStatusById, hasLiveDurableSnapshot, hasLiveSessionSnapshot } =
+    sessionScheduledTasks;
+  const enrichedScheduledTasksByTurn = useMemo(
+    () =>
+      enrichScheduledTasksByTurn(scheduledTasksByTurn, {
+        taskStatusById,
+        hasLiveDurableSnapshot,
+        hasLiveSessionSnapshot,
+      }),
+    [
+      scheduledTasksByTurn,
       taskStatusById,
       hasLiveDurableSnapshot,
       hasLiveSessionSnapshot,
-    });
-  }, [scheduledTasksByTurn, sessionScheduledTasks]);
+    ],
+  );
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
     taskActivityKey,
@@ -19349,8 +19487,15 @@ export function App({
   const tryFireBoundRun = useCallback(() => {
     const pending = pendingBoundRunRef.current;
     const conn = connectionRef.current;
+    if (!pending) return;
+    if (pending.owner && !pending.owner.isCurrent()) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        new DOMException('Bound run session was replaced', 'AbortError'),
+      );
+      return;
+    }
     if (
-      !pending ||
       conn.sessionId !== pending.sessionId ||
       conn.loadingTranscript ||
       conn.goalState === undefined
@@ -19364,13 +19509,6 @@ export function App({
           pending.reject(new Error('Timed out waiting for session replay'));
         }, BOUND_RUN_SWITCH_TIMEOUT_MS);
       }
-      return;
-    }
-    if (pending.owner && !pending.owner.isCurrent()) {
-      clearPendingBoundRun(pending.sessionId);
-      pending.reject(
-        new DOMException('Bound run session was replaced', 'AbortError'),
-      );
       return;
     }
     if (pending.timer !== undefined) clearTimeout(pending.timer);
@@ -19419,6 +19557,11 @@ export function App({
           .then(() => {
             if (pendingBoundRunRef.current !== pending) return;
             pending.owner = sessionOwnerGuard.capture();
+            pending.timer = setTimeout(() => {
+              if (pendingBoundRunRef.current !== pending) return;
+              pendingBoundRunRef.current = null;
+              pending.reject(new Error('Timed out waiting for session replay'));
+            }, BOUND_RUN_SWITCH_TIMEOUT_MS);
             tryFireBoundRun();
           })
           .catch((error: unknown) => {
@@ -19446,6 +19589,18 @@ export function App({
     connection.goalState,
     tryFireBoundRun,
   ]);
+  useEffect(
+    () => () => {
+      const pending = pendingBoundRunRef.current;
+      if (!pending) return;
+      if (pending.timer !== undefined) clearTimeout(pending.timer);
+      pendingBoundRunRef.current = null;
+      pending.reject(
+        new DOMException('Bound run owner was unmounted', 'AbortError'),
+      );
+    },
+    [],
+  );
 
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
@@ -24460,6 +24615,7 @@ export function App({
     onSideTaskTitleChange: handleSideTaskTitleChange,
     onSideTaskInitialPromptRefused: handleSideTaskInitialPromptRefused,
     liveSessionScheduledTasks: sessionScheduledTasks.liveSessionTaskById,
+    liveSessionScheduledTasksOwnerSessionId: connection.sessionId,
     hasLiveSessionScheduledSnapshot:
       sessionScheduledTasks.hasLiveSessionSnapshot,
     onCancelSessionScheduledTask: sessionScheduledTasks.cancelSessionTaskById,
@@ -25527,6 +25683,25 @@ export function App({
                             }
                           : {}),
                         ...artifactsHeaderEntry,
+                        scheduledTaskCount:
+                          scheduledTasksHeaderItemVisible
+                            ? sessionScheduledTasks.tasks.length
+                            : undefined,
+                        scheduledTaskActiveCount:
+                          scheduledTasksHeaderItemVisible
+                            ? sessionScheduledTasks.activeCount
+                            : undefined,
+                        scheduledTaskNextRunAt:
+                          scheduledTasksHeaderItemVisible
+                            ? sessionScheduledTasks.nextRunAt
+                            : undefined,
+                        onOpenScheduledTasks:
+                          scheduledTasksHeaderItemVisible &&
+                          environmentPanelReachable &&
+                          environmentPanelItems.includes('scheduledTasks') &&
+                          connection.sessionId
+                            ? openEnvironmentScheduledTasks
+                            : undefined,
                         onOpenLocalControlSettings:
                           showMobileAccess && workspaceContextActive
                             ? handleOpenLocalControlSettings
@@ -25616,6 +25791,7 @@ export function App({
                       onOpenScheduledTasks={
                         scheduledTasksHeaderItemVisible &&
                         environmentPanelReachable &&
+                        environmentPanelItems.includes('scheduledTasks') &&
                         connection.sessionId
                           ? openEnvironmentScheduledTasks
                           : undefined
@@ -27506,7 +27682,8 @@ export function App({
                               sessionScheduledTasks.activeSessionCount
                             }
                             onOpenScheduledTasks={
-                              environmentPanelReachable
+                              environmentPanelReachable &&
+                              environmentPanelItems.includes('scheduledTasks')
                                 ? openEnvironmentScheduledTasks
                                 : undefined
                             }
@@ -28103,9 +28280,7 @@ export function App({
                   void sessionScheduledTasks.cancelSessionTask(entry)
                 }
                 onManageAllScheduledTasks={
-                  projectFeaturesAvailable
-                    ? () => navigationRef.current?.openPage('scheduled-tasks')
-                    : undefined
+                  projectFeaturesAvailable ? openScheduledTasks : undefined
                 }
                 onReadImage={readSessionImage}
                 onImagePreview={(src, alt, source) => {

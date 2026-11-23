@@ -230,15 +230,10 @@ export function enrichScheduledTasksByTurn(
       items.map((item) => {
         const status = live.taskStatusById.get(item.id);
         if (status) return { ...item, liveStatus: status };
-        // No structured id from the tool result was recovered. Equality with
-        // the synthetic callId proves nothing; never infer cancellation from it.
-        if (item.id === item.toolCallId) return item;
-        const hasSnapshot = item.durable
-          ? live.hasLiveDurableSnapshot
-          : live.hasLiveSessionSnapshot;
-        return hasSnapshot
-          ? { ...item, liveStatus: 'cancelled' as const }
-          : item;
+        // Absence is not a cancellation event: durable filtering, a consumed
+        // one-shot, an expired recurring job and task-owner changes all look
+        // identical in this list. Keep the historical creation snapshot.
+        return item;
       }),
     );
   }

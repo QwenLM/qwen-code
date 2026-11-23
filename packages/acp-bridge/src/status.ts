@@ -1242,6 +1242,8 @@ export interface ServeSessionScheduledTaskStatus {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   gate?: string;
+  /** False when the owning session's scheduler has been disabled. */
+  enabled?: boolean;
 }
 
 export type ServeSessionTaskStatus =

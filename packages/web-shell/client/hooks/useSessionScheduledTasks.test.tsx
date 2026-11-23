@@ -417,25 +417,505 @@ describe('useSessionScheduledTasks', () => {
     );
     expect(latest?.busyIds.size).toBe(0);
 
+    const sessionTask = sessionCronTask({ id: 'wakeup-reject' });
+    await act(async () => latest!.syncSessionTasks([sessionTask]));
+    const sessionEntry = latest!.tasks.find(
+      (task): task is SessionScopedScheduledTask => task.id === 'wakeup-reject',
+    )!;
     let cancelled = true;
     await act(async () => {
-      cancelled = await latest!.cancelSessionTaskById('wakeup-reject');
+      cancelled = await latest!.cancelSessionTask(sessionEntry);
     });
     expect(cancelled).toBe(false);
     expect(onError).toHaveBeenLastCalledWith(
       expect.any(Error),
-      'Failed to update task',
+      'Failed to stop the scheduled task',
     );
     expect(latest?.busyIds.size).toBe(0);
+    expect(latest?.activeSessionCount).toBe(1);
 
     sdkMock.sessionActions.cancelTask.mockResolvedValueOnce({
       cancelled: false,
     });
     await act(async () => {
-      cancelled = await latest!.cancelSessionTaskById('expired-wakeup');
+      cancelled = await latest!.cancelSessionTask(sessionEntry);
     });
     expect(cancelled).toBe(false);
     expect(onError).toHaveBeenCalledTimes(3);
     expect(latest?.busyIds.size).toBe(0);
+    expect(latest?.activeSessionCount).toBe(1);
   });
+
+  it('uses the resolved secondary workspace for both the fresh read and manual run', async () => {
+    const durable = durableTask({
+      id: 'durable-secondary',
+      sessionId: 'session-1',
+    });
+    // A plain list response may omit the workspace id, so the explicit
+    // caller's registration must reach both downstream operations.
+    delete durable.workspaceId;
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([durable]);
+    sdkMock.workspaceActions.runScheduledTask.mockResolvedValue(undefined);
+    onRunPrompt.mockResolvedValue(undefined);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-secondary',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const entry = latest?.tasks.find(
+      (item): item is SessionDurableScheduledTask =>
+        item.id === 'durable-secondary',
+    );
+    await act(async () => {
+      await latest!.runDurableTask(entry!);
+    });
+    expect(
+      sdkMock.workspaceActions.listScheduledTasks.mock.calls.every(
+        ([workspaceId]) => workspaceId === 'ws-secondary',
+      ),
+    ).toBe(true);
+    expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledWith(
+      'durable-secondary',
+      'ws-secondary',
+    );
+  });
+
+  it('does not carry an explicit refresh into a different session', async () => {
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([]);
+    renderHarness({ sessionId: 'session-1', workspaceId: 'ws-1' });
+    act(() => {
+      latest!.refresh();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    sdkMock.workspaceActions.listScheduledTasks.mockClear();
+
+    renderHarness({ sessionId: 'session-2', workspaceId: 'ws-2' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(sdkMock.workspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+
+    act(() => {
+      latest!.refresh();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'ws-2',
+    );
+  });
+
+  it('keeps disabled in-memory schedules paused, not active', () => {
+    renderHarness({ sessionId: 'session-1' });
+    act(() => {
+      latest!.syncSessionTasks([
+        sessionCronTask({
+          id: 'stopped-loop',
+          source: 'wakeup',
+          recurring: false,
+          enabled: false,
+        }),
+      ]);
+    });
+    expect(latest?.activeSessionCount).toBe(0);
+    expect(latest?.taskStatusById.get('stopped-loop')).toBe('paused');
+    expect(latest?.tasks[0]?.enabled).toBe(false);
+  });
+
+  it('truncates a task title by Unicode code points, not raw code units', () => {
+    renderHarness({ sessionId: 'session-1' });
+    const title = 'a'.repeat(76) + '😀' + 'b'.repeat(20);
+    act(() => {
+      latest!.syncSessionTasks([sessionCronTask({ prompt: title })]);
+    });
+    expect(latest?.tasks[0]?.title).toBe('a'.repeat(76) + '😀' + '…');
+    expect(latest?.tasks[0]?.title).not.toContain('\uFFFD');
+  });
+
+  it('does not resume an older session manual run or clear a newer run lock', async () => {
+    const taskA = durableTask({ id: 'a-run', sessionId: 'session-1' });
+    const taskB = durableTask({ id: 'b-run', sessionId: 'session-2' });
+    let deferFreshA = false;
+    let releaseFreshA!: () => void;
+    const freshA = new Promise<void>((resolve) => {
+      releaseFreshA = resolve;
+    });
+    sdkMock.workspaceActions.listScheduledTasks.mockImplementation(
+      (workspaceId?: string) => {
+        if (workspaceId === 'ws-a' && deferFreshA) return freshA;
+        return Promise.resolve(workspaceId === 'ws-a' ? [taskA] : [taskB]);
+      },
+    );
+    sdkMock.workspaceActions.runScheduledTask.mockResolvedValue(undefined);
+    let admitB!: () => void;
+    const admissionB = new Promise<void>((resolve) => {
+      admitB = resolve;
+    });
+    onRunPrompt.mockImplementation(
+      (_prompt: string, targetSessionId: string | null) =>
+        targetSessionId === 'session-2' ? admissionB : Promise.resolve(),
+    );
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-a',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    const entryA = latest!.tasks[0] as SessionDurableScheduledTask;
+    deferFreshA = true;
+    let oldRun!: Promise<void>;
+    await act(async () => {
+      oldRun = latest!.runDurableTask(entryA);
+      await Promise.resolve();
+    });
+
+    renderHarness({
+      sessionId: 'session-2',
+      workspaceId: 'ws-b',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    const entryB = latest!.tasks[0] as SessionDurableScheduledTask;
+    let newRun!: Promise<void>;
+    await act(async () => {
+      newRun = latest!.runDurableTask(entryB);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onRunPrompt).toHaveBeenCalledWith(taskB.prompt, 'session-2');
+
+    await act(async () => {
+      releaseFreshA();
+      await oldRun;
+    });
+    expect(onRunPrompt).toHaveBeenCalledTimes(1);
+    expect(sdkMock.workspaceActions.runScheduledTask).not.toHaveBeenCalled();
+    expect(latest?.manualRunActive).toBe(true);
+
+    await act(async () => {
+      admitB();
+      await newRun;
+    });
+    expect(
+      sdkMock.workspaceActions.runScheduledTask,
+    ).toHaveBeenCalledExactlyOnceWith('b-run', 'ws-b');
+    expect(latest?.manualRunActive).toBe(false);
+  });
+
+  it.each(['toggle', 'delete'] as const)(
+    'does not let an older read overwrite a successful %s',
+    async (mutation) => {
+      const task = durableTask({ id: 'd-stale', enabled: true });
+      sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([task]);
+      sdkMock.workspaceActions.updateScheduledTask.mockResolvedValue({
+        ...task,
+        enabled: false,
+      });
+      sdkMock.workspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+      renderHarness({
+        sessionId: 'session-1',
+        workspaceId: 'ws-1',
+        activityKey: ACTIVE_KEY,
+      });
+      await act(async () => Promise.resolve());
+      const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+      let releaseRead!: (tasks: DaemonScheduledTask[]) => void;
+      const staleRead = new Promise<DaemonScheduledTask[]>((resolve) => {
+        releaseRead = resolve;
+      });
+      sdkMock.workspaceActions.listScheduledTasks.mockImplementationOnce(
+        () => staleRead,
+      );
+      await act(async () => {
+        latest!.refresh();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        if (mutation === 'toggle') await latest!.toggleDurableTask(entry);
+        else await latest!.deleteDurableTask(entry);
+      });
+
+      await act(async () => {
+        releaseRead([task]);
+        await staleRead;
+        await Promise.resolve();
+      });
+      if (mutation === 'delete') expect(latest?.tasks).toEqual([]);
+      else expect(latest?.taskStatusById.get('d-stale')).toBe('paused');
+    },
+  );
+
+  it('keeps a confirmed cancellation when an older snapshot arrives', async () => {
+    const sessionTask = sessionCronTask({ id: 'cron-cancelled' });
+    sdkMock.sessionActions.cancelTask.mockResolvedValue({ cancelled: true });
+    renderHarness({ sessionId: 'session-1' });
+    await act(async () => latest!.syncSessionTasks([sessionTask]));
+    const entry = latest!.tasks[0] as SessionScopedScheduledTask;
+    await act(async () => {
+      expect(await latest!.cancelSessionTask(entry)).toBe(true);
+    });
+    expect(latest?.activeSessionCount).toBe(0);
+
+    await act(async () => latest!.syncSessionTasks([sessionTask]));
+    expect(latest?.activeSessionCount).toBe(0);
+    expect(latest?.tasks).toEqual([]);
+  });
+
+  it('reports a consumed one-shot when its owner changes before prompt admission', async () => {
+    const oneShot = durableTask({
+      id: 'one-shot-owner',
+      sessionId: 'session-1',
+      recurring: false,
+    });
+    const other = durableTask({ id: 'other-session', sessionId: 'session-2' });
+    sdkMock.workspaceActions.listScheduledTasks.mockImplementation(
+      (workspaceId?: string) =>
+        Promise.resolve(workspaceId === 'ws-a' ? [oneShot] : [other]),
+    );
+    let releaseConsumption!: () => void;
+    const consumed = new Promise<void>((resolve) => {
+      releaseConsumption = resolve;
+    });
+    sdkMock.workspaceActions.runScheduledTask.mockImplementationOnce(
+      () => consumed,
+    );
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-a',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    let run!: Promise<void>;
+    const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+    await act(async () => {
+      run = latest!.runDurableTask(entry);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledWith(
+        'one-shot-owner',
+        'ws-a',
+      );
+    });
+
+    renderHarness({
+      sessionId: 'session-2',
+      workspaceId: 'ws-b',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    await act(async () => {
+      releaseConsumption();
+      await run;
+    });
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Error),
+      'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
+    );
+    expect(latest?.manualRunActive).toBe(false);
+  });
+
+  it('loads a newly bound durable task only on an explicit refresh in this session', async () => {
+    const first = durableTask({ id: 'first-bound', sessionId: 'session-1' });
+    const second = durableTask({ id: 'second-bound', sessionId: 'session-2' });
+    sdkMock.workspaceActions.listScheduledTasks.mockImplementation(
+      (workspaceId?: string) =>
+        Promise.resolve(workspaceId === 'ws-1' ? [first] : [second]),
+    );
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: '',
+      refreshTrigger: 0,
+    });
+    await act(async () => Promise.resolve());
+    expect(sdkMock.workspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: '',
+      refreshTrigger: 1,
+    });
+    await act(async () => Promise.resolve());
+    expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(latest?.tasks[0]?.id).toBe('first-bound');
+
+    renderHarness({
+      sessionId: 'session-2',
+      workspaceId: 'ws-2',
+      activityKey: '',
+      refreshTrigger: 1,
+    });
+    await act(async () => Promise.resolve());
+    expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(latest?.tasks).toEqual([]);
+
+    renderHarness({
+      sessionId: 'session-2',
+      workspaceId: 'ws-2',
+      activityKey: '',
+      refreshTrigger: 2,
+    });
+    await act(async () => Promise.resolve());
+    expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(latest?.tasks[0]?.id).toBe('second-bound');
+  });
+
+  it('refreshes a per-run task after its next fire time has passed', async () => {
+    vi.useFakeTimers();
+    try {
+      const anchor = Date.parse('2026-06-01T08:00:00Z');
+      vi.setSystemTime(anchor);
+      const dueAt = anchor + 10_000;
+      let reads = 0;
+      sdkMock.workspaceActions.listScheduledTasks.mockImplementation(() => {
+        reads += 1;
+        return Promise.resolve([
+          durableTask({
+            id: 'per-run-next',
+            sessionId: 'session-1',
+            sessionMode: 'per_run',
+            nextRunAt: reads === 1 ? dueAt : dueAt + 60_000,
+          }),
+        ]);
+      });
+      renderHarness({
+        sessionId: 'session-1',
+        workspaceId: 'ws-1',
+        activityKey: ACTIVE_KEY,
+      });
+      await act(async () => Promise.resolve());
+      expect(latest?.nextRunAt).toBe(dueAt);
+
+      await act(() => vi.advanceTimersByTimeAsync(29_999));
+      expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+        1,
+      );
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(latest?.nextRunAt).toBe(dueAt + 60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['transient failure', 'unchanged snapshot'] as const)(
+    'continues past-due refreshes after %s',
+    async (mode) => {
+      vi.useFakeTimers();
+      try {
+        const anchor = Date.parse('2026-06-01T08:00:00Z');
+        vi.setSystemTime(anchor);
+        const dueAt = anchor + 10_000;
+        const task = durableTask({
+          id:
+            mode === 'transient failure' ? 'past-due-failure' : 'past-due-same',
+          sessionId: 'session-1',
+          sessionMode: 'per_run',
+          nextRunAt: dueAt,
+        });
+        sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([task]);
+        renderHarness({
+          sessionId: 'session-1',
+          workspaceId: 'ws-1',
+          activityKey: ACTIVE_KEY,
+        });
+        await act(async () => Promise.resolve());
+        expect(latest?.nextRunAt).toBe(dueAt);
+        if (mode === 'transient failure') {
+          sdkMock.workspaceActions.listScheduledTasks.mockRejectedValueOnce(
+            new Error('temporary offline state'),
+          );
+        }
+
+        await act(() => vi.advanceTimersByTimeAsync(30_000));
+        expect(
+          sdkMock.workspaceActions.listScheduledTasks,
+        ).toHaveBeenCalledTimes(2);
+        await act(() => vi.advanceTimersByTimeAsync(30_000));
+        expect(
+          sdkMock.workspaceActions.listScheduledTasks,
+        ).toHaveBeenCalledTimes(3);
+        expect(latest?.nextRunAt).toBe(dueAt);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['toggle', 'delete'] as const)(
+    'does not let a read started during a %s overwrite its mutation result',
+    async (mutation) => {
+      const task = durableTask({ id: 'd-mutation-read', enabled: true });
+      sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([task]);
+      let releaseMutation!: () => void;
+      const pendingMutation = new Promise<void>((resolve) => {
+        releaseMutation = resolve;
+      });
+      sdkMock.workspaceActions.updateScheduledTask.mockImplementation(
+        async () => {
+          await pendingMutation;
+          return { ...task, enabled: false };
+        },
+      );
+      sdkMock.workspaceActions.deleteScheduledTask.mockImplementation(
+        () => pendingMutation,
+      );
+      renderHarness({
+        sessionId: 'session-1',
+        workspaceId: 'ws-1',
+        activityKey: ACTIVE_KEY,
+      });
+      await act(async () => Promise.resolve());
+      const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+      let operation!: Promise<void>;
+      await act(async () => {
+        operation =
+          mutation === 'toggle'
+            ? latest!.toggleDurableTask(entry)
+            : latest!.deleteDurableTask(entry);
+        await Promise.resolve();
+      });
+
+      let releaseRead!: (tasks: DaemonScheduledTask[]) => void;
+      const staleRead = new Promise<DaemonScheduledTask[]>((resolve) => {
+        releaseRead = resolve;
+      });
+      sdkMock.workspaceActions.listScheduledTasks.mockImplementationOnce(
+        () => staleRead,
+      );
+      await act(async () => {
+        latest!.refresh();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        releaseMutation();
+        await operation;
+      });
+
+      await act(async () => {
+        releaseRead([task]);
+        await staleRead;
+        await Promise.resolve();
+      });
+      if (mutation === 'delete') expect(latest?.tasks).toEqual([]);
+      else expect(latest?.taskStatusById.get('d-mutation-read')).toBe('paused');
+    },
+  );
 });

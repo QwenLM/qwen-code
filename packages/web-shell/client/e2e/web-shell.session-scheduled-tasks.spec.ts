@@ -7,12 +7,16 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
-import type { DaemonSessionScheduledTaskStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionScheduledTaskStatus,
+  PromptRequest,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonScheduledTask } from '../daemon/workspace/types';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   installMockDaemon,
+  promptIdFor,
   toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
@@ -107,6 +111,7 @@ async function setupScheduledRoutes(
     sessionTasks: DaemonSessionScheduledTaskStatus[];
     cancelledPayloads: Array<{ taskId: string; kind: unknown }>;
     patchedPayloads: Array<{ taskId: string; body: Record<string, unknown> }>;
+    manualRunTaskIds: string[];
   },
 ) {
   const origin = new URL(baseURL).origin;
@@ -126,6 +131,33 @@ async function setupScheduledRoutes(
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({ tasks: state.durableTasks }),
+        });
+        return;
+      }
+
+      const runMatch = url.pathname.match(/^\/scheduled-tasks\/([^/]+)\/run$/);
+      if (runMatch && method === 'POST') {
+        const taskId = decodeURIComponent(runMatch[1]!);
+        state.manualRunTaskIds.push(taskId);
+        const task = state.durableTasks.find((item) => item.id === taskId);
+        const at = Date.now();
+        const updated = task && {
+          ...task,
+          lastFiredAt: at,
+          runs: [
+            ...task.runs,
+            { at, kind: 'manual' as const, sessionId: SESSION_ID },
+          ],
+        };
+        if (updated) {
+          state.durableTasks = state.durableTasks.map((item) =>
+            item.id === taskId ? updated : item,
+          );
+        }
+        await route.fulfill({
+          status: updated ? 200 : 404,
+          contentType: 'application/json',
+          body: JSON.stringify(updated ?? { error: 'not found' }),
         });
         return;
       }
@@ -196,7 +228,7 @@ async function setupScheduledRoutes(
   );
 }
 
-test('surfaces durable and session-scoped scheduled tasks in header, composer chips, and environment panel', async ({
+test('@smoke surfaces durable and session-scoped scheduled tasks in header, composer chips, and environment panel', async ({
   page,
 }, testInfo) => {
   const baseURL = testInfo.project.use.baseURL ?? 'http://127.0.0.1:5174';
@@ -210,15 +242,17 @@ test('surfaces durable and session-scoped scheduled tasks in header, composer ch
       taskId: string;
       body: Record<string, unknown>;
     }>,
+    manualRunTaskIds: [] as string[],
   };
 
-  await installMockDaemon(page, scenario, baseURL);
+  const daemon = await installMockDaemon(page, scenario, { baseURL });
   await setupScheduledRoutes(page, baseURL, state);
 
   await page.addInitScript(() => {
     window.localStorage.setItem('qwen-code-web-shell-language', 'en');
     window.localStorage.setItem('qwen-code-web-shell-theme', 'dark');
   });
+  await page.setViewportSize({ width: 430, height: 780 });
   await page.goto(`${baseURL}/session/${SESSION_ID}?theme=dark`);
 
   const headerEntry = page.locator('[data-web-shell-scheduled-tasks-entry]');
@@ -306,32 +340,107 @@ test('surfaces durable and session-scoped scheduled tasks in header, composer ch
   }
   await page.setViewportSize({ width: 1440, height: 900 });
 
-  // Stop the session-scoped cron task inline.
-  const cronRow = section
+  const durableRow = section
     .locator('[data-testid="environment-scheduled-task"]')
-    .filter({ hasText: 'Check the release pipeline status' });
-  await cronRow.locator('button[aria-label="Stop"]').click();
+    .filter({ hasText: 'Daily CI digest' });
+  await durableRow
+    .getByRole('button', { name: 'Run now', exact: true })
+    .click();
 
+  // The real EnvironmentPanel → App seam must submit the actual prompt, not
+  // regress to a record-only POST /scheduled-tasks/:id/run.
+  await expect
+    .poll(() =>
+      daemon.promptRequests().some((request) => {
+        const body = request.body as {
+          prompt?: readonly { type?: unknown; text?: unknown }[];
+        };
+        return body.prompt?.some(
+          (part) =>
+            part.type === 'text' && part.text === durableTasks[0]!.prompt,
+        );
+      }),
+    )
+    .toBe(true);
+  await expect.poll(() => state.manualRunTaskIds).toEqual(['durable-standup']);
+
+  // The intercepted daemon accepts a prompt but does not invent model output.
+  // Finish that exact prompt so later reload/restore checks run from an idle session.
+  const manualPromptId = promptIdFor(
+    daemon.promptRequests().at(-1)?.body as PromptRequest,
+  );
+  await daemon.burstEvents([
+    assistantTextEvent('Manual run acknowledged in the mock daemon.', {
+      sessionId: SESSION_ID,
+    }),
+    turnCompleteEvent(manualPromptId, { sessionId: SESSION_ID }),
+  ]);
+  await expect(
+    page.getByText('Manual run acknowledged in the mock daemon.'),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'esc to cancel', exact: true }),
+  ).toHaveCount(0);
+
+  await durableRow
+    .getByRole('button', { name: 'Disable', exact: true })
+    .click();
+  await expect
+    .poll(() => state.patchedPayloads)
+    .toEqual([{ taskId: 'durable-standup', body: { enabled: false } }]);
+  await expect(durableRow).toHaveAttribute('data-enabled', 'false');
+
+  // An explicit detail-page cancellation has a known result, unlike a task
+  // merely disappearing from the poll after it fired or expired.
+  const creationCardButton = page.getByRole('button', {
+    name: 'Open',
+    exact: true,
+  });
+  await expect(creationCardButton).toHaveCount(1);
+  await creationCardButton.click();
+  await page.getByRole('button', { name: 'Stop task', exact: true }).click();
   await expect
     .poll(() => state.cancelledPayloads)
     .toEqual([{ taskId: 'cron-build-watch', kind: 'cron' }]);
+  await expect(
+    page.getByText('This session-scoped scheduled task is no longer active.'),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Stop task', exact: true }),
+  ).toHaveCount(0);
+
+  await page.reload();
+  await headerEntry.click();
+  await expect(section).toBeVisible();
   await expect(
     section.locator('[data-testid="environment-scheduled-task"]'),
   ).toHaveCount(2);
   await expect(composerChip).toContainText('1 scheduled task');
   await expect(headerEntry).toContainText('2');
+  await expect(creationCardButton).toBeVisible();
   await expect(
-    page.locator('[data-scheduled-task-status="cancelled"]'),
-  ).toHaveCount(1);
+    creationCardButton.locator(
+      'xpath=ancestor::div[@data-scheduled-task-status]',
+    ),
+  ).toHaveCount(0);
 
-  // Pause the durable task inline.
-  const durableRow = section
-    .locator('[data-testid="environment-scheduled-task"]')
-    .filter({ hasText: 'Daily CI digest' });
-  await durableRow.locator('button[aria-label="Disable"]').click();
-
-  await expect
-    .poll(() => state.patchedPayloads)
-    .toEqual([{ taskId: 'durable-standup', body: { enabled: false } }]);
-  await expect(durableRow).toHaveAttribute('data-enabled', 'false');
+  await page
+    .getByRole('button', {
+      name: 'Toggle environment information',
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.locator('[data-testid="environment-panel"]'),
+  ).not.toBeVisible();
+  await creationCardButton.click();
+  await expect(
+    page.getByText(
+      'This is a session-scoped scheduled task. Showing the snapshot from when it was created.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Stop task', exact: true }),
+  ).toHaveCount(0);
 });

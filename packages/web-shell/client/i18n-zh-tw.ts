@@ -4176,8 +4176,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'environment.scheduledTasks.viewAll': '管理全部',
   'scheduledTasks.sessionScopedActive':
     '目前對話執行中，停止後會立即取消後續觸發。',
+  'scheduledTasks.sessionScopedPaused':
+    '目前對話的定時任務已暫停。停止後會移除剩餘排程。',
   'scheduledTasks.sessionScopedCancelled': '該對話級定時任務已停止或已過期。',
   'scheduledTasks.stopSessionTask': '停止任務',
+  'scheduledTasks.error.cancelFailed': '停止定時任務失敗',
   'tasks.pill.scheduled': (v) => `${v?.count ?? 0} 個定時任務`,
   'environment.title': '環境資訊',
   'environment.changes': '變更',

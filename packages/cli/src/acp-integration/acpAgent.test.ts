@@ -16153,6 +16153,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       v: 1,
       sessionId,
       now: 5_000,
+      scheduledTasks: [],
       tasks: [
         {
           kind: 'agent',
@@ -19243,6 +19244,69 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'cron',
       }),
     ).resolves.toEqual({ cancelled: false, reason: 'not_found' });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('handles disabled cron and an unsuccessful cron deletion separately', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let enabled = false;
+    const deleteCron = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    Object.assign(innerConfig, {
+      isCronEnabled: vi.fn().mockImplementation(() => enabled),
+      getCronScheduler: vi.fn().mockReturnValue({
+        list: vi
+          .fn()
+          .mockReturnValue([{ id: 'session-cron-1', durable: false }]),
+        delete: deleteCron,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'session-cron-1',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: false, reason: 'disabled' });
+    expect(deleteCron).not.toHaveBeenCalled();
+
+    enabled = true;
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'session-cron-1',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: false });
+    expect(deleteCron).toHaveBeenCalledWith('session-cron-1');
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'session-cron-1',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(deleteCron).toHaveBeenCalledTimes(2);
 
     mockConnectionState.resolve();
     await agentPromise;

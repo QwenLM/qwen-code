@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   act,
   createRef,
+  useEffect,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -1084,6 +1085,9 @@ const {
       latestAskUserQuestionOnAskDetails: null as (() => void) | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
       backgroundTasks: [] as DaemonSessionTaskStatus[],
+      sessionScheduledTasks: undefined as
+        | readonly import('@qwen-code/sdk/daemon').DaemonSessionScheduledTaskStatus[]
+        | undefined,
       latestMonitorDetailsOnOpen: null as
         | ((tool: {
             callId: string;
@@ -1446,8 +1450,20 @@ vi.mock('./hooks/useBackgroundTasks', () => ({
     _taskActivityActive: boolean,
     _connected: boolean,
     refreshTrigger = 0,
+    _workflowsEnabled: boolean,
+    onScheduledTasks?: (
+      tasks: readonly import('@qwen-code/sdk/daemon').DaemonSessionScheduledTaskStatus[],
+    ) => void,
+    scheduledTaskActivityKey = '',
   ) => {
     testState.latestBackgroundTasksRefreshTrigger = refreshTrigger;
+    // Mirror the real channel only when scheduling activity is present; the
+    // default fixture must not invent an always-on fetch or empty snapshot.
+    useEffect(() => {
+      if (scheduledTaskActivityKey && testState.sessionScheduledTasks) {
+        onScheduledTasks?.(testState.sessionScheduledTasks);
+      }
+    }, [onScheduledTasks, scheduledTaskActivityKey]);
     return testState.backgroundTasks;
   },
 }));
@@ -6408,6 +6424,211 @@ describe('task activity key', () => {
     expect(
       container.querySelector('button[title="Daily report"]'),
     ).not.toBeNull();
+  });
+
+  it('restores an environment durable task without a transcript call and preserves its owner', async () => {
+    const ownedTask = {
+      id: 'durable:environment',
+      name: 'Owned environment task',
+      cron: '15 8 * * *',
+      prompt: 'Prompt from the owning session',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      events: [],
+      hasMore: false,
+    });
+    const renderChatHeader = vi.fn(() => null);
+    const options = {
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    } as const;
+    const first = renderApp(options);
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        first.container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      first.container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    await vi.waitFor(() => {
+      const state = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      )['/tmp/project\0session-1'];
+      expect(state?.tabs?.[0]).toMatchObject({
+        kind: 'scheduled_task',
+        toolCallId: 'scheduled:durable:durable:environment',
+      });
+    });
+    first.unmount();
+
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    const second = renderApp(options);
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task.prompt).toBe(
+        ownedTask.prompt,
+      );
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(second.container.textContent).toContain(ownedTask.prompt);
+      expect(second.container.textContent).toContain(ownedTask.cron);
+    });
+    expect(second.container.textContent).toContain(ownedTask.name);
+    const modernPersisted = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    )['/tmp/project\0session-1'];
+    expect(modernPersisted.tabs[0]).toMatchObject({
+      taskId: ownedTask.id,
+      taskScope: 'durable',
+    });
+    second.unmount();
+
+    delete modernPersisted.tabs[0].taskId;
+    delete modernPersisted.tabs[0].taskScope;
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({ '/tmp/project\0session-1': modernPersisted }),
+    );
+    const legacy = renderApp(options);
+    await vi.waitFor(async () => {
+      await flush();
+      expect(legacy.container.textContent).toContain(ownedTask.prompt);
+      expect(legacy.container.textContent).toContain(ownedTask.cron);
+    });
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'primary',
+    );
+    legacy.unmount();
+
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      {
+        ...ownedTask,
+        name: 'Foreign environment task',
+        prompt: 'Prompt from a foreign session',
+        sessionId: 'foreign-session',
+      },
+    ]);
+    const foreign = renderApp(options);
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.id === modernPersisted.tabs[0].id,
+      );
+      expect(tab?.kind).toBe('pending');
+      expect(tab?.kind === 'pending' && tab.loadError).toEqual(
+        expect.any(String),
+      );
+    });
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (item) => item.kind === 'scheduled_task',
+      ),
+    ).toBe(false);
+    expect(foreign.container.textContent).not.toContain(
+      'Prompt from a foreign session',
+    );
+  });
+
+  it('restores a stopped session task from its original creation record', async () => {
+    const taskId = 'cron-cancelled-history';
+    const prompt = 'History preserved after the schedule was stopped';
+    testState.messages = [
+      {
+        id: 'original-stop-history',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-original-history',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: { cron: '*/5 * * * *', prompt, recurring: true },
+            rawOutput: {
+              returnDisplay: `Scheduled recurring job ${taskId} (*/5 * * * *).`,
+            },
+          },
+        ],
+      },
+    ];
+    testState.sessionScheduledTasks = [];
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 1_000,
+      tasks: [],
+      scheduledTasks: [],
+    });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'saved-stopped-cron',
+          tabs: [
+            {
+              id: 'saved-stopped-cron',
+              kind: 'scheduled_task',
+              title: 'Stopped cron',
+              toolCallId: `scheduled:session:${taskId}`,
+              taskId,
+              taskScope: 'session',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/tmp/project',
+              workspaceId: 'primary',
+            },
+          ],
+        },
+      }),
+    );
+
+    renderApp({ environmentPanel: { items: ['scheduledTasks'] } });
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task.prompt).toBe(prompt);
+    });
+    expect(mockSessionActions.getTasks).toHaveBeenCalled();
+    expect(mockWorkspace.client.sessionTasks).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -13834,6 +14055,7 @@ beforeEach(() => {
   testState.latestAskUserQuestionOnAskDetails = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
+  testState.sessionScheduledTasks = undefined;
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
   testState.settingsLoading = false;
@@ -14020,6 +14242,7 @@ beforeEach(() => {
   mockWorkspaceActions.suggestWorkspacePaths.mockReset();
   mockWorkspaceActions.pickWorkspaceDirectory.mockReset();
   mockWorkspaceActions.listScheduledTasks.mockReset();
+  mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
   mockWorkspaceActions.updateScheduledTask.mockReset();
   mockWorkspaceActions.deleteScheduledTask.mockReset();
   mockWorkspaceActions.deleteModel.mockReset();
@@ -56277,6 +56500,92 @@ describe('App workflow history entry', () => {
   });
 });
 
+it('gates the scheduled-task entry on the host environment section with live data', async () => {
+  testState.messages = [
+    {
+      id: 'scheduled-config-activity',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'scheduled-config-create',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: {
+            cron: '*/5 * * * *',
+            prompt: 'Check the release pipeline',
+            recurring: true,
+          },
+          rawOutput: {
+            returnDisplay: 'Created scheduled task (id: cron-config-visible)',
+          },
+        },
+      ],
+    },
+  ];
+  testState.sessionScheduledTasks = [
+    {
+      id: 'cron-config-visible',
+      source: 'cron',
+      cronExpr: '*/5 * * * *',
+      prompt: 'Check the release pipeline',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 60_000,
+    },
+  ];
+
+  const excludedHeader = vi.fn(() => null);
+  const excluded = renderApp({
+    environmentPanel: { items: ['environment'] },
+    renderChatHeader: excludedHeader,
+  });
+  await vi.waitFor(async () => {
+    await flush();
+    expect(
+      excludedHeader.mock.calls.some(
+        ([props]) => props.scheduledTaskCount === 1,
+      ),
+    ).toBe(true);
+  });
+  expect(
+    excludedHeader.mock.lastCall?.[0].onOpenScheduledTasks,
+  ).toBeUndefined();
+  excluded.unmount();
+
+  const includedHeader = vi.fn(() => null);
+  const included = renderApp({
+    environmentPanel: { items: ['scheduledTasks'] },
+    renderChatHeader: includedHeader,
+  });
+  await vi.waitFor(async () => {
+    await flush();
+    expect(
+      includedHeader.mock.calls.some(
+        ([props]) => props.scheduledTaskCount === 1,
+      ),
+    ).toBe(true);
+  });
+  expect(includedHeader.mock.lastCall?.[0].onOpenScheduledTasks).toEqual(
+    expect.any(Function),
+  );
+  await act(async () => {
+    includedHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+  });
+  await flush();
+  const manageAll = Array.from(
+    included.container.querySelectorAll<HTMLButtonElement>('button'),
+  ).find((button) => button.textContent === 'Manage all');
+  expect(manageAll).toBeDefined();
+  await act(async () => {
+    manageAll?.click();
+  });
+  await flush();
+  expect(testState.latestScheduledTasksProps).not.toBeNull();
+});
+
 describe('App manual-run orchestration (scheduled tasks)', () => {
   // Drives App's real runTaskManually / enqueueManualRun / tryFireBoundRun via
   // the onRunPrompt prop the (captured) ScheduledTasksDialog mock receives.
@@ -56583,6 +56892,52 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       vi.advanceTimersByTime(1);
     });
     expect((err as Error | undefined)?.message).toMatch(/session replay/);
+  });
+
+  it('bounds waiting when the restored session never finishes loading its transcript', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'loading-session';
+      mockConnection.loadingTranscript = true;
+    });
+    vi.useFakeTimers();
+    let err: unknown;
+    await act(async () => {
+      void run('do the thing', 'loading-session').catch((error) => {
+        err = error;
+      });
+      await Promise.resolve();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(29_999));
+    expect(err).toBeUndefined();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect((err as Error | undefined)?.message).toMatch(/session replay/);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('clears a pending bound run when the App unmounts', async () => {
+    const { container, unmount } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'loading-session';
+      mockConnection.loadingTranscript = true;
+    });
+    vi.useFakeTimers();
+    let err: unknown;
+    await act(async () => {
+      void run('do the thing', 'loading-session').catch((error) => {
+        err = error;
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      unmount();
+      await Promise.resolve();
+    });
+    expect((err as Error | undefined)?.name).toBe('AbortError');
   });
 
   it('"create via chat" starts a fresh session and primes the composer', async () => {

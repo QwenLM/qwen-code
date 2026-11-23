@@ -298,8 +298,7 @@ button.row:disabled {
   color: var(--error-color);
 }
 
-.sectionHeaderRow {
-  display: flex;
+.scheduledTaskHeaderRow {
   align-items: center;
   justify-content: space-between;
   gap: 8px;

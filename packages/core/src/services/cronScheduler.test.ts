@@ -2400,4 +2400,25 @@ describe('nextCronJobFireMs', () => {
       }),
     ).toBeNull();
   });
+
+  it('adds the exact jitter milliseconds onto the projected fire time', () => {
+    const base = nextCronJobFireMs({
+      id: 'exact-jitter',
+      cronExpr: '0 0 * * *',
+      recurring: true,
+      createdAt: anchor,
+      jitterMs: 0,
+    });
+    const jittered = nextCronJobFireMs({
+      id: 'exact-jitter',
+      cronExpr: '0 0 * * *',
+      recurring: true,
+      createdAt: anchor,
+      jitterMs: 3_000,
+    });
+    const localMidnight = new Date(anchor);
+    localMidnight.setHours(24, 0, 0, 0);
+    expect(base).toBe(localMidnight.getTime());
+    expect(jittered).toBe(base! + 3_000);
+  });
 });

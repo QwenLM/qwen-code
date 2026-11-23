@@ -1170,4 +1170,101 @@ describe('EnvironmentPanel', () => {
     expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(sessionEntry);
     expect(onManageAllScheduledTasks).toHaveBeenCalledOnce();
   });
+
+  it('scrolls on a new focus nonce only, and does not leak wakeup internals', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-01T08:00:00Z'));
+    const scrollIntoView = vi.fn();
+    const previousDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      'scrollIntoView',
+    );
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const scheduledTasks = [
+      {
+        scope: 'session' as const,
+        source: 'wakeup' as const,
+        id: 'wakeup-1',
+        title: 'Check deployment again',
+        prompt: 'Check deployment again',
+        cronExpr: '@wakeup',
+        recurring: false,
+        enabled: true as const,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: Date.now(),
+        expiresAt: null,
+        task: {
+          id: 'wakeup-1',
+          source: 'wakeup' as const,
+          cronExpr: '@wakeup',
+          prompt: 'Check deployment again',
+          recurring: false,
+          createdAt: 1_000,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: Date.now(),
+          enabled: true,
+        },
+      },
+    ];
+    const view = (focusScheduledTasksNonce: number) => (
+      <I18nProvider language="en">
+        <EnvironmentPanel
+          tasks={[]}
+          scheduledTasks={scheduledTasks}
+          focusScheduledTasksNonce={focusScheduledTasksNonce}
+          onOpenTask={() => {}}
+        />
+      </I18nProvider>
+    );
+    try {
+      act(() => {
+        root.render(view(1));
+      });
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(container.textContent).toContain('Runs once');
+      expect(container.textContent).not.toContain('Next in Due now');
+      const entry = container.querySelector(
+        '[data-testid="environment-scheduled-task"]',
+      );
+      const titles = Array.from(entry?.querySelectorAll('[title]') ?? []).map(
+        (element) => element.getAttribute('title'),
+      );
+      expect(titles.every((title) => !title?.includes('@wakeup'))).toBe(true);
+
+      act(() => {
+        root.render(view(2));
+      });
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+
+      act(() => root.unmount());
+      const remounted = createRoot(container);
+      act(() => {
+        remounted.render(view(2));
+      });
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+      act(() => remounted.unmount());
+    } finally {
+      act(() => {
+        if (root) root.unmount();
+      });
+      if (previousDescriptor) {
+        Object.defineProperty(
+          HTMLElement.prototype,
+          'scrollIntoView',
+          previousDescriptor,
+        );
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
+      }
+      vi.useRealTimers();
+    }
+  });
 });

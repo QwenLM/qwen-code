@@ -4164,8 +4164,11 @@ export const ZH: Messages = {
   'environment.scheduledTasks.viewAll': '管理全部',
   'scheduledTasks.sessionScopedActive':
     '当前会话运行中，停止后会立即取消后续触发。',
+  'scheduledTasks.sessionScopedPaused':
+    '当前会话的定时任务已暂停。停止后会移除剩余调度。',
   'scheduledTasks.sessionScopedCancelled': '该会话级定时任务已停止或已过期。',
   'scheduledTasks.stopSessionTask': '停止任务',
+  'scheduledTasks.error.cancelFailed': '停止定时任务失败',
   'tasks.pill.scheduled': (v) => `${v?.count ?? 0} 个定时任务`,
   'environment.title': '环境信息',
   'environment.changes': '变更',

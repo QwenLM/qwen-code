@@ -2377,6 +2377,34 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
   });
 
+  it('does not call a fallback tool-call id a deleted durable task', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: 'cron-call',
+            toolCallId: 'cron-call',
+            prompt: 'history without structured id',
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('history without structured id');
+    expect(container.textContent).not.toContain('has been deleted');
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    expect(edit?.disabled).toBe(true);
+  });
+
   it('shows a session-scoped task snapshot without a workspace owner', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -6347,6 +6375,95 @@ describe('ArtifactPanel binary document previews', () => {
     expect(download?.download).toBe('Report.PDF');
   });
 
+  it('allows stopping a paused but live session-scoped scheduled task', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const task = {
+      id: 'cron-paused-live',
+      toolCallId: 'create-paused-live',
+      title: 'Paused release monitor',
+      cron: '*/5 * * * *',
+      prompt: 'Paused release monitor',
+      recurring: true,
+      durable: false,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:paused:cron-paused-live',
+                kind: 'scheduled_task',
+                title: 'Paused release monitor',
+                task,
+                sourceSessionId: 'session-live',
+              },
+            ]}
+            activeTabId="scheduled-task:paused:cron-paused-live"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  'cron-paused-live',
+                  {
+                    id: 'cron-paused-live',
+                    source: 'cron' as const,
+                    cronExpr: '*/5 * * * *',
+                    prompt: 'Paused release monitor',
+                    recurring: true,
+                    enabled: false,
+                    createdAt: 1,
+                    expiresAt: null,
+                    lastFiredAt: null,
+                    nextRunAt: Date.now() + 60_000,
+                  },
+                ],
+              ])
+            }
+            liveSessionScheduledTasksOwnerSessionId="session-live"
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Paused in this session. Stopping removes the remaining schedule.',
+    );
+    const stopButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Stop task');
+    expect(stopButton).toBeDefined();
+    expect(stopButton?.disabled).toBe(false);
+
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-paused-live',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Stop task',
+      ),
+    ).toBeUndefined();
+  });
+
   it('allows stopping an active session-scoped scheduled task from ArtifactPanel', async () => {
     const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
     const container = document.createElement('div');
@@ -6413,6 +6530,139 @@ describe('ArtifactPanel binary document previews', () => {
       await Promise.resolve();
     });
     expect(onCancelSessionScheduledTask).toHaveBeenCalledWith('cron-live-1');
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+  });
+
+  it('does not borrow another session live snapshot for a historical task', () => {
+    const onCancelSessionScheduledTask = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const task = {
+      id: 'cron-from-session-b',
+      toolCallId: 'tool-session-b',
+      title: 'Poll build status',
+      cron: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      durable: false,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session-b:cron-from-session-b',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task,
+                sourceSessionId: 'session-b',
+              },
+            ]}
+            activeTabId="scheduled-task:session-b:cron-from-session-b"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={new Map()}
+            liveSessionScheduledTasksOwnerSessionId="session-a"
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Showing the snapshot from when it was created.',
+    );
+    expect(container.textContent).not.toContain('no longer active');
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Stop task',
+      ),
+    ).toBeUndefined();
+    expect(onCancelSessionScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a failed session-scoped cancellation instead of a silent snapshot', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(false);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const liveTask = {
+      id: 'cron-refused-1',
+      source: 'cron' as const,
+      cronExpr: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: 100_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+      enabled: true,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session:cron-refused-1',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task: {
+                  id: 'cron-refused-1',
+                  toolCallId: 'tool-cron-refused',
+                  title: 'Poll the build',
+                  cron: '*/5 * * * *',
+                  prompt: 'Poll build status',
+                  recurring: true,
+                  durable: false,
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:session:cron-refused-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={new Map([[liveTask.id, liveTask]])}
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent === 'Stop task',
+    );
+    expect(stopButton).toBeDefined();
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith('cron-refused-1');
+    expect(container.textContent).toContain(
+      'Failed to stop the scheduled task',
+    );
+    expect(container.textContent).not.toContain(
+      'Showing the snapshot from when it was created.',
+    );
+    expect(stopButton?.disabled).toBe(false);
   });
 });
 
