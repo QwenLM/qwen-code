@@ -3166,9 +3166,14 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
   const sha256 = (text) =>
     createHash('sha256').update(text, 'utf8').digest('hex');
 
+  const ANCHOR = {
+    expectedHead: HEAD,
+    coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+  };
+
   function makeExecRecord(overrides = {}) {
     return {
-      schemaVersion: 'poc-exec-record-v1',
+      schemaVersion: 'verify-pr-exec-record-v1',
       runId: 'fc-run-01',
       repo: 'QwenLM/qwen-code',
       pr: 17185,
@@ -3233,6 +3238,44 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it('refuses an execution record presented without host-held anchoring coordinates', () => {
+    // A self-consistent forged record with no --context must NOT pass: repo and
+    // headRefOid would otherwise only be shape-checked (single-signal probe gap).
+    const recText = JSON.stringify(makeExecRecord({ repo: 'evil/repo' }));
+    const unanchored = checkExecutionRecord(recText);
+    expect(unanchored.errors.join('\n')).toMatch(
+      /requires a host-held --context to anchor repo, pr, and headRefOid/,
+    );
+    expect(unanchored.errors.join('\n')).toMatch(
+      /requires a host-held --context headRefOid/,
+    );
+
+    const wrongRepo = checkExecutionRecord(recText, { ...ANCHOR });
+    expect(wrongRepo.errors.join('\n')).toMatch(
+      /not this round's QwenLM\/qwen-code#17185/,
+    );
+
+    const movedHead = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ headRefOid: 'c'.repeat(40) })),
+      { ...ANCHOR },
+    );
+    expect(movedHead.errors.join('\n')).toMatch(/does not match expected head/);
+
+    const badSchema = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ schemaVersion: 'poc-exec-record-v1' })),
+      { ...ANCHOR },
+    );
+    expect(badSchema.errors.join('\n')).toMatch(/schemaVersion must be/);
+
+    const badSupervisor = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ supervisorPid: 0.5 })),
+      { ...ANCHOR },
+    );
+    expect(badSupervisor.errors.join('\n')).toMatch(
+      /supervisorPid must be an integer/,
+    );
+  });
+
   it('accepts a valid provider-vm execution record and mode vm boundary', () => {
     const rec = makeExecRecord({
       backend: 'provider-vm',
@@ -3256,6 +3299,7 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
       }),
       evidence: ['01-ab-cells.png'],
       expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
       executionRecordText: recText,
       executionRecordSha256: sha256(recText),
     });
@@ -3290,7 +3334,7 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     ]) {
       const checkRes = checkExecutionRecord(
         JSON.stringify(makeExecRecord(override)),
-        { expectedHead: HEAD },
+        { ...ANCHOR },
       );
       expect(checkRes.errors.join('\n')).toMatch(pattern);
     }
@@ -3306,7 +3350,7 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
             backend: 'container',
           }),
         ),
-        { expectedHead: HEAD },
+        { ...ANCHOR },
       );
       expect(res.errors.join('\n')).toMatch(
         /requires executionClass=hardware-isolated/,
@@ -3374,7 +3418,7 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     );
 
     const wrongCtxSha = checkExecutionRecord(JSON.stringify(makeExecRecord()), {
-      expectedHead: HEAD,
+      ...ANCHOR,
       expectedContextSha256: SHA('9'),
     });
     expect(wrongCtxSha.errors.join('\n')).toMatch(
@@ -3389,7 +3433,10 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
           backend: 'container',
         }),
       ),
-      { expectedHead: HEAD, requiredExecutionClass: 'hardware-isolated' },
+      {
+        ...ANCHOR,
+        requiredExecutionClass: 'hardware-isolated',
+      },
     );
     expect(downgraded.errors.join('\n')).toMatch(
       /violates host context requirement executionClass=hardware-isolated/,
@@ -3445,42 +3492,82 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     mkdirSync(join(dir, 'evidence'), { recursive: true });
     writeFileSync(join(dir, 'evidence', '01-ab.png'), 'png');
 
-    const rec = makeExecRecord();
-    const recText = JSON.stringify(rec, null, 2);
-    const recSha = sha256(recText);
-    const hostRec = join(base, 'host-execution-record.json');
-    writeFileSync(hostRec, recText);
-
     const files = validFiles({
       report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Firecracker microVM (hardware-isolated).\n`,
-      boundary: JSON.stringify(makeMicrovmBoundary(rec, recText)),
       boundaryGate: undefined,
     });
     writeFileSync(join(dir, 'report.md'), files.report);
     writeFileSync(join(dir, 'verdict.txt'), files.verdict);
     writeFileSync(join(dir, 'assertions.json'), files.assertions);
-    writeFileSync(join(dir, 'boundary.json'), files.boundary);
 
     const run = (args) =>
       spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
 
-    // 1. Valid host-held record with digest binding exits 0
+    // Host-held context anchoring the record to this round (required since
+    // an execution record without --context cannot be anchored).
+    const hostCtx = join(base, 'host-context.json');
+    const ctxText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      baseRefOid: BASE_OID,
+      headRefOid: HEAD,
+      trustClassification: {
+        prTrust: 'external',
+        executionClass: 'hardware-isolated',
+        escalationReasons: [],
+        headRefOid: HEAD,
+      },
+    });
+    writeFileSync(hostCtx, ctxText);
+    const ctxSha = sha256(ctxText);
+    const anchor = ['--context', hostCtx, '--context-sha256', ctxSha];
+
+    // Rebuild the record bound to the real context digest so the positive
+    // control exercises anchoring + contextDigest binding together.
+    const boundRec = makeExecRecord({ contextDigest: ctxSha });
+    const boundRecText = JSON.stringify(boundRec, null, 2);
+    const boundRecSha = sha256(boundRecText);
+    const hostRec = join(base, 'host-execution-record.json');
+    writeFileSync(hostRec, boundRecText);
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+
+    // 1. Valid host-held record with digest binding AND anchoring context exits 0
     const ok = run([
       '--context-root',
       clone,
+      ...anchor,
       '--execution-record',
       hostRec,
       '--execution-record-sha256',
-      recSha,
+      boundRecSha,
       dir,
     ]);
     expect(ok.status).toBe(0);
     expect(ok.stdout).toMatch(/ok: verdict=merge-ready/);
 
+    // 1b. An otherwise valid record presented WITHOUT a --context anchor is refused
+    const noAnchor = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(noAnchor.status).toBe(1);
+    expect(noAnchor.stdout).toMatch(
+      /requires a host-held --context to anchor repo, pr, and headRefOid/,
+    );
+
     // 2. Wrong sha256 fails closed
     const badSha = run([
       '--context-root',
       clone,
+      ...anchor,
       '--execution-record',
       hostRec,
       '--execution-record-sha256',
@@ -3491,19 +3578,20 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(badSha.stderr).toMatch(/does not match --execution-record-sha256/);
 
     // 3. --execution-record-sha256 without --execution-record is usage error 2
-    const orphanSha = run(['--execution-record-sha256', recSha, dir]);
+    const orphanSha = run(['--execution-record-sha256', boundRecSha, dir]);
     expect(orphanSha.status).toBe(2);
 
     // 4. Execution record placed inside PR-writable clone is refused
     const inTreeRec = join(clone, 'in-tree-record.json');
-    writeFileSync(inTreeRec, recText);
+    writeFileSync(inTreeRec, boundRecText);
     const inTree = run([
       '--context-root',
       clone,
+      ...anchor,
       '--execution-record',
       inTreeRec,
       '--execution-record-sha256',
-      recSha,
+      boundRecSha,
       dir,
     ]);
     expect(inTree.status).toBe(1);
@@ -3517,10 +3605,11 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     const symRes = run([
       '--context-root',
       clone,
+      ...anchor,
       '--execution-record',
       symRec,
       '--execution-record-sha256',
-      recSha,
+      boundRecSha,
       dir,
     ]);
     expect(symRes.status).toBe(1);
@@ -3529,29 +3618,31 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     // 6. Hardlink alias on --execution-record is refused
     const linkedSource = join(base, 'linked-record.json');
     const linkedAlias = join(base, 'linked-alias.json');
-    writeFileSync(linkedSource, recText);
+    writeFileSync(linkedSource, boundRecText);
     linkSync(linkedSource, linkedAlias);
     const linkRes = run([
       '--context-root',
       clone,
+      ...anchor,
       '--execution-record',
       linkedAlias,
       '--execution-record-sha256',
-      recSha,
+      boundRecSha,
       dir,
     ]);
     expect(linkRes.status).toBe(1);
     expect(linkRes.stderr).toMatch(/is a hard link/);
 
     // 7. Guest-planted execution-record.json inside artifact dir is refused
-    writeFileSync(join(dir, 'execution-record.json'), recText);
+    writeFileSync(join(dir, 'execution-record.json'), boundRecText);
     const planted = run([
       '--context-root',
       clone,
+      ...anchor,
       '--execution-record',
       hostRec,
       '--execution-record-sha256',
-      recSha,
+      boundRecSha,
       dir,
     ]);
     expect(planted.status).toBe(1);
@@ -3561,7 +3652,6 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     unlinkSync(join(dir, 'execution-record.json'));
 
     // 8. CLI wires host --context trustClassification & contextDigest / baseRefOid binding
-    const hostCtx = join(base, 'host-ctx.json');
     const ctxObj = {
       repo: 'QwenLM/qwen-code',
       pr: 17185,
@@ -3573,22 +3663,19 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         headRefOid: HEAD,
       },
     };
-    const ctxText = JSON.stringify(ctxObj);
-    const ctxSha = sha256(ctxText);
-    writeFileSync(hostCtx, ctxText);
-
     // 8a. Execution record with wrong contextDigest is rejected via CLI
+    const unboundRecText = JSON.stringify(makeExecRecord(), null, 2);
+    const unboundRecSha = sha256(unboundRecText);
+    const unboundHostRec = join(base, 'unbound-exec-record.json');
+    writeFileSync(unboundHostRec, unboundRecText);
     const wrongCtxRes = run([
-      '--context',
-      hostCtx,
-      '--context-sha256',
-      ctxSha,
+      ...anchor,
       '--context-root',
       clone,
       '--execution-record',
-      hostRec,
+      unboundHostRec,
       '--execution-record-sha256',
-      recSha,
+      unboundRecSha,
       dir,
     ]);
     expect(wrongCtxRes.status).toBe(1);
@@ -3596,30 +3683,8 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
       /contextDigest .* does not match host context sha256/,
     );
 
-    // 8b. Execution record matching host contextDigest and baseRefOid exits 0
-    const boundRec = makeExecRecord({ contextDigest: ctxSha });
-    const boundRecText = JSON.stringify(boundRec, null, 2);
-    const boundRecSha = sha256(boundRecText);
-    const boundHostRec = join(base, 'bound-exec-record.json');
-    writeFileSync(boundHostRec, boundRecText);
-    writeFileSync(
-      join(dir, 'boundary.json'),
-      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
-    );
-    const boundOk = run([
-      '--context',
-      hostCtx,
-      '--context-sha256',
-      ctxSha,
-      '--context-root',
-      clone,
-      '--execution-record',
-      boundHostRec,
-      '--execution-record-sha256',
-      boundRecSha,
-      dir,
-    ]);
-    expect(boundOk.status).toBe(0);
+    // 8b. The context-bound record from step 1 already exited 0 (ok.status above).
+    expect(boundRec.contextDigest).toBe(ctxSha);
 
     // 8c. Stale trustClassification.headRefOid in --context is refused by CLI
     const staleCtx = join(base, 'stale-ctx.json');

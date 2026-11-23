@@ -655,6 +655,16 @@ export function writeExecutionRecordAndBoundary({
     expectedHead: normalized.headRefOid || null,
     expectedSha256: recordSha256,
     actualSha256: recordSha256,
+    // The record was built host-side from the digest-bound prepare snapshot,
+    // so its own coordinates are the trusted anchor for this self-check.
+    coordinates:
+      normalized.repo && Number.isInteger(normalized.pr)
+        ? {
+            owner: normalized.repo.split('/')[0],
+            repo: normalized.repo.split('/').slice(1).join('/'),
+            number: normalized.pr,
+          }
+        : null,
   });
   const errors = [...liveErrors, ...check.errors];
   const boundaryPath = join(realArtifact, 'boundary.json');

@@ -55,6 +55,7 @@ export const PR_TRUST_LEVELS = [
 export const EXECUTION_CLASSES = ['hardware-isolated', 'trusted-shared-kernel'];
 export const HARDWARE_BACKENDS = ['firecracker', 'vfkit', 'provider-vm'];
 export const LIGHTWEIGHT_BACKENDS = ['container'];
+export const EXECUTION_RECORD_SCHEMA = 'verify-pr-exec-record-v1';
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -600,6 +601,11 @@ export function checkExecutionRecord(
     };
   }
   const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
+  if (parsed.schemaVersion !== EXECUTION_RECORD_SCHEMA) {
+    errors.push(
+      `execution-record.json schemaVersion must be "${EXECUTION_RECORD_SCHEMA}" (got ${JSON.stringify(parsed.schemaVersion)})`,
+    );
+  }
   for (const field of [
     'runId',
     'repo',
@@ -618,6 +624,30 @@ export function checkExecutionRecord(
   }
   if (!Number.isInteger(parsed.pr) || parsed.pr <= 0) {
     errors.push('execution-record.json pr must be a positive integer');
+  }
+  // Without host-held coordinates the record cannot be anchored to this
+  // round; refuse rather than accept a self-consistent forged record.
+  if (
+    !coordinates ||
+    typeof coordinates.owner !== 'string' ||
+    typeof coordinates.repo !== 'string'
+  ) {
+    errors.push(
+      'execution-record.json requires a host-held --context to anchor repo, pr, and headRefOid to this round',
+    );
+  }
+  if (!expectedHead) {
+    errors.push(
+      'execution-record.json requires a host-held --context headRefOid to anchor headRefOid to this round',
+    );
+  }
+  if (
+    parsed.supervisorPid !== undefined &&
+    !Number.isInteger(parsed.supervisorPid)
+  ) {
+    errors.push(
+      'execution-record.json supervisorPid must be an integer when present',
+    );
   }
   if (nonEmpty(parsed.baseRefOid) && !FULL_OID_RE.test(parsed.baseRefOid)) {
     errors.push('execution-record.json baseRefOid must be a 40-hex OID');
