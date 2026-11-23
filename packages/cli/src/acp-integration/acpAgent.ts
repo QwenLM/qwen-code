@@ -18137,7 +18137,7 @@ class QwenAgent implements Agent {
           await replaySessionHistory();
           await options.beforeStartPostReplayServices?.(session);
           await config.getLlmClient().refreshStartupContextReminder();
-          session.installRewriter();
+          session.installMods();
           config.finalizeSessionRestore?.();
           startNonInteractiveOpenAILogHousekeeping(config, settings);
         },
@@ -18293,9 +18293,9 @@ class QwenAgent implements Agent {
         await options.beforeStartPostReplayServices?.(session);
       }
 
-      // Install rewriter AFTER history replay to avoid rewriting historical messages
+      // Install Mods AFTER history replay so they do not hear historical messages
       if (options.deferWorkspaceActivation !== true) {
-        session.installRewriter();
+        session.installMods();
       }
 
       if (options.deferWorkspaceActivation !== true) {
