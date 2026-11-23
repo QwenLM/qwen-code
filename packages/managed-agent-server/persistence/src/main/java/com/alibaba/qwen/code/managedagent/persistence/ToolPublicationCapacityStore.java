@@ -45,7 +45,7 @@ final class ToolPublicationCapacityStore {
                 + " COALESCE(SUM(capture_used_bytes + producer_used_bytes + admission_used_bytes), 0) AS used,"
                 + " COALESCE(SUM(CASE WHEN producer_phase <> 'FINISHING' THEN capture_used_bytes"
                 + " + producer_used_bytes + admission_used_bytes ELSE 0 END), 0) AS retained"
-                + " FROM ma_output_capture WHERE scope_key = ? AND state <> 'NOT_STARTED'",
+                + " FROM ma_output_capture WHERE scope_ref = ? AND state <> 'NOT_STARTED'",
                 (row, index) -> ManagedSchemaRows.read(row), scope).getFirst();
         long sessionReserved = ((Number) sessionTotals.get("reserved")).longValue();
         // A full tenant or Session is not a malformed request: it answers

@@ -438,23 +438,18 @@ class RuntimeStageStoreTest {
     @Test
     void findPullableRunsSpendsItsLimitBudgetOnBackgroundRunsOnly() {
         seedPreparedBackgroundProcess("call-bg");
-        // Sort the background row last by hash, then fill more than the
-        // LIMIT budget with foreground PREPARED rows ahead of it.
-        jdbc.update(
-                "UPDATE ma_tool_execution SET execution_call_id_hash = ? WHERE execution_call_id = ?",
-                "f".repeat(64), "call-bg:process");
+        // Sort the background row last by raw identity, then fill more than
+        // the LIMIT budget with foreground PREPARED rows ahead of it.
         for (int i = 0; i < 257; i++) {
-            String hash = String.format("%064x", i);
             jdbc.update(
-                    "INSERT INTO ma_tool_execution (execution_call_id_hash, execution_call_id,"
-                            + " idempotency_key_hash, idempotency_key, binding_id, runtime_generation,"
-                            + " harness_session_id, runtime_session_id, runtime_session_key, turn_id,"
+                    "INSERT INTO ma_tool_execution (execution_call_id,"
+                            + " idempotency_key, binding_id, runtime_generation,"
+                            + " harness_session_id, runtime_session_id, turn_id,"
                             + " tool_call_id, request_digest, reference_json, execution_state,"
                             + " last_sequence, is_cancel_requested, dispatch_generation, record_version)"
-                            + " VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 'turn-1', 'tool-1',"
+                            + " VALUES (?, ?, ?, 1, ?, ?, 'turn-1', 'tool-1',"
                             + " 'sha256:digest', '{}', 'PREPARED', 0, 0, 0, 0)",
-                    hash, "fg-" + i, hash, "idem-fg-" + i, bindingId, session,
-                    runtimeSessionId, "0".repeat(64));
+                    "aaa-fg-" + i, "idem-fg-" + i, bindingId, session, runtimeSessionId);
         }
         List<PullableRun> runs = stageStore.findPullableRuns();
         assertThat(runs).extracting(PullableRun::executionCallId).containsExactly("call-bg");

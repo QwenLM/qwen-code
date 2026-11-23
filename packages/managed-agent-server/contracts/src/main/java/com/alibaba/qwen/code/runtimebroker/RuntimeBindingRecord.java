@@ -100,7 +100,7 @@ public final class RuntimeBindingRecord {
             Instant lastReconciledAt, Instant lastActiveAt,
             RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence,
             RuntimeDrainReceipt drainReceipt) {
-        this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
+        this.bindingId = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (request == null) {
             throw new IllegalArgumentException("request is required");
         }

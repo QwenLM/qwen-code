@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.managedschema;
 
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.flywaydb.core.Flyway;
@@ -30,45 +31,45 @@ class ManagedSchemaTest {
             Map.entry("ma_session", List.of("tenant_id", "session_id")),
             Map.entry("ma_user_message_queue", List.of("tenant_id", "session_id")),
             Map.entry("ma_user_message", List.of("tenant_id", "session_id", "message_id")),
-            Map.entry("ma_user_message_command", List.of("tenant_id", "session_id", "command_key")),
+            Map.entry("ma_user_message_command", List.of("tenant_id", "session_id", "actor_id", "idempotency_key")),
             Map.entry("ma_turn", List.of("tenant_id", "session_id", "turn_id")),
             Map.entry("ma_session_head", List.of("tenant_id", "harness_session_id")),
             Map.entry("ma_session_journal_tx", List.of("tenant_id", "session_id", "journal_revision")),
             Map.entry("ma_event_stream", List.of("tenant_id", "session_id", "stream_kind", "stream_id")),
             Map.entry("ma_public_event", List.of("tenant_id", "session_id", "stream_kind", "stream_id", "sequence_id")),
             Map.entry("ma_message", List.of("tenant_id", "session_id", "item_id")),
-            Map.entry("ma_session_record", List.of("tenant_id", "session_id", "record_key")),
+            Map.entry("ma_session_record", List.of("tenant_id", "session_id", "domain", "record_id")),
             Map.entry("ma_agent_definition", List.of("tenant_id", "agent_id", "revision")),
-            Map.entry("ma_resource", List.of("resource_key")),
-            Map.entry("ma_resource_ref", List.of("tenant_id", "session_id", "owner_kind", "owner_key", "owner_revision", "resource_key")),
-            Map.entry("ma_output_capture", List.of("scope_key", "publication_id")),
+            Map.entry("ma_resource", List.of("tenant_id", "session_id", "resource_id")),
+            Map.entry("ma_resource_ref", List.of("tenant_id", "session_id", "owner_kind", "owner_ref", "owner_revision", "resource_id")),
+            Map.entry("ma_output_capture", List.of("scope_ref", "publication_id")),
             Map.entry("ma_artifact", List.of("artifact_id")),
             Map.entry("ma_request_receipt", List.of("receipt_key")),
             Map.entry("ma_memory_store", List.of("tenant_id", "memory_store_id")),
             Map.entry("ma_memory_entry", List.of("tenant_id", "memory_store_id", "memory_id")),
             Map.entry("ma_side_query", List.of("tenant_id", "query_id")),
-            Map.entry("ma_operation", List.of("operation_key")),
-            Map.entry("ma_operation_work", List.of("operation_key", "work_kind", "target_key")),
+            Map.entry("ma_operation", List.of("operation_ref")),
+            Map.entry("ma_operation_work", List.of("operation_ref", "work_kind", "target_id")),
             Map.entry("ma_workspace", List.of("tenant_id", "workspace_id")),
             Map.entry("ma_workspace_access", List.of("tenant_id", "workspace_id", "actor_id")),
             Map.entry("ma_extension_package", List.of("tenant_id", "workspace_id", "extension_id", "package_revision")),
-            Map.entry("ma_extension_source_import", List.of("import_key")),
+            Map.entry("ma_extension_source_import", List.of("tenant_id", "workspace_id", "operation_id")),
             Map.entry("ma_extension_settings", List.of("tenant_id", "workspace_id", "extension_id", "settings_revision")),
-            Map.entry("ma_extension_operation", List.of("operation_key")),
-            Map.entry("ma_storage", List.of("alias_key")),
-            Map.entry("ma_runtime_slot", List.of("request_key")),
+            Map.entry("ma_extension_operation", List.of("tenant_id", "workspace_id", "operation_id")),
+            Map.entry("ma_storage", List.of("tenant_id", "storage_id")),
+            Map.entry("ma_runtime_slot", List.of("request_id")),
             Map.entry("ma_runtime_binding", List.of("binding_id")),
-            Map.entry("ma_runtime_session", List.of("scope_key", "runtime_session_id")),
-            Map.entry("ma_tool_execution", List.of("execution_call_id_hash")),
+            Map.entry("ma_runtime_session", List.of("scope_id", "runtime_session_id")),
+            Map.entry("ma_tool_execution", List.of("execution_call_id")),
             Map.entry("ma_runtime_stage", List.of("execution_call_id_hash", "delivery_seq")),
-            Map.entry("ma_storage_owner", List.of("storage_key")),
+            Map.entry("ma_storage_owner", List.of("physical_id")),
             Map.entry("ma_tenant_guard", List.of("tenant_id", "guard_domain")),
             Map.entry("ma_read_lease", List.of("lease_id")),
             Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
             Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
             Map.entry("ma_pr_watch_binding", List.of("tenant_id", "channel_id", "owner", "repo", "pr_number")),
-            Map.entry("ma_delivery", List.of("delivery_key")),
-            Map.entry("ma_channel_segment", List.of("delivery_key", "segment_id")),
+            Map.entry("ma_delivery", List.of("delivery_kind", "tenant_id", "source_scope_id", "delivery_id")),
+            Map.entry("ma_channel_segment", List.of("tenant_id", "channel_id", "delivery_id", "segment_id")),
             Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),
             Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
             Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
@@ -82,20 +83,22 @@ class ManagedSchemaTest {
         try (var connection = source.getConnection();
                 var insert = connection.prepareStatement("INSERT INTO ma_journal_pack"
                         + " (pack_id, tenant_id, workspace_id, session_id, from_revision, through_revision,"
-                        + " manifest_resource_key, object_key, state, byte_length, sha256, builder_id, gmt_create, gmt_modified)"
-                        + " VALUES (?, 'tenant', 'workspace', 'session', 1, 1, '', 'object', 'BUILDING', 1, ?, 'builder', 1, 1)");
+                        + " manifest_resource_ref, object_key, state, byte_length, sha256, builder_id, gmt_create, gmt_modified)"
+                        + " VALUES (?, 'tenant', 'workspace', 'session', 1, 1, '"
+                        + ManagedIdentityRefs.resourceRef("tenant", "session", "manifest")
+                        + "', 'object', 'BUILDING', 1, ?, 'builder', 1, 1)");
                 var statement = connection.createStatement()) {
             insert.setString(1, "old");
             insert.setString(2, "b".repeat(64));
             insert.executeUpdate();
             insert.setString(1, "replacement");
             assertThrows(SQLException.class, insert::executeUpdate);
-            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = X'6f6c64'");
+            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = 'old'");
             insert.executeUpdate();
             assertThrows(SQLException.class, () -> statement.executeUpdate(
-                    "UPDATE ma_journal_pack SET state = 'PUBLISHED' WHERE pack_id = X'7265706c6163656d656e74'"));
-            statement.executeUpdate("UPDATE ma_journal_pack SET is_put_closed = 1, state = 'PUBLISHED' WHERE pack_id = X'7265706c6163656d656e74'");
-            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = X'7265706c6163656d656e74'");
+                    "UPDATE ma_journal_pack SET state = 'PUBLISHED' WHERE pack_id = 'replacement'"));
+            statement.executeUpdate("UPDATE ma_journal_pack SET is_put_closed = 1, state = 'PUBLISHED' WHERE pack_id = 'replacement'");
+            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = 'replacement'");
             insert.setString(1, "next");
             insert.executeUpdate();
             try (var rows = statement.executeQuery("SELECT COUNT(*) FROM ma_journal_pack WHERE active_from_revision IS NULL")) {
@@ -182,7 +185,7 @@ class ManagedSchemaTest {
         DataSource foreignKey = initialized();
         try (var connection = foreignKey.getConnection(); var statement = connection.createStatement()) {
             statement.execute("ALTER TABLE ma_resource_ref ADD CONSTRAINT fk_unexpected"
-                    + " FOREIGN KEY (resource_key) REFERENCES ma_resource(resource_key)");
+                    + " FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session(tenant_id, session_id)");
         }
         assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(foreignKey));
     }
@@ -390,7 +393,7 @@ class ManagedSchemaTest {
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
             statement.execute(
-                    "ALTER TABLE ma_runtime_binding ALTER COLUMN storage_alias_key SET NOT NULL");
+                    "ALTER TABLE ma_runtime_binding ALTER COLUMN storage_id SET NOT NULL");
         }
         assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
         DataSource missingCompletionCheck = initialized();
@@ -534,11 +537,11 @@ class ManagedSchemaTest {
                     SQLException.class,
                     () -> statement.execute("UPDATE ma_session_head SET journal_revision = 0"));
             statement.execute(
-                    "INSERT INTO ma_storage (alias_key,tenant_id,storage_id)"
-                            + " VALUES ('alias','tenant','storage')");
+                    "INSERT INTO ma_storage (tenant_id,storage_id)"
+                            + " VALUES ('tenant','storage')");
             try (var row =
                     statement.executeQuery(
-                            "SELECT registration_state,physical_key FROM ma_storage")) {
+                            "SELECT registration_state,physical_id FROM ma_storage")) {
                 assertTrue(row.next());
                 assertEquals("FENCE_ONLY", row.getString(1));
                 assertNull(row.getObject(2));
@@ -647,20 +650,20 @@ class ManagedSchemaTest {
                 var statement = connection.createStatement()) {
             String prefix =
                     "INSERT INTO ma_session_record"
-                        + " (record_key,tenant_id,workspace_id,session_id,domain,record_id,revision,gmt_create,record_resource_id,hook_once_key_hash)"
+                        + " (tenant_id,workspace_id,session_id,domain,record_id,revision,gmt_create,record_resource_id,hook_once_key)"
                         + " VALUES ";
             statement.execute(
                     prefix
-                            + "('record1','tenant','workspace','session','hook','record1',1,0,'body','once')");
+                            + "('tenant','workspace','session','hook','record1',1,0,'body','once')");
             assertThrows(
                     SQLException.class,
                     () ->
                             statement.execute(
                                     prefix
-                                            + "('record2','tenant','workspace','session','hook','record2',1,0,'body','once')"));
+                                            + "('tenant','workspace','session','hook','record2',1,0,'body','once')"));
             statement.execute(
                     "INSERT INTO ma_resource_ref"
-                        + " (owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
+                        + " (owner_kind,owner_ref,owner_revision,resource_id,tenant_id,session_id,gmt_create)"
                         + " VALUES"
                         + " ('JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")");
             ManagedSchema.validate(source);
@@ -673,13 +676,13 @@ class ManagedSchemaTest {
                 var statement = connection.createStatement();
                 var row =
                         statement.executeQuery(
-                                "SELECT CAST(X'0102' AS BLOB) AS inline_bytes, CAST('record' AS CLOB) AS record_json, CAST('tenant ' AS VARBINARY) AS tenant_id, CAST(X'0304' AS VARBINARY) AS actor_key, CAST(CURRENT_TIMESTAMP(6) AS TIMESTAMP) AS observed_at")) {
+                                "SELECT CAST(X'0102' AS BLOB) AS inline_bytes, CAST('record' AS CLOB) AS record_json, CAST('tenant ' AS VARBINARY) AS tenant_id, CAST(X'0304' AS VARBINARY) AS record_bytes, CAST(CURRENT_TIMESTAMP(6) AS TIMESTAMP) AS observed_at")) {
             assertTrue(row.next());
             var values = ManagedSchemaRows.read(row);
             org.junit.jupiter.api.Assertions.assertArrayEquals(
                     new byte[] {1, 2}, (byte[]) values.get("inline_bytes"));
             org.junit.jupiter.api.Assertions.assertArrayEquals(
-                    new byte[] {3, 4}, (byte[]) values.get("actor_key"));
+                    new byte[] {3, 4}, (byte[]) values.get("record_bytes"));
             assertEquals("record", values.get("record_json"));
             assertEquals("tenant ", values.get("tenant_id"));
             assertTrue(values.get("observed_at") instanceof java.sql.Timestamp);
@@ -708,9 +711,9 @@ class ManagedSchemaTest {
                         "INSERT INTO ma_session"
                             + " (tenant_id,session_id,agent_id,session_kind,gmt_create,gmt_modified)"
                             + " VALUES (?,?,?,?,0,0)")) {
-            statement.setBytes(1, ManagedSchemaKeys.identity(tenant));
-            statement.setBytes(2, ManagedSchemaKeys.identity(session));
-            statement.setBytes(3, ManagedSchemaKeys.identity("agent"));
+            statement.setString(1, tenant);
+            statement.setString(2, session);
+            statement.setString(3, "agent");
             statement.setString(4, kind);
             statement.executeUpdate();
         }
@@ -732,11 +735,11 @@ class ManagedSchemaTest {
             throws SQLException {
         statement.execute(
                 "INSERT INTO ma_operation"
-                    + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,"
-                    + "target_kind,target_key,request_digest,request_json,state,phase,publication_id,gmt_create,gmt_modified)"
+                    + " (operation_ref,scope_kind,scope_id,operation_id,operation_kind,tenant_id,"
+                    + "target_kind,target_id,request_digest,request_json,state,phase,publication_id,gmt_create,gmt_modified)"
                     + " VALUES ('"
                         + key
-                        + "','scope','"
+                        + "','SESSION','scope','"
                         + id
                         + "','"
                         + kind
@@ -755,11 +758,12 @@ class ManagedSchemaTest {
             throws SQLException {
         try (var statement =
                 connection.prepareStatement(
-                        "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key,"
-                            + " tenant_id, scope_kind, scope_key, scope_id, idempotency_key,"
+                        "INSERT INTO ma_request_receipt (receipt_key, namespace,"
+                            + " tenant_id, scope_kind, scope_ref, scope_id, idempotency_key,"
                             + " idempotency_digest, request_digest, state, gmt_create, gmt_modified)"
-                            + " VALUES (?, ?, 'tenant-key', 'tenant', 'ACTOR', 'scope', 'actor', ?,"
-                            + " ?, 'digest', 'PENDING', 1, 1)")) {
+                            + " VALUES (?, ?, 'tenant', 'ACTOR', '"
+                            + ManagedIdentityRefs.receiptScopeRef("tenant", "actor")
+                            + "', 'actor', ?, ?, 'digest', 'PENDING', 1, 1)")) {
             statement.setString(1, ManagedSchemaKeys.key(key));
             statement.setString(2, namespace);
             statement.setString(3, key);
