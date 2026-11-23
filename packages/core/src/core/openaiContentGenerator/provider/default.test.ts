@@ -595,6 +595,12 @@ describe('DefaultOpenAICompatibleProvider', () => {
       ['gpt-5.6-sol', 'max', 'max'],
       ['gpt-6-astra', 'high', 'high'],
       ['gpt-6-astra', 'max', 'max'],
+      ['gpt-6-luna', 'max', 'xhigh'],
+      ['gpt-6-sol', 'max', 'xhigh'],
+      ['gpt-6.1-terra', 'max', 'xhigh'],
+      ['gpt-6.1-sol', 'max', 'xhigh'],
+      ['gpt-6.2-astra', 'max', 'xhigh'],
+      ['gpt-6.2-sol', 'max', 'xhigh'],
       ['gpt-5-pro', 'low', 'high'],
       ['gpt-5.4-pro', 'low', 'medium'],
     ])(

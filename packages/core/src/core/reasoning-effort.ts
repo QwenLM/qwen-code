@@ -139,6 +139,24 @@ export function getGptReasoningCapabilities(model: string | undefined):
         defaultEnabled: true,
         thinkingMandatory: true,
       };
+    case 'gpt-6-luna':
+    case 'gpt-6-sol':
+    case 'gpt-6.1-terra':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: false,
+      };
+    case 'gpt-6.1-sol':
+    case 'gpt-6.2-astra':
+    case 'gpt-6.2-sol':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
     default:
       return undefined;
   }

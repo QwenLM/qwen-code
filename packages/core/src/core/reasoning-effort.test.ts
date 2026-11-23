@@ -67,6 +67,17 @@ describe('getGptReasoningCapabilities', () => {
       true,
       true,
     ],
+    ['gpt-6-luna', UP_TO_XHIGH, 'medium', true, false],
+    ['GPT-6-LUNA', UP_TO_XHIGH, 'medium', true, false],
+    ['openai/gpt-6-luna-2026-10-01', UP_TO_XHIGH, 'medium', true, false],
+    ['gpt-6-sol', UP_TO_XHIGH, 'medium', true, false],
+    ['openai/gpt-6-sol:batch', UP_TO_XHIGH, 'medium', true, false],
+    ['gpt-6.1-terra', UP_TO_XHIGH, 'medium', true, false],
+    ['gpt-6.1-sol', UP_TO_XHIGH, 'medium', true, true],
+    ['openai/gpt-6.1-sol', UP_TO_XHIGH, 'medium', true, true],
+    ['gpt-6.2-astra', UP_TO_XHIGH, 'medium', true, true],
+    ['gpt-6.2-sol', UP_TO_XHIGH, 'medium', true, true],
+    ['openai/gpt-6.2-sol:batch', UP_TO_XHIGH, 'medium', true, true],
   ] as const)(
     'describes %s',
     (model, efforts, defaultEffort, defaultEnabled, thinkingMandatory) => {
@@ -106,6 +117,8 @@ describe('getGptReasoningCapabilities', () => {
     'gpt-6-astra-custom',
     'my-gpt-6-astra',
     'gpt-6-astra-chat-latest',
+    'gpt-6-luna-custom',
+    'gpt-6.2-sol-chat-latest',
     'qwen3.8-max',
   ])('does not assign GPT reasoning controls to %s', (model) => {
     expect(getGptReasoningCapabilities(model)).toBeUndefined();
