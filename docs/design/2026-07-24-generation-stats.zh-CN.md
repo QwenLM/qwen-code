@@ -32,7 +32,7 @@ Issue #4252 要求 `/stats` 把生成时序与会话墙钟时间、端到端 API
 - 非交互式 `/stats` 的文本响应。
 
 它不新增第二个计时器、不把时序持久化进按日/按月 token 用量文件、不改变
-导出，也不改变 daemon/Web Shell 的 stats 模式。
+导出，也不改变 daemon/Web Shell 的 stats 结构。
 
 ## 数据流
 
@@ -54,8 +54,8 @@ LoggingContentGenerator.loggingStreamWrapper
 对每个带 TTFT 的成功流式响应：
 
 - **TTFT** 是既有的 `ttftMs` 测量值。
-- **生成时间** 是 `max(0, duration_ms - ttft_ms)`，从首个用户可见流式
-  内容起量到完成。
+- **生成时间** 是 `max(0, duration_ms - ttft_ms)`，自首个用户可见流式
+  内容起算，至完成。
 - **TPS** 是 `output_token_count / generation_time_seconds`。生成时间为零
   时不可用。
 
