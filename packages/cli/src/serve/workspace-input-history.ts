@@ -10,14 +10,19 @@ import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { atomicWriteFile } from '@qwen-code/qwen-code-core/atomicFileWrite';
 import {
+  MAX_INPUT_HISTORY_ENTRIES,
+  MAX_INPUT_HISTORY_ENTRY_CHARS,
+} from '@qwen-code/qwen-code-core/utils/input-history.js';
+import {
   appendShellHistoryFile,
   readShellHistoryFile,
 } from '../utils/shell-history-file.js';
 
 export type WorkspaceInputHistoryKind = 'prompt' | 'shell';
 
-export const MAX_WORKSPACE_INPUT_HISTORY_ENTRIES = 100;
-export const MAX_WORKSPACE_INPUT_HISTORY_ENTRY_CHARS = 32_768;
+export const MAX_WORKSPACE_INPUT_HISTORY_ENTRIES = MAX_INPUT_HISTORY_ENTRIES;
+export const MAX_WORKSPACE_INPUT_HISTORY_ENTRY_CHARS =
+  MAX_INPUT_HISTORY_ENTRY_CHARS;
 
 const PROMPT_HISTORY_FILENAME = 'input_history.json';
 
@@ -103,7 +108,7 @@ async function readRawEntriesOldestFirst(
   }
 
   if (kind === 'shell') {
-    return { entries: readShellHistoryFile(filePath), fileExists: true };
+    return { entries: await readShellHistoryFile(filePath), fileExists: true };
   }
 
   const parsed = JSON.parse(content) as unknown;
@@ -190,7 +195,7 @@ export async function appendWorkspaceInputHistory(
   const filePath = getWorkspaceInputHistoryFilePath(workspaceCwd, kind);
   return serializeByPath(filePath, async () => {
     if (kind === 'shell') {
-      const entries = appendShellHistoryFile(filePath, trimmed);
+      const entries = await appendShellHistoryFile(filePath, trimmed);
       return { kind, entries, revision: computeRevision(entries) };
     }
     const { entries, fileExists } = await readRawEntriesOldestFirst(

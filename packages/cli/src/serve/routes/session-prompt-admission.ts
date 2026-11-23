@@ -151,6 +151,7 @@ export function classifyPromptRequest(
   delete forwardedBody['deadlineMs'];
   delete forwardedBody['delivery'];
   delete forwardedBody['idempotencyKey'];
+  delete forwardedBody['suppressInputHistory'];
   const forwardedMeta =
     typeof forwardedBody['_meta'] === 'object' &&
     forwardedBody['_meta'] !== null &&

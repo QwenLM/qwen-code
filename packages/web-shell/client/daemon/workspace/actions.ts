@@ -1020,7 +1020,7 @@ export function createDaemonWorkspaceActions({
       };
     },
 
-    async loadInputHistory({ kind, limit, workspaceId, ifNoneMatch, signal }) {
+    async loadInputHistory({ kind, limit, workspaceId, ifNoneMatch }) {
       requireClient(getClient, 'Load input history failed');
       const path = workspaceId
         ? `/workspaces/${encodeURIComponent(workspaceId)}/input-history`
@@ -1034,7 +1034,7 @@ export function createDaemonWorkspaceActions({
       if (token) headers['Authorization'] = `Bearer ${token}`;
       if (ifNoneMatch) headers['If-None-Match'] = ifNoneMatch;
       const res = await withActionTimeout(
-        requestRest(url, { headers, ...(signal ? { signal } : {}) }),
+        requestRest(url, { headers }),
         'Load input history timed out',
       );
       if (res.status === 304) {

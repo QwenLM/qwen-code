@@ -4,20 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/atomicFileWrite';
+import { MAX_INPUT_HISTORY_ENTRIES } from '@qwen-code/qwen-code-core/utils/input-history.js';
 
-export const SHELL_HISTORY_MAX_ENTRIES = 100;
+export const SHELL_HISTORY_MAX_ENTRIES = MAX_INPUT_HISTORY_ENTRIES;
 
-const LOCK_RETRY_DELAYS_MS = Array.from({ length: 250 }, () => 20);
 const STALE_LOCK_MS = 10_000;
-const sleepState = new Int32Array(new SharedArrayBuffer(4));
-
-function sleepSync(ms: number): void {
-  Atomics.wait(sleepState, 0, 0, ms);
-}
+const LOCK_RETRIES = Object.freeze({
+  retries: 50,
+  factor: 1.25,
+  minTimeout: 10,
+  maxTimeout: 100,
+});
 
 function parseJsonHistory(text: string): string[] | undefined {
   try {
@@ -59,10 +60,12 @@ export function parseShellHistoryText(text: string): string[] {
   return result;
 }
 
-export function readShellHistoryFile(filePath: string): string[] {
+export async function readShellHistoryFile(
+  filePath: string,
+): Promise<string[]> {
   let text: string;
   try {
-    text = fs.readFileSync(filePath, 'utf8');
+    text = await fs.readFile(filePath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
     throw error;
@@ -72,45 +75,48 @@ export function readShellHistoryFile(filePath: string): string[] {
 
 /**
  * Serializes TUI and daemon shell-history updates across processes. Both
- * producers reread inside this bounded lock and write oldest-to-newest.
+ * producers reread inside the stale-reclaiming lock and write oldest-to-newest.
+ * Contention yields to the event loop rather than spin-waiting on its thread.
  */
-export function appendShellHistoryFile(
+export async function appendShellHistoryFile(
   filePath: string,
   command: string,
-): string[] {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-
-  let release: (() => void) | undefined;
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      release = lockfile.lockSync(filePath, {
-        realpath: false,
-        stale: STALE_LOCK_MS,
-      });
-      break;
-    } catch (error) {
-      const lockError = error as NodeJS.ErrnoException;
-      if (lockError.code !== 'ELOCKED') throw error;
-      if (attempt >= LOCK_RETRY_DELAYS_MS.length) throw error;
-      sleepSync(LOCK_RETRY_DELAYS_MS[attempt]!);
-    }
-  }
-
+): Promise<string[]> {
+  let compromised: Error | undefined;
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const release = await lockfile.lock(filePath, {
+    realpath: false,
+    stale: STALE_LOCK_MS,
+    retries: LOCK_RETRIES,
+    onCompromised: (error: Error) => {
+      compromised = error;
+    },
+  });
+  let bounded: string[];
   try {
-    const next = readShellHistoryFile(filePath).filter(
+    const next = (await readShellHistoryFile(filePath)).filter(
       (entry) => entry !== command && entry.length > 0,
     );
+    // Keep the compromise check and final atomic replacement in the same
+    // event-loop turn so the lock cannot be lost during an awaited commit.
+    if (compromised) throw compromised;
     next.push(command);
-    const bounded = next.slice(-SHELL_HISTORY_MAX_ENTRIES);
+    bounded = next.slice(-SHELL_HISTORY_MAX_ENTRIES);
     atomicWriteFileSync(filePath, JSON.stringify(bounded, null, 2), {
       mode: 0o600,
       forceMode: true,
     });
-    return bounded;
   } finally {
-    release();
+    await release().catch((error: unknown) => {
+      if (
+        compromised &&
+        (error as NodeJS.ErrnoException)?.code === 'ERELEASED'
+      ) {
+        return;
+      }
+      throw error;
+    });
   }
+  if (compromised) throw compromised;
+  return bounded;
 }

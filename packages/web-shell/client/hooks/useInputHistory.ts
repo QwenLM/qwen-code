@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react';
+import {
+  MAX_INPUT_HISTORY_ENTRIES,
+  MAX_INPUT_HISTORY_ENTRY_CHARS,
+} from '@qwen-code/qwen-code-core/utils/input-history.js';
 
 const DEFAULT_STORAGE_KEY = 'qwen-web-shell-history';
 const DEFAULT_SHELL_STORAGE_KEY = 'qwen-web-shell-command-history';
-const MAX_HISTORY = 100;
+const MAX_HISTORY = MAX_INPUT_HISTORY_ENTRIES;
+const MAX_PENDING_REMOTE_ENTRIES = MAX_HISTORY;
+const MAX_MISSED_SNAPSHOTS = 2;
 
 export function getPromptHistoryStorageKey(workspaceCwd?: string): string {
   return workspaceCwd
@@ -24,6 +30,7 @@ export function getShellHistoryStorageKey(workspaceCwd?: string): string {
 export function mergeRemoteInputHistory(
   localEntries: readonly string[],
   remoteEntries: readonly string[],
+  previousRemoteEntries: readonly string[] | null = [],
 ): string[] {
   const remoteSeen = new Set<string>();
   const remoteNewestFirst: string[] = [];
@@ -40,26 +47,40 @@ export function mergeRemoteInputHistory(
     if (remoteNewestFirst.length >= MAX_HISTORY) break;
   }
   const normalizedRemote = remoteNewestFirst.reverse();
+  // Missing provenance makes the old window ambiguous. Never infer that all
+  // its entries were remote and discard independent local history from text
+  // overlap alone.
+  for (const entry of previousRemoteEntries ?? []) remoteSeen.add(entry);
 
   const localOnlyNewestFirst: string[] = [];
-  const localSeen = new Set<string>(remoteSeen);
-  const remainingSlots = MAX_HISTORY - normalizedRemote.length;
-  if (remainingSlots > 0) {
-    for (let i = localEntries.length - 1; i >= 0; i--) {
-      const entry = localEntries[i];
-      if (
-        typeof entry !== 'string' ||
-        entry.length === 0 ||
-        localSeen.has(entry)
-      ) {
-        continue;
-      }
-      localSeen.add(entry);
-      localOnlyNewestFirst.push(entry);
-      if (localOnlyNewestFirst.length >= remainingSlots) break;
+  for (let i = localEntries.length - 1; i >= 0; i--) {
+    const entry = localEntries[i];
+    if (
+      typeof entry !== 'string' ||
+      entry.length === 0 ||
+      remoteSeen.has(entry)
+    ) {
+      continue;
     }
+    remoteSeen.add(entry);
+    localOnlyNewestFirst.push(entry);
+    if (localOnlyNewestFirst.length >= MAX_HISTORY) break;
   }
-  return [...localOnlyNewestFirst.reverse(), ...normalizedRemote];
+
+  const local = localOnlyNewestFirst.reverse();
+  const retainedLocals =
+    normalizedRemote.length === 0
+      ? local
+      : local.slice(-Math.min(local.length, MAX_HISTORY - 1));
+  const remoteSlots = MAX_HISTORY - retainedLocals.length;
+  // Preserve independent local entries ahead of older remote entries, but
+  // keep an incoming remote item visible when local history fills the window.
+  return [
+    ...retainedLocals,
+    ...normalizedRemote.slice(
+      Math.max(0, normalizedRemote.length - remoteSlots),
+    ),
+  ];
 }
 
 function readHistory(storageKey: string): string[] | null {
@@ -75,8 +96,100 @@ function readHistory(storageKey: string): string[] | null {
   }
 }
 
+interface PendingRemoteEntry {
+  text: string;
+  seenRemoteRevision?: string;
+  missedRemoteSnapshots: number;
+  hadLocalBefore?: boolean;
+}
+
 function getPendingRemoteStorageKey(storageKey: string): string {
   return `${storageKey}:pending-remote`;
+}
+
+function getRemoteSourceStorageKey(storageKey: string): string {
+  return `${storageKey}:remote-source`;
+}
+
+function loadRemoteSource(storageKey: string): Set<string> | null {
+  const sourceKey = getRemoteSourceStorageKey(storageKey);
+  try {
+    if (localStorage.getItem(sourceKey) === null) return null;
+    const entries = readHistory(sourceKey);
+    return entries === null ? null : new Set(entries);
+  } catch {
+    // Do not discard local history just because provenance cannot be read.
+    return new Set();
+  }
+}
+
+function loadPendingRemoteHistory(storageKey: string): PendingRemoteEntry[] {
+  try {
+    const raw = localStorage.getItem(getPendingRemoteStorageKey(storageKey));
+    if (!raw) return [];
+    const data: unknown = JSON.parse(raw);
+    if (!Array.isArray(data)) return [];
+    const entries: PendingRemoteEntry[] = [];
+    for (const value of data) {
+      let entry: PendingRemoteEntry;
+      if (typeof value === 'string') {
+        entry = {
+          text: value,
+          missedRemoteSnapshots: 0,
+          hadLocalBefore: true,
+        };
+      } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const candidate = value as Record<string, unknown>;
+        if (typeof candidate['text'] !== 'string') continue;
+        const missed = candidate['missedRemoteSnapshots'];
+        entry = {
+          text: candidate['text'],
+          ...(candidate['hadLocalBefore'] === true
+            ? { hadLocalBefore: true }
+            : {}),
+          ...(typeof candidate['seenRemoteRevision'] === 'string'
+            ? { seenRemoteRevision: candidate['seenRemoteRevision'] }
+            : {}),
+          missedRemoteSnapshots:
+            typeof missed === 'number' && Number.isFinite(missed)
+              ? Math.min(
+                  MAX_MISSED_SNAPSHOTS - 1,
+                  Math.max(0, Math.floor(missed)),
+                )
+              : 0,
+        };
+      } else {
+        continue;
+      }
+      const text = entry.text.trim();
+      if (text.length === 0 || text.length > MAX_INPUT_HISTORY_ENTRY_CHARS) {
+        continue;
+      }
+      const duplicate = entries.findIndex(
+        (candidate) => candidate.text.trim() === text,
+      );
+      if (duplicate !== -1) entries.splice(duplicate, 1);
+      if (entry.hadLocalBefore !== true) delete entry.hadLocalBefore;
+      entries.push({ ...entry, text });
+    }
+    return entries.slice(-MAX_PENDING_REMOTE_ENTRIES);
+  } catch {
+    return [];
+  }
+}
+
+function savePendingRemoteHistory(
+  storageKey: string,
+  pending: readonly PendingRemoteEntry[],
+): void {
+  try {
+    localStorage.setItem(
+      getPendingRemoteStorageKey(storageKey),
+      JSON.stringify(pending.slice(-MAX_PENDING_REMOTE_ENTRIES)),
+    );
+  } catch {
+    // Remote confirmation remains best-effort when browser storage is unavailable.
+  }
 }
 
 function loadHistory(
@@ -122,6 +235,7 @@ export function pushInputHistoryEntry(
 export function useInputHistory(
   storageKey = DEFAULT_STORAGE_KEY,
   fallbackStorageKey?: string,
+  remoteHistoryEnabled = false,
 ) {
   const storageKeyRef = useRef(storageKey);
   const fallbackStorageKeyRef = useRef(fallbackStorageKey);
@@ -132,17 +246,21 @@ export function useInputHistory(
   const historyRef = useRef<string[]>([]);
   const historyLoadedRef = useRef(false);
   const unsavedHistoryRef = useRef(false);
+  const pendingRemoteEntriesRef = useRef<PendingRemoteEntry[]>([]);
+  const remoteSourceRef = useRef<Set<string> | null>(null);
   if (!historyLoadedRef.current) {
     historyRef.current = loadHistory(storageKey, fallbackStorageKey) ?? [];
+    pendingRemoteEntriesRef.current = loadPendingRemoteHistory(storageKey);
+    remoteSourceRef.current = loadRemoteSource(storageKey);
     historyLoadedRef.current = true;
   }
   const indexRef = useRef<number>(-1);
   const draftRef = useRef<string>('');
   const searchIndexRef = useRef<number>(-1);
   const mutationVersionRef = useRef<number>(0);
-  // Submissions may outrun the daemon write. Preserve their order until a
-  // remote snapshot confirms them instead of demoting them behind old entries.
-  const pendingRemoteEntriesRef = useRef<string[]>([]);
+  const remoteHistoryEnabledRef = useRef(remoteHistoryEnabled);
+  remoteHistoryEnabledRef.current = remoteHistoryEnabled;
+  const seenRemoteRevisionRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (
@@ -159,9 +277,9 @@ export function useInputHistory(
     draftRef.current = '';
     searchIndexRef.current = -1;
     mutationVersionRef.current++;
-    pendingRemoteEntriesRef.current = Array.from(
-      new Set(readHistory(getPendingRemoteStorageKey(storageKey)) ?? []),
-    ).slice(-MAX_HISTORY);
+    pendingRemoteEntriesRef.current = loadPendingRemoteHistory(storageKey);
+    remoteSourceRef.current = loadRemoteSource(storageKey);
+    seenRemoteRevisionRef.current = undefined;
   }, [fallbackStorageKey, storageKey]);
 
   const readCurrentHistory = useCallback(() => {
@@ -176,16 +294,40 @@ export function useInputHistory(
 
   const push = useCallback(
     (text: string) => {
-      mutationVersionRef.current++;
-      pendingRemoteEntriesRef.current = [
-        ...pendingRemoteEntriesRef.current.filter((entry) => entry !== text),
-        text,
-      ].slice(-MAX_HISTORY);
-      void saveHistory(
-        getPendingRemoteStorageKey(storageKeyRef.current),
-        pendingRemoteEntriesRef.current,
-      );
       const h = readCurrentHistory();
+      mutationVersionRef.current++;
+      if (remoteHistoryEnabledRef.current) {
+        const normalized = text.trim();
+        const previous = pendingRemoteEntriesRef.current.find(
+          (entry) => entry.text === normalized,
+        );
+        const next = pendingRemoteEntriesRef.current.filter(
+          (entry) => entry.text !== normalized,
+        );
+        if (
+          normalized.length > 0 &&
+          normalized.length <= MAX_INPUT_HISTORY_ENTRY_CHARS
+        ) {
+          next.push({
+            ...previous,
+            text: normalized,
+            ...(previous === undefined &&
+            h.some((entry) => entry.trim() === normalized) &&
+            remoteSourceRef.current?.has(normalized) !== true
+              ? { hadLocalBefore: true }
+              : {}),
+            seenRemoteRevision: seenRemoteRevisionRef.current,
+            missedRemoteSnapshots: 0,
+          });
+        }
+        pendingRemoteEntriesRef.current = next.slice(
+          -MAX_PENDING_REMOTE_ENTRIES,
+        );
+        savePendingRemoteHistory(
+          storageKeyRef.current,
+          pendingRemoteEntriesRef.current,
+        );
+      }
       if (h[h.length - 1] === text) {
         if (
           unsavedHistoryRef.current ||
@@ -209,6 +351,7 @@ export function useInputHistory(
     (
       remoteEntries: readonly string[],
       expectedMutationVersion?: number,
+      remoteRevision?: string,
     ): boolean => {
       if (
         expectedMutationVersion !== undefined &&
@@ -217,23 +360,89 @@ export function useInputHistory(
         return false;
       }
       const current = readCurrentHistory();
+      const normalizedRevision =
+        typeof remoteRevision === 'string' ? remoteRevision.trim() : undefined;
+      if (normalizedRevision) {
+        seenRemoteRevisionRef.current = normalizedRevision;
+      }
       const remoteSet = new Set(remoteEntries);
-      const pending = pendingRemoteEntriesRef.current.filter(
-        (entry) => !remoteSet.has(entry),
+      const previouslyPendingSet = new Set(
+        (remoteHistoryEnabledRef.current
+          ? pendingRemoteEntriesRef.current
+          : []
+        ).map((entry) => entry.text),
       );
-      pendingRemoteEntriesRef.current = pending;
-      void saveHistory(
-        getPendingRemoteStorageKey(storageKeyRef.current),
-        pending,
+      const confirmedPending = new Set<string>();
+      const expiredPending = new Set<string>();
+      const preservedLocalExpired = new Set<string>();
+      const pending: PendingRemoteEntry[] = [];
+      if (remoteHistoryEnabledRef.current) {
+        for (const entry of pendingRemoteEntriesRef.current) {
+          if (remoteSet.has(entry.text)) {
+            confirmedPending.add(entry.text);
+            continue;
+          }
+          const entryLength = entry.text.trim().length;
+          if (
+            entryLength === 0 ||
+            entryLength > MAX_INPUT_HISTORY_ENTRY_CHARS
+          ) {
+            if (!entry.hadLocalBefore) expiredPending.add(entry.text);
+            else preservedLocalExpired.add(entry.text);
+            continue;
+          }
+          if (
+            !normalizedRevision ||
+            !entry.seenRemoteRevision ||
+            entry.seenRemoteRevision === normalizedRevision
+          ) {
+            pending.push({
+              ...entry,
+              seenRemoteRevision:
+                entry.seenRemoteRevision || normalizedRevision,
+            });
+            continue;
+          }
+          if (entry.missedRemoteSnapshots + 1 < MAX_MISSED_SNAPSHOTS) {
+            pending.push({
+              ...entry,
+              seenRemoteRevision: normalizedRevision,
+              missedRemoteSnapshots: entry.missedRemoteSnapshots + 1,
+            });
+          } else if (!entry.hadLocalBefore) {
+            expiredPending.add(entry.text);
+          } else {
+            preservedLocalExpired.add(entry.text);
+          }
+        }
+        pendingRemoteEntriesRef.current = pending;
+        savePendingRemoteHistory(storageKeyRef.current, pending);
+      }
+      const beforeMerge = current.filter(
+        (entry) =>
+          (!confirmedPending.has(entry.trim()) &&
+            !expiredPending.has(entry.trim()) &&
+            !previouslyPendingSet.has(entry.trim())) ||
+          preservedLocalExpired.has(entry.trim()),
       );
-      const pendingSet = new Set(pending);
       const merged = [
         ...mergeRemoteInputHistory(
-          current.filter((entry) => !pendingSet.has(entry)),
+          beforeMerge,
           remoteEntries,
+          remoteSourceRef.current === null
+            ? null
+            : [...remoteSourceRef.current],
         ),
-        ...pending,
+        ...pending.map((entry) => entry.text),
       ].slice(-MAX_HISTORY);
+      // Remember only remote entries that survived into this bounded merged
+      // window. Older entries evicted by the daemon must not become local-only.
+      remoteSourceRef.current = new Set(
+        remoteEntries.filter((entry) => merged.includes(entry)),
+      );
+      saveHistory(getRemoteSourceStorageKey(storageKeyRef.current), [
+        ...remoteSourceRef.current,
+      ]);
       if (
         merged.length === current.length &&
         merged.every((entry, idx) => entry === current[idx])

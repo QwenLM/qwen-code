@@ -8,10 +8,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type React from 'react';
 import { act } from 'react';
+import { waitFor } from '@testing-library/react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import { TOUCH_COMPOSER_QUERY } from './useIsTouchComposer';
+import { createFakeIndexedDB } from '../test/fake-indexeddb';
 import { publishSidechannelRemotePrompt } from '../daemon/remotePromptSidechannel';
 import type {
   DaemonInputHistoryResult,
@@ -23,6 +25,7 @@ import {
   type UseComposerCoreOptions,
   type UseComposerCoreReturn,
 } from './useComposerCore';
+import { getPromptHistoryStorageKey } from './useInputHistory';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -92,7 +95,16 @@ function Harness({
   options: UseComposerCoreOptions;
 }): React.JSX.Element {
   latest = useComposerCore(options);
-  return <div ref={latest.containerRef} />;
+  return latest.mobileComposer ? (
+    <textarea
+      ref={latest.mobileComposer.textareaRef}
+      value={latest.mobileComposer.value}
+      onChange={latest.mobileComposer.onChange}
+      placeholder={latest.mobileComposer.placeholder}
+    />
+  ) : (
+    <div ref={latest.containerRef} />
+  );
 }
 
 async function mount(overrides: Partial<UseComposerCoreOptions> = {}) {
@@ -150,6 +162,8 @@ describe('useComposerCore cross-device input history sync', () => {
     }
     localStorage.clear();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    window.history.replaceState({}, '', '/');
   });
 
   it('shows desktop history in mobile Input history panel and live-updates while open', async () => {
@@ -436,6 +450,567 @@ describe('useComposerCore cross-device input history sync', () => {
       kind: 'prompt',
       workspaceId: undefined,
       ifNoneMatch: '"v1:rev1"',
+    });
+  });
+
+  it('does not create pending history without a resolved workspace target', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    currentWorkspace = {
+      workspaceCwd: '/repo/unresolved',
+      capabilities: {
+        features: ['workspace_input_history', 'workspace_qualified_rest_core'],
+        workspaces: [
+          { id: 'known', cwd: '/repo/known', primary: true, trusted: true },
+        ],
+      },
+      actions: {
+        loadInputHistory: vi.fn().mockResolvedValue({
+          notModified: false,
+          kind: 'prompt',
+          entries: [],
+          revision: 'rev',
+        } satisfies DaemonInputHistoryResult),
+      },
+      client: makeFakeClient(),
+    };
+
+    const onSubmit: UseComposerCoreOptions['onSubmit'] = vi.fn();
+    const storageKey = getPromptHistoryStorageKey('/repo/unresolved');
+    await mount({ atWorkspaceCwd: '/repo/unresolved', onSubmit });
+    act(() => latest!.setText('/init'));
+    await waitFor(() => expect(latest!.canSubmit).toBe(true));
+    await act(async () => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalled();
+
+    expect(localStorage.getItem(`${storageKey}:pending-remote`)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(['/init']);
+
+    currentWorkspace = {
+      ...currentWorkspace,
+      capabilities: {
+        ...currentWorkspace.capabilities,
+        workspaces: [
+          ...currentWorkspace.capabilities.workspaces!,
+          { id: 'resolved', cwd: '/repo/unresolved', trusted: true },
+        ],
+      },
+    };
+    await mount({ atWorkspaceCwd: '/repo/unresolved', onSubmit });
+    act(() => latest!.setText('/init'));
+    await waitFor(() => expect(latest!.canSubmit).toBe(true));
+    await act(async () => latest!.submitText());
+    expect(localStorage.getItem(`${storageKey}:pending-remote`)).not.toBeNull();
+  });
+
+  it('supports implicit primary history and keeps local input from an unsupported daemon', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const loadInputHistory = vi.fn().mockResolvedValue({
+      notModified: false,
+      kind: 'prompt',
+      entries: [],
+      revision: 'r0',
+    } satisfies DaemonInputHistoryResult);
+    const onSubmit: UseComposerCoreOptions['onSubmit'] = vi.fn();
+    currentWorkspace = {
+      workspaceCwd: '/repo/primary',
+      capabilities: { features: [] },
+      actions: { loadInputHistory },
+      client: makeFakeClient(),
+    };
+
+    await mount({ onSubmit });
+    act(() => latest!.setText('local input'));
+    await waitFor(() => expect(latest!.canSubmit).toBe(true));
+    await act(async () => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(
+      localStorage.getItem('qwen-web-shell-history:pending-remote'),
+    ).toBeNull();
+    expect(loadInputHistory).not.toHaveBeenCalled();
+
+    loadInputHistory
+      .mockResolvedValueOnce({
+        notModified: false,
+        kind: 'prompt',
+        entries: ['from desktop'],
+        revision: 'r1',
+      } satisfies DaemonInputHistoryResult)
+      .mockResolvedValueOnce({
+        notModified: false,
+        kind: 'prompt',
+        entries: ['from another desktop'],
+        revision: 'r2',
+      } satisfies DaemonInputHistoryResult);
+    currentWorkspace = {
+      ...currentWorkspace,
+      capabilities: {
+        ...currentWorkspace.capabilities,
+        features: ['workspace_input_history'],
+      },
+    };
+    await mount({ onSubmit });
+    await waitFor(() => expect(loadInputHistory).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        JSON.parse(localStorage.getItem('qwen-web-shell-history')!),
+      ).toEqual(['local input', 'from desktop']),
+    );
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(loadInputHistory).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        JSON.parse(localStorage.getItem('qwen-web-shell-history')!),
+      ).toEqual(['local input', 'from another desktop']),
+    );
+  });
+
+  it('creates pending history for an implicit primary target', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const loadInputHistory = vi.fn().mockResolvedValue({
+      notModified: false,
+      kind: 'prompt',
+      entries: [],
+      revision: 'rev',
+    } satisfies DaemonInputHistoryResult);
+    const onSubmit: UseComposerCoreOptions['onSubmit'] = vi.fn();
+    currentWorkspace = {
+      workspaceCwd: '/repo/primary',
+      capabilities: { features: ['workspace_input_history'] },
+      actions: { loadInputHistory },
+      client: makeFakeClient(),
+    };
+
+    await mount({ onSubmit });
+    act(() => latest!.setText('implicit primary input'));
+    await waitFor(() => expect(latest!.canSubmit).toBe(true));
+    await act(async () => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(
+      JSON.parse(
+        localStorage.getItem('qwen-web-shell-history:pending-remote')!,
+      ),
+    ).toEqual([expect.objectContaining({ text: 'implicit primary input' })]);
+    expect(loadInputHistory).toHaveBeenCalled();
+  });
+
+  it('keeps deferred primary history when the capability list becomes specific', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const recordInputHistory = vi.fn().mockResolvedValue(undefined);
+    let commitAccepted: (() => void) | undefined;
+    const onSubmit: UseComposerCoreOptions['onSubmit'] = vi.fn(
+      (_text, _images, _files, accepted) => {
+        commitAccepted = accepted;
+        return false;
+      },
+    );
+    currentWorkspace = {
+      workspaceCwd: '/repo/primary',
+      capabilities: { features: ['workspace_input_history'] },
+      actions: {
+        loadInputHistory: vi.fn().mockResolvedValue({
+          notModified: false,
+          kind: 'prompt',
+          entries: [],
+          revision: 'rev',
+        } satisfies DaemonInputHistoryResult),
+        recordInputHistory,
+      },
+      client: makeFakeClient(),
+    };
+    const options: Partial<UseComposerCoreOptions> = {
+      composerScopeKey: 'same-primary',
+      atWorkspaceCwd: '/repo/primary',
+      onSubmit,
+    };
+
+    await mount(options);
+    act(() => latest!.setText('/init'));
+    await waitFor(() => expect(latest!.canSubmit).toBe(true));
+    await act(async () => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalled();
+
+    currentWorkspace = {
+      ...currentWorkspace,
+      capabilities: {
+        features: ['workspace_input_history'],
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/repo/primary',
+            primary: true,
+            trusted: true,
+          },
+        ],
+      },
+    };
+    await mount(options);
+    await act(async () => {
+      commitAccepted?.();
+      await Promise.resolve();
+    });
+
+    expect(recordInputHistory).toHaveBeenCalledWith({
+      kind: 'prompt',
+      entry: '/init',
+    });
+  });
+
+  it('records a deferred slash acceptance after a new session is allocated', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const recordInputHistory = vi.fn().mockResolvedValue(undefined);
+    let commitAccepted: (() => void) | undefined;
+    const onSubmit: UseComposerCoreOptions['onSubmit'] = vi.fn(
+      (_text, _images, _files, accepted) => {
+        commitAccepted = accepted;
+        return false;
+      },
+    );
+    currentWorkspace = {
+      workspaceCwd: '/repo/primary',
+      capabilities: {
+        features: ['workspace_input_history', 'workspace_qualified_rest_core'],
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/repo/primary',
+            primary: true,
+            trusted: true,
+          },
+        ],
+      },
+      actions: {
+        loadInputHistory: vi.fn().mockResolvedValue({
+          notModified: false,
+          kind: 'prompt',
+          entries: [],
+          revision: 'rev',
+        } satisfies DaemonInputHistoryResult),
+        recordInputHistory,
+      },
+      client: makeFakeClient(),
+    };
+
+    await mount({
+      sessionId: undefined,
+      atWorkspaceCwd: '/repo/primary',
+      onSubmit,
+    });
+    act(() => latest!.setText('/goal improve shared history'));
+    await waitFor(() => expect(latest!.canSubmit).toBe(true));
+    await act(async () => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalled();
+
+    await mount({
+      sessionId: 'allocated-session',
+      atWorkspaceCwd: '/repo/primary',
+    });
+    await act(async () => {
+      commitAccepted?.();
+      await Promise.resolve();
+    });
+
+    expect(recordInputHistory).toHaveBeenCalledTimes(1);
+    expect(recordInputHistory).toHaveBeenCalledWith({
+      kind: 'prompt',
+      entry: '/goal improve shared history',
+    });
+  });
+
+  it('does not commit deferred slash history to a newly selected workspace', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const recordInputHistory = vi.fn().mockResolvedValue(undefined);
+    const loadInputHistory = vi.fn().mockResolvedValue({
+      notModified: false,
+      kind: 'prompt',
+      entries: [],
+      revision: 'rev-a',
+    } satisfies DaemonInputHistoryResult);
+    let commitAccepted: (() => void) | undefined;
+    const onSubmit: UseComposerCoreOptions['onSubmit'] = vi.fn(
+      (_text, _images, _files, accepted) => {
+        commitAccepted = accepted;
+        return false;
+      },
+    );
+    const options: Partial<UseComposerCoreOptions> = {
+      composerScopeKey: 'shared-live-key',
+      onSubmit,
+    };
+    currentWorkspace = {
+      workspaceCwd: '/repo/a',
+      capabilities: {
+        features: ['workspace_input_history', 'workspace_qualified_rest_core'],
+        workspaces: [
+          { id: 'ws-a', cwd: '/repo/a', trusted: true },
+          { id: 'ws-b', cwd: '/repo/b', trusted: true },
+        ],
+      },
+      actions: { loadInputHistory, recordInputHistory },
+      client: makeFakeClient(),
+    };
+
+    await mount({ ...options, atWorkspaceCwd: '/repo/a' });
+    act(() => latest!.setText('/init'));
+    await waitFor(() => expect(latest!.canSubmit).toBe(true));
+    expect(latest!.getText()).toBe('/init');
+    await act(async () => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalled();
+    expect(commitAccepted).toEqual(expect.any(Function));
+
+    currentWorkspace = { ...currentWorkspace, workspaceCwd: '/repo/b' };
+    await mount({ ...options, atWorkspaceCwd: '/repo/b' });
+    await act(async () => {
+      commitAccepted?.();
+      await Promise.resolve();
+    });
+    expect(recordInputHistory).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        localStorage.getItem('qwen-web-shell-history:shared-live-key')!,
+      ),
+    ).toEqual(['/init']);
+
+    // A control acceptance in the original workspace does record its target.
+    currentWorkspace = { ...currentWorkspace, workspaceCwd: '/repo/a' };
+    await mount({ ...options, atWorkspaceCwd: '/repo/a' });
+    act(() => latest!.setText('/init again'));
+    await act(async () => {
+      latest!.submitText();
+      commitAccepted?.();
+    });
+    expect(recordInputHistory).toHaveBeenCalledWith({
+      kind: 'prompt',
+      entry: '/init again',
+      workspaceId: 'ws-a',
+    });
+  });
+
+  it('does not fetch remote data for an explicitly shared non-workspace key', async () => {
+    localStorage.setItem(
+      'qwen-web-shell-history:shared-sync-scope',
+      JSON.stringify(['local-a']),
+    );
+    localStorage.setItem(
+      'qwen-web-shell-history:shared-sync-scope:pending-remote',
+      JSON.stringify([
+        {
+          text: 'local-a',
+          seenRemoteRevision: 'rev-a',
+          missedRemoteSnapshots: 0,
+        },
+      ]),
+    );
+    const loadInputHistory = vi.fn();
+    currentWorkspace = {
+      workspaceCwd: '/repo/a',
+      capabilities: {
+        features: ['workspace_input_history', 'workspace_qualified_rest_core'],
+        workspaces: [
+          { id: 'ws-a', cwd: '/repo/a', trusted: true },
+          { id: 'ws-b', cwd: '/repo/b', trusted: true },
+        ],
+      },
+      actions: { loadInputHistory },
+      client: makeFakeClient(),
+    };
+    await mount({
+      composerScopeKey: 'shared-sync-scope',
+      atWorkspaceCwd: '/repo/a',
+    });
+    currentWorkspace = { ...currentWorkspace, workspaceCwd: '/repo/b' };
+    await mount({
+      composerScopeKey: 'shared-sync-scope',
+      atWorkspaceCwd: '/repo/b',
+    });
+    await act(async () => {
+      publishSidechannelRemotePrompt({
+        sessionId: 'session-shared',
+        kind: 'prompt',
+        baseSeq: 1,
+      });
+      latest!.searchState.openHistorySearch();
+      await Promise.resolve();
+    });
+
+    expect(loadInputHistory).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        localStorage.getItem('qwen-web-shell-history:shared-sync-scope')!,
+      ),
+    ).toEqual(['local-a']);
+    expect(
+      localStorage.getItem(
+        'qwen-web-shell-history:shared-sync-scope:pending-remote',
+      ),
+    ).toBe(
+      JSON.stringify([
+        {
+          text: 'local-a',
+          seenRemoteRevision: 'rev-a',
+          missedRemoteSnapshots: 0,
+        },
+      ]),
+    );
+  });
+
+  it('namespaces a reserved secondary id when switching away from primary', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const resolvers: Array<(result: DaemonInputHistoryResult) => void> = [];
+    const loadInputHistory = vi.fn(
+      () =>
+        new Promise<DaemonInputHistoryResult>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const recordInputHistory = vi.fn().mockResolvedValue(undefined);
+    let accept: (() => void) | undefined;
+    const onSubmit: UseComposerCoreOptions['onSubmit'] = vi.fn(
+      (_text, _images, _files, accepted) => {
+        accept = accepted;
+        return false;
+      },
+    );
+    currentWorkspace = {
+      workspaceCwd: '/repo/primary',
+      capabilities: {
+        features: ['workspace_input_history', 'workspace_qualified_rest_core'],
+        workspaces: [
+          {
+            id: 'root-primary',
+            cwd: '/repo/primary',
+            primary: true,
+            trusted: true,
+          },
+          { id: '<primary>', cwd: '/repo/other', trusted: true },
+        ],
+      },
+      actions: { loadInputHistory, recordInputHistory },
+      client: makeFakeClient(),
+    };
+    await mount({ onSubmit, atWorkspaceCwd: '/repo/primary' });
+    act(() => latest!.setText('/init'));
+    await vi.waitFor(() => expect(latest!.canSubmit).toBe(true));
+    await act(async () => latest!.submitText());
+    expect(accept).toEqual(expect.any(Function));
+
+    currentWorkspace = { ...currentWorkspace, workspaceCwd: '/repo/other' };
+    await mount({ atWorkspaceCwd: '/repo/other' });
+    expect(loadInputHistory).toHaveBeenCalledTimes(2);
+    expect(loadInputHistory.mock.calls[1][0]).toMatchObject({
+      kind: 'prompt',
+      workspaceId: '<primary>',
+    });
+    await act(async () => {
+      accept?.();
+      await Promise.resolve();
+    });
+    expect(recordInputHistory).not.toHaveBeenCalled();
+
+    act(() => latest!.searchState.openHistorySearch());
+    await act(async () => {
+      resolvers[0]({
+        notModified: false,
+        kind: 'prompt',
+        entries: ['old-main'],
+        revision: 'old',
+      });
+      await Promise.resolve();
+    });
+    expect(latest!.searchState.searchMatches).not.toContain('old-main');
+    await act(async () => {
+      resolvers[1]({
+        notModified: false,
+        kind: 'prompt',
+        entries: ['other-workspace'],
+        revision: 'other',
+      });
+      await Promise.resolve();
+    });
+    expect(latest!.searchState.searchMatches).toContain('other-workspace');
+  });
+
+  it('keeps the latest A request authoritative across A → B → A switches', async () => {
+    const responses: Array<(value: DaemonInputHistoryResult) => void> = [];
+    const loadInputHistory = vi.fn(
+      () =>
+        new Promise<DaemonInputHistoryResult>((resolve) => {
+          responses.push(resolve);
+        }),
+    );
+    const snapshot = (
+      entries: string[],
+      revision: string,
+    ): DaemonInputHistoryResult => ({
+      notModified: false,
+      kind: 'prompt',
+      entries,
+      revision,
+    });
+    currentWorkspace = {
+      workspaceCwd: '/repo/a',
+      capabilities: {
+        features: ['workspace_input_history', 'workspace_qualified_rest_core'],
+        workspaces: [
+          { id: 'ws-a', cwd: '/repo/a', trusted: true },
+          { id: 'ws-b', cwd: '/repo/b', trusted: true },
+        ],
+      },
+      actions: { loadInputHistory },
+      client: makeFakeClient(),
+    };
+    const select = async (workspaceCwd: string) => {
+      currentWorkspace = { ...currentWorkspace, workspaceCwd };
+      await mount({
+        composerScopeKey: workspaceCwd,
+        atWorkspaceCwd: workspaceCwd,
+      });
+    };
+    const settle = async (
+      index: number,
+      entries: string[],
+      revision: string,
+    ) => {
+      await act(async () => {
+        responses[index](snapshot(entries, revision));
+        await Promise.resolve();
+      });
+    };
+
+    await select('/repo/a');
+    await select('/repo/b');
+    await select('/repo/a');
+    expect(loadInputHistory).toHaveBeenCalledTimes(3);
+
+    // The new A wins, even though the older A carries the same target key.
+    await settle(2, ['old', 'new'], 'new-a');
+    act(() => latest!.searchState.openHistorySearch());
+    expect(loadInputHistory).toHaveBeenCalledTimes(4);
+    expect(latest!.searchState.searchMatches).toEqual(['new', 'old']);
+
+    // An older A must neither apply its snapshot nor clear the newest GET.
+    await settle(0, ['stale'], 'stale-a');
+    await act(async () => {
+      publishSidechannelRemotePrompt({
+        sessionId: 'session-shared',
+        kind: 'prompt',
+        baseSeq: 1,
+      });
+      await Promise.resolve();
+    });
+    expect(loadInputHistory).toHaveBeenCalledTimes(4);
+    expect(latest!.searchState.searchMatches).toEqual(['new', 'old']);
+
+    // The unrelated B response is ignored; the queued current A is refreshed once.
+    await settle(1, ['other-workspace'], 'b');
+    await settle(3, ['old', 'new', 'latest'], 'latest-a');
+    expect(latest!.searchState.searchMatches).toEqual(['latest', 'new', 'old']);
+    await vi.waitFor(() => expect(loadInputHistory).toHaveBeenCalledTimes(5));
+    await act(async () => {
+      responses[4]({ notModified: true, kind: 'prompt' });
+      await Promise.resolve();
     });
   });
 });

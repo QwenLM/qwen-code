@@ -12,7 +12,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
-import { spawnDaemon, type SpawnedDaemon } from './_daemon-harness.js';
+import {
+  DEFAULT_CLI_BIN,
+  spawnDaemon,
+  type SpawnedDaemon,
+} from './_daemon-harness.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MOCK_CHILD = path.resolve(
@@ -35,7 +40,6 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
   if (SKIP) return;
   let root: string;
   let workspace: string;
-  let missing: string;
   let daemon: SpawnedDaemon;
   let shellFile: string;
   let promptFile: string;
@@ -142,9 +146,10 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
   }
 
   beforeAll(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-input-history-real-'));
+    root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-input-history-real-')),
+    );
     workspace = path.join(root, 'primary');
-    missing = path.join(root, 'missing');
     const home = path.join(root, 'home');
     const runtime = path.join(root, 'runtime');
     await Promise.all(
@@ -163,7 +168,7 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
     );
     daemon = await spawnDaemon({
       workspaceCwd: workspace,
-      cliBin: path.resolve(__dirname, '../../packages/cli/dist/index.js'),
+      cliBin: DEFAULT_CLI_BIN,
       token: 'input-history-real-test-token',
       bootTimeoutMs: 30_000,
       extraArgs: ['--enable-session-shell'],
@@ -174,7 +179,7 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
         QWEN_RUNTIME_DIR: runtime,
         QWEN_CLI_ENTRY: MOCK_CHILD,
         MOCK_AGENT_TYPE: 'plain',
-        MOCK_AGENT_DELAY_MS: '800',
+        MOCK_ACP_PROMPT_DELAY_MS: '5000',
         MOCK_AGENT_LOG_FILE: path.join(root, 'mock-agent.jsonl'),
         MOCK_AGENT_STDERR_FILE: path.join(root, 'mock-agent-stderr.txt'),
       },
@@ -241,7 +246,7 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
     const mobile = await subscribe(desktop.sessionId, 'mobile-client');
 
     try {
-      await desktop.prompt({
+      await desktop.submitPrompt({
         prompt: [{ type: 'text', text: 'desktop original @src/main.ts' }],
         _meta: { 'qwen.submittedPrompt': 'explain @src/main.ts' },
       });
@@ -258,6 +263,7 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
         },
       );
       expect(active.status).toBe(200);
+      await expect(active.json()).resolves.toMatchObject({ accepted: true });
       await vi
         .waitFor(() => {
           expect(
@@ -377,6 +383,7 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
 
     const unknown = await request('', {}, 'ffffffffffffffff');
     expect(unknown.status).toBe(400);
+    const primaryBeforeSecondary = await fs.readFile(promptFile, 'utf8');
     const secondaryRegistration = await daemon.client.addWorkspace(
       await fs.mkdtemp(path.join(root, 'secondary-')),
     );
@@ -427,11 +434,202 @@ describe('daemon workspace input history (real HTTP/stdio/filesystem)', () => {
       await fs.writeFile(promptFile, promptBeforeCorruption, 'utf8');
     }
 
-    // Explicit negative control proves the workspace used by the test was the
-    // intended real isolated directory, never a shared primary history file.
+    // The secondary append must leave the real primary file untouched, and
+    // the primary file itself must live under this test's isolated root.
     expect((await get()).entries).toContain('local slash /recap');
-    await expect(
-      fs.access(path.join(missing, 'input_history.json')),
-    ).rejects.toThrow();
+    await expect(fs.readFile(promptFile, 'utf8')).resolves.toBe(
+      primaryBeforeSecondary,
+    );
+    expect(path.relative(root, promptFile)).not.toMatch(/^\.\.(?:[\\/]|$)/);
   }, 60_000);
 });
+
+describe.skipIf(process.platform === 'win32')(
+  'qwen serve per-workspace input history runtime roots',
+  () => {
+    let daemon: SpawnedDaemon | undefined;
+    let root: string;
+    let primary: string;
+    let secondary: string;
+    let primaryRuntime: string;
+    let secondaryRuntime: string;
+    let home: string;
+
+    beforeAll(async () => {
+      root = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-history-runtime-')),
+      );
+      home = path.join(root, 'home');
+      primary = path.join(root, 'primary');
+      secondary = path.join(root, 'secondary');
+      primaryRuntime = path.join(root, 'primary-runtime');
+      secondaryRuntime = path.join(root, 'secondary-runtime');
+      await Promise.all([
+        fs.mkdir(home, { recursive: true }),
+        fs.mkdir(path.join(primary, '.qwen'), { recursive: true }),
+        fs.mkdir(path.join(secondary, '.qwen'), { recursive: true }),
+      ]);
+      await Promise.all([
+        fs.writeFile(
+          path.join(home, 'settings.json'),
+          JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+        ),
+        fs.writeFile(
+          path.join(home, 'trustedFolders.json'),
+          JSON.stringify({
+            [primary]: 'TRUST_FOLDER',
+            [secondary]: 'TRUST_FOLDER',
+          }),
+        ),
+        fs.writeFile(
+          path.join(primary, '.qwen', 'settings.json'),
+          JSON.stringify({ advanced: { runtimeOutputDir: primaryRuntime } }),
+        ),
+        fs.writeFile(
+          path.join(secondary, '.qwen', 'settings.json'),
+          JSON.stringify({ advanced: { runtimeOutputDir: secondaryRuntime } }),
+        ),
+      ]);
+
+      daemon = await spawnDaemon({
+        workspaceCwd: primary,
+        extraArgs: [
+          '--workspace',
+          secondary,
+          '--enable-session-shell',
+          '--allow-origin',
+          'https://input-history.test',
+        ],
+        envDrop: [/^QWEN_/, /^OPENAI_/, /^ANTHROPIC_/, /^AWS_/],
+        env: {
+          HOME: home,
+          USERPROFILE: home,
+          QWEN_HOME: home,
+          // Do not set QWEN_RUNTIME_DIR: it would override both workspaces'
+          // independently configured advanced.runtimeOutputDir values.
+          QWEN_CLI_ENTRY: MOCK_CHILD,
+          MOCK_ACP_PROMPT_DELAY_MS: '5000',
+          QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(
+            home,
+            'trustedFolders.json',
+          ),
+        },
+      });
+      await vi.waitFor(
+        async () => {
+          const capabilities = await daemon!.client.capabilities();
+          expect(
+            capabilities.workspaces?.some(
+              (workspace) => workspace.cwd === secondary,
+            ),
+          ).toBe(true);
+        },
+        { timeout: 30_000, interval: 100 },
+      );
+    }, 60_000);
+
+    afterAll(async () => {
+      await daemon?.dispose();
+      await fs.rm(root, { recursive: true, force: true });
+    });
+
+    it('records prompt, mid-turn and shell input only in the secondary runtime root', async () => {
+      const capabilities = await daemon!.client.capabilities();
+      const secondaryId = capabilities.workspaces?.find(
+        (workspace) => workspace.cwd === secondary,
+      )?.id;
+      expect(secondaryId).toBeDefined();
+      const client = await DaemonSessionClient.createOrAttach(
+        daemon!.client,
+        { workspaceCwd: secondary, sessionScope: 'thread' },
+        'secondary-desktop',
+      );
+      await client.prompt({
+        prompt: [{ type: 'text', text: 'synthetic host command' }],
+        suppressInputHistory: true,
+      });
+      await client.submitPrompt({
+        prompt: [{ type: 'text', text: 'secondary prompt' }],
+      });
+      await expect(
+        client.enqueueMidTurnMessage('secondary follow-up'),
+      ).resolves.toMatchObject({ accepted: true });
+      await expect(
+        client.shellCommand('printf secondary-shell'),
+      ).resolves.toMatchObject({ exitCode: 0 });
+
+      const readHistory = async (kind: 'prompt' | 'shell') => {
+        const response = await fetch(
+          `${daemon!.base}/workspaces/${encodeURIComponent(secondaryId!)}/input-history?kind=${kind}`,
+          { headers: { Authorization: `Bearer ${daemon!.token}` } },
+        );
+        expect(response.status).toBe(200);
+        return (await response.json()) as { entries: string[] };
+      };
+      await vi.waitFor(async () => {
+        await expect(readHistory('prompt')).resolves.toMatchObject({
+          entries: ['secondary prompt', 'secondary follow-up'],
+        });
+        await expect(readHistory('shell')).resolves.toMatchObject({
+          entries: ['printf secondary-shell'],
+        });
+      });
+
+      const storage = new Storage(secondary, secondaryRuntime);
+      expect(
+        JSON.parse(
+          await fs.readFile(
+            path.join(storage.getProjectTempDir(), 'input_history.json'),
+            'utf8',
+          ),
+        ),
+      ).toEqual(['secondary prompt', 'secondary follow-up']);
+      expect(
+        JSON.parse(await fs.readFile(storage.getHistoryFilePath(), 'utf8')),
+      ).toEqual(['printf secondary-shell']);
+
+      const allowedOrigin = 'https://input-history.test';
+      const preflight = await fetch(`${daemon!.base}/workspace/input-history`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: allowedOrigin,
+          'Access-Control-Request-Method': 'GET',
+          'Access-Control-Request-Headers': 'authorization,if-none-match',
+        },
+      });
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get('access-control-allow-origin')).toBe(
+        allowedOrigin,
+      );
+      expect(preflight.headers.get('access-control-allow-headers')).toContain(
+        'If-None-Match',
+      );
+      const corsHeaders = {
+        Origin: allowedOrigin,
+        Authorization: `Bearer ${daemon!.token}`,
+      };
+      const initial = await fetch(`${daemon!.base}/workspace/input-history`, {
+        headers: corsHeaders,
+      });
+      expect(initial.status).toBe(200);
+      const etag = initial.headers.get('etag');
+      expect(etag).toBeTruthy();
+      const unchanged = await fetch(`${daemon!.base}/workspace/input-history`, {
+        headers: { ...corsHeaders, 'If-None-Match': etag! },
+      });
+      expect(unchanged.status).toBe(304);
+
+      for (const base of [home, primaryRuntime]) {
+        const ambientStorage = new Storage(secondary, base);
+        await expect(
+          fs.access(
+            path.join(ambientStorage.getProjectTempDir(), 'input_history.json'),
+          ),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(
+          fs.access(ambientStorage.getHistoryFilePath()),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+    }, 60_000);
+  },
+);

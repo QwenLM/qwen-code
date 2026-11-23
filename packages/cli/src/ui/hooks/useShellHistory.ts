@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import * as fs from 'node:fs/promises';
 import {
   createDebugLogger,
@@ -14,9 +14,26 @@ import {
 import {
   appendShellHistoryFile,
   parseShellHistoryText,
+  SHELL_HISTORY_MAX_ENTRIES,
 } from '../../utils/shell-history-file.js';
+import { registerCleanup } from '../../utils/cleanup.js';
 
-const MAX_HISTORY_LENGTH = 100;
+const pendingShellHistoryWrites = new Set<Promise<void>>();
+let unregisterExitDrain: (() => void) | undefined;
+
+function trackShellHistoryWrite(write: Promise<void>): void {
+  if (pendingShellHistoryWrites.size === 0) {
+    unregisterExitDrain = registerCleanup(async () => {
+      // Include writes that arrive while the exit drain is already active.
+      while (pendingShellHistoryWrites.size > 0) {
+        await Promise.all([...pendingShellHistoryWrites]);
+      }
+    });
+  }
+  pendingShellHistoryWrites.add(write);
+}
+
+const MAX_HISTORY_LENGTH = SHELL_HISTORY_MAX_ENTRIES;
 const debugLogger = createDebugLogger('SHELL_HISTORY');
 
 export interface UseShellHistoryReturn {
@@ -49,7 +66,7 @@ async function readHistoryFile(filePath: string): Promise<string[]> {
 
 async function writeHistoryFile(filePath: string, command: string) {
   try {
-    appendShellHistoryFile(filePath, command);
+    await appendShellHistoryFile(filePath, command);
   } catch (error) {
     debugLogger.error('Error writing shell history:', error);
   }
@@ -62,6 +79,7 @@ export function useShellHistory(
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [historyFilePath, setHistoryFilePath] = useState<string | null>(null);
+  const writeQueuesRef = useRef(new Map<string, Promise<void>>());
 
   useEffect(() => {
     let cancelled = false;
@@ -91,7 +109,23 @@ export function useShellHistory(
         .slice(0, MAX_HISTORY_LENGTH)
         .filter(Boolean);
       setHistory(newHistory);
-      writeHistoryFile(historyFilePath, command);
+      const queues = writeQueuesRef.current;
+      const previous = queues.get(historyFilePath) ?? Promise.resolve();
+      const write = () => writeHistoryFile(historyFilePath, command);
+      const next = previous.then(write, write);
+      queues.set(historyFilePath, next);
+      trackShellHistoryWrite(next);
+      const cleanup = () => {
+        if (queues.get(historyFilePath) === next) {
+          queues.delete(historyFilePath);
+        }
+        pendingShellHistoryWrites.delete(next);
+        if (pendingShellHistoryWrites.size === 0) {
+          unregisterExitDrain?.();
+          unregisterExitDrain = undefined;
+        }
+      };
+      void next.then(cleanup, cleanup);
       setHistoryIndex(-1);
     },
     [history, historyFilePath],

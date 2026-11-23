@@ -846,7 +846,6 @@ export interface DaemonWorkspaceActions
     limit?: number;
     workspaceId?: string;
     ifNoneMatch?: string;
-    signal?: AbortSignal;
   }): Promise<DaemonInputHistoryResult>;
   recordInputHistory(opts: {
     kind: DaemonInputHistoryKind;

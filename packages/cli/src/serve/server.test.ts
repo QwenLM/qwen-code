@@ -53438,7 +53438,17 @@ it('auto-records prompt, mid-turn-message, and shell inputs into workspace input
   await fsp.mkdir(home, { recursive: true });
   await fsp.mkdir(workspace, { recursive: true });
   vi.stubEnv('QWEN_HOME', home);
-  const bridge = fakeBridge();
+  const bridge = fakeBridge({
+    enqueueMidTurnImpl: (_sessionId, message, _context, messageId) =>
+      message === 'rejected mid turn'
+        ? { accepted: false }
+        : { accepted: true, messageId: messageId ?? 'mid-default' },
+    getMidTurnMessagesImpl: () => ({
+      messages: [],
+      settledMessageIds: ['replayed-id'],
+      promotedMessageIds: [],
+    }),
+  });
   const app = createServeApp(
     { ...baseOpts, token: 'tkn', workspace, enableSessionShell: true },
     undefined,
@@ -53466,7 +53476,28 @@ it('auto-records prompt, mid-turn-message, and shell inputs into workspace input
       })
       .expect(202);
 
-    // 2. Channel-marked prompt must NOT enter composer input history.
+    // 2. Host-generated prompts explicitly opt out of composer history.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'scheduled command' }],
+        suppressInputHistory: true,
+      })
+      .expect(202);
+
+    // 3. A normal prompt without optional metadata is still recorded.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ prompt: [{ type: 'text', text: 'normal user prompt' }] })
+      .expect(202);
+
+    // 4. Channel-marked prompt must NOT enter composer input history.
     await request(app)
       .post(`/session/${sessionId}/prompt`)
       .set('Authorization', 'Bearer tkn')
@@ -53478,16 +53509,42 @@ it('auto-records prompt, mid-turn-message, and shell inputs into workspace input
       })
       .expect(202);
 
-    // 3. Mid-turn message records into prompt history.
+    // 5. Mid-turn message records into prompt history.
     await request(app)
       .post(`/session/${sessionId}/mid-turn-message`)
       .set('Authorization', 'Bearer tkn')
       .set('Host', '127.0.0.1:4170')
       .set('X-Qwen-Client-Id', 'desktop-client')
-      .send({ message: '  follow up mid turn  ' })
+      .send({ message: '  follow up mid turn  ', messageId: 'fresh-id' })
       .expect(200);
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ message: 'rejected mid turn' })
+      .expect(200)
+      .expect((response) => {
+        expect(response.body.accepted).toBe(false);
+      });
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        message: 'different text from the replayed id',
+        messageId: 'replayed-id',
+      })
+      .expect(200)
+      .expect((response) => {
+        expect(response.body).toEqual({
+          accepted: true,
+          messageId: 'replayed-id',
+        });
+      });
 
-    // 4. Shell command records into shell history.
+    // 6. Shell command records into shell history.
     await request(app)
       .post(`/session/${sessionId}/shell`)
       .set('Authorization', 'Bearer tkn')
@@ -53504,6 +53561,7 @@ it('auto-records prompt, mid-turn-message, and shell inputs into workspace input
       expect(promptHist.status).toBe(200);
       expect(promptHist.body.entries).toEqual([
         'check @src/a.ts',
+        'normal user prompt',
         'follow up mid turn',
       ]);
 

@@ -9771,6 +9771,7 @@ export function registerSessionRoutes(
           return;
         }
         if (
+          body['suppressInputHistory'] !== true &&
           !classification.channelPrompt &&
           !classification.requestedChannelPrompt
         ) {
@@ -9779,10 +9780,12 @@ export function registerSessionRoutes(
             classification.submittedPrompt,
           );
           if (historyText) {
-            void appendWorkspaceInputHistory(
-              runtime.workspaceCwd,
-              'prompt',
-              historyText,
+            void runWithWorkspaceRuntimeStorage(runtime, () =>
+              appendWorkspaceInputHistory(
+                runtime.workspaceCwd,
+                'prompt',
+                historyText,
+              ),
             ).catch((err) => {
               daemonLog?.warn('failed to record workspace input history', {
                 sessionId,
@@ -12774,6 +12777,19 @@ export function registerSessionRoutes(
         // originator for SSE echo routing. `null` = malformed id (already answered).
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        let alreadyRecordedMidTurn = false;
+        if (typeof messageId === 'string') {
+          const previous = runtime.bridge.getMidTurnMessages(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          alreadyRecordedMidTurn =
+            previous.messages.some(
+              (message) => message.messageId === messageId,
+            ) ||
+            previous.settledMessageIds.includes(messageId) ||
+            previous.promotedMessageIds.includes(messageId);
+        }
         const result = runtime.bridge.enqueueMidTurnMessage(
           sessionId,
           trimmed,
@@ -12785,11 +12801,13 @@ export function registerSessionRoutes(
             ...(mediaBlocks ? { content: mediaBlocks } : {}),
           },
         );
-        if (trimmed.length > 0) {
-          void appendWorkspaceInputHistory(
-            runtime.workspaceCwd,
-            'prompt',
-            trimmed,
+        if (trimmed.length > 0 && result.accepted && !alreadyRecordedMidTurn) {
+          void runWithWorkspaceRuntimeStorage(runtime, () =>
+            appendWorkspaceInputHistory(
+              runtime.workspaceCwd,
+              'prompt',
+              trimmed,
+            ),
           ).catch((err) => {
             daemonLog?.warn('failed to record workspace input history', {
               sessionId,
@@ -12993,10 +13011,12 @@ export function registerSessionRoutes(
           return;
         }
         const trimmedCommand = command.trim();
-        void appendWorkspaceInputHistory(
-          runtime.workspaceCwd,
-          'shell',
-          trimmedCommand,
+        void runWithWorkspaceRuntimeStorage(runtime, () =>
+          appendWorkspaceInputHistory(
+            runtime.workspaceCwd,
+            'shell',
+            trimmedCommand,
+          ),
         ).catch((err) => {
           daemonLog?.warn('failed to record workspace input history', {
             sessionId,

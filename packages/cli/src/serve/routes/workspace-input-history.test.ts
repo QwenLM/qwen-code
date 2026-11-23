@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   createWorkspaceRegistry,
   WorkspaceGenerationClosedError,
@@ -31,13 +32,18 @@ function fakeRuntime(opts: {
   primary?: boolean;
   trusted?: boolean;
   closed?: boolean;
+  runtimeBaseDir?: string;
 }): WorkspaceRuntime {
   return {
     workspaceId: opts.id,
     workspaceCwd: opts.cwd,
+    sessionRuntimeBaseDir: opts.runtimeBaseDir ?? opts.cwd,
     primary: opts.primary ?? false,
     trusted: opts.trusted ?? true,
     generationGuard: {
+      close: () => {
+        opts.closed = true;
+      },
       assertOpen: () => {
         if (opts.closed) {
           throw new WorkspaceGenerationClosedError();
@@ -83,6 +89,9 @@ describe('workspace-input-history routes', () => {
   function createApp(opts?: {
     primaryClosed?: boolean;
     secondaryClosed?: boolean;
+    primaryRuntimeBaseDir?: string;
+    secondaryRuntimeBaseDir?: string;
+    onRegistry?: (registry: ReturnType<typeof createWorkspaceRegistry>) => void;
   }) {
     const app = express();
     app.use(express.json());
@@ -93,6 +102,7 @@ describe('workspace-input-history routes', () => {
         primary: true,
         trusted: true,
         closed: opts?.primaryClosed,
+        runtimeBaseDir: opts?.primaryRuntimeBaseDir,
       }),
       fakeRuntime({
         id: 'secondary',
@@ -100,6 +110,7 @@ describe('workspace-input-history routes', () => {
         primary: false,
         trusted: true,
         closed: opts?.secondaryClosed,
+        runtimeBaseDir: opts?.secondaryRuntimeBaseDir,
       }),
       fakeRuntime({
         id: 'untrusted',
@@ -120,6 +131,7 @@ describe('workspace-input-history routes', () => {
         }
       },
     });
+    opts?.onRegistry?.(workspaceRegistry);
     return app;
   }
 
@@ -231,6 +243,114 @@ describe('workspace-input-history routes', () => {
       .post('/workspaces/untrusted/input-history')
       .send({ kind: 'prompt', entry: 'nope' });
     expect(untrustedPost.status).toBe(403);
+  });
+
+  it('uses primary and selected runtime base dirs instead of ambient storage', async () => {
+    const primaryBase = path.join(scratch, 'primary-runtime-root');
+    const secondaryBase = path.join(scratch, 'secondary-runtime-root');
+    const app = createApp({
+      primaryRuntimeBaseDir: primaryBase,
+      secondaryRuntimeBaseDir: secondaryBase,
+    });
+
+    await request(app)
+      .post('/workspace/input-history')
+      .send({ kind: 'prompt', entry: 'primary-runtime-entry' })
+      .expect(200);
+    await request(app)
+      .get('/workspace/input-history?kind=prompt')
+      .expect(200)
+      .expect((response) => {
+        expect(response.body.entries).toEqual(['primary-runtime-entry']);
+      });
+    await request(app)
+      .post('/workspaces/secondary/input-history')
+      .send({ kind: 'prompt', entry: 'secondary-runtime-entry' })
+      .expect(200);
+
+    for (const [cwd, base, entry] of [
+      [primaryCwd, primaryBase, 'primary-runtime-entry'],
+      [secondaryCwd, secondaryBase, 'secondary-runtime-entry'],
+    ] as const) {
+      const storage = new Storage(cwd, base);
+      const historyFile = path.join(
+        storage.getProjectTempDir(),
+        'input_history.json',
+      );
+      expect(JSON.parse(await fs.readFile(historyFile, 'utf8'))).toEqual([
+        entry,
+      ]);
+
+      const ambientFile = path.join(
+        new Storage(cwd).getProjectTempDir(),
+        'input_history.json',
+      );
+      await expect(fs.access(ambientFile)).rejects.toThrow();
+    }
+  });
+
+  it('uses the replacement primary runtime storage root', async () => {
+    const oldBase = path.join(scratch, 'old-runtime');
+    const replacementBase = path.join(scratch, 'replacement-runtime');
+    let registry!: ReturnType<typeof createWorkspaceRegistry>;
+    const app = createApp({
+      primaryRuntimeBaseDir: oldBase,
+      onRegistry: (value) => {
+        registry = value;
+      },
+    });
+    expect(registry.beginReplacement(registry.primaryEntry, 'review')).toBe(
+      true,
+    );
+    registry.activateReplacement(
+      registry.primaryEntry,
+      fakeRuntime({
+        id: 'primary',
+        cwd: primaryCwd,
+        primary: true,
+        runtimeBaseDir: replacementBase,
+      }),
+      'review',
+    );
+
+    await request(app)
+      .post('/workspace/input-history')
+      .send({ kind: 'prompt', entry: 'after-replacement' })
+      .expect(200);
+    await request(app)
+      .get('/workspace/input-history?kind=prompt')
+      .expect(200)
+      .expect((response) => {
+        expect(response.body.entries).toEqual(['after-replacement']);
+      });
+    const replacementFile = path.join(
+      new Storage(primaryCwd, replacementBase).getProjectTempDir(),
+      'input_history.json',
+    );
+    expect(JSON.parse(await fs.readFile(replacementFile, 'utf8'))).toEqual([
+      'after-replacement',
+    ]);
+    const oldFile = path.join(
+      new Storage(primaryCwd, oldBase).getProjectTempDir(),
+      'input_history.json',
+    );
+    await expect(fs.access(oldFile)).rejects.toThrow();
+  });
+
+  it('returns 503 instead of using the old primary during replacement', async () => {
+    let registry!: ReturnType<typeof createWorkspaceRegistry>;
+    const app = createApp({
+      onRegistry: (value) => {
+        registry = value;
+      },
+    });
+    expect(registry.beginReplacement(registry.primaryEntry, 'review')).toBe(
+      true,
+    );
+
+    const response = await request(app).get('/workspace/input-history');
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
   });
 
   it('returns 503 workspace_runtime_unavailable when workspace generation is closed', async () => {

@@ -1762,6 +1762,13 @@ export function useComposerCore(
   const { language, t } = useI18n();
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
+  const storageScopeRef = useRef(storageScopeKey);
+  storageScopeRef.current = storageScopeKey;
+  const defaultPrimaryScopeRef = useRef(
+    atWorkspaceCwd === undefined && composerScopeKey === undefined,
+  );
+  defaultPrimaryScopeRef.current =
+    atWorkspaceCwd === undefined && composerScopeKey === undefined;
   const promptHistoryStorageKey = getPromptHistoryStorageKey(storageScopeKey);
   const legacyPromptHistoryStorageKey = getPromptHistoryStorageKey();
   const promptHistoryFallbackStorageKey =
@@ -1813,17 +1820,73 @@ export function useComposerCore(
   const applyingSharedDraftRef = useRef(false);
   const publishDraftContentRef = useRef<() => void>(() => undefined);
   const publishDraftIngestionRef = useRef<() => void>(() => undefined);
+  const inputHistoryTarget = useMemo(() => {
+    if (!workspace || !workspaceFeaturesEnabled) return undefined;
+    const features = workspace.capabilities?.features ?? [];
+    if (!features.includes('workspace_input_history')) return undefined;
+    if (typeof workspace.actions?.loadInputHistory !== 'function')
+      return undefined;
+    const listed = workspace.capabilities?.workspaces ?? [];
+    if (atWorkspaceCwd) {
+      if (listed.length === 0) {
+        if (workspace.workspaceCwd && atWorkspaceCwd !== workspace.workspaceCwd)
+          return undefined;
+        return {
+          workspaceId: undefined as string | undefined,
+          targetKey: '<primary>',
+          workspaceCwd: workspace.workspaceCwd ?? atWorkspaceCwd,
+        };
+      }
+      const matches = listed.filter((entry) => entry.cwd === atWorkspaceCwd);
+      if (matches.length !== 1) return undefined;
+      if (matches[0].primary) {
+        return {
+          workspaceId: undefined as string | undefined,
+          targetKey: '<primary>',
+          workspaceCwd: matches[0].cwd,
+        };
+      }
+      if (
+        matches[0].trusted === false ||
+        !features.includes('workspace_qualified_rest_core')
+      ) {
+        return undefined;
+      }
+      return {
+        workspaceId: matches[0].id as string | undefined,
+        targetKey: `workspace:${matches[0].id}`,
+        workspaceCwd: matches[0].cwd,
+      };
+    }
+    if (listed.length === 0) {
+      return {
+        workspaceId: undefined as string | undefined,
+        targetKey: '<primary>',
+        workspaceCwd: workspace.workspaceCwd,
+      };
+    }
+    const primaryMatches = listed.filter((entry) => entry.primary);
+    if (primaryMatches.length !== 1) return undefined;
+    return {
+      workspaceId: undefined as string | undefined,
+      targetKey: '<primary>',
+      workspaceCwd: primaryMatches[0].cwd,
+    };
+  }, [workspace, workspaceFeaturesEnabled, atWorkspaceCwd]);
+
   const composerIdentityRef = useRef({
     sessionId,
     promptHistoryStorageKey,
     promptHistoryFallbackStorageKey,
     draftStorageKey: composerDraftStorageKey,
+    inputHistoryTargetKey: inputHistoryTarget?.targetKey,
   });
   composerIdentityRef.current = {
     sessionId,
     promptHistoryStorageKey,
     promptHistoryFallbackStorageKey,
     draftStorageKey: composerDraftStorageKey,
+    inputHistoryTargetKey: inputHistoryTarget?.targetKey,
   };
   const tooltipPortalRef = useRef<HTMLDivElement | null>(null);
   const onSubmitRef = useRef(onSubmit);
@@ -3360,15 +3423,30 @@ export function useComposerCore(
     updateHasContent,
   ]);
 
+  const remoteHistoryEnabled =
+    inputHistoryTarget !== undefined &&
+    ((defaultPrimaryScopeRef.current &&
+      inputHistoryTarget.workspaceId === undefined) ||
+      promptHistoryStorageKey ===
+        getPromptHistoryStorageKey(inputHistoryTarget.workspaceCwd));
+  const shellRemoteHistoryEnabled =
+    shellModeEnabled &&
+    inputHistoryTarget !== undefined &&
+    ((defaultPrimaryScopeRef.current &&
+      inputHistoryTarget.workspaceId === undefined) ||
+      shellHistoryStorageKey ===
+        getShellHistoryStorageKey(inputHistoryTarget.workspaceCwd));
   const promptHistory = useInputHistory(
     promptHistoryStorageKey,
     promptHistoryFallbackStorageKey,
+    remoteHistoryEnabled,
   );
   const shellHistory = useInputHistory(
     shellModeEnabled ? shellHistoryStorageKey : promptHistoryStorageKey,
     shellModeEnabled
       ? shellHistoryFallbackStorageKey
       : promptHistoryFallbackStorageKey,
+    shellRemoteHistoryEnabled,
   );
 
   const {
@@ -3428,55 +3506,6 @@ export function useComposerCore(
   const getSearchMatchesRef = useRef(getSearchMatches);
   getSearchMatchesRef.current = getSearchMatches;
 
-  const inputHistoryTarget = useMemo(() => {
-    if (!workspace || !workspaceFeaturesEnabled) return undefined;
-    const features = workspace.capabilities?.features ?? [];
-    if (!features.includes('workspace_input_history')) return undefined;
-    if (typeof workspace.actions?.loadInputHistory !== 'function')
-      return undefined;
-    const listed = workspace.capabilities?.workspaces ?? [];
-    if (atWorkspaceCwd) {
-      if (listed.length === 0) {
-        if (workspace.workspaceCwd && atWorkspaceCwd !== workspace.workspaceCwd)
-          return undefined;
-        return {
-          workspaceId: undefined as string | undefined,
-          targetKey: '<primary>',
-        };
-      }
-      const matches = listed.filter((entry) => entry.cwd === atWorkspaceCwd);
-      if (matches.length !== 1) return undefined;
-      if (matches[0].primary) {
-        return {
-          workspaceId: undefined as string | undefined,
-          targetKey: matches[0].id,
-        };
-      }
-      if (
-        matches[0].trusted === false ||
-        !features.includes('workspace_qualified_rest_core')
-      ) {
-        return undefined;
-      }
-      return {
-        workspaceId: matches[0].id as string | undefined,
-        targetKey: matches[0].id,
-      };
-    }
-    if (listed.length === 0) {
-      return {
-        workspaceId: undefined as string | undefined,
-        targetKey: '<primary>',
-      };
-    }
-    const primaryMatches = listed.filter((entry) => entry.primary);
-    if (primaryMatches.length !== 1) return undefined;
-    return {
-      workspaceId: undefined as string | undefined,
-      targetKey: primaryMatches[0].id,
-    };
-  }, [workspace, workspaceFeaturesEnabled, atWorkspaceCwd]);
-
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
   const inputHistoryTargetRef = useRef(inputHistoryTarget);
@@ -3484,12 +3513,29 @@ export function useComposerCore(
   const inputHistoryTargetKey = inputHistoryTarget?.targetKey;
   const remoteHistoryEtagRef = useRef<{
     targetKey?: string;
+    workspaceCwd?: string;
     prompt?: string;
     shell?: string;
   }>({});
+  const remoteHistoryTargetVersionRef = useRef({
+    targetKey: inputHistoryTargetKey,
+    workspaceCwd: inputHistoryTarget?.workspaceCwd,
+    version: 0,
+  });
+  if (
+    remoteHistoryTargetVersionRef.current.targetKey !== inputHistoryTargetKey ||
+    remoteHistoryTargetVersionRef.current.workspaceCwd !==
+      inputHistoryTarget?.workspaceCwd
+  ) {
+    remoteHistoryTargetVersionRef.current = {
+      targetKey: inputHistoryTargetKey,
+      workspaceCwd: inputHistoryTarget?.workspaceCwd,
+      version: remoteHistoryTargetVersionRef.current.version + 1,
+    };
+  }
   const remoteHistoryInFlightRef = useRef<{
-    prompt?: string;
-    shell?: string;
+    prompt?: { targetKey: string; targetVersion: number };
+    shell?: { targetKey: string; targetVersion: number };
   }>({});
   const remoteHistoryPendingRef = useRef<{
     prompt?: boolean;
@@ -3502,12 +3548,36 @@ export function useComposerCore(
       const target = inputHistoryTargetRef.current;
       const loadInputHistory = workspaceRef.current?.actions?.loadInputHistory;
       if (!target || typeof loadInputHistory !== 'function') return;
-      if (remoteHistoryEtagRef.current.targetKey !== target.targetKey) {
-        remoteHistoryEtagRef.current = { targetKey: target.targetKey };
+      const implicitPrimaryScope =
+        defaultPrimaryScopeRef.current && target.workspaceId === undefined;
+      if (
+        !implicitPrimaryScope &&
+        ((kind === 'prompt' &&
+          getPromptHistoryStorageKey(target.workspaceCwd) !==
+            getPromptHistoryStorageKey(storageScopeRef.current)) ||
+          (kind === 'shell' &&
+            getShellHistoryStorageKey(target.workspaceCwd) !==
+              getShellHistoryStorageKey(storageScopeRef.current)))
+      ) {
+        return;
+      }
+      if (
+        remoteHistoryEtagRef.current.targetKey !== target.targetKey ||
+        remoteHistoryEtagRef.current.workspaceCwd !== target.workspaceCwd
+      ) {
+        remoteHistoryEtagRef.current = {
+          targetKey: target.targetKey,
+          workspaceCwd: target.workspaceCwd,
+        };
         remoteHistoryInFlightRef.current = {};
         remoteHistoryPendingRef.current = {};
       }
-      if (remoteHistoryInFlightRef.current[kind] === target.targetKey) {
+      const targetVersion = remoteHistoryTargetVersionRef.current.version;
+      const active = remoteHistoryInFlightRef.current[kind];
+      if (
+        active?.targetKey === target.targetKey &&
+        active.targetVersion === targetVersion
+      ) {
         remoteHistoryPendingRef.current[kind] = true;
         return;
       }
@@ -3517,7 +3587,18 @@ export function useComposerCore(
           : historyActionsRef.current;
       const mutationVersion = history.getMutationVersion();
       const ifNoneMatch = remoteHistoryEtagRef.current[kind];
-      remoteHistoryInFlightRef.current[kind] = target.targetKey;
+      // A key can repeat after an A → B → A switch, so route completion by
+      // the immutable request identity, not just by its workspace key.
+      const request = {
+        targetKey: target.targetKey,
+        targetVersion,
+      };
+      const isCurrentRequest = () =>
+        remoteHistoryInFlightRef.current[kind] === request &&
+        remoteHistoryTargetVersionRef.current.version === targetVersion &&
+        inputHistoryTargetRef.current?.targetKey === target.targetKey &&
+        inputHistoryTargetRef.current?.workspaceCwd === target.workspaceCwd;
+      remoteHistoryInFlightRef.current[kind] = request;
       remoteHistoryPendingRef.current[kind] = false;
       try {
         const result = await loadInputHistory({
@@ -3525,9 +3606,7 @@ export function useComposerCore(
           workspaceId: target.workspaceId,
           ...(ifNoneMatch ? { ifNoneMatch } : {}),
         });
-        if (inputHistoryTargetRef.current?.targetKey !== target.targetKey) {
-          return;
-        }
+        if (!isCurrentRequest()) return;
         if (result.notModified) return;
         if (history.getMutationVersion() !== mutationVersion) {
           // A local push occurred while this GET was in flight; skip applying
@@ -3540,6 +3619,7 @@ export function useComposerCore(
         const changed = history.applyRemoteEntries(
           result.entries,
           mutationVersion,
+          result.revision,
         );
         if (
           changed &&
@@ -3559,11 +3639,13 @@ export function useComposerCore(
       } catch {
         // Best-effort sync; keep localStorage history working offline.
       } finally {
-        if (remoteHistoryInFlightRef.current[kind] === target.targetKey) {
+        if (remoteHistoryInFlightRef.current[kind] === request) {
           remoteHistoryInFlightRef.current[kind] = undefined;
           if (
             remoteHistoryPendingRef.current[kind] &&
-            inputHistoryTargetRef.current?.targetKey === target.targetKey
+            remoteHistoryTargetVersionRef.current.version === targetVersion &&
+            inputHistoryTargetRef.current?.targetKey === target.targetKey &&
+            inputHistoryTargetRef.current?.workspaceCwd === target.workspaceCwd
           ) {
             remoteHistoryPendingRef.current[kind] = false;
             void syncRemoteHistoryRef.current(kind);
@@ -3579,12 +3661,21 @@ export function useComposerCore(
   useEffect(() => {
     if (!inputHistoryTargetKey) return;
     void syncRemoteHistory('prompt');
-  }, [inputHistoryTargetKey, syncRemoteHistory]);
+  }, [
+    inputHistoryTargetKey,
+    inputHistoryTarget?.workspaceCwd,
+    syncRemoteHistory,
+  ]);
 
   useEffect(() => {
     if (!inputHistoryTargetKey || !shellMode) return;
     void syncRemoteHistory('shell');
-  }, [inputHistoryTargetKey, shellMode, syncRemoteHistory]);
+  }, [
+    inputHistoryTargetKey,
+    inputHistoryTarget?.workspaceCwd,
+    shellMode,
+    syncRemoteHistory,
+  ]);
 
   useEffect(() => {
     if (!inputHistoryTargetKey || typeof window === 'undefined') return;
@@ -3610,7 +3701,11 @@ export function useComposerCore(
         document.removeEventListener('visibilitychange', onForeground);
       }
     };
-  }, [inputHistoryTargetKey, syncRemoteHistory]);
+  }, [
+    inputHistoryTargetKey,
+    inputHistoryTarget?.workspaceCwd,
+    syncRemoteHistory,
+  ]);
 
   useEffect(() => {
     if (!inputHistoryTargetKey || !sessionId) return;
@@ -3618,7 +3713,12 @@ export function useComposerCore(
       if (event.sessionId !== sessionId) return;
       void syncRemoteHistory(event.kind);
     });
-  }, [inputHistoryTargetKey, sessionId, syncRemoteHistory]);
+  }, [
+    inputHistoryTargetKey,
+    inputHistoryTarget?.workspaceCwd,
+    sessionId,
+    syncRemoteHistory,
+  ]);
 
   const openHistorySearch = useCallback(() => {
     if (disabledRef.current) return;
@@ -3814,7 +3914,11 @@ export function useComposerCore(
       inputAnnotations.push(annotation);
     }
     inputAnnotations.sort((left, right) => left.start - right.start);
-    const submissionIdentity = { ...composerIdentityRef.current };
+    const submissionIdentity = {
+      ...composerIdentityRef.current,
+      inputHistoryTargetKey: inputHistoryTargetRef.current?.targetKey,
+      inputHistoryWorkspaceCwd: inputHistoryTargetRef.current?.workspaceCwd,
+    };
     const draftTextAtSubmit = editorText;
     const editorDocAtSubmit = view?.state.doc;
     const mobileTextVersionAtSubmit = mobileTextVersionRef.current;
@@ -3885,6 +3989,24 @@ export function useComposerCore(
     const commitAccepted = () => {
       if (committed) return;
       committed = true;
+      const recordSlashHistory = () => {
+        if (isShellMode || !text.trimStart().startsWith('/')) return;
+        const target = inputHistoryTargetRef.current;
+        if (
+          !target ||
+          target.targetKey !== submissionIdentity.inputHistoryTargetKey ||
+          target.workspaceCwd !== submissionIdentity.inputHistoryWorkspaceCwd
+        )
+          return;
+        const recordInputHistory =
+          workspaceRef.current?.actions?.recordInputHistory;
+        if (typeof recordInputHistory !== 'function') return;
+        void recordInputHistory({
+          kind: 'prompt',
+          entry: text,
+          workspaceId: target.workspaceId,
+        }).catch(() => {});
+      };
       const currentIdentity = composerIdentityRef.current;
       const sourceChanged =
         !composerMountedRef.current ||
@@ -3916,6 +4038,7 @@ export function useComposerCore(
           clearComposerDraftIfMatches(key, draftTextAtSubmit);
           forgetDraftAttachments(key);
         }
+        recordSlashHistory();
         return;
       }
       onDismissFollowupRef.current?.();
@@ -3925,18 +4048,7 @@ export function useComposerCore(
       } else {
         historyActionsRef.current.push(text);
         historyActionsRef.current.reset();
-        if (text.trimStart().startsWith('/')) {
-          const target = inputHistoryTargetRef.current;
-          const recordInputHistory =
-            workspaceRef.current?.actions?.recordInputHistory;
-          if (target && typeof recordInputHistory === 'function') {
-            void recordInputHistory({
-              kind: 'prompt',
-              entry: text,
-              workspaceId: target.workspaceId,
-            }).catch(() => {});
-          }
-        }
+        recordSlashHistory();
       }
       historyBrowseActiveRef.current = false;
       if (!isComposerUnchanged()) return;

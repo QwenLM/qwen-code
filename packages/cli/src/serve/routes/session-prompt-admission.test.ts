@@ -297,6 +297,22 @@ describe('classifyPromptRequest', () => {
     },
   );
 
+  it('removes the history-recording opt-out from the forwarded request', () => {
+    const prompt = [{ type: 'text', text: 'machine command' }];
+    const body = { prompt, suppressInputHistory: true };
+    const { classification, forwardedBody } = classifyPromptRequest(
+      body,
+      runtime,
+    );
+
+    expect(classification).toEqual({
+      channelPrompt: false,
+      requestedChannelPrompt: false,
+    });
+    expect(forwardedBody).toEqual({ prompt });
+    expect(body).toHaveProperty('suppressInputHistory', true);
+  });
+
   it('drops a display text that is not a string, even from the worker', () => {
     registerChannelWorkerPromptAuthorization('worker-token', '/ws');
     const { classification } = classifyPromptRequest(

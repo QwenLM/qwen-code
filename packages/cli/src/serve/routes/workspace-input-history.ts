@@ -20,6 +20,7 @@ import {
   readWorkspaceInputHistory,
   type WorkspaceInputHistoryKind,
 } from '../workspace-input-history.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 
 export interface WorkspaceInputHistoryRouteDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
@@ -205,31 +206,55 @@ export function registerWorkspaceInputHistoryRoutes(
   const { mutate, safeBody, boundWorkspace } = deps;
 
   app.get('/workspace/input-history', async (req: Request, res: Response) => {
-    const assertGenerationOpen =
-      deps.captureGenerationAssertion?.() ?? (() => {});
-    await handleGetInputHistory(
-      req,
-      res,
-      boundWorkspace,
-      assertGenerationOpen,
-      'GET /workspace/input-history',
-    );
+    const fn = () => {
+      const assertGenerationOpen =
+        deps.captureGenerationAssertion?.() ?? (() => {});
+      return handleGetInputHistory(
+        req,
+        res,
+        boundWorkspace,
+        assertGenerationOpen,
+        'GET /workspace/input-history',
+      );
+    };
+    try {
+      const primaryRuntime = deps.workspaceRegistry?.primary;
+      if (primaryRuntime) {
+        await runWithWorkspaceRuntimeStorage(primaryRuntime, fn);
+      } else {
+        await fn();
+      }
+    } catch (err) {
+      if (!sendGenerationClosedError(res, err)) throw err;
+    }
   });
 
   app.post(
     '/workspace/input-history',
     mutate(),
     async (req: Request, res: Response) => {
-      const assertGenerationOpen =
-        deps.captureGenerationAssertion?.() ?? (() => {});
-      await handlePostInputHistory(
-        req,
-        res,
-        boundWorkspace,
-        safeBody,
-        assertGenerationOpen,
-        'POST /workspace/input-history',
-      );
+      const fn = () => {
+        const assertGenerationOpen =
+          deps.captureGenerationAssertion?.() ?? (() => {});
+        return handlePostInputHistory(
+          req,
+          res,
+          boundWorkspace,
+          safeBody,
+          assertGenerationOpen,
+          'POST /workspace/input-history',
+        );
+      };
+      try {
+        const primaryRuntime = deps.workspaceRegistry?.primary;
+        if (primaryRuntime) {
+          await runWithWorkspaceRuntimeStorage(primaryRuntime, fn);
+        } else {
+          await fn();
+        }
+      } catch (err) {
+        if (!sendGenerationClosedError(res, err)) throw err;
+      }
     },
   );
 
@@ -249,12 +274,14 @@ export function registerWorkspaceInputHistoryRoutes(
         const assertGenerationOpen = () => {
           runtime.generationGuard?.assertOpen();
         };
-        await handleGetInputHistory(
-          req,
-          res,
-          runtime.workspaceCwd,
-          assertGenerationOpen,
-          'GET /workspaces/:workspace/input-history',
+        await runWithWorkspaceRuntimeStorage(runtime, () =>
+          handleGetInputHistory(
+            req,
+            res,
+            runtime.workspaceCwd,
+            assertGenerationOpen,
+            'GET /workspaces/:workspace/input-history',
+          ),
         );
       },
     );
@@ -273,13 +300,15 @@ export function registerWorkspaceInputHistoryRoutes(
         const assertGenerationOpen = () => {
           runtime.generationGuard?.assertOpen();
         };
-        await handlePostInputHistory(
-          req,
-          res,
-          runtime.workspaceCwd,
-          safeBody,
-          assertGenerationOpen,
-          'POST /workspaces/:workspace/input-history',
+        await runWithWorkspaceRuntimeStorage(runtime, () =>
+          handlePostInputHistory(
+            req,
+            res,
+            runtime.workspaceCwd,
+            safeBody,
+            assertGenerationOpen,
+            'POST /workspaces/:workspace/input-history',
+          ),
         );
       },
     );
