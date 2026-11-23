@@ -108,7 +108,10 @@ import * as workspaceContextUtils from '../utils/workspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
-import { SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX } from './shell-output-framing.js';
+import {
+  SHELL_OUTPUT_UNTRUSTED_FRAMING,
+  SHELL_OUTPUT_UNTRUSTED_FRAMING_PREFIX,
+} from './shell-output-framing.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -3599,8 +3602,11 @@ describe('ShellTool', () => {
         exitCode: 7,
       });
 
+      // The result opens with the untrusted-content framing (#17318); the
+      // command echo and the labels follow it.
       expect(result.llmContent).toBe(
         [
+          ...SHELL_OUTPUT_UNTRUSTED_FRAMING,
           'Command: node probe.cjs',
           'Directory: (root)',
           'Output (stdout and stderr combined): EXPECTED_FAILURE',
