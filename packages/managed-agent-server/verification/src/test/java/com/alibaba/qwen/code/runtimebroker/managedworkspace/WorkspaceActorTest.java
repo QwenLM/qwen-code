@@ -35,12 +35,16 @@ class WorkspaceActorTest {
     }
 
     @Test
-    void acceptsAnActorIdOfUpTo36CodePoints() {
-        String clef = "\uD834\uDD1E";
-        assertEquals(72, new WorkspaceActor("tenant-a", clef.repeat(36))
-                .getActorId().length());
+    void acceptsAnActorIdOfUpTo36Utf16Units() {
+        String bmp = "\u754c".repeat(36);
+        String supplementary = "\uD834\uDD1E".repeat(18);
+        assertEquals(bmp, new WorkspaceActor("tenant-a", bmp).getActorId());
+        assertEquals(supplementary,
+                new WorkspaceActor("tenant-a", supplementary).getActorId());
         assertThrows(IllegalArgumentException.class,
-                () -> new WorkspaceActor("tenant-a", clef.repeat(37)));
+                () -> new WorkspaceActor("tenant-a", bmp + "x"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", supplementary + "x"));
         // Interior spaces count and are kept; trailing spaces are refused
         // so a PAD SPACE collation cannot fold two actors together.
         assertEquals("a b", new WorkspaceActor("tenant-a", "a b").getActorId());

@@ -2,16 +2,22 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -76,6 +82,31 @@ class WorkspaceRuntimeResolverTest {
         when(registrations.find("tenant", "workspace")).thenReturn(Optional.of(registration("other-workspace")));
         refused(() -> resolver().resolve("session"));
         verify(authority).authorizeExternal(session, null);
+    }
+
+    @Test
+    void persistedConfinedSessionCannotFallBackWhenPrivateRootIsDisabled(@TempDir Path mount) throws IOException {
+        Path canonicalMount = mount.toRealPath();
+        var broker = properties.getRuntimeBroker();
+        broker.setProvisioner(RuntimeProviderKinds.LOCAL_PROCESS);
+        broker.setWorkspaceMounts(List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                binding.getTenantId(), binding.getStorageId(), canonicalMount.toString())));
+        when(authority.isExternal(binding)).thenReturn(false);
+        when(session.toolProfile()).thenReturn(WorkspaceToolProfiles.CONFINED_SHELL);
+        var resolver = resolver();
+
+        assertThatThrownBy(() -> resolver.resolve("session"))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo(WorkspaceExecutionProfile.CONFINEMENT_UNAVAILABLE);
+                    assertThat(error.isRetryable()).isFalse();
+                });
+        verifyNoInteractions(authority, registrations);
+
+        when(session.toolProfile()).thenReturn(WorkspaceToolProfiles.SHELL);
+        var ordinary = resolver.resolve("session");
+        assertThat(ordinary.scope().getCanonicalCwd()).isEqualTo(canonicalMount.toString());
+        assertThat(ordinary.scope().getCapabilityDigest()).isEqualTo(WorkspaceExecutionProfile.CAPABILITY_DIGEST);
     }
 
     private WorkspaceRuntimeResolver resolver() {

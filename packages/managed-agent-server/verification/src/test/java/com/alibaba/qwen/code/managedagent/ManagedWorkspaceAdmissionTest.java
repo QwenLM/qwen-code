@@ -445,7 +445,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void confinedShellFlagChangesPreserveReplayButBlockFreshTurns() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String actor = "actor-a";
         String workspace = "ws-shell";
         String storage = "storage-shell";

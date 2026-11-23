@@ -462,6 +462,9 @@ public final class LocalProcessRuntimeProvisioner
     private static void stopCgroup(LocalRuntimeStore.Resource resource, LocalRuntimeStore.Registration registration,
             boolean rebooted) throws IOException {
         if (registration.state() == LocalRuntimeStore.State.RETIRED) {
+            if (!rebooted) {
+                LinuxRuntimeCgroup.saved(registration.handle()).removeEmpty();
+            }
             return;
         }
         if (rebooted) {

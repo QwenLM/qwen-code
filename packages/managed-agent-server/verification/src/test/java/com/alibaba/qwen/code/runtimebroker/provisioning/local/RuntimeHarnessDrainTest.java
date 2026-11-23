@@ -641,7 +641,16 @@ public class RuntimeHarnessDrainTest {
                 } finally {
                     mountCommand("umount", leaf.toString());
                 }
-                drain.get().toCompletableFuture().get(10, TimeUnit.SECONDS);
+                // An empty child keeps the original leaf from being removed
+                // even after the whole unit has stopped.
+                Path emptyChild = Files.createDirectory(leaf.resolve("empty-child"));
+                try {
+                    drain.get().toCompletableFuture().get(10, TimeUnit.SECONDS);
+                    assertTrue(unit.empty());
+                    assertTrue(Files.isDirectory(leaf));
+                } finally {
+                    Files.deleteIfExists(emptyChild);
+                }
                 var retired = bindings.findById(original.getBindingId());
                 assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
                 assertTrue(retired.getDrainReceipt().matches(retired));
@@ -651,15 +660,19 @@ public class RuntimeHarnessDrainTest {
                 assertEquals(0L, memberCount(jdbc, physical));
                 assertNull(jdbc.queryForObject(storageKeyQuery, String.class,
                         original.getBindingId(), original.getGeneration()));
-                assertFalse(Files.exists(leaf));
                 assertTrue(LocalRuntimeStore.linuxProcessAbsent(childStat, childStart));
                 assertTrue(canary.isAlive());
+
+                assertTrue(restored.stopDrained(retired).toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS).matches(retired));
+                assertFalse(Files.exists(leaf));
 
                 Files.createDirectory(leaf);
                 bindMount(sibling, leaf);
                 try {
                     var replayed = restored.stopDrained(retired).toCompletableFuture().get(5, TimeUnit.SECONDS);
                     assertTrue(replayed.matches(retired));
+                    assertTrue(Files.isDirectory(leaf));
                     assertTrue(canary.isAlive());
                 } finally {
                     mountCommand("umount", leaf.toString());
