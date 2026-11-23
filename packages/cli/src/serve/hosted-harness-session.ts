@@ -8267,10 +8267,30 @@ export function registerHostedHarnessSessionRoutes(
                   verdict.checkpoint.continuation.phase !== 'await_action'
                 )
                   return undefined;
-                const continuation = await findHostedApprovalContinuation(
-                  session.managed,
-                  turn.turnId,
-                );
+                let continuation:
+                  | RestoredHostedApprovalContinuation
+                  | undefined;
+                try {
+                  continuation = await findHostedApprovalContinuation(
+                    session.managed,
+                    turn.turnId,
+                  );
+                } catch (cause) {
+                  // A Store fault says nothing about the saved continuation,
+                  // so the pump retries it. Any other rejection is fixed in
+                  // the journal and would fail every pass: the Turn takes the
+                  // crash path instead, as it did before it could resume.
+                  if (
+                    cause instanceof ManagedSessionStoreTransportError ||
+                    (cause instanceof ManagedSessionStoreHttpError &&
+                      (cause.status === 429 || cause.status >= 500))
+                  )
+                    throw cause;
+                  writeStderrLineSafe(
+                    `qwen serve: Interrupted wake turn ${turn.turnId} cannot resume its approval wait: ${String(cause)}`,
+                  );
+                  return undefined;
+                }
                 if (!continuation || continuation.plan.commandStep)
                   return undefined;
                 const text = await hostedOriginalPromptText(

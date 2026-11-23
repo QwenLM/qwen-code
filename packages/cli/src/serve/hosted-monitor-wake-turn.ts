@@ -115,7 +115,8 @@ export function createMonitorWakeRunTurn(params: {
    * A wake turn that died waiting for an approval its saved continuation can
    * resume runs that continuation, as a parked prompt's takeover does,
    * instead of settling as a crash. Resolves to the resumed run, or undefined
-   * when the turn has no such wait.
+   * when the turn has no such wait or its continuation is durably refused.
+   * Rejects only on a transient fault, which the pump retries.
    */
   readonly resumeInterrupted?: (
     turn: HostedMonitorWakeTurn,

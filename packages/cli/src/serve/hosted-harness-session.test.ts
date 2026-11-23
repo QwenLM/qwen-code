@@ -47379,13 +47379,18 @@ describe('idle suspension', () => {
   }
 
   // A wake Turn has no coordinator row, so its own pump is the only thing
-  // that can resume it after the Harness dies inside its approval wait.
-  it('resumes a monitor wake approval after its Harness dies in the wait', async () => {
+  // that can resume it after the Harness dies inside its approval wait. A
+  // Store fault while reading the saved continuation only delays it.
+  async function resumeMonitorWakeAfterDeath(fault: boolean) {
     domainEnablement.monitorRun = true;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     const turnId = 'monitor-1:notify:1';
     mockApprovalTurn(turnId);
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const saved = vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+    );
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -47465,6 +47470,10 @@ describe('idle suspension', () => {
       // after it reaches the journal, exactly as after a SIGKILL.
       live.monitorWake?.close();
       await live.managed.close();
+      if (fault)
+        saved.mockRejectedValueOnce(
+          new ManagedSessionStoreTransportError('Store unavailable'),
+        );
       const replacement = await app(true);
       const loaded = await headers(
         supertest(replacement).post(`/session/${SESSION_ID}/load`),
@@ -47527,11 +47536,19 @@ describe('idle suspension', () => {
       await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
         .set('X-Qwen-Client-Id', clientId)
         .expect(204);
+      if (fault) expect(saved.mock.calls.length).toBeGreaterThan(1);
     } finally {
+      saved.mockRestore();
       waiting.mockRestore();
       state.approvalSelections.clear();
     }
-  });
+  }
+
+  it('resumes a monitor wake approval after its Harness dies in the wait', () =>
+    resumeMonitorWakeAfterDeath(false));
+
+  it('retries a wake approval continuation read that a Store fault failed', () =>
+    resumeMonitorWakeAfterDeath(true));
 
   it('parks a recoverable approval and resumes it through cold recovery', async () => {
     state.wakeDispatch = true;
@@ -49408,9 +49425,10 @@ describe('idle suspension', () => {
 
   // The crash aftermath must leave a checkpoint the next turn can start
   // from: a wait left at await_action failed every later wake turn. A wait
-  // with no saved continuation (an uncaptured batch) is one the pump cannot
-  // resume, so it still meets the aftermath.
-  it('settles a monitor wake that died in its approval wait so its continuation can run', async () => {
+  // with no saved continuation (an uncaptured batch), or one whose saved
+  // continuation is durably refused, is one the pump cannot resume, so it
+  // still meets the aftermath instead of being retried forever.
+  async function settleMonitorWakeDeadInItsWait(refused: boolean) {
     domainEnablement.monitorRun = true;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     const turnId = 'monitor-1:notify:1';
@@ -49438,9 +49456,15 @@ describe('idle suspension', () => {
       throw new Error('The waiting Turn unexpectedly continued.');
     });
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
-    const saved = vi
-      .spyOn(approvalContinuation, 'findHostedApprovalContinuation')
-      .mockResolvedValue(undefined);
+    const saved = vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+    );
+    if (refused)
+      saved.mockRejectedValue(
+        new Error('Original assistant batch is missing.'),
+      );
+    else saved.mockResolvedValue(undefined);
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -49566,5 +49590,11 @@ describe('idle suspension', () => {
       waiting.mockRestore();
       state.approvalSelections.clear();
     }
-  });
+  }
+
+  it('settles a monitor wake that died in its approval wait so its continuation can run', () =>
+    settleMonitorWakeDeadInItsWait(false));
+
+  it('settles a monitor wake whose saved approval continuation is durably refused', () =>
+    settleMonitorWakeDeadInItsWait(true));
 });
