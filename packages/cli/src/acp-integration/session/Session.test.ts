@@ -126,7 +126,10 @@ import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
 } from './history-replay-page.js';
-import { createRepeatedToolFailureGuardState } from './repeated-tool-failure-guard.js';
+import {
+  createRepeatedToolFailureGuardState,
+  REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+} from './repeated-tool-failure-guard.js';
 import type { DaemonTodoStopGuard } from './daemon-todo-stop-guard.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
@@ -2431,7 +2434,7 @@ describe('Session', () => {
       status: 'unanswered',
     });
     merged['experimental'] = { mods: false };
-    modSession.installRewriter();
+    modSession.installMods();
     merged['experimental'] = { mods: true };
     expect(await modSession.askModRow('AssistantMessage', row)).toEqual({
       status: 'unhooked',
@@ -22004,15 +22007,6 @@ describe('Session', () => {
     });
 
     it('marks a buffered background response partial when a later model iteration fails', async () => {
-      const flushTurn = vi.fn().mockResolvedValue(undefined);
-      const interceptUpdate = vi.fn(async (update: SessionUpdate) => {
-        await session.sendUpdate(update);
-      });
-      session.messageRewriter = {
-        interceptUpdate,
-        flushTurn,
-        waitForPendingRewrites: vi.fn().mockResolvedValue(undefined),
-      } as unknown as Session['messageRewriter'];
       mockToolRegistry.getTool.mockReturnValue({
         name: 'read_file',
         kind: core.Kind.Read,
@@ -22133,38 +22127,12 @@ describe('Session', () => {
         (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
           .invocationCallOrder[endTurnCallIndex]!,
       );
-      const terminalUpdateIndex = interceptUpdate.mock.calls.findIndex(
-        ([update]) => {
-          const backgroundTask = update._meta?.['backgroundTask'] as
-            | { turnComplete?: boolean }
-            | undefined;
-          return (
-            update._meta?.['source'] === 'background_notification_response' &&
-            backgroundTask?.turnComplete === true
-          );
-        },
-      );
-      expect(terminalUpdateIndex).toBeGreaterThanOrEqual(0);
-      expect(
-        interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
-      ).toBeLessThan(flushTurn.mock.invocationCallOrder.at(-1)!);
-      expect(flushTurn.mock.invocationCallOrder.at(-1)).toBeLessThan(
-        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
-          .invocationCallOrder[endTurnCallIndex]!,
-      );
     });
 
     it('completes a buffered response when the final model iteration is empty', async () => {
-      const flushTurn = vi.fn().mockResolvedValue(undefined);
-      const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
-      const interceptUpdate = vi.fn(async (update: SessionUpdate) => {
-        await session.sendUpdate(update);
-      });
-      session.messageRewriter = {
-        interceptUpdate,
-        flushTurn,
-        waitForPendingRewrites,
-      } as unknown as Session['messageRewriter'];
+      const sessionUpdate = mockClient.sessionUpdate as ReturnType<
+        typeof vi.fn
+      >;
       mockToolRegistry.getTool.mockReturnValue({
         name: 'read_file',
         kind: core.Kind.Read,
@@ -22225,8 +22193,8 @@ describe('Session', () => {
           expect.objectContaining({ source: 'background_notification' }),
         );
       });
-      const terminalUpdateIndex = interceptUpdate.mock.calls.findIndex(
-        ([update]) => {
+      const terminalUpdateIndex = sessionUpdate.mock.calls.findIndex(
+        ([{ update }]) => {
           const content = (
             update as { content?: { type?: string; text?: string } }
           ).content;
@@ -22248,15 +22216,10 @@ describe('Session', () => {
           (params as { source?: string }).source === 'background_notification',
       );
       expect(terminalUpdateIndex).toBeGreaterThanOrEqual(0);
+      // The terminal marker reaches the client before end_turn.
       expect(
-        interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
-      ).toBeLessThan(flushTurn.mock.invocationCallOrder.at(-1)!);
-      // The terminal marker must be followed by a flush and pending-rewrite
-      // drain before end_turn so its metadata cannot leak into the next turn.
-      expect(
-        interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
-      ).toBeLessThan(waitForPendingRewrites.mock.invocationCallOrder.at(-1)!);
-      expect(flushTurn.mock.invocationCallOrder.at(-1)).toBeLessThan(
+        sessionUpdate.mock.invocationCallOrder[terminalUpdateIndex],
+      ).toBeLessThan(
         (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
           .invocationCallOrder[endTurnCallIndex]!,
       );
@@ -25185,57 +25148,6 @@ describe('Session', () => {
             ),
           },
         );
-      });
-    });
-
-    it('flushes notification rewrite metadata even without usage metadata', async () => {
-      const flushTurn = vi.fn().mockResolvedValue(undefined);
-      const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
-      const interceptUpdate = vi.fn().mockResolvedValue(undefined);
-      session.messageRewriter = {
-        interceptUpdate,
-        flushTurn,
-        waitForPendingRewrites,
-      } as unknown as Session['messageRewriter'];
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(createEmptyStream())
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                candidates: [
-                  {
-                    content: {
-                      parts: [{ text: 'notification response' }],
-                    },
-                  },
-                ],
-              },
-            },
-          ]),
-        );
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'start background work' }],
-      });
-
-      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
-        displayText: string,
-        modelText: string,
-        meta: { agentId: string; status: string; toolUseId?: string },
-      ) => void;
-
-      callback('done', '<task-notification />', {
-        agentId: 'agent-1',
-        status: 'completed',
-      });
-
-      await vi.waitFor(() => {
-        expect(flushTurn).toHaveBeenCalled();
       });
     });
 
@@ -30046,32 +29958,26 @@ describe('Session', () => {
         recreateSessionWithGuardMode('enforce');
         try {
           const execute = installFailingTool();
-          let enterRewriterWait!: () => void;
-          const rewriterWaitStarted = new Promise<void>((resolve) => {
-            enterRewriterWait = resolve;
+          // Cancel as the stop keeps the batch and its stop message.
+          let cancelled: Promise<void> | undefined;
+          vi.mocked(mockChat.addHistory).mockImplementation((content) => {
+            if (
+              !cancelled &&
+              content.parts?.some((part) =>
+                part.text?.includes(REPEATED_TOOL_FAILURE_STOP_MESSAGE),
+              )
+            )
+              cancelled = session.cancelPendingPrompt();
           });
-          let releaseRewriterWait!: () => void;
-          const rewriterWaitGate = new Promise<void>((resolve) => {
-            releaseRewriterWait = resolve;
-          });
-          session.messageRewriter = {
-            interceptUpdate: vi.fn().mockResolvedValue(undefined),
-            waitForPendingRewrites: vi.fn(async () => {
-              enterRewriterWait();
-              await rewriterWaitGate;
-            }),
-          } as unknown as NonNullable<Session['messageRewriter']>;
           queueMatchingFailureStreak();
 
           const prompt = session.prompt({
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: 'run the failing tool' }],
           });
-          await rewriterWaitStarted;
-          await session.cancelPendingPrompt();
-          releaseRewriterWait();
 
           await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+          expect(cancelled).toBeDefined();
           expect(execute).toHaveBeenCalledTimes(9);
           expect(logLoopDetectedSpy).toHaveBeenCalledWith(
             mockConfig,
@@ -35855,36 +35761,29 @@ describe('Session', () => {
           mockClient.extMethod = vi
             .fn()
             .mockResolvedValue({ messages: ['urgent: stop'] });
-          let markFinishing!: () => void;
-          const finishing = new Promise<void>((resolve) => {
-            markFinishing = resolve;
+          // The tool batch has settled and the tool ended the turn: its
+          // responses are being kept when the person sends now.
+          vi.mocked(mockChat.addHistory).mockImplementation((content) => {
+            if (content.parts?.some((part) => part.functionResponse))
+              session.sendMidTurnInputNow();
           });
-          let finish!: () => void;
-          const finished = new Promise<void>((resolve) => {
-            finish = resolve;
-          });
-          session.messageRewriter = {
-            interceptUpdate: vi.fn(async (update: SessionUpdate) => {
-              await session.sendUpdate(update);
-            }),
-            flushTurn: vi.fn().mockResolvedValue(undefined),
-            waitForPendingRewrites: vi.fn(async () => {
-              markFinishing();
-              await finished;
-            }),
-          } as unknown as Session['messageRewriter'];
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
             .mockResolvedValue(createEmptyStream());
 
           const done = startPrompt();
-          await finishing;
-          // The tool batch has settled and the tool ended the turn.
-          session.sendMidTurnInputNow();
-          finish();
 
           await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          expect(mockChat.addHistory).toHaveBeenCalledWith(
+            expect.objectContaining({
+              parts: expect.arrayContaining([
+                expect.objectContaining({
+                  functionResponse: expect.anything(),
+                }),
+              ]),
+            }),
+          );
         });
 
         it('leaves input recovered from a timed-out drain to the tool boundary', async () => {
@@ -43649,7 +43548,7 @@ describe('Session', () => {
           },
         );
 
-        it('does not record a clean boundary when cancellation arrives during tool-result rewriting', async () => {
+        it('does not record a clean boundary when cancellation arrives while the tool results are kept', async () => {
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',
             revision: 1,
@@ -43661,18 +43560,17 @@ describe('Session', () => {
             key === turnKey ? permit : undefined,
           );
           mockToolsWithTerminatingUpdateGoal();
-          let releaseRewrite!: () => void;
-          const waitForPendingRewrites = vi.fn(
-            () =>
-              new Promise<void>((resolve) => {
-                releaseRewrite = resolve;
-              }),
-          );
-          session.messageRewriter = {
-            interceptUpdate: vi.fn().mockResolvedValue(undefined),
-            flushTurn: vi.fn().mockResolvedValue(undefined),
-            waitForPendingRewrites,
-          } as unknown as Session['messageRewriter'];
+          // Cancel as the ended turn keeps its tool results.
+          let cancelled: Promise<void> | undefined;
+          vi.mocked(mockChat.addHistory).mockImplementation((content) => {
+            if (
+              !cancelled &&
+              content.parts?.some(
+                (part) => part.functionResponse?.id === 'call-update',
+              )
+            )
+              cancelled = session.cancelPendingPrompt();
+          });
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValueOnce(
@@ -43682,11 +43580,8 @@ describe('Session', () => {
             permit,
             continuationContext: 'finish the goal',
           });
-          await vi.waitFor(() =>
-            expect(waitForPendingRewrites).toHaveBeenCalled(),
-          );
-          await session.cancelPendingPrompt();
-          releaseRewrite();
+          await vi.waitFor(() => expect(cancelled).toBeDefined());
+          await cancelled;
           await vi.waitFor(() =>
             expect(mockClient.extNotification).toHaveBeenCalledWith(
               '_qwencode/end_turn',
@@ -53206,20 +53101,7 @@ describe('Session', () => {
         yield* createEmptyStream();
       }
 
-      it('waits for pending rewrites before ending after cancelled ask_user_question', async () => {
-        let releaseRewrite!: () => void;
-        const flushTurn = vi.fn().mockResolvedValue(undefined);
-        const waitForPendingRewrites = vi.fn(
-          () =>
-            new Promise<void>((resolve) => {
-              releaseRewrite = resolve;
-            }),
-        );
-        session.messageRewriter = {
-          interceptUpdate: vi.fn().mockResolvedValue(undefined),
-          flushTurn,
-          waitForPendingRewrites,
-        } as unknown as Session['messageRewriter'];
+      it('ends the turn after cancelled ask_user_question with the follow-up kept', async () => {
         mockToolRegistry.getTool.mockReturnValue(
           mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, vi.fn()),
         );
@@ -53237,20 +53119,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: 'question' }],
         });
-        let promptSettled = false;
-        void promptPromise.then(() => {
-          promptSettled = true;
-        });
 
-        await vi.waitFor(() => {
-          expect(waitForPendingRewrites).toHaveBeenCalledTimes(1);
-        });
-        await Promise.resolve();
-
-        expect(flushTurn).toHaveBeenCalledTimes(1);
-        expect(promptSettled).toBe(false);
-
-        releaseRewrite();
         await expect(promptPromise).resolves.toEqual({
           stopReason: 'end_turn',
         });
@@ -53280,7 +53149,7 @@ describe('Session', () => {
         );
       });
 
-      it('waits for pending rewrites before cron stops after cancelled ask_user_question', async () => {
+      it('lets cron stop after cancelled ask_user_question', async () => {
         const scheduler = {
           size: 1,
           hasPendingWork: true,
@@ -53293,21 +53162,6 @@ describe('Session', () => {
         mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
         mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
 
-        let releaseCronRewrite!: () => void;
-        const waitForPendingRewrites = vi
-          .fn()
-          .mockResolvedValueOnce(undefined)
-          .mockImplementationOnce(
-            () =>
-              new Promise<void>((resolve) => {
-                releaseCronRewrite = resolve;
-              }),
-          );
-        session.messageRewriter = {
-          interceptUpdate: vi.fn().mockResolvedValue(undefined),
-          flushTurn: vi.fn().mockResolvedValue(undefined),
-          waitForPendingRewrites,
-        } as unknown as Session['messageRewriter'];
         mockToolRegistry.getTool.mockReturnValue(
           mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, vi.fn()),
         );
@@ -53325,23 +53179,13 @@ describe('Session', () => {
         });
 
         await vi.waitFor(() => {
-          expect(waitForPendingRewrites).toHaveBeenCalledTimes(2);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockClient.requestPermission).toHaveBeenCalledTimes(1);
         });
 
         const internals = session as unknown as {
           cronCompletion: Promise<void> | null;
         };
-        const cronCompletion = internals.cronCompletion;
-        expect(cronCompletion).toBeTruthy();
-        let cronSettled = false;
-        void cronCompletion?.then(() => {
-          cronSettled = true;
-        });
-        await Promise.resolve();
-
-        expect(cronSettled).toBe(false);
-
-        releaseCronRewrite();
         await vi.waitFor(() => {
           expect(internals.cronCompletion).toBeNull();
         });
@@ -62551,31 +62395,17 @@ describe('Session', () => {
     });
 
     it('reports cancellation before a feature-off Stop loop starts', async () => {
-      let enterWait!: () => void;
-      const waitStarted = new Promise<void>((resolve) => {
-        enterWait = resolve;
-      });
-      let releaseWait!: () => void;
-      const waitGate = new Promise<void>((resolve) => {
-        releaseWait = resolve;
-      });
-      session.messageRewriter = {
-        interceptUpdate: vi.fn().mockResolvedValue(undefined),
-        waitForPendingRewrites: vi.fn(async () => {
-          enterWait();
-          await waitGate;
-        }),
-      } as unknown as NonNullable<Session['messageRewriter']>;
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
+      // Cancelled as the response ends, before the Stop loop runs.
+      mockChat.sendMessageStream = vi.fn().mockImplementationOnce(async () =>
+        (async function* () {
+          yield* createEmptyStream();
+          void session.cancelPendingPrompt();
+        })(),
+      );
 
-      const prompt = runGuardPrompt();
-      await waitStarted;
-      await session.cancelPendingPrompt();
-      releaseWait();
-
-      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
+      await expect(runGuardPrompt()).resolves.toMatchObject({
+        stopReason: 'cancelled',
+      });
     });
 
     it('lets cancellation win while a loop-detected Stop continuation is preserved', async () => {
@@ -66111,23 +65941,6 @@ describe('Session', () => {
       const internals = session as unknown as {
         todoStopGuardDrainAutomaticQueuesWhenIdle: boolean;
       };
-      let enterWait!: () => void;
-      const waitStarted = new Promise<void>((resolve) => {
-        enterWait = resolve;
-      });
-      let releaseWait!: () => void;
-      const waitGate = new Promise<void>((resolve) => {
-        releaseWait = resolve;
-      });
-      let waitCalls = 0;
-      session.messageRewriter = {
-        interceptUpdate: vi.fn().mockResolvedValue(undefined),
-        waitForPendingRewrites: vi.fn(async () => {
-          if (++waitCalls !== 1) return;
-          enterWait();
-          await waitGate;
-        }),
-      } as unknown as NonNullable<Session['messageRewriter']>;
       let enterSecondSend!: () => void;
       const secondSendStarted = new Promise<void>((resolve) => {
         enterSecondSend = resolve;
@@ -66136,9 +65949,28 @@ describe('Session', () => {
       const secondSendGate = new Promise<void>((resolve) => {
         releaseSecondSend = resolve;
       });
+      // A newer prompt supersedes the first as its response ends.
+      let secondPrompt!: ReturnType<typeof session.prompt>;
       mockChat.sendMessageStream = vi
         .fn()
-        .mockResolvedValueOnce(createEmptyStream())
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield* createEmptyStream();
+            secondPrompt = session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'new work chain' }],
+            });
+            internals.todoStopGuardDrainAutomaticQueuesWhenIdle = true;
+            mockBackgroundTaskRegistry.getAll.mockReturnValue([
+              {
+                id: 'old-unwind-agent',
+                isBackgrounded: true,
+                status: 'running',
+                notified: false,
+              },
+            ]);
+          })(),
+        )
         .mockImplementationOnce(async () => {
           enterSecondSend();
           await secondSendGate;
@@ -66160,21 +65992,6 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
 
       const firstPrompt = runGuardPrompt();
-      await waitStarted;
-      const secondPrompt = session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'new work chain' }],
-      });
-      internals.todoStopGuardDrainAutomaticQueuesWhenIdle = true;
-      mockBackgroundTaskRegistry.getAll.mockReturnValue([
-        {
-          id: 'old-unwind-agent',
-          isBackgrounded: true,
-          status: 'running',
-          notified: false,
-        },
-      ]);
-      releaseWait();
       await secondSendStarted;
 
       expect(internals.todoStopGuardDrainAutomaticQueuesWhenIdle).toBe(true);
