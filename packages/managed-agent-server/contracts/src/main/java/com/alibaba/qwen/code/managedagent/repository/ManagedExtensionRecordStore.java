@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 
 public interface ManagedExtensionRecordStore {
-    public com.fasterxml.jackson.databind.JsonNode currentMcpSettings(String tenant, String session);
+    public JsonNode currentMcpSettings(String tenant, String session);
 
     public static final String ERROR_MESSAGE_LINEAGE =
             "session_message_lineage_refused";
@@ -30,7 +30,8 @@ public interface ManagedExtensionRecordStore {
             "managed_session_extension_record_rejected";
 
     public record TaskRow(String taskId, String kind,
-            TaskProjection projection, String resourceId) {
+            TaskProjection projection, String resourceId,
+            String domain, String recordId) {
     }
 
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
@@ -45,13 +46,44 @@ public interface ManagedExtensionRecordStore {
     public List<JsonNode> listRecords(String tenantId, String sessionId,
             String domain);
 
+    public String diagnosticReadRevision(String tenantId, String sessionId);
+
+    public Optional<JsonNode> diagnosticConfigRef(String tenantId, String sessionId);
+
+    public List<JsonNode> diagnosticMcpRecordRefs(String tenantId, String sessionId, int limit);
+
+    public JsonNode readExtensionContributions(String tenantId, String sessionId, JsonNode ref);
+
     public Map<String, WebShellModelContext> findModelContexts(
             String tenantId, List<String> sessionIds);
+
+    public record ModelDiagnostics(JsonNode context, JsonNode statistics,
+            Long contextSequence, Long statisticsSequence, Long observedAt,
+            Long readRevision, boolean stale, List<String> coverageGaps) { }
+
+    public ModelDiagnostics findModelDiagnostics(String tenantId, String sessionId);
+
+    public record ActivityPage(List<JsonNode> items, boolean hasMore, boolean partial, Long lastTime, String lastKey) { }
+
+    public JsonNode findActivityStatistics(String tenantId, String sessionId);
+
+    public String diagnosticCommittedSequence(String tenantId, String sessionId);
+
+    public ActivityPage listActivity(String tenantId, String sessionId, String domain, long upperSequence,
+            Long beforeCreatedAt, String beforeKey, int limit);
 
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId);
 
     public Optional<TaskTarget> findTaskTarget(String tenantId,
             String sessionId, String taskId);
+
+    /**
+     * The task target keyed by its raw (domain, record_id) tuple, for callers
+     * that already hold the row (a task page item) and must not re-resolve the
+     * public task id hash through a Session-wide scan.
+     */
+    public Optional<TaskTarget> findTaskTargetByRecord(String tenantId,
+            String sessionId, String domain, String recordId);
 
     public JsonNode readRecordResource(String tenantId, String sessionId,
             JsonNode ref);
@@ -62,8 +94,19 @@ public interface ManagedExtensionRecordStore {
     public TaskPage listTasks(String tenantId, String sessionId,
             Long beforeCreatedAt, String beforeTaskId, int limit);
 
+    public TaskPage listChildTasks(String tenantId, String sessionId,
+            Long beforeCreatedAt, String beforeTaskId, int limit);
+
     public Optional<TaskRow> findTask(String tenantId, String sessionId,
             String taskId);
+
+    /**
+     * Resolves a page of public task ids in one Session-wide scan, keyed by
+     * task id, so a caller looping over page items does not pay a scan per
+     * item. Ids absent from the Session are simply not returned.
+     */
+    public Map<String, TaskRow> findTasks(String tenantId, String sessionId,
+            List<String> taskIds);
 
     public record ChildTaskDetails(String sessionId, Boolean stopRequested, String approvalMode) { }
 

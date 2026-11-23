@@ -102,17 +102,25 @@ export function readLocalJournalBytes(
     const bytes = readDescriptorPrefix(fd, size);
     const after = fs.fstatSync(fd);
     const current = fs.lstatSync(filePath);
+    // Timestamps come from a coarse clock, so a write in the same tick as the
+    // previous one leaves them equal. They stand for the bytes only while the
+    // size is unchanged too, which assumes no writer brings the file back to
+    // the same length with different bytes within one tick, by rewriting it
+    // in place or by truncating it and appending again. Comparing the bytes
+    // on this path too would catch that, at the cost of reading every
+    // unchanged file twice. A file that grew is read again up to the size
+    // read the first time, the bound or the size its first stat saw, and
+    // those bytes must match.
     requireSnapshot(
       !current.isSymbolicLink() &&
         current.isFile() &&
         current.dev === before.dev &&
         current.ino === before.ino &&
         after.size >= size &&
-        ((after.ctimeMs === before.ctimeMs &&
+        ((after.size === before.size &&
+          after.ctimeMs === before.ctimeMs &&
           after.mtimeMs === before.mtimeMs) ||
-          (maxBytes !== undefined &&
-            after.size > before.size &&
-            readDescriptorPrefix(fd, size).equals(bytes))),
+          (after.size > before.size && descriptorPrefixEquals(fd, bytes))),
       'file changed while reading',
     );
     return bytes;
@@ -126,6 +134,38 @@ export function readLocalJournalBytes(
   } finally {
     fs.closeSync(fd);
   }
+}
+
+const PREFIX_COMPARE_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Whether the descriptor's first bytes are still `expected`, read again in
+ * chunks so that a large file is not held twice.
+ */
+function descriptorPrefixEquals(fd: number, expected: Buffer): boolean {
+  const chunk = Buffer.allocUnsafe(
+    Math.min(PREFIX_COMPARE_CHUNK_BYTES, expected.length),
+  );
+  let offset = 0;
+  while (offset < expected.length) {
+    const count = fs.readSync(
+      fd,
+      chunk,
+      0,
+      Math.min(chunk.length, expected.length - offset),
+      offset,
+    );
+    if (
+      count <= 0 ||
+      !chunk
+        .subarray(0, count)
+        .equals(expected.subarray(offset, offset + count))
+    ) {
+      return false;
+    }
+    offset += count;
+  }
+  return true;
 }
 
 function readDescriptorPrefix(fd: number, size: number): Buffer {

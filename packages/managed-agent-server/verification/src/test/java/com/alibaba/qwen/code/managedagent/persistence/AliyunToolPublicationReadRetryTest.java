@@ -31,7 +31,9 @@ class AliyunToolPublicationReadRetryTest {
             try (var input = objects.open("key")) {
                 assertThat(input.readAllBytes()).isEqualTo("payload".getBytes(StandardCharsets.UTF_8));
             }
-            assertThat(fixture.attempts.get()).isEqualTo(operation.equals("versioning") ? 3 : 2);
+            // One fault plus one recovery per operation: the versioning fault lands
+            // in the constructor probe, and open no longer re-probes versioning.
+            assertThat(fixture.attempts.get()).isEqualTo(2);
         }
     }
 

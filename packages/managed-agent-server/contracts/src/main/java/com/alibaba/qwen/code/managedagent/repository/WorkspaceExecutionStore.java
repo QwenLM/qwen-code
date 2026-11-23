@@ -3,17 +3,20 @@ package com.alibaba.qwen.code.managedagent.repository;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.nio.file.Path;
+
 public interface WorkspaceExecutionStore {
-    public java.nio.file.Path createdStorageRoot(String tenantId, String storageId);
+    public Path createdStorageRoot(String tenantId, String storageId);
 
     public boolean verifiedRecoveryEnabled();
 
     public void authorize(SessionRecord session);
 
-    public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+    public void authorizeLifecycle(SessionRecord session, RuntimeLifecycleAuthority authority);
 
     public void authorizeLegacyClose(SessionRecord session);
 
@@ -31,6 +34,26 @@ public interface WorkspaceExecutionStore {
     public void authorizeActionResponse(SessionRecord session);
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session);
+
+    /** Claims the registered EXTERNAL Workspace member for a saved original binding. */
+    public void claim(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord saved,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository repository);
+
+    /** Held-state read that also checks the EXTERNAL Workspace member row. */
+    public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord saved,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository repository);
+
+    public void assertHeld(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord saved,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository repository);
+
+    public void release(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord saved,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository repository);
+
+    public void assertOriginalExternal(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord saved,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository repository);
+
+    public void releaseStopped(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord saved,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository repository);
 
     public void beginRewind(ContextBinding binding, RuntimeSessionRecord session);
 
@@ -58,7 +81,18 @@ public interface WorkspaceExecutionStore {
 
     public boolean canStopDrained(RuntimeBindingRecord saved);
 
+    /** Whether the drained original may stop: EXTERNAL members keep their provider row. */
+    public boolean canStopExternalDrained(RuntimeBindingRecord saved,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository repository);
+
     public void releaseLost(RuntimeBindingRecord saved);
+
+    public boolean isExternal(ContextBinding binding);
+
+    public void authorizeExternal(SessionRecord session,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+
+    public void requireExternalExecution(ContextBinding binding);
 
     public static RuntimeBrokerException unavailable() {
         return new RuntimeBrokerException(409, "workspace_unavailable",

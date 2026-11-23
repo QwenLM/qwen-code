@@ -7,8 +7,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -87,15 +86,15 @@ class HostedHarnessPoolMySqlIT {
         assertThat(jdbc.queryForObject("SELECT VERSION()", String.class)).startsWith("8.4.");
         var settings = spring.getBean(ManagedAgentProperties.class);
         settings.getSessionStore().setBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
-        var placements = spring.getBean(HarnessPlacementStore.class);
+        var placements = spring.getBean(JdbcHarnessPlacementStore.class);
         // The wired bean is the SdkHarnessBoundary decorator, so asking Spring
         // for the concrete pool type finds nothing; resolve the owner instead.
         pool = (HarnessPoolConnector) HostedGateTestSupport.connectorOwning(
                 spring.getBean(HarnessConnector.class));
         pool.refresh();
         assertThat(pool.supportsFencedTitles()).isTrue();
-        String tenantA = "pool-a-" + UUID.randomUUID();
-        String tenantB = "pool-b-" + UUID.randomUUID();
+        String tenantA = UUID.randomUUID().toString();
+        String tenantB = UUID.randomUUID().toString();
         String a1 = root(tenantA);
         String b1 = root(tenantB);
         String b2 = root(tenantB);
@@ -159,12 +158,10 @@ class HostedHarnessPoolMySqlIT {
 
     private String root(String tenant) {
         String id = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, tenant_key, session_key, session_scope_key,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', ?, ?, ?, 1, 1)", tenant, id,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(id),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, id));
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 1, 1)", tenant, id);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified)"
-                + " VALUES (?, ?, 'SESSION', X'', 1)", tenant, id);
+                + " VALUES (?, ?, 'SESSION', '', 1)", tenant, id);
         return id;
     }
 

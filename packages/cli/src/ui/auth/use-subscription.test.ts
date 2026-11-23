@@ -94,7 +94,7 @@ it('starts OAuth without environment configuration', async () => {
   await flush();
   expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(mocks.browser).toHaveBeenCalledWith(
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
   );
   expect(result.current.state.status).toBe('purchase-required');
   unmount();
@@ -102,7 +102,7 @@ it('starts OAuth without environment configuration', async () => {
 
 it('uses the production browser URL without exposing the device code', () => {
   expect(subscriptionAuthorizationUrl(device)).toBe(
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
   );
 });
 
@@ -130,12 +130,12 @@ it.each([
     });
     expect(result.current.canCheckAgain).toBe(false);
     expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
     ]);
     act(() => result.current.openPlans());
     expect(mocks.browser).toHaveBeenCalledTimes(2);
     expect(mocks.browser).toHaveBeenLastCalledWith(
-      'https://chat.qwen.ai/?memberPlan=qwen_code',
+      'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli',
     );
     expect(mocks.signIn).toHaveBeenCalledOnce();
     await act(async () => {
@@ -185,7 +185,7 @@ it.each(['free', 'plus', 'pro'])(
     expect(mocks.signOut).not.toHaveBeenCalled();
     expect(onActivate).not.toHaveBeenCalled();
     expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
     ]);
     await act(async () => finish({ ...free, member_type }));
     expect(result.current.state.status).toBe(
@@ -195,7 +195,7 @@ it.each(['free', 'plus', 'pro'])(
     if (member_type !== 'free') {
       expect(onActivate).toHaveBeenCalledWith(
         expect.any(AbortSignal),
-        'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+        'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
       );
     }
     unmount();
@@ -221,8 +221,8 @@ it('opens a new device authorization on every explicit entry', async () => {
   expect(mocks.getUserInfo).not.toHaveBeenCalled();
   expect(mocks.signOut).not.toHaveBeenCalled();
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
-    'https://chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
+    'https://chat.qwen.ai/authorize?user_code=NEXT-CODE&client=cli&entry=qwen_code&paywallScene=cli',
   ]);
   second.unmount();
 });
@@ -277,8 +277,8 @@ it.each([false, true])(
     if (suppressBrowserLaunch) expect(mocks.browser).not.toHaveBeenCalled();
     else
       expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-        'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
-        'https://chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
+        'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
+        'https://chat.qwen.ai/authorize?user_code=NEXT-CODE&client=cli&entry=qwen_code&paywallScene=cli',
       ]);
     await act(async () =>
       finishLogin({ ...free, email: 'next@example.test', member_type: 'pro' }),
@@ -540,7 +540,7 @@ it('does not let stale saved refresh credentials block explicit authorization', 
   expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(mocks.getUserInfo).not.toHaveBeenCalled();
   expect(mocks.browser).toHaveBeenCalledWith(
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
   );
   unmount();
 });
@@ -652,7 +652,7 @@ it('does not reopen plans when the first membership query after authorization is
   });
   expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
   ]);
   unmount();
 });
@@ -713,11 +713,11 @@ it('does not repeat a membership request before Retry-After, then recovers', asy
   unmount();
 });
 
-it('activates a paid account, hides private errors, and permits retry', async () => {
+it('activates a paid account, displays activation errors, and permits retry', async () => {
   authorize({ ...free, member_type: 'pro' });
   const onActivate = vi
     .fn()
-    .mockRejectedValueOnce(new Error('private-token'))
+    .mockRejectedValueOnce(new Error('model configuration failed'))
     .mockResolvedValue(undefined);
   const hook = renderHook(() => useSubscription({ onActivate }));
   await act(async () => {
@@ -725,8 +725,9 @@ it('activates a paid account, hides private errors, and permits retry', async ()
   });
   expect(hook.result.current.state.status).toBe('ready');
   expect(onActivate).toHaveBeenCalledTimes(1);
-  expect(hook.result.current.connectionError).toContain('Could not connect');
-  expect(hook.result.current.connectionError).not.toContain('private-token');
+  expect(hook.result.current.connectionError).toBe(
+    'model configuration failed',
+  );
   await act(async () => {
     await hook.result.current.connect();
   });
@@ -797,7 +798,7 @@ it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'] as const)(
     expect(onActivate).toHaveBeenCalledTimes(1);
     expect(onActivate).toHaveBeenCalledWith(
       expect.any(AbortSignal),
-      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
     );
     hook.rerender();
     await flush();
@@ -830,11 +831,11 @@ it('automatically activates a newly authorized paid account', async () => {
   expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(onActivate).toHaveBeenCalledWith(
     expect.any(AbortSignal),
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
   );
   expect(onActivate).toHaveBeenCalledOnce();
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
   ]);
   hook.unmount();
 });
@@ -857,7 +858,7 @@ it('automatically activates after a failed initial membership query is retried',
   expect(onActivate).toHaveBeenCalledOnce();
   expect(onActivate).toHaveBeenCalledWith(
     expect.any(AbortSignal),
-    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=cli&entry=qwen_code&paywallScene=cli',
   );
   expect(hook.result.current.connectionError).toBeUndefined();
   hook.unmount();
@@ -891,7 +892,7 @@ it('reads the latest activation callback without retrying automatically on reren
     }),
   );
   const first = vi.fn().mockResolvedValue(undefined);
-  const latest = vi.fn().mockRejectedValue(new Error('private failure'));
+  const latest = vi.fn().mockRejectedValue(new Error('activation failed'));
   const retry = vi.fn().mockResolvedValue(undefined);
   const hook = renderHook(({ onActivate }) => useSubscription({ onActivate }), {
     initialProps: { onActivate: first },
@@ -900,7 +901,7 @@ it('reads the latest activation callback without retrying automatically on reren
   await act(async () => confirm({ ...free, member_type: 'pro' }));
   expect(first).not.toHaveBeenCalled();
   expect(latest).toHaveBeenCalledOnce();
-  expect(hook.result.current.connectionError).toContain('Could not connect');
+  expect(hook.result.current.connectionError).toBe('activation failed');
   hook.rerender({ onActivate: retry });
   await act(async () => {
     await vi.advanceTimersByTimeAsync(60000);

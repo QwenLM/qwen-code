@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 
 /** Operator metadata only; registration does not attest or mount storage. */
 public record ExternalStorageRegistration(ExternalStorageIdentity identity, StorageAlias alias) {
@@ -29,7 +29,8 @@ public record ExternalStorageRegistration(ExternalStorageIdentity identity, Stor
 
         public String ownerKey() {
             // A revision must never create a second owner for the same provider storage.
-            return ManagedSchemaKeys.key("external-storage/1", providerId, physicalKey);
+            return ManagedIdentityRefs.ref(ManagedIdentityRefs.PHYSICAL_REF_BYTES,
+                    "external-storage/1", providerId, physicalKey);
         }
 
         @Override

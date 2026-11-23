@@ -8,6 +8,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,7 +39,7 @@ class SessionWorktreeStoreTest {
     Path temp;
     private JdbcTemplate jdbc;
     private TransactionTemplate transaction;
-    private SessionWorktreeStore store;
+    private JdbcSessionWorktreeStore store;
     private String workspace;
 
     protected DataSource source() {
@@ -55,30 +57,30 @@ class SessionWorktreeStoreTest {
         var properties = new ManagedAgentProperties();
         properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve("created")).toRealPath().toString());
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
-        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var registry = new JdbcManagedWorkspaceRegistry(jdbc);
         var guard = new WorkspaceStorageGuard(jdbc, manager, properties,
                 path -> new StorageIdentityReader.Identity(path.toString(), "test-host", "1", "2", "2026-10-15T00:00:00.123456789Z"));
         workspace = new WorkspaceCreationStore(jdbc, manager, guard, registry, properties, new ObjectMapper(), Clock.systemUTC())
                 .create("tenant", "actor", "Worktrees", "create").workspaceId();
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeStore(jdbc, registry, guard));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcSessionWorktreeStore(jdbc, registry, guard));
     }
 
     @Test
     void usesManagedJdbcWhenTheHostProvidesDefaultPersistenceBeans() {
         var host = new DriverManagerDataSource("jdbc:h2:mem:host-" + UUID.randomUUID(), "sa", "");
-        new ApplicationContextRunner().withUserConfiguration(SessionWorktreeStore.class)
+        new ApplicationContextRunner().withUserConfiguration(JdbcSessionWorktreeStore.class)
                 .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> jdbc, definition -> ((org.springframework.beans.factory.support.AbstractBeanDefinition) definition).setDefaultCandidate(false))
                 .withBean("hostJdbcTemplate", JdbcTemplate.class, () -> new JdbcTemplate(host))
                 .withBean("hostTransactionManager", org.springframework.transaction.PlatformTransactionManager.class,
                         () -> new DataSourceTransactionManager(host))
-                .withBean(ManagedWorkspaceRegistry.class, () -> new ManagedWorkspaceRegistry(jdbc))
+                .withBean(JdbcManagedWorkspaceRegistry.class, () -> new JdbcManagedWorkspaceRegistry(jdbc))
                 .withBean(WorkspaceStorageGuard.class, () -> org.mockito.Mockito.mock(WorkspaceStorageGuard.class))
-                .withBean(SshWorkspaceStore.class, () -> org.mockito.Mockito.mock(SshWorkspaceStore.class))
+                .withBean(JdbcSshWorkspaceStore.class, () -> org.mockito.Mockito.mock(JdbcSshWorkspaceStore.class))
                 .withBean(ManagedAgentProperties.class, ManagedAgentProperties::new)
                 .withBean(WorktreeFiles.class, LocalWorktreeFiles::new)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(SessionWorktreeStore.class).describe("tenant", "missing")).isNull();
+                    assertThat(context.getBean(JdbcSessionWorktreeStore.class).describe("tenant", "missing")).isNull();
                 });
     }
 
@@ -106,13 +108,13 @@ class SessionWorktreeStoreTest {
                 store.admit("tenant", "actor", "session", plan, resolved);
             });
             var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                    new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             assertThat(sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session").state())
                     .isEqualTo("preparing");
-            assertThat(SessionWorktreeStore.isReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session")).isFalse();
+            assertThat(JdbcSessionWorktreeStore.isReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session")).isFalse();
             assertThat(store.due()).hasSize(1);
             var candidate = store.due().getFirst();
-            SessionWorktreeStore.Row claim;
+            JdbcSessionWorktreeStore.Row claim;
             try (var workers = java.util.concurrent.Executors.newFixedThreadPool(2)) {
                 var start = new java.util.concurrent.CountDownLatch(1);
                 var first = workers.submit(() -> {
@@ -130,34 +132,94 @@ class SessionWorktreeStoreTest {
                 claim = claims.stream().filter(java.util.Objects::nonNull).findFirst().orElseThrow();
             }
             assertThat(claim).isNotNull();
-            String physical = WorkspaceExecutionStore.storageKey(jdbc, com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.storageBinding(plan));
-            jdbc.update("UPDATE ma_storage_owner SET holder_key = ?, maintenance_id = ?, maintenance_generation = ? WHERE storage_key = ?",
+            String physical = JdbcWorkspaceExecutionStore.storageKey(jdbc, SessionWorktreeStore.storageBinding(plan));
+            jdbc.update("UPDATE ma_storage_owner SET holder_id = ?, maintenance_id = ?, maintenance_generation = ? WHERE physical_id = ?",
                     "live-step", claim.operationId(), claim.generation(), physical);
             assertThat(store.claim(claim, "other", 120000)).isNull();
             assertThat(store.describe("tenant", "session").state()).isEqualTo("preparing");
-            jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, maintenance_id = NULL, maintenance_generation = NULL WHERE storage_key = ?", physical);
+            jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL, maintenance_id = NULL, maintenance_generation = NULL WHERE physical_id = ?", physical);
             String identity = git.prepare(plan);
             assertThat(store.complete(claim, "foreign", "READY", identity, null)).isFalse();
             assertThat(store.complete(claim, claim.claimedBy(), "READY", identity, null)).isTrue();
             var ready = sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session");
             assertThat(ready.id()).isEqualTo(id);
             assertThat(ready.state()).isEqualTo("ready");
-            SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session");
+            JdbcSessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session");
             assertThat(store.due()).isEmpty();
             assertThat(store.list("tenant", "actor", workspace)).hasSize(1);
-            assertThatThrownBy(() -> SessionWorktreeStore.requireCwd(jdbc, "tenant", "session", "project"))
+            assertThatThrownBy(() -> JdbcSessionWorktreeStore.requireCwd(jdbc, "tenant", "session", "project"))
                     .hasMessageContaining("worktree_cwd_outside");
             Files.move(location.root().resolve(cwd), location.root().resolve(cwd + "-saved"));
             assertThatThrownBy(() -> transaction.execute(status -> {
-                SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session");
+                JdbcSessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session");
                 return null;
             })).hasMessageContaining("worktree_identity_conflict");
             assertThat(sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session").state())
                     .isEqualTo("blocked");
-            assertThat(SessionWorktreeStore.descriptor(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session").state()).isEqualTo("blocked");
-            assertThatThrownBy(() -> SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))
+            assertThat(JdbcSessionWorktreeStore.descriptor(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session").state()).isEqualTo("blocked");
+            assertThatThrownBy(() -> JdbcSessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))
                     .hasMessageContaining("worktree_identity_conflict");
+            jdbc.update("UPDATE ma_session SET owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
+                    "actor", "tenant", "session");
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES (?,?,?,'READER')",
+                    "tenant", workspace, ManagedWorkspaceRegistry.actorKey("tenant", "other"));
+            assertThat(store.list("tenant", "other", workspace)).isEmpty();
+            assertThatThrownBy(() -> store.get("tenant", "other", workspace, id, false)).hasMessageContaining("not found");
+            assertThat(store.list("tenant", "actor", workspace)).hasSize(1);
         }
+    }
+
+    @Test
+    void listReusesAuthorizedRowsAndStillVerifiesBranchesAndBlocksBadIdentity() throws Exception {
+        var files = org.mockito.Mockito.mock(WorktreeFiles.class);
+        var json = new ObjectMapper();
+        for (int index = 0; index < 6; index++) {
+            String tenant = index == 5 ? "other-tenant" : "tenant";
+            String selectedWorkspace = index == 4 ? "other-workspace" : workspace;
+            String session = "listed-" + index;
+            String state = index == 1 ? "PREPARING" : index == 3 ? "REMOVED" : "READY";
+            var plan = new Plan(tenant, selectedWorkspace, 1, "storage", ".", "config", 1,
+                    temp.toString(), "root", ".", ".", ".git", "common", null, "commit",
+                    session, session, session, "planned-branch");
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, 'agent', 1, 1)", tenant, session);
+            jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id,"
+                    + " physical_id, worktree_id, owner_actor_key, state, revision, plan_json, identity_json,"
+                    + " operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, 'storage', 'physical', ?, ?, ?, 1, ?, '{}', ?, ?, 1)",
+                    tenant, session, selectedWorkspace, session, "actor",
+                    state, json.writeValueAsString(plan), session, index);
+            new WorkspaceOperations(jdbc, tenant).create(WorkspaceOperations.Kind.SESSION_WORKTREE, session,
+                    WorkspaceOperations.values("session_id", session, "state", state, "phase", state));
+            if (index == 0) {
+                org.mockito.Mockito.when(files.verify(plan, "{}")).thenReturn("verified-identity");
+                org.mockito.Mockito.when(files.currentBranch("verified-identity")).thenReturn("current-branch");
+            } else if (index == 2) {
+                org.mockito.Mockito.when(files.verify(plan, "{}"))
+                        .thenThrow(SessionWorktreeStore.error("worktree_identity_conflict"));
+            }
+        }
+        var trace = new StoreLockTrace(jdbc.getDataSource());
+        var listing = new JdbcSessionWorktreeStore(new ManagedSchemaJdbcTemplate(trace),
+                new JdbcManagedWorkspaceRegistry(jdbc), org.mockito.Mockito.mock(WorkspaceStorageGuard.class));
+        listing.configureWorktreeFiles(files);
+        var descriptors = listing.list("tenant", "actor", workspace);
+        assertThat(descriptors).extracting(SessionWorktreeStore.Descriptor::sessionId)
+                .containsExactly("listed-2", "listed-1", "listed-0");
+        assertThat(descriptors).extracting(SessionWorktreeStore.Descriptor::state)
+                .containsExactly("blocked", "preparing", "ready");
+        assertThat(descriptors.getLast().branch()).isEqualTo("current-branch");
+        assertThat(descriptors.getFirst().errorCode()).isEqualTo("worktree_identity_conflict");
+        assertThat(descriptors.getFirst().revision()).isEqualTo(2);
+        assertThat(JdbcSessionWorktreeStore.find(jdbc, "tenant", "listed-2").state()).isEqualTo("BLOCKED");
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql).filter(sql -> sql.contains(" from ma_session_worktree w ")))
+                .hasSize(1).allMatch(sql -> !sql.contains("w.session_id in"));
+        org.mockito.Mockito.verify(files, org.mockito.Mockito.times(2)).verify(
+                org.mockito.ArgumentMatchers.any(Plan.class), org.mockito.ArgumentMatchers.eq("{}"));
+        jdbc.update("UPDATE ma_session_worktree SET plan_json = 'not-json' WHERE tenant_id = ? AND session_id = ?",
+                "tenant", "listed-1");
+        assertThatThrownBy(() -> listing.list("tenant", "actor", workspace))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("Invalid Session worktree record");
     }
 
     @Test
@@ -193,7 +255,7 @@ class SessionWorktreeStoreTest {
             assertThat(store.describe("tenant", "cleanup-session").state()).isEqualTo("ready");
             var removal = store.cleanup("tenant", "actor", workspace, id, "remove");
             assertThat(store.cleanup("tenant", "actor", workspace, id, "remove").operationId()).isEqualTo(removal.operationId());
-            var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(jdbc.getDataSource())));
+            var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(jdbc.getDataSource())));
             var service = VerificationFixtures.configure(new com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService(store, execution,
                     new ManagedAgentProperties(), org.mockito.Mockito.mock(ManagedAgentStore.class),
                     org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class)));

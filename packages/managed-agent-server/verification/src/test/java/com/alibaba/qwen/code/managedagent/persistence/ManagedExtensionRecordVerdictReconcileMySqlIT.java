@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -45,16 +44,14 @@ class ManagedExtensionRecordVerdictReconcileMySqlIT {
                         parent);
                 shared.update(
                         "INSERT INTO ma_session_record"
-                                + " (session_scope_key, record_key, tenant_id,"
+                                + " (tenant_id,"
                                 + " workspace_id, session_id, domain, record_id,"
-                                + " operation_hash, revision,"
+                                + " operation_id, revision,"
                                 + " record_resource_id, task_kind, task_state,"
                                 + " delivery_target, delivery_state, gmt_create)"
-                                + " VALUES (?, ?, ?, 'workspace', ?, 'child_run',"
+                                + " VALUES (?, 'workspace', ?, 'child_run',"
                                 + " ?, 'h', 1, 'res-x', 'child_agent', 'running',"
                                 + " 'session', 'planned', 1)",
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, parent),
-                        ManagedExtensionProjection.recordKey(parent, "child_run", runId),
                         TENANT,
                         parent,
                         runId);
@@ -69,8 +66,8 @@ class ManagedExtensionRecordVerdictReconcileMySqlIT {
                     JdbcTemplate mintJdbc =
                             new JdbcTemplate(new SingleConnectionDataSource(mint, true));
                     try {
-                        ManagedExtensionRecordStore records =
-                                new ManagedExtensionRecordStore(gateJdbc);
+                        JdbcManagedExtensionRecordStore records =
+                                new JdbcManagedExtensionRecordStore(gateJdbc);
                         // The production ordinary reads ahead of the commit:
                         // the transaction snapshot is established here.
                         gateJdbc.queryForObject(

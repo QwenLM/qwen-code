@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -106,21 +108,21 @@ public final class ToolExecutionRecord {
             Instant dispatchLeaseUntil, long dispatchGeneration, long version,
             Instant settledAt, Instant abandonedAt, String lossEvidenceId,
             Long authorizedDispatchGeneration, Long authorizedBindingVersion) {
-        this.executionCallId = BrokerValues.requireId(executionCallId,
+        this.executionCallId = BrokerValues.requireChildRunId(executionCallId,
                 "executionCallId");
         this.idempotencyKey = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
-        this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
+        this.bindingId = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (runtimeGeneration <= 0) {
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");
         }
-        this.harnessSessionId = BrokerValues.requireId(harnessSessionId,
+        this.harnessSessionId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        this.runtimeSessionId = BrokerValues.requireId(runtimeSessionId,
+        this.runtimeSessionId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         this.turnId = BrokerValues.requireId(turnId, "turnId");
-        this.toolCallId = BrokerValues.requireId(toolCallId, "toolCallId");
+        this.toolCallId = BrokerValues.requireToolCallId(toolCallId, "toolCallId");
         this.requestDigest = BrokerValues.requireId(requestDigest,
                 "requestDigest");
         if (reference == null || state == null) {
@@ -410,10 +412,26 @@ public final class ToolExecutionRecord {
                 dispatchGeneration, version, completionTime);
     }
 
+    public ToolExecutionRecord withMeasurements(Map<String, Object> metadata) {
+        if (!isSettled() || !RuntimeToolMeasurements.selected(reference) || result == null) {
+            throw new IllegalStateException(
+                    "Only a measured settled execution accepts observations");
+        }
+        if (result.containsKey(RuntimeToolMeasurements.FIELD)) {
+            if (!BrokerValues.sameJsonMap(RuntimeToolMeasurements.metadata(result), metadata)) {
+                throw new IllegalArgumentException("Measured result metadata conflicts");
+            }
+            return this;
+        }
+        Map<String, Object> enriched = new java.util.LinkedHashMap<>(result);
+        enriched.put(RuntimeToolMeasurements.FIELD, metadata);
+        return withResult(enriched, lastSequence, settledAt);
+    }
+
     public static Map<String, Object> cancelledBeforeV3Start() {
-        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        Map<String, Object> result = new LinkedHashMap<>();
         result.put("executionStatus", "not_started");
-        result.put("responseParts", java.util.List.of());
+        result.put("responseParts", List.of());
         result.put("capture", null);
         return result;
     }

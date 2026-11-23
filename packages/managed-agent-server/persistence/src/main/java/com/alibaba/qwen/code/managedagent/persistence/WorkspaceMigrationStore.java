@@ -8,7 +8,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -124,12 +123,10 @@ public final class WorkspaceMigrationStore {
                     "request_json", request.toString(), "state", "RETIRING",
                     "source_registration_json", JSON.valueToTree(source).toString(),
                     "target_registration_id", UUID.randomUUID().toString()));
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+            jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
                     + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                     + " fence_operation_id = COALESCE(fence_operation_id, VALUES(fence_operation_id))",
-                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
-                    JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(storage),
                     tenant, storage, id);
             requireOwner();
         });
@@ -366,36 +363,30 @@ public final class WorkspaceMigrationStore {
     }
 
     private void requireIdle(JdbcTemplate reader) {
-        check(countIn(reader, "SELECT COUNT(*) FROM ma_session s JOIN ma_turn t"
+        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_turn t"
                 + " ON t.tenant_id = s.tenant_id AND t.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')") == 0,
+                + " AND s.workspace_storage_id = ? AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')"),
                 "migration_work_unsettled");
         // A parked task cancel counts here although it holds no lifecycle
         // hostage: its acceptance is unknown and its task may still use this
         // storage, so the move waits for the reconciler (D7-2).
-        check(countIn(reader, "SELECT COUNT(*) FROM ma_session s JOIN ma_operation o"
-                + " ON o.session_scope_key = s.session_scope_key AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')") == 0,
+        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_operation o"
+                + " ON o.tenant_id = s.tenant_id AND o.session_id = s.session_id AND s.is_publication_retention_registered = 1 WHERE s.tenant_id = ?"
+                + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')"),
                 "migration_work_unsettled");
-        check(countIn(reader, "SELECT COUNT(*) FROM ma_session s JOIN ma_request_receipt c"
+        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_request_receipt c"
                 + " ON c.tenant_id = s.tenant_id AND c.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND c.namespace = 'SESSION_COMMAND' AND c.state = 'PENDING'") == 0,
-                "migration_work_unsettled");
-        // An open or parked title waits; one a later title superseded, or
-        // one proven never delivered, has settled.
-        check(countIn(reader, "SELECT COUNT(*) FROM ma_session s JOIN ma_operation r"
-                + " ON r.session_scope_key = s.session_scope_key AND r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')") == 0,
+                + " AND s.workspace_storage_id = ? AND c.namespace = 'SESSION_COMMAND' AND c.state = 'PENDING'"),
                 "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage
         // moves. A conflicted one keeps only refs, which move with it.
-        check(countIn(reader, "SELECT COUNT(*) FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT' AND tenant_id = ?"
-                + " AND storage_id = ? AND child_state NOT IN ('merged', 'discarded', 'failed', 'conflicted')") == 0,
+        check(!existsIn(reader, "SELECT 1 FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT' AND tenant_id = ?"
+                + " AND storage_id = ? AND child_state NOT IN ('merged', 'discarded', 'failed', 'conflicted')"),
                 "migration_work_unsettled");
-        check(reader.queryForObject("SELECT COUNT(*) FROM ma_session_worktree WHERE physical_key IN"
-                        + " (SELECT physical_key FROM ma_storage WHERE alias_key = ?) AND state <> 'REMOVED'", Integer.class,
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage)) == 0,
+        check(reader.queryForList("SELECT 1 FROM ma_session_worktree WHERE physical_id IN"
+                        + " (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?) AND state <> 'REMOVED' LIMIT 1", Integer.class,
+                tenant, storage).isEmpty(),
                 "migration_work_unsettled");
         long now = reader.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
@@ -415,12 +406,12 @@ public final class WorkspaceMigrationStore {
                 break;
             }
         }
-        check(countIn(reader, "SELECT COUNT(*) FROM ma_session s JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")") == 0,
+        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND s.is_publication_retention_registered = 1 WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")"),
                 "migration_writer_active");
     }
 
-    private long countIn(JdbcTemplate reader, String sql) {
-        return reader.queryForObject(sql, Long.class, tenant, storage);
+    private boolean existsIn(JdbcTemplate reader, String sql) {
+        return !reader.queryForList(sql + " LIMIT 1", Integer.class, tenant, storage).isEmpty();
     }
 
     private void assertRetired() {
@@ -430,12 +421,12 @@ public final class WorkspaceMigrationStore {
             for (RuntimeBindingRecord binding : page) {
                 check(binding.getState() == RuntimeBindingRecord.State.RELEASED
                         && (binding.getDrainReceipt() != null || binding.hasStoppedWriters()), "migration_stop_unverified");
-                check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
-                        + " AND runtime_generation = ? AND session_state NOT IN ('RELEASED', 'FAILED')", Long.class,
-                        binding.getBindingId(), binding.getGeneration()) == 0, "migration_work_unsettled");
-                check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id = ?"
-                        + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED')", Long.class,
-                        binding.getBindingId(), binding.getGeneration()) == 0, "migration_work_unsettled");
+                check(jdbc.queryForList("SELECT 1 FROM ma_runtime_session WHERE binding_id = ?"
+                        + " AND runtime_generation = ? AND session_state NOT IN ('RELEASED', 'FAILED') LIMIT 1", Integer.class,
+                        binding.getBindingId(), binding.getGeneration()).isEmpty(), "migration_work_unsettled");
+                check(jdbc.queryForList("SELECT 1 FROM ma_tool_execution WHERE binding_id = ?"
+                        + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED') LIMIT 1", Integer.class,
+                        binding.getBindingId(), binding.getGeneration()).isEmpty(), "migration_work_unsettled");
                 cursor = binding.getBindingId();
             }
             if (page.size() < 50) {
@@ -454,8 +445,10 @@ public final class WorkspaceMigrationStore {
     }
 
     private void clearFence() {
-        check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL WHERE tenant_key = ? AND storage_key = ? AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey(storage), id) == 1, "migration_conflict");
+        // The same index as owner(), which already locked this row.
+        check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL"
+                + " WHERE tenant_id = ? AND storage_id = ? AND fence_operation_id = ?", tenant, storage,
+                id) == 1, "migration_conflict");
     }
 
     private Map<String, Object> requireRow(boolean lock) {

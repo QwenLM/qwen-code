@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,8 +37,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class HarnessPlacementStoreTest {
     protected JdbcTemplate jdbc;
     protected TransactionTemplate tx;
-    protected HarnessPlacementStore placements;
-    protected ManagedSessionStore store;
+    protected JdbcHarnessPlacementStore placements;
+    protected JdbcManagedSessionStore store;
     protected WriterCredentialPolicy credentials;
     private static final String TENANT = "tenant";
     private static final String SESSION = "session";
@@ -56,7 +57,7 @@ public class HarnessPlacementStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new ReleaseFaultJdbc(source);
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
-        placements = new HarnessPlacementStore(jdbc);
+        placements = new JdbcHarnessPlacementStore(jdbc);
         var properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey("0123456789abcdef0123456789abcdef");
         credentials = new WriterCredentialPolicy(properties);
@@ -90,12 +91,14 @@ public class HarnessPlacementStoreTest {
         jdbc.update("UPDATE ma_session SET status = ? WHERE tenant_id = ? AND session_id = ?", pendingStatus, TENANT, SESSION);
         jdbc.update("UPDATE ma_session_head SET phase = 'LIFECYCLE_ONLY', operation_id = 'close'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
-                + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, claim_owner,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind, tenant_id, session_id,"
+                + " target_kind, target_id, request_digest, request_json, state, phase, delivery_state, claim_owner,"
                 + " claim_generation, claim_until, lifecycle_protocol_version, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'close', ?, ?, ?, 'SESSION', ?, ?, '{}', 'PENDING', 'LIFECYCLE_ONLY',"
-                + " 'LEASED', 'worker', 7, ?, 1, 1, 1)", "c".repeat(64), "d".repeat(64), kind.name(), TENANT, SESSION,
-                "e".repeat(64), "f".repeat(64), HarnessPlacementStore.now(jdbc) + 60_000);
+                + " VALUES (?, 'SESSION', ?, 'close', ?, ?, ?, 'SESSION', ?, ?, '{}', 'PENDING', 'LIFECYCLE_ONLY',"
+                + " 'LEASED', 'worker', 7, ?, 1, 1, 1)",
+                ManagedIdentityRefs.operationRef(kind.name(), TENANT, "SESSION", SESSION, SESSION, "close"),
+                SESSION, kind.name(), TENANT, SESSION, SESSION,
+                "f".repeat(64), JdbcHarnessPlacementStore.now(jdbc) + 60_000);
         var operation = new OperationRecord(TENANT, SESSION, "close", kind, "request", "PENDING",
                 "ADMITTED", "LEASED", "ACTIVE", null, "worker", 7, 0, null, 1);
         assertThatThrownBy(() -> tx.execute(status -> placements.takeover(TENANT, SESSION, owner, "pod-b", "boot-b")))
@@ -290,7 +293,7 @@ public class HarnessPlacementStoreTest {
                 .isInstanceOf(ManagedAgentException.class).extracting("code").isEqualTo("harness_session_scope_ambiguous");
     }
 
-    private String token(HarnessPlacementStore.Placement placement) {
+    private String token(JdbcHarnessPlacementStore.Placement placement) {
         return credentials.issue(TENANT, WORKSPACE, SESSION, placement.instanceId(), placement.bootId(), placement.epoch());
     }
 

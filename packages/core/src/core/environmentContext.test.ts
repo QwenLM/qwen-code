@@ -25,6 +25,7 @@ import {
   getInitialChatHistory,
   getStartupContextLength,
   markCompressedHistory,
+  RETAINED_COMPACTION_TAIL_REMINDER,
   isSkillListingReminder,
   isSystemReminderContent,
   stripSystemReminderBlocks,
@@ -43,6 +44,10 @@ import { SendMessageTool } from '../tools/send-message.js';
 import { MonitorTool } from '../tools/monitor.js';
 import { LspTool } from '../tools/lsp.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import {
+  getShellConfiguration,
+  getShellDisplayName,
+} from '../utils/shell-utils.js';
 import {
   collectAvailableSkillEntries,
   SKILLS_ACTIVATED_OPENER,
@@ -449,6 +454,15 @@ describe('getEnvironmentContext', () => {
     });
   });
 
+  it('names the shell that will run the command', async () => {
+    const parts = await getEnvironmentContext(mockConfig as Config);
+    const configured = getShellConfiguration();
+
+    expect(parts[0].text).toContain(
+      `Shell commands run under: ${getShellDisplayName(configured)}`,
+    );
+  });
+
   it('omits the local operating system for an execution environment', async () => {
     mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
 
@@ -456,6 +470,8 @@ describe('getEnvironmentContext', () => {
 
     expectContains(parts[0].text, "Today's date is", 'Use workspace tools');
     expect(parts[0].text).not.toContain('My operating system is:');
+    // The command runs in the remote environment, not under the local shell.
+    expect(parts[0].text).not.toContain('Shell commands run under:');
     expect(parts[0].text).not.toContain('/test/dir');
     expect(getFolderStructure).not.toHaveBeenCalled();
   });
@@ -1158,6 +1174,46 @@ describe('getStartupContextLength', () => {
     userText(`${text}\n\nResume the prior task...`);
   const compressionAck = () =>
     modelText('Got it. Thanks for the additional context!');
+
+  it('recognizes a retained-operation bridge without consuming the original tool call', () => {
+    const history = [
+      summary(),
+      compressionAck(),
+      userText(RETAINED_COMPACTION_TAIL_REMINDER),
+      content('model', fnCall('fn', {}, 'latest')),
+      content('user', fnResponse('fn', {}, 'latest')),
+    ];
+    markCompressedHistory(history, 3);
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      3,
+    );
+    const restored: Content[] = JSON.parse(JSON.stringify(history));
+    markCompressedHistory(restored, 3);
+    expect(getStartupContextLength(restored, { includeCompressed: true })).toBe(
+      3,
+    );
+    const startup = userText(wrapSystemReminder('startup'));
+    expect(
+      getStartupContextLength([startup, ...restored], {
+        includeCompressed: true,
+      }),
+    ).toBe(4);
+  });
+
+  it('does not treat a real prompt quoting the bridge as synthetic context', () => {
+    const quoted = userText(RETAINED_COMPACTION_TAIL_REMINDER);
+    markApiHistoryPrompt(quoted, 'real-input');
+    expect(
+      getStartupContextLength([summary(), compressionAck(), quoted], {
+        includeCompressed: true,
+      }),
+    ).toBe(2);
+    expect(
+      getStartupContextLength([userText(RETAINED_COMPACTION_TAIL_REMINDER)], {
+        includeCompressed: true,
+      }),
+    ).toBe(0);
+  });
 
   it.each([0, 1, 3, 2.5, '3'])(
     'falls back to the detected boundary for an invalid saved prefix: %s',

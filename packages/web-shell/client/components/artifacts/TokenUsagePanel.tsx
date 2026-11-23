@@ -37,6 +37,14 @@ import {
   sampleSpeed,
   type TrendSeries,
 } from './TokenUsageTrend';
+import {
+  formatCompact,
+  inputTokens,
+  outputSpeed,
+  outputTokens,
+  summarizeSessionUsage,
+  totalTokens,
+} from './tokenUsageTotals';
 
 const POLL_INTERVAL_MS = 2_000;
 /** Distinct series colors; later models share a neutral color. */
@@ -53,23 +61,6 @@ interface ModelEntry {
   metrics: DaemonSessionStatsModelMetrics;
   /** Color slot by first use, so a model keeps its color as ranks change. */
   color: string;
-}
-
-function inputTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
-  return tokens.prompt > 0 ? tokens.prompt : tokens.cached;
-}
-
-function totalTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
-  const input = inputTokens(tokens);
-  return tokens.total > 0
-    ? Math.max(tokens.total, input + tokens.candidates)
-    : input + tokens.candidates + tokens.thoughts;
-}
-
-function outputTokens(
-  tokens: DaemonSessionStatsModelMetrics['tokens'],
-): number {
-  return Math.max(0, totalTokens(tokens) - inputTokens(tokens));
 }
 
 function flattenModels(
@@ -91,18 +82,6 @@ function flattenModels(
 
 function formatCount(n: number): string {
   return n.toLocaleString('en-US');
-}
-
-/** Compact token counts: 1,390,000 → "1.39M", 199,076 → "199.1K". */
-function formatCompact(n: number): string {
-  if (n >= 999_995_000) return trimZeros((n / 1_000_000_000).toFixed(2)) + 'B';
-  if (n >= 999_950) return trimZeros((n / 1_000_000).toFixed(2)) + 'M';
-  if (n >= 1_000) return trimZeros((n / 1_000).toFixed(1)) + 'K';
-  return String(n);
-}
-
-function trimZeros(value: string): string {
-  return value.replace(/\.?0+$/, '');
 }
 
 interface RequestOutcome {
@@ -130,16 +109,6 @@ const OUTCOME_ICONS = {
   warning: TriangleAlertIcon,
   error: CircleAlertIcon,
 } as const;
-
-/** Output tokens per second over every timed generation window. */
-function outputSpeed(
-  generation: DaemonSessionStatsModelMetrics['generation'],
-): number | undefined {
-  return generation && generation.totalGenerationDurationMs > 0
-    ? generation.totalThroughputOutputTokens /
-        (generation.totalGenerationDurationMs / 1000)
-    : undefined;
-}
 
 export function TokenUsagePanel({
   sessionActions,
@@ -261,41 +230,8 @@ function TokenUsageBody({
 }) {
   const { t } = useI18n();
   const entries = flattenModels(status.models);
-  const totals = entries.reduce(
-    (acc, e) => {
-      acc.prompt += inputTokens(e.metrics.tokens);
-      acc.cached += e.metrics.tokens.cached;
-      acc.output += outputTokens(e.metrics.tokens);
-      acc.thoughts += e.metrics.tokens.thoughts;
-      acc.total += totalTokens(e.metrics.tokens);
-      acc.requests += e.metrics.api.totalRequests;
-      acc.failed += e.metrics.api.totalErrors;
-      const g = e.metrics.generation;
-      if (g) {
-        acc.generation.timedRequests += g.timedRequests;
-        acc.generation.totalTtftMs += g.totalTtftMs;
-        acc.generation.totalGenerationDurationMs += g.totalGenerationDurationMs;
-        acc.generation.totalThroughputOutputTokens +=
-          g.totalThroughputOutputTokens;
-      }
-      return acc;
-    },
-    {
-      prompt: 0,
-      cached: 0,
-      output: 0,
-      thoughts: 0,
-      total: 0,
-      requests: 0,
-      failed: 0,
-      generation: {
-        timedRequests: 0,
-        totalTtftMs: 0,
-        totalGenerationDurationMs: 0,
-        totalThroughputOutputTokens: 0,
-      },
-    },
-  );
+  const totals = summarizeSessionUsage(status);
+  const legacySpeed = totals.legacySpeed;
   const grandTotal = totals.total;
   const trendSeries: TrendSeries[] = entries
     .map((entry) => ({
@@ -303,6 +239,7 @@ function TokenUsageBody({
       label: entry.label,
       color: entry.color,
       samples: entry.metrics.timingSamples ?? [],
+      legacySpeed,
       failures: entry.metrics.failures?.recent ?? [],
     }))
     .filter((s) => s.samples.length > 0 || s.failures.length > 0);
@@ -310,7 +247,7 @@ function TokenUsageBody({
   const speedScaleMax = Math.max(
     0,
     ...trendSeries.flatMap((s) =>
-      s.samples.map((sample) => sampleSpeed(sample) ?? 0),
+      s.samples.map((sample) => sampleSpeed(sample, legacySpeed) ?? 0),
     ),
   );
   // Keep legacy daemon responses correctly ordered when total is omitted.
@@ -376,6 +313,7 @@ function TokenUsageBody({
           thoughts={totals.thoughts}
           outcome={{ requests: totals.requests, failed: totals.failed }}
           generation={totals.generation}
+          legacySpeed={legacySpeed}
         />
       </div>
 
@@ -396,6 +334,7 @@ function TokenUsageBody({
               key={entry.key}
               entry={entry}
               grandTotal={grandTotal}
+              legacySpeed={legacySpeed}
               speedScaleMax={speedScaleMax}
             />
           ))}
@@ -530,10 +469,12 @@ function SuccessRateValue({
 function ModelCard({
   entry,
   grandTotal,
+  legacySpeed,
   speedScaleMax,
 }: {
   entry: ModelEntry;
   grandTotal: number;
+  legacySpeed: boolean;
   speedScaleMax: number;
 }) {
   const { t } = useI18n();
@@ -543,16 +484,25 @@ function ModelCard({
   const avgLatency =
     m.api.totalRequests > 0 ? m.api.totalLatencyMs / m.api.totalRequests : 0;
   const { generation } = m;
+  const speed = outputSpeed(generation, legacySpeed);
+  // Averaged over the same requests as TTFT so the two add up to their
+  // latency; Avg latency also counts failed, internal and non-streamed
+  // requests. An older daemon only sums the windows of its output speed.
+  const generationTotal =
+    generation?.totalTimedGenerationDurationMs ??
+    generation?.totalGenerationDurationMs;
+  const showGeneration =
+    speed !== undefined ||
+    (generationTotal !== undefined && generationTotal > 0);
   const timing =
     generation && generation.timedRequests > 0
       ? {
           ttft: generation.totalTtftMs / generation.timedRequests,
-          // Averaged over the same requests as TTFT so the two add up to
-          // their latency; Avg latency also counts failed, internal
-          // and non-streamed requests.
           generation:
-            generation.totalGenerationDurationMs / generation.timedRequests,
-          speed: outputSpeed(generation),
+            showGeneration && generationTotal !== undefined
+              ? generationTotal / generation.timedRequests
+              : undefined,
+          speed,
         }
       : undefined;
   const stats: Array<{ label: string; value: string; node?: ReactNode }> = [
@@ -570,6 +520,10 @@ function ModelCard({
                     rate: timing.speed.toFixed(1),
                   }),
                 },
+              ]
+            : []),
+          ...(timing.generation !== undefined
+            ? [
                 {
                   label: t('tokenUsage.generation'),
                   value: formatDuration(timing.generation),
@@ -614,7 +568,11 @@ function ModelCard({
         ))}
       </dl>
       {m.timingSamples && (
-        <SpeedSpread samples={m.timingSamples} scaleMax={speedScaleMax} />
+        <SpeedSpread
+          samples={m.timingSamples}
+          legacy={legacySpeed}
+          scaleMax={speedScaleMax}
+        />
       )}
       {m.failures && Object.keys(m.failures.byKind).length > 0 && (
         <FailureKinds byKind={m.failures.byKind} />
@@ -681,6 +639,7 @@ function TokenSummary({
   thoughts,
   outcome,
   generation,
+  legacySpeed,
 }: {
   input: number;
   output: number;
@@ -688,9 +647,10 @@ function TokenSummary({
   thoughts: number;
   outcome: RequestOutcome;
   generation: NonNullable<DaemonSessionStatsModelMetrics['generation']>;
+  legacySpeed: boolean;
 }) {
   const { t } = useI18n();
-  const speed = outputSpeed(generation);
+  const speed = outputSpeed(generation, legacySpeed);
   return (
     <dl className={styles.overview}>
       <div className={styles.summaryMetric}>

@@ -157,14 +157,16 @@ final class HostedWorkflowProbe implements AutoCloseable {
                 MessageDigest.getInstance("SHA-256").digest(bytes));
         int updated = jdbc.update(
                 "UPDATE ma_resource SET inline_bytes = ?, byte_length = ?,"
-                        + " sha256 = ? WHERE tenant_id = ? AND session_id"
-                        + " = ? AND resource_id = ?", bytes, bytes.length,
-                shaAfter, tenant, sessionId, resourceId);
+                        + " sha256 = ? WHERE tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?", bytes,
+                bytes.length, shaAfter, tenant, sessionId,
+                resourceId);
         assertThat(updated).as("the envelope row updated").isEqualTo(1);
         var reread = jdbc.queryForList(
                 "SELECT sha256, byte_length FROM ma_resource WHERE"
-                        + " tenant_id = ? AND session_id = ? AND"
-                        + " resource_id = ?", tenant, sessionId, resourceId);
+                        + " tenant_id = ? AND session_id"
+                        + " = ? AND resource_id = ?", tenant,
+                sessionId, resourceId);
         assertThat(reread.getFirst().get("sha256").toString())
                 .as("the tamper landed").isEqualTo(shaAfter);
         return Map.of("resourceId", resourceId, "childRunId", recordId,

@@ -140,6 +140,7 @@ export const MainContent = ({
 }: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const transcriptSessionId = uiState.historyManager.sessionId;
   const { allExpanded: fullDetail } = useThoughtExpanded();
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
@@ -460,7 +461,7 @@ export const MainContent = ({
   // Streaming-only state — including pending source-copy offsets — is read
   // from refs so callback identity is stable.
   const renderVirtualItem = useCallback(
-    ({ item }: { item: VpItem }) => {
+    ({ item, isInViewport }: { item: VpItem; isInViewport: boolean }) => {
       if (item.type === 'vp-banner') {
         return (
           <Box flexDirection="column">
@@ -508,6 +509,8 @@ export const MainContent = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
           fullDetail={fullDetail}
+          modSessionId={transcriptSessionId}
+          isInViewport={isInViewport}
         />
       );
     },
@@ -521,6 +524,7 @@ export const MainContent = ({
       fullDetail,
       pendingAvailableTerminalHeight,
       uiState.constrainHeight,
+      transcriptSessionId,
     ],
   );
 

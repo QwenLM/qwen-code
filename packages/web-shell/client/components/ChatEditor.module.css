@@ -427,6 +427,75 @@
   -webkit-line-clamp: 2;
 }
 
+:global(
+  [data-web-shell-toolbar-popover][data-web-shell-mode-popover]:not(
+      [data-web-shell-compact-overlay]
+    )
+) {
+  box-sizing: border-box;
+  width: min(400px, var(--radix-popover-content-available-width));
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover]) {
+  padding: 6px;
+  font-size: 13px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownList {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownRich
+  .dropdownItem {
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  gap: 8px;
+  padding: 5px 7px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItem {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemContent {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemLabel {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDesc {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemIcon
+  svg {
+  width: 16px;
+  height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemIcon,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemLabel,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemDesc {
+  color: var(--destructive);
+}
+
 :global([data-web-shell-reasoning-popover]) {
   overflow-x: hidden;
   overflow-y: auto;
@@ -435,6 +504,33 @@
 :global([data-web-shell-model-submenu]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
   min-width: min(280px, var(--radix-popover-content-available-width));
+}
+
+:global([data-web-shell-model-sheet]) .dropdownItemLabel {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The sheet is portaled out of .editorShell, so the mobile composer's 44px
+   overrides never reach its controls. The section row keeps its own taller
+   floor. The sheet also stands in for the popover in narrow desktop windows,
+   where a mouse needs none of this, so the floor is keyed on the pointer. */
+@media (hover: none) and (pointer: coarse) {
+  :global([data-web-shell-model-sheet]) .dropdownItem:not(.sheetSectionRow),
+  :global([data-web-shell-model-sheet]) .reasoningThinkingRow,
+  :global([data-web-shell-model-sheet]) .reasoningEffortRow,
+  :global([data-web-shell-model-sheet]) [data-web-shell-model-sheet-done],
+  :global([data-web-shell-model-sheet]) .dropdownSearchRow > button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The Thinking row is not itself a control: its switch is. Growing the row
+     alone would add dead space, so the switch's own hit rect grows with it. */
+  :global([data-web-shell-model-sheet])
+    [data-web-shell-thinking-toggle]::after {
+    inset-block: -13px;
+  }
 }
 
 .slashPanel {
@@ -517,7 +613,7 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 220px)
+    minmax(0, max-content)
     minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
@@ -601,7 +697,7 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .slashDetailText {
@@ -637,7 +733,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
-  text-align: right;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1205,6 +1301,61 @@
   overflow-y: auto;
 }
 
+/* Touch follow-up suggestion bar: tap fills the textarea without submitting
+   (desktop Tab semantics). Rendered only while the input is empty, so it
+   never competes with a draft for room. */
+.mobileFollowup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+}
+
+/* Chip styling so the bar reads as a tappable button on touch (no hover to
+   discover it): the suggestion content is the label, the insert icon and
+   container carry the affordance. */
+.mobileFollowupAccept {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 8px;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: start;
+  cursor: pointer;
+}
+
+.mobileFollowupAccept > svg {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowupText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mobileFollowupAccept:not(:disabled):hover {
+  background: var(--chat-editor-bg-primary);
+  border-color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowup .toolBtn > svg {
+  width: 18px;
+  height: 18px;
+}
+
 .editorArea .cm-scroller {
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
@@ -1383,9 +1534,10 @@
   flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
-/* Compact (icon-only) chip: a single severity dot on the branch icon so the
-   working-tree state is still glanceable without the text + inline indicators. */
+/* Reserve a visible severity dot for icon-only and detail-collapsed branch
+   chips, without duplicating the detailed indicators on wider layouts. */
 .gitBranchBadgeDot {
+  display: none;
   position: absolute;
   top: var(--git-branch-badge-offset, -2px);
   right: var(--git-branch-badge-offset, -3px);
@@ -1394,6 +1546,10 @@
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+}
+
+.gitBranchChipCompact .gitBranchBadgeDot {
+  display: block;
 }
 
 .gitBranchBadgeDot[data-tone='warning'] {
@@ -1718,7 +1874,6 @@
 
 .dropdownItemActive {
   color: var(--foreground);
-  background: var(--accent);
 }
 
 .dropdownItemIcon,
@@ -1744,6 +1899,19 @@
   min-width: 0;
   flex-direction: column;
   gap: 2px;
+}
+
+.dropdownItem.modelPickerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+}
+
+.modelPickerContent {
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
 }
 
 .dropdownItemLabel {
@@ -1791,6 +1959,33 @@
   border-top: 1px solid var(--border);
 }
 
+.sheetSectionRow {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sheetSectionValue {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--muted-foreground);
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sheetSectionValue svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
 .reasoningOptions {
   display: flex;
   flex-direction: column;
@@ -1826,6 +2021,23 @@
 
 .reasoningEffortRow:hover:not(:disabled) {
   background: var(--accent);
+}
+
+.dropdownItemActive,
+.dropdownItemActive:hover,
+.reasoningEffortRowActive,
+.reasoningEffortRowActive:hover:not(:disabled) {
+  font-weight: 500;
+  background: color-mix(in oklab, var(--accent), var(--foreground) 6%);
+}
+
+.dropdownItemActive .dropdownItemLabel {
+  font-weight: 500;
+}
+
+.reasoningEffortRowActive:disabled {
+  font-weight: inherit;
+  background: transparent;
 }
 
 .reasoningEffortRow:disabled {
@@ -1870,6 +2082,20 @@
 .toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+/* The trigger names the active mode, so Full Access stays dangerous after it
+   is selected, not only inside the picker. Hover tiles the generic rule above
+   on specificity and would otherwise drop the warning color. */
+.toolBtn.modeToolBtnDanger,
+.toolBtn.modeToolBtnDanger .toolBtnText {
+  color: var(--destructive);
+}
+
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover,
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover
+  .toolBtnText {
+  color: var(--destructive);
 }
 
 .planControl {
@@ -3053,9 +3279,47 @@
   flex-shrink: 1;
 }
 
+@supports (container-type: inline-size) {
+  @container (max-width: 320px) {
+    .mobileContextRow [data-slot='select-value'],
+    .mobileContextRow [data-web-shell-git-branch-label],
+    .mobileContextRow .gitBranchText,
+    .mobileContextRow .workspaceChipText {
+      display: none;
+    }
+    .mobileContextRow .gitBranchIndicators {
+      display: none;
+    }
+    .mobileContextRow .gitBranchBadgeDot {
+      display: block;
+    }
+  }
+}
+
 .mobileEditingActions {
   flex-wrap: wrap;
   margin-top: -8px;
+}
+
+/* Keep the controls together so hide-keyboard/expand stay an adjacent tail.
+   Group-internal wrapping preserves 44px targets and keeps them right aligned. */
+.mobileEditingKeys {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.mobileEditingTail {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+  margin-inline-start: auto;
+}
+
+.mobileKeyboardPlaceholder {
+  visibility: hidden;
 }
 
 .mobileEditingActions:has(.mobileContextRow) {
@@ -3064,6 +3328,13 @@
 }
 
 .mobileEditingActions > button > svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Direction, hide-keyboard and expand buttons share this group's 18px icon
+   geometry, including when the keyboard button appears and disappears. */
+:is(.mobileEditingKeys, .mobileEditingTail) > button > svg {
   width: 18px;
   height: 18px;
 }

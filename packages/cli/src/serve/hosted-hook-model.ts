@@ -164,6 +164,7 @@ export async function runHostedHookOperation<T>(
     true,
     {
       toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
       ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
     },
   );

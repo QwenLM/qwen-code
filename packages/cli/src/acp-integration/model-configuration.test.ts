@@ -20,6 +20,7 @@ import {
   resolveReasoningCapabilities,
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -744,7 +745,6 @@ describe('model configuration manifest', () => {
     'QWEN-LATEST-SERIES-INVITE-202610-m6',
     'qwen4',
     'qwen4-plus',
-    'Qwen4-Max-2026-10-01',
   ])('registers the stable tiered controls for %s', (modelId) => {
     expect(getModelConfiguration(modelId)).toEqual(
       getModelConfiguration('qwen3.8-max'),
@@ -764,6 +764,28 @@ describe('model configuration manifest', () => {
     });
   });
 
+  it.each(['qwen4-max', 'Qwen4-Max-2026-10-01'])(
+    'registers the qwen4 native controls for %s',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toEqual(
+        getModelConfiguration('qwen4-max'),
+      );
+      expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
+        id: 'reasoning_effort',
+        currentValue: 'high',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'high' },
+          { value: 'xhigh' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': { defaultEffort: 'high' },
+        },
+      });
+    },
+  );
+
   it.each(['qwen-latest-series-other', 'company-qwen4', 'qwen3.9-max'])(
     'does not register tiered controls for %s',
     (modelId) => {
@@ -771,9 +793,17 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it.each(['qwen4-plus', 'qwen-latest-series-invite-202610-m6'])(
+  it.each([
+    [
+      'qwen-latest-series-invite-202610-m6',
+      'xhigh',
+      ['none', 'low', 'medium', 'xhigh'],
+    ],
+    ['qwen4-plus', 'xhigh', ['none', 'low', 'medium', 'xhigh']],
+    ['qwen4-max', 'high', ['none', 'low', 'high', 'xhigh']],
+  ] as const)(
     'projects tiered controls for %s on opaque duplicate-endpoint routes',
-    (model) => {
+    (model, currentValue, tiers) => {
       const baseUrl =
         'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
       const generation = {
@@ -800,13 +830,8 @@ describe('model configuration manifest', () => {
           true,
         )?.[0],
       ).toMatchObject({
-        currentValue: 'xhigh',
-        options: [
-          { value: 'none' },
-          { value: 'low' },
-          { value: 'medium' },
-          { value: 'xhigh' },
-        ],
+        currentValue,
+        options: tiers.map((value) => ({ value })),
       });
     },
   );
@@ -931,6 +956,16 @@ describe('model configuration manifest', () => {
     ['qwen-latest-series-invite-202610-m6', 'max', false, false],
     ['qwen4-plus', 'none', false, true],
     ['qwen4-plus', 'none', true, false],
+    ['qwen4-plus', 'low', false, true],
+    ['qwen4-plus', 'medium', false, true],
+    ['qwen4-plus', 'xhigh', false, true],
+    ['qwen4-plus', 'high', false, false],
+    ['qwen4-plus', 'max', false, false],
+    ['qwen4-max', 'low', false, true],
+    ['qwen4-max', 'high', false, true],
+    ['qwen4-max', 'xhigh', false, true],
+    ['qwen4-max', 'medium', false, false],
+    ['qwen4-max', 'max', false, false],
     ['qwen3.7-plus', 'default', false, true],
     ['qwen3.7-plus', 'none', false, true],
     ['qwen3.7-plus', 'low', false, false],
@@ -945,12 +980,25 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
-    'wraps the stable %s default option for workspace preview',
+  it.each([
+    'qwen3.8-max',
+    'qwen3.8-flash',
+    'qwen3.7-plus',
+    'future-served-model',
+  ])(
+    'shows the subscription default for %s in the workspace preview',
     (modelId) => {
-      expect(buildModelReasoningConfigPreview(modelId)).toEqual([
-        buildModelReasoningConfigOption(modelId),
-      ]);
+      const generation = {
+        model: modelId,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      };
+      const reasoning = resolveReasoningForModel(undefined, generation);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, undefined, true),
+      ).toMatchObject([{ currentValue: 'medium' }]);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, 'xhigh', true),
+      ).toMatchObject([{ currentValue: 'xhigh' }]);
     },
   );
 
@@ -1254,13 +1302,17 @@ describe('GPT raw reasoning reporting', () => {
 // `/effort` and a workflow agent's per-call effort share one tier rule (core's
 // reasoningEffortsForCapability); these pin it at the `/effort` read site.
 describe('getReasoningEffortsForConfig', () => {
-  const configWith = (reasoning: unknown) =>
+  const configWith = (
+    reasoning: unknown,
+    modelId = 'custom-model',
+    authType = 'openai',
+  ) =>
     ({
-      getModel: () => 'custom-model',
-      getAuthType: () => 'openai',
+      getModel: () => modelId,
+      getAuthType: () => authType,
       getContentGeneratorConfig: () => ({
-        model: 'custom-model',
-        authType: 'openai',
+        model: modelId,
+        authType,
         baseUrl: 'https://example.com',
       }),
       getResolvedModelConfig: () => ({ capabilities: { reasoning } }),
@@ -1295,6 +1347,58 @@ describe('getReasoningEffortsForConfig', () => {
       REASONING_EFFORT_TIERS,
     );
   });
+
+  // The built-in tables are the only tier source for these models, so skipping
+  // them offered the whole ladder and let `/effort` persist a tier the wire
+  // then re-tiered (#17411).
+  it.each([
+    { modelId: 'gpt-5-pro', tiers: ['high'] },
+    { modelId: 'gpt-5.1', tiers: ['low', 'medium', 'high'] },
+    { modelId: 'qwen3.8-max', tiers: ['low', 'medium', 'xhigh'] },
+    { modelId: 'qwen4-max', tiers: ['low', 'high', 'xhigh'] },
+  ])(
+    'offers the built-in tiers for $modelId with no declaration',
+    ({ modelId, tiers }) => {
+      expect(
+        getReasoningEffortsForConfig(configWith(undefined, modelId)),
+      ).toEqual(tiers);
+    },
+  );
+
+  it('offers nothing for a toggle-only manifest model with no declaration', () => {
+    expect(
+      getReasoningEffortsForConfig(configWith(undefined, 'qwen3.7-max')),
+    ).toEqual([]);
+  });
+
+  it('offers only the native Gemini 4 tiers on a Gemini route', () => {
+    expect(
+      getReasoningEffortsForConfig(
+        configWith(undefined, 'gemini-4-neon', 'gemini'),
+      ),
+    ).toEqual(['low', 'medium', 'high', 'xhigh']);
+    expect(
+      getReasoningEffortsForConfig(
+        configWith(undefined, 'gemini-4-neon', 'vertex-ai'),
+      ),
+    ).toEqual(['low', 'medium', 'high', 'xhigh']);
+    expect(
+      getReasoningEffortsForConfig(
+        configWith(undefined, 'gemini-4-hydrogen', 'gemini'),
+      ),
+    ).toEqual(['low', 'medium', 'high', 'xhigh']);
+    expect(
+      getReasoningEffortsForConfig(
+        configWith(undefined, 'gemini-4-argon-high', 'gemini'),
+      ),
+    ).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('does not apply Gemini protocol capabilities to an OpenAI route', () => {
+    expect(
+      getReasoningEffortsForConfig(configWith(undefined, 'gemini-4-neon')),
+    ).toEqual(REASONING_EFFORT_TIERS);
+  });
 });
 
 describe('external reasoning controls', () => {
@@ -1308,6 +1412,53 @@ describe('external reasoning controls', () => {
     authType: 'openai',
     baseUrl: 'https://gateway.example/v1',
   } as ContentGeneratorConfig;
+
+  it('previews the built-in Gemini 4 ladder without persisting its default', () => {
+    const geminiGeneration: ContentGeneratorConfig = {
+      model: 'gemini-4-neon',
+      authType: AuthType.USE_GEMINI,
+      baseUrl: 'https://proxy.example.test',
+    };
+    const resolved = resolveReasoningForModel(undefined, geminiGeneration);
+    expect(
+      buildModelReasoningRoutePreview(
+        geminiGeneration,
+        resolved,
+        undefined,
+      )?.[0],
+    ).toMatchObject({
+      currentValue: 'high',
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'high' },
+        { value: 'xhigh' },
+      ],
+    });
+    expect(geminiGeneration.reasoning).toBeUndefined();
+
+    const argonGeneration: ContentGeneratorConfig = {
+      ...geminiGeneration,
+      model: 'gemini-4-argon',
+    };
+    const argonResolved = resolveReasoningForModel(undefined, argonGeneration);
+    expect(
+      buildModelReasoningRoutePreview(
+        argonGeneration,
+        argonResolved,
+        undefined,
+      )?.[0],
+    ).toMatchObject({
+      currentValue: 'high',
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'high' },
+      ],
+    });
+  });
 
   it('shows concrete defaults without persisting them as a selection', () => {
     const config = {

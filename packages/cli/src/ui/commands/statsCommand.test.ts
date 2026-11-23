@@ -216,6 +216,11 @@ describe('statsCommand', () => {
     it('should return text stats without calling addItem', async () => {
       if (!statsCommand.action) throw new Error('Command has no action');
 
+      // The visible Prompts statistic reads userPromptCount, not the mint
+      // counter (promptCount); distinct values pin that the right one renders.
+      nonInteractiveContext.session.stats.userPromptCount = 7;
+      nonInteractiveContext.session.stats.promptCount = 9;
+
       const result = (await statsCommand.action(nonInteractiveContext, '')) as {
         type: string;
         messageType: string;
@@ -225,7 +230,7 @@ describe('statsCommand', () => {
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
       expect(result.content).toContain('Session duration');
-      expect(result.content).toContain('Prompts');
+      expect(result.content).toContain('Prompts: 7');
       expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
     });
 
@@ -235,12 +240,15 @@ describe('statsCommand', () => {
         timedRequests: 2,
         totalTtftMs: 300,
         totalGenerationDurationMs: 2000,
-        totalThroughputOutputTokens: 80,
+        totalThroughputOutputTokens: 92,
+        totalTimedGenerationDurationMs: 2000,
+        totalOutputSpeedTokens: 92,
+        totalOutputSpeedDurationMs: 2300,
         last: {
           model: 'qwen3-coder',
           ttftMs: 250,
           generationDurationMs: 1250,
-          outputTokens: 50,
+          outputTokens: 60,
         },
       };
 
@@ -254,6 +262,8 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Model: qwen3-coder');
       expect(result.content).toContain('TTFT: 250ms');
       expect(result.content).toContain('Generation Time: 1.3s');
+      expect(result.content).toContain('Output (incl. Reasoning): 60');
+      // TTFT counts: 60 tokens over 250 ms + 1250 ms, 92 over 300 + 2000 ms.
       expect(result.content).toContain('TPS: 40.0 tok/s');
       expect(result.content).toContain('Average TTFT: 150ms');
       expect(result.content).toContain('Session TPS: 40.0 tok/s');

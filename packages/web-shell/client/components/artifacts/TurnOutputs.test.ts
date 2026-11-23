@@ -75,6 +75,80 @@ describe('TurnOutputs helpers', () => {
     ).toBe('# New');
   });
 
+  it('captures preview content for a parameterised-mime HTML artifact', () => {
+    // normalizeArtifactMimeType maps text/html; charset=utf-8 to text/html; a
+    // raw toLowerCase comparison would silently lose this inline preview.
+    const artifact = {
+      id: 'html-param',
+      kind: 'file',
+      workspacePath: 'out/page-param',
+      mimeType: 'text/html; charset=utf-8',
+    } as DaemonSessionArtifact;
+    const change: TurnOutputFileChange = {
+      path: '/workspace/project/out/page-param',
+      status: 'modified',
+      toolCallId: 'tool-1',
+      isArtifact: true,
+      diffs: [
+        {
+          oldText: '<html>old</html>',
+          newText: '<html>new</html>',
+          fullContent: true,
+        },
+      ],
+    };
+
+    expect(
+      getArtifactPreviewContent(artifact, [change], '/workspace/project'),
+    ).toBe('<html>new</html>');
+  });
+
+  it('captures preview content for an image identified by mime alone', () => {
+    // The image/* mime arm renders an extensionless path; dropping that arm
+    // would silently return undefined for this shape.
+    const artifact = {
+      id: 'image-mime',
+      kind: 'image',
+      workspacePath: 'out/diagram',
+      mimeType: 'image/png',
+    } as DaemonSessionArtifact;
+    const change: TurnOutputFileChange = {
+      path: '/workspace/project/out/diagram',
+      status: 'modified',
+      toolCallId: 'tool-1',
+      isArtifact: true,
+      diffs: [
+        { oldText: '', newText: 'captured-image-content', fullContent: true },
+      ],
+    };
+
+    expect(
+      getArtifactPreviewContent(artifact, [change], '/workspace/project'),
+    ).toBe('captured-image-content');
+  });
+
+  it('stays undefined for an svg mime', () => {
+    // getArtifactImageMimeType deliberately excludes svg, so the preview
+    // content guard must not let it through.
+    const artifact = {
+      id: 'svg-artifact',
+      kind: 'image',
+      workspacePath: 'out/diagram',
+      mimeType: 'image/svg+xml',
+    } as DaemonSessionArtifact;
+    const change: TurnOutputFileChange = {
+      path: '/workspace/project/out/diagram',
+      status: 'modified',
+      toolCallId: 'tool-1',
+      isArtifact: true,
+      diffs: [{ oldText: '', newText: '<svg/>', fullContent: true }],
+    };
+
+    expect(
+      getArtifactPreviewContent(artifact, [change], '/workspace/project'),
+    ).toBeUndefined();
+  });
+
   it('uses the latest full file content for review previews', () => {
     const change: TurnOutputFileChange = {
       path: 'report.html',

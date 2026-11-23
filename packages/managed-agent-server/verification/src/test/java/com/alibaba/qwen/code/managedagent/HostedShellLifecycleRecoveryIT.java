@@ -1,12 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -70,7 +70,7 @@ class HostedShellLifecycleRecoveryIT {
 
     private final class Fixture implements AutoCloseable {
         private final String cut;
-        private final String tenant = "l4-http-" + UUID.randomUUID();
+        private final String tenant = UUID.randomUUID().toString();
         private final Path root;
         private final Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath().normalize();
         private final String node = required("node.executable");
@@ -122,6 +122,7 @@ class HostedShellLifecycleRecoveryIT {
         private void run() throws Exception {
             startHarness();
             startSpring();
+            WorkspaceTestStorage.prepareNativeRoot(root.resolve("workspace"));
             var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
             storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
             storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
@@ -244,6 +245,7 @@ class HostedShellLifecycleRecoveryIT {
                 assertThat(((Number) writerIdentity().get("writer_generation")).longValue())
                         .isEqualTo(((Number) writer.get("writer_generation")).longValue());
             }
+            assertThat(writerIdentity()).containsEntry("writer_id", null).containsEntry("lease_token_hash", null);
             assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, session)).isEqualTo("DELETED");
             assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation WHERE operation_id = ?",
@@ -452,8 +454,8 @@ class HostedShellLifecycleRecoveryIT {
                     + " is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     tenant, session));
             state.put("liveReadLeases", jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease"
-                    + " WHERE tenant_key = ? AND session_key = ? AND expires_at > ?", Long.class,
-                    ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session),
+                    + " WHERE tenant_id = ? AND session_id = ? AND expires_at > ?", Long.class,
+                    tenant, session,
                     System.currentTimeMillis()));
             return state;
         }

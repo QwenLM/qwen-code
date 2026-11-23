@@ -360,9 +360,9 @@ describe('actual stdio MCP artifact', () => {
     const queryTool = tools.find((tool) => tool.name === 'test_report_query')!;
     expect(queryTool.inputSchema.required).toEqual(['reportId', 'query']);
     const queryShape = queryTool.inputSchema.properties!['query'] as {
-      anyOf: Array<{ properties: { offset?: { minimum: number } } }>;
+      oneOf: Array<{ properties: { offset?: { minimum: number } } }>;
     };
-    expect(queryShape.anyOf[1].properties.offset?.minimum).toBe(0);
+    expect(queryShape.oneOf[1].properties.offset?.minimum).toBe(0);
     const imported = await call(client, 'test_report_import', {
       relativePath: 'report.json',
     });

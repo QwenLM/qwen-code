@@ -19,7 +19,7 @@ keys. Three usability gaps follow:
 2. **No explanation.** The field carries one dense paragraph (key syntax,
    role routing, seven template variables). Individual keys have no
    description, and a single-line `Input` cannot comfortably hold an
-   instruction template of up to 2,000 code points (the adapter's
+   instruction template of up to 2,000 code points (channel-base's
    `BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS`).
 3. **No fullscreen.** `ChannelEditorDialog` is fixed at `sm:max-w-xl`
    (~576px) with no expand affordance, while other surfaces (DialogShell,

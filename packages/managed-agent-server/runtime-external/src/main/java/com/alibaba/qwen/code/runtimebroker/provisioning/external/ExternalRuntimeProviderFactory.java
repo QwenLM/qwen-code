@@ -13,6 +13,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 
@@ -46,9 +47,13 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                         + " worker attestation and storage registration are checked on first use", null);
         if (ExternalRuntimeKinds.isWorkspace(settings.getRuntimeBroker().getProvisioner())) {
             return List.of(accepted, new Check("external-prerequisite", Status.WARN,
-                    "external-workspace can provision a storage-bound worker, but it"
-                            + " cannot execute Hosted tools or close a Session yet; every placement fails closed",
-                    "keep this profile out of production until files execution and Session close are verified (step 3b/3c)"));
+                    settings.isExternalWorkspaceFilesConfigured()
+                            ? "External files require exact Harness negotiation and current registration;"
+                                    + " original-worker close proof is checked at drain"
+                            : "external-workspace files are disabled or incompletely configured;"
+                                    + " new Hosted files Sessions fail closed",
+                    "keep this profile out of production until files execution and"
+                            + " Session close are verified (step 3b/3c)"));
         }
         return List.of(accepted);
     }
@@ -61,19 +66,20 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         if (!ExternalRuntimeKinds.isExternal(provisioner)) {
             return;
         }
-        if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
+        boolean workspace = ExternalRuntimeKinds.isWorkspace(provisioner);
+        if (harness.isWorkspaceFilesEnabled() && !workspace
+                || harness.isWorkspaceShellEnabled()
+                || workspace && (settings.getManagedExtensions().isEnabled() || settings.getExtensions().isEnabled())
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
-                || !runtimeBroker.getResidentWorkspaces().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
                 || runtimeBroker.isLocalDirectoryImportEnabled()
                 || runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
                 || runtimeBroker.isOperatorRecoveryEnabled()
                 || runtimeBroker.isChildWorkspacesEnabled() || runtimeBroker.isChildSnapshotsEnabled()
                 || runtimeBroker.getSsh().isEnabled() || !runtimeBroker.getSsh().getNodes().isEmpty()) {
-            throw new IllegalStateException(ExternalRuntimeKinds.isWorkspace(provisioner)
-                    ? "External Workspace Runtime is a storage provisioning prerequisite;"
-                            + " managed Workspace files, Shell and recovery features must stay"
-                            + " disabled until files execution and Session close are verified"
+            throw new IllegalStateException(workspace
+                    ? "External Workspace Runtime supports registered files-only Sessions;"
+                            + " local mounts, Shell, extensions, children and recovery features must stay disabled"
                     : "External Runtime supports scratch Sessions only;"
                             + " managed Workspace features must be disabled");
         }
@@ -118,7 +124,7 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         BrokerValues.requireId(runtimeBroker.getWorkspaceId(), "External Runtime workspace ID");
         String cwd = runtimeBroker.getWorkspaceCwd();
         if (cwd == null || !cwd.startsWith("/")
-                || java.util.Arrays.stream(cwd.substring(1).split("/", -1))
+                || Arrays.stream(cwd.substring(1).split("/", -1))
                         .anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."))) {
             throw new IllegalStateException("External Runtime workspace cwd must be an absolute normalized"
                     + " worker path other than the filesystem root");

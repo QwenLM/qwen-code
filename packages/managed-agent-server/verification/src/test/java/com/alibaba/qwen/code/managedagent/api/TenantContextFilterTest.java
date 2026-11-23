@@ -33,8 +33,8 @@ class TenantContextFilterTest {
 
     @Test
     void acceptsTrustedActorIdsAtTheUnicodeBoundary() throws Exception {
-        for (String actorId : new String[] {"alice@example.com", " ",
-                "𝄞".repeat(512)}) {
+        for (String actorId : new String[] {"alice@example.com", "a",
+                "𝄞".repeat(18)}) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor("tenant-a", actorId));
             MockHttpServletResponse response = new MockHttpServletResponse();
@@ -68,7 +68,8 @@ class TenantContextFilterTest {
             throws ServletException, IOException {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
-                actor("tenant-a", "𝄞".repeat(513))
+                actor("tenant-a", "𝄞".repeat(19)),
+                actor("tenant-a", "𝄞".repeat(37))
         }) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor);
@@ -78,6 +79,19 @@ class TenantContextFilterTest {
             assertThat(response.getStatus()).isEqualTo(403);
             assertThat(response.getContentAsString())
                     .contains("actor_scope_mismatch");
+            assertThat(chain.getRequest()).isNull();
+        }
+    }
+
+    @Test
+    void rejectsInvalidTenantHeaders() throws Exception {
+        for (String tenant : new String[] {"tenant a", "tenant/a", "é",
+                "t".repeat(37)}) {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            MockFilterChain chain = new MockFilterChain();
+            filter.doFilter(request(tenant), response, chain);
+            assertThat(response.getStatus()).isEqualTo(400);
+            assertThat(response.getContentAsString()).contains("invalid_tenant");
             assertThat(chain.getRequest()).isNull();
         }
     }
@@ -101,6 +115,41 @@ class TenantContextFilterTest {
         MockFilterChain passed = new MockFilterChain();
         filter.doFilter(unrelated, new MockHttpServletResponse(), passed);
         assertThat(passed.getRequest()).isSameAs(unrelated);
+    }
+
+    @Test
+    void exemptsTheTerminalUpgradeButNotTheTicketMint() throws Exception {
+        // The upgrade carries its identity in the single-use ticket, not the
+        // tenant header a browser WebSocket cannot set, so it must pass the
+        // filter without one.
+        MockHttpServletRequest upgrade = new MockHttpServletRequest("GET",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain passed = new MockFilterChain();
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(upgrade, response, passed);
+        assertThat(passed.getRequest()).isSameAs(upgrade);
+        assertThat(response.getStatus()).isEqualTo(200);
+
+        // A plain non-upgrade method on the upgrade path keeps the header
+        // filter: the exemption is the GET upgrade shape, not the path alone.
+        MockHttpServletRequest plainPost = new MockHttpServletRequest("POST",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain postBlocked = new MockFilterChain();
+        MockHttpServletResponse postResponse = new MockHttpServletResponse();
+        filter.doFilter(plainPost, postResponse, postBlocked);
+        assertThat(postResponse.getStatus()).isEqualTo(400);
+        assertThat(postResponse.getContentAsString()).contains("invalid_tenant");
+        assertThat(postBlocked.getRequest()).isNull();
+
+        // The ticket-minting POST stays on the authenticated surface.
+        MockHttpServletRequest mint = new MockHttpServletRequest("POST",
+                "/api/agent/web-shell/v1/sessions/terminal-ticket");
+        MockFilterChain blocked = new MockFilterChain();
+        MockHttpServletResponse mintResponse = new MockHttpServletResponse();
+        filter.doFilter(mint, mintResponse, blocked);
+        assertThat(mintResponse.getStatus()).isEqualTo(400);
+        assertThat(mintResponse.getContentAsString()).contains("invalid_tenant");
+        assertThat(blocked.getRequest()).isNull();
     }
 
     private static MockHttpServletRequest request(String tenant) {

@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -33,7 +33,7 @@ class HostedCleanupDebtStoreTest {
     private static final String WORKSPACE = "workspace-cleanup-debt";
 
     @Autowired
-    private HostedCleanupDebtStore store;
+    private JdbcHostedCleanupDebtStore store;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -52,7 +52,8 @@ class HostedCleanupDebtStoreTest {
             assertThat(debt.sessionId()).isEqualTo(session);
             assertThat(debt.promptId()).isEqualTo(prompt);
             assertThat(debt.ownerKey())
-                    .isEqualTo(ManagedSchemaKeys.key("hosted-cleanup", prompt));
+                    .isEqualTo(ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES,
+                            "hosted-cleanup", prompt));
         });
     }
 
@@ -120,6 +121,42 @@ class HostedCleanupDebtStoreTest {
         assertThat(second.exhausted()).isTrue();
     }
 
+    // Phase 3b §4.8: a seal that certified this debt as a background hold owns
+    // its discharge through the drain-only wake, so the scan must not hand it
+    // to a cleanup-only load. Any acquisition clears the certificate and the
+    // debt becomes retryable again.
+    @Test
+    void skipsADebtWhoseSealCertifiedItAsABackgroundHold() {
+        String session = session("certified");
+        String prompt = UUID.randomUUID().toString();
+        owed(TENANT, WORKSPACE, session, prompt, null);
+        certifiedHead(session, 1, 3);
+
+        assertThat(store.findOwed(10, -1, "").debts()).isEmpty();
+
+        // A stamp for another revision certifies nothing about this prefix.
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 2 WHERE session_id = ?", session);
+        assertThat(store.findOwed(10, -1, "").debts()).singleElement()
+                .satisfies(debt -> assertThat(debt.promptId()).isEqualTo(prompt));
+
+        // An acquired (live) head has no certificate either.
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 3, state = 'ACTIVE',"
+                + " wake_seal_background = 0 WHERE session_id = ?", session);
+        assertThat(store.findOwed(10, -1, "").debts()).singleElement()
+                .satisfies(debt -> assertThat(debt.promptId()).isEqualTo(prompt));
+    }
+
+    private void certifiedHead(String session, int background, long revision) {
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
+                + " workspace_id, session_id, harness_session_id, head_kind, state,"
+                + " writer_generation, journal_revision, committed_sequence,"
+                + " last_commit_digest, activation_epoch, packed_through_revision,"
+                + " wake_seal_revision, wake_seal_background, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, ?, 'MANAGED_SESSION', 'SEALED', 1, ?, ?,"
+                + " 'digest', 0, 0, ?, ?, 0, 0)",
+                TENANT, WORKSPACE, session, session, revision, revision, revision, background);
+    }
+
     private String session(String suffix) {
         return session(TENANT, suffix);
     }
@@ -145,21 +182,19 @@ class HostedCleanupDebtStoreTest {
             byte[] bytes, String storageKind, long gmtCreate) {
         byte[] body = bytes == null ? descriptor(tenant, workspace, session, prompt) : bytes;
         String resourceId = "cleanup-" + UUID.randomUUID();
-        String resourceKey = UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'hosted-turn-cleanup', 1, ?, ?,"
+                        + " VALUES (?, ?, ?, ?, 'hosted-turn-cleanup', 1, ?, ?,"
                         + " ?, ?, 'REFERENCED', ?)",
-                resourceKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant,
+                tenant,
                 workspace, session, resourceId, body.length, "d", storageKind, body, gmtCreate);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " journal_revision, resource_id, gmt_create, runtime_binding_key)"
-                        + " VALUES (?, 'HOSTED_CLEANUP', ?, 1, ?, ?, ?, ?, 1, ?, ?, ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
-                ManagedSchemaKeys.key("hosted-cleanup", prompt), resourceKey, tenant, workspace,
-                session, resourceId, gmtCreate, "binding-" + UUID.randomUUID());
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
+                        + " owner_revision, tenant_id, workspace_id, session_id,"
+                        + " journal_revision, resource_id, gmt_create, runtime_binding_id)"
+                        + " VALUES ('HOSTED_CLEANUP', ?, 1, ?, ?, ?, 1, ?, ?, ?)",
+                ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, "hosted-cleanup", prompt),
+                tenant, workspace, session, resourceId, gmtCreate, "binding-" + UUID.randomUUID());
     }
 
     private static byte[] descriptor(String tenant, String workspace, String session,

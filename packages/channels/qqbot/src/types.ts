@@ -84,6 +84,22 @@ export interface QQChannelConfig {
    * When false, `<@OPENID>` tags are stripped before reaching the LLM.
    */
   allowMention?: boolean;
+  /**
+   * Deliver messages authored by another bot to the agent with a `[bot]`
+   * prefix on the sender line, letting the model decide whether to reply.
+   * Default false: such messages are dropped before they reach the agent.
+   *
+   * Bot-to-bot conversation is a feature, not a defect, and this switch is its
+   * whole boundary: QQ delivers message events for user-authored messages only
+   * — a bot's own sends come back in the send API's response (a message the bot
+   * itself sent is referenced through the response's ext_info.ref_idx, not
+   * through a message event) — so the only bot-authored traffic is another bot
+   * talking in the group. Turning the switch on is an explicit operator
+   * tradeoff — there is deliberately no automatic rate cap on top; the group's
+   * human members and the model's own silence rules are the guard, and the
+   * operator who enables it owns that tradeoff.
+   */
+  forwardBotMessages?: boolean;
   /** Route overrides for chat IDs that haven't been seen inbound yet.
    *  Key: chat openid (group_openid or user_openid).
    *  Value: 'group' or 'c2c'.
@@ -112,6 +128,15 @@ export interface QQChannelConfig {
    * A non-integer or a value below -1 warns on stderr and falls back to `-1`.
    */
   moderationRecallWindowMs?: number;
+  /**
+   * Expose the outbound file tool (`qq_send_file`) to the agent in this
+   * channel's sessions. Default false: the tool lets the model hand a local
+   * file to QQ under the bot's own identity, so it stays off until the channel
+   * opts in. Only files inside the session workspace or the system temporary
+   * directory, non-empty and at most 20 MB, can be sent.
+   */
+  fileTools?: boolean;
+
   /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
   bufferFlushLength?: number;
   /** Max reconnect attempts before giving up. Default 20. 0 = unlimited. */

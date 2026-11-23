@@ -6,7 +6,10 @@
 
 import { describe, expect, it } from 'vitest';
 import type { PermissionRequest } from '../adapters/types';
-import { isAskUserPermission } from './askUserPermission';
+import {
+  formatAskUserQuestions,
+  isAskUserPermission,
+} from './askUserPermission';
 
 const req = (r: Partial<PermissionRequest>): PermissionRequest =>
   r as PermissionRequest;
@@ -36,5 +39,80 @@ describe('isAskUserPermission', () => {
         req({ toolName: 'write_file', rawInput: { questions: [{}] } }),
       ),
     ).toBe(false);
+  });
+});
+
+describe('formatAskUserQuestions', () => {
+  it('formats questions with option labels and descriptions', () => {
+    expect(
+      formatAskUserQuestions({
+        questions: [
+          {
+            question: 'Pick a color',
+            options: [
+              { label: 'Red', description: 'warm' },
+              { label: 'Blue', description: 'cool' },
+            ],
+          },
+          {
+            question: 'Pick a size',
+            options: [{ label: 'Small' }, { label: 'Large', description: '' }],
+          },
+        ],
+      }),
+    ).toBe(
+      '[1] Pick a color\n- Red: warm\n- Blue: cool\n\n' +
+        '[2] Pick a size\n- Small\n- Large',
+    );
+  });
+
+  it('trims whitespace and keeps questions without options', () => {
+    expect(
+      formatAskUserQuestions({
+        questions: [{ question: '  Why?  ' }],
+      }),
+    ).toBe('[1] Why?');
+  });
+
+  it('marks multi-select questions and only when the flag is true', () => {
+    expect(
+      formatAskUserQuestions({
+        questions: [
+          { question: 'Pick any', multiSelect: true },
+          { question: 'Pick one', multiSelect: false },
+          { question: 'Default' },
+          { question: 'Loose typing', multiSelect: 'yes' },
+        ],
+      }),
+    ).toBe(
+      '[1] Pick any [multiSelect]\n\n[2] Pick one\n\n[3] Default\n\n[4] Loose typing',
+    );
+  });
+
+  it('skips malformed entries and renumbers the survivors', () => {
+    expect(
+      formatAskUserQuestions({
+        questions: [
+          null,
+          'nope',
+          { question: '   ' },
+          { options: [{ label: 'orphan' }] },
+          {
+            question: 'Real question',
+            options: [null, { label: '' }, { label: 'Keep', description: 3 }],
+          },
+        ],
+      }),
+    ).toBe('[1] Real question\n- Keep');
+  });
+
+  it('returns an empty string without a questions array', () => {
+    expect(formatAskUserQuestions(undefined)).toBe('');
+    expect(formatAskUserQuestions({})).toBe('');
+    expect(formatAskUserQuestions({ questions: 'nope' })).toBe('');
+    expect(formatAskUserQuestions({ questions: [] })).toBe('');
+    // A non-array object must not reach the iterator: dropping the
+    // Array.isArray guard throws "questions is not iterable" here.
+    expect(formatAskUserQuestions({ questions: { a: 1 } })).toBe('');
   });
 });

@@ -91,6 +91,7 @@ export const useAuthCommand = (
   config: Config,
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   onAuthChange?: () => void,
+  skipStartupDialog = false,
 ) => {
   const unAuthenticated = config.getAuthType() === undefined;
 
@@ -99,7 +100,9 @@ export const useAuthCommand = (
   );
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(unAuthenticated);
+  const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(
+    unAuthenticated && !skipStartupDialog,
+  );
   const [isAuthDialogDismissible, setIsAuthDialogDismissible] = useState(false);
   const [pendingAuthType, setPendingAuthType] = useState<AuthType | undefined>(
     undefined,

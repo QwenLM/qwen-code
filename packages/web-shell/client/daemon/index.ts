@@ -128,6 +128,7 @@ export type {
   DaemonResourceOptions,
   DaemonChannelPairingActions,
   DaemonChannelsResource,
+  DaemonChannelObservedContacts,
   DaemonChannelEventEntry,
   DaemonChannelEventList,
   DaemonStatusReportOptions,
@@ -241,4 +242,9 @@ export type {
   DaemonChannelPairingRevocationResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
+  DaemonArtifactLibraryMemberError,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';

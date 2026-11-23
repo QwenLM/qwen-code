@@ -479,7 +479,9 @@ describe('git-sourced lint lanes', () => {
       repo = path.join(root, 'repo');
       mkdirSync(repo);
       for (const [name, content] of Object.entries(files)) {
-        writeFileSync(path.join(repo, name), content);
+        const file = path.join(repo, name);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, content);
       }
       execSync('git init -q && git add -A', { cwd: repo });
     }
@@ -701,6 +703,41 @@ describe('git-sourced lint lanes', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'enrols the sourced apt-mirror probe in the shellcheck lane via its shebang',
+    async (ctx) => {
+      // Drive the lane's own candidate selection (name regex + real file(1)
+      // mime filter) with only shellcheck stubbed, so a change to the lane's
+      // filter that drops the probe is caught here (#16278 R2-1). The fixture
+      // sits at the probe's real dot-directory path: `^([^.]+)` cannot match a
+      // leading dot, so only the `.*\.(sh|zsh|bash)` arm can select it —
+      // at the repo root that arm could be deleted without reddening this
+      // case. Removing the probe's shebang still makes file(1) report
+      // text/plain and reddens it too.
+      const linters = await getLintersOrSkip(ctx);
+      const probeSrc = readFileSync(
+        '.github/scripts/apt-mirror-probe.sh',
+        'utf8',
+      );
+      const probePath = '.github/scripts/apt-mirror-probe.sh';
+      const { root, repo, bin } = setup({ [probePath]: probeSrc });
+      try {
+        const shellcheckLog = path.join(root, 'shellcheck.log');
+        stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+        const result = runLane(linters.shellcheck.run, { repo, bin });
+        expect(result.status).toBe(0);
+        // Exact argv: pins the lane options and the awk colon-strip, and
+        // proves this file (not a root-level namesake) reached shellcheck.
+        expect(readFileSync(shellcheckLog, 'utf8').trim()).toBe(
+          '--check-sourced --enable=all --exclude=SC2002,SC2129,SC2310' +
+            ` --severity=style --format=gcc --color=never ${probePath}`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('appends the pip --user bin dir after the inherited PATH', async () => {
     const { getLinterPath } = await import('../lint.js');

@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
@@ -79,12 +78,9 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @Test
     void lifecycleEffectsKeepOtherTenantExtensionRecordsUnlocked() throws Exception {
         var fixture = fixture();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("neighbor", "other-session");
-        String record = ManagedExtensionProjection.recordKey("other-session", "hook_execution", "other-hook");
-        fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, gmt_create, first_sequence)"
-                + " VALUES (?, ?, 'neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)",
-                scope, record, "a".repeat(64));
+        fixture.jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id,"
+                + " session_id, domain, record_id, operation_id, revision, record_resource_id, gmt_create, first_sequence)"
+                + " VALUES ('neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)", "a".repeat(64));
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         try (var workers = Executors.newFixedThreadPool(2)) {
@@ -108,8 +104,8 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             try {
                 assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
                 var neighbor = workers.submit(() -> new JdbcTemplate(source).update(
-                        "UPDATE ma_session_record SET revision = revision + 1 WHERE session_scope_key = ? AND record_key = ?",
-                        scope, record));
+                        "UPDATE ma_session_record SET revision = revision + 1 WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                        "neighbor", "other-session", "hook_execution", "other-hook"));
                 assertThat(neighbor.get(2, TimeUnit.SECONDS)).isEqualTo(1);
             } finally {
                 release.countDown();
@@ -117,7 +113,8 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             held.get(10, TimeUnit.SECONDS);
         }
         assertThat(fixture.jdbc.queryForObject("SELECT revision FROM ma_session_record"
-                + " WHERE session_scope_key = ? AND record_key = ?", Long.class, scope, record)).isEqualTo(2);
+                + " WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?", Long.class,
+                "neighbor", "other-session", "hook_execution", "other-hook")).isEqualTo(2);
     }
 
     @ParameterizedTest
@@ -142,9 +139,9 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             fixture.bindings.requestHarnessDrain("tenant", fixture.session);
             var legacy = new AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration(), "legacy-close");
             var ordinary = new AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration());
-            var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(source)));
+            var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(source)));
             assertThat(operation.lifecycleProtocolVersion()).isZero();
-            assertThat(fixture.transactions.<Boolean>execute(ignored -> WorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
+            assertThat(fixture.transactions.<Boolean>execute(ignored -> JdbcWorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
                     .isTrue();
             fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary("tenant", fixture.session, "w".repeat(32), legacy));
             execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session));
@@ -152,7 +149,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                     "tenant", fixture.session, "w".repeat(32), ordinary))).isInstanceOfSatisfying(ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
             fixture.jdbc.update("UPDATE ma_operation SET claim_until = " + ManagedSchemaTime.SQL_NOW + " - 1000 WHERE operation_id = ?", id);
-            assertThat(fixture.transactions.<Boolean>execute(ignored -> WorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
+            assertThat(fixture.transactions.<Boolean>execute(ignored -> JdbcWorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
                     .isFalse();
             assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(
                     "tenant", fixture.session, "w".repeat(32), legacy))).isInstanceOfSatisfying(ManagedAgentException.class,
@@ -178,7 +175,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             var entered = new CountDownLatch(1);
             var queued = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<Throwable>>();
             fixture.transactions.execute(ignored -> {
-                WorkspaceLifecycleStore.lockPlacement(fixture.jdbc, "tenant");
+                JdbcWorkspaceLifecycleStore.lockPlacement(fixture.jdbc, "tenant");
                 queued.set(pool.submit(() -> {
                     entered.countDown();
                     try {
@@ -314,9 +311,9 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             assertThatThrownBy(() -> {
                 if (throughAdmission) {
                     fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.DELETE, "owner",
-                            "a".repeat(64), "operation", "digest", true, 1);
+                            "a".repeat(64), "operation", "digest", true, 2);
                 } else {
-                    WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json,
+                    JdbcWorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json,
                             "tenant", fixture.session);
                 }
             }).isInstanceOfSatisfying(ManagedAgentException.class, error ->
@@ -338,7 +335,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                 + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
                 "tenant", fixture.session);
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored ->
-                WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json, "tenant", fixture.session)))
+                JdbcWorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json, "tenant", fixture.session)))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("workspace_lifecycle_journal_unverified"));
     }

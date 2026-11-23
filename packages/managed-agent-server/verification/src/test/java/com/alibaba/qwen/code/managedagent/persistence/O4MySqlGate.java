@@ -110,9 +110,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(child.waitFor(10, TimeUnit.SECONDS)).isTrue();
             var objects = new O4FileObjects(root);
             retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects);
-            assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?",
+            assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_kind = 'PUBLICATION' AND scope_id = ?",
                     String.class, scope)).containsExactly("RETURNED");
-            assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?",
+            assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_kind = 'PUBLICATION' AND scope_id = ?",
                     Long.class, scope)).isEqualTo(1);
             retire();
             assertThat(blocker()).isNull();
@@ -132,11 +132,11 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(child.waitFor(10, TimeUnit.SECONDS)).isTrue();
             var objects = new O4FileObjects(root);
             assertThat(Files.exists(root.resolve("exact/one"))).isFalse();
-            jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -60000) WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?", scope);
+            jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -60000) WHERE operation_kind = 'OBJECT_PUT' AND scope_kind = 'PUBLICATION' AND scope_id = ?", scope);
             assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects))
                     .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
             assertThat(Files.exists(root.resolve("exact/one"))).isFalse();
-            assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?",
+            assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_kind = 'PUBLICATION' AND scope_id = ?",
                     String.class, scope)).containsExactly("IN_FLIGHT");
             retire();
             assertThat(collector(objects).runOnce()).isFalse();
@@ -173,7 +173,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(Files.exists(root.resolve("exact/three"))).isFalse();
             assertThat(held()).isZero();
             assertThat(replacement.runOnce()).isFalse();
-            assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
+            assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_kind = 'PUBLICATION' AND scope_id = ?",
                     Long.class, scope)).isEqualTo(2);
         } finally {
             stop(child);
@@ -193,8 +193,8 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
         try {
             ready(child);
             signal(child, "-STOP");
-            long expires = jdbc.queryForObject("SELECT expires_at FROM ma_read_lease WHERE tenant_key = ?",
-                    Long.class, ToolPublicationRetentionStore.hash(tenant));
+            long expires = jdbc.queryForObject("SELECT expires_at FROM ma_read_lease WHERE tenant_id = ?",
+                    Long.class, tenant);
             assertThat(expires - ToolPublicationRetentionStore.now(jdbc)).as("two-minute reader budget")
                     .isBetween(115_000L, 120_000L);
             while (ToolPublicationRetentionStore.now(jdbc) <= expires + 1000) {
@@ -275,7 +275,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                 assertThat(input.transferTo(java.io.OutputStream.nullOutputStream())).isEqualTo(segment.length);
             }
             addCaptureObject(scope, "pub-1", session, slot, slot, objectKey, null, "VERIFIED");
-            jdbc.update("UPDATE ma_resource SET byte_length = ?, sha256 = ? WHERE scope_key = ? AND slot_key = ?",
+            jdbc.update("UPDATE ma_resource SET byte_length = ?, sha256 = ? WHERE scope_ref = ? AND slot_key = ?",
                     segment.length, digest, scope, slot);
             stored += segment.length;
         }
@@ -283,8 +283,8 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             addObject("z-" + name, null, new byte[] {1});
         }
         jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = ?, capture_held_bytes = ?,"
-                        + " producer_used_bytes = 3, producer_held_bytes = 1000 WHERE scope_key = ?", total, total, scope);
-        assertThat(jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE scope_key = ?",
+                        + " producer_used_bytes = 3, producer_held_bytes = 1000 WHERE scope_ref = ?", total, total, scope);
+        assertThat(jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE scope_ref = ?",
                 Long.class, scope)).isEqualTo(total + 3);
         retire();
         var gc = collector(objects);
@@ -299,9 +299,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
         }
         assertThat(pages).isEqualTo((count + 3 + 99) / 100);
         assertThat(held()).isZero();
-        assertThat(jdbc.queryForObject("SELECT collected_bytes FROM ma_output_capture WHERE scope_key = ?",
+        assertThat(jdbc.queryForObject("SELECT collected_bytes FROM ma_output_capture WHERE scope_ref = ?",
                 Long.class, scope)).isEqualTo(total + 3);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE scope_key = ?"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE scope_ref = ?"
                 + " AND (capture_state <> 'COLLECTED' OR inline_bytes IS NOT NULL)", Long.class, scope)).isZero();
         try (var input = objects.open(prefix + "outside")) {
             assertThat(input.read()).isEqualTo(9);

@@ -105,8 +105,11 @@ export async function migrateTomlCommands(
         // File doesn't exist, continue
       }
 
-      // Write Markdown file
-      await fs.writeFile(markdownPath, markdownContent, 'utf-8');
+      // The destination may have appeared after the existence check.
+      await fs.writeFile(markdownPath, markdownContent, {
+        encoding: 'utf-8',
+        flag: 'wx',
+      });
 
       // Backup original if requested (rename to .toml.backup)
       if (createBackup) {

@@ -35,6 +35,14 @@ export {
   createJavaManagedAgentProvider,
   type JavaManagedAgentProviderOptions,
 } from './components/managed/java-managed-agent-provider';
+export type {
+  ManagedSideQuery,
+  ManagedSideQueryKind,
+  ManagedSideQueryCreate,
+  ManagedSideQueryContext,
+  ManagedSideQueryPage,
+  ManagedSideQueriesProvider,
+} from './components/managed/managed-side-query-types';
 export {
   ManagedAgentWebShell,
   type ManagedAgentWebShellProps,
@@ -47,10 +55,16 @@ export type {
   ManagedToolResult,
   ManagedToolResultReader,
   ManagedToolResultResponse,
+  ManagedWorkspaceArtifactReader,
 } from './components/managed/managed-tool-result-types';
 export {
   type ManagedAgentCommandOptions,
   type ManagedAgentPendingAction,
+  type ManagedAgentPendingPermissionAction,
+  type ManagedAgentPendingQuestionAction,
+  type ManagedAgentQuestionAnswer,
+  type ManagedAgentQuestionResponse,
+  type ManagedAgentActionResponse,
   type ManagedAgentProvider,
   type ManagedAgentRequestOptions,
   type ManagedAgentRuntimeState,
@@ -375,6 +389,12 @@ export type {
 } from './settings';
 
 export type { WebShellModelManagementOptions } from './modelManagement';
+export type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerMount,
+  WebShellModelPickerOptions,
+} from './model-picker';
 export type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipHandle,

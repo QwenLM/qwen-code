@@ -156,7 +156,7 @@ class HostedChannelFaultGatesIT {
                 "fg7-cases", letter);
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
-        String tenant = "hosted-channel-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         start(tenant);
         for (String fault : cases) {
             try {
@@ -1325,12 +1325,12 @@ class HostedChannelFaultGatesIT {
                     assertThat(support.inputAcceptedCount(tenant, sessionId))
                             .as("the replay never commits a second input")
                             .isEqualTo(1);
-                    assertThat(modelCallsFor(fault))
-                            .as("the replay never re-runs the turn")
-                            .isEqualTo(1);
                     JsonNode replayed = support.drive(caseDir, "pull", base);
                     assertThat(replayed.path("sends")).hasSize(1);
                     HostedChannelGateSupport.assertSendsTo(replayed);
+                    assertThat(modelCallsFor(fault))
+                            .as("the replay never re-runs the turn")
+                            .isEqualTo(1);
                     assertThat(((Number) support.routeProjection(tenant,
                             sessionId).get("revision")).intValue())
                             .isEqualTo(1);

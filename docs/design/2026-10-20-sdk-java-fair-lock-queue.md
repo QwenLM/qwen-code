@@ -2,6 +2,37 @@
 
 [English](2026-10-20-sdk-java-fair-lock-queue.md) | [简体中文](2026-10-20-sdk-java-fair-lock-queue.zh-CN.md)
 
+## Current PR scope
+
+The suite/write-back lock split described below already landed on main through
+#15128 and #15254. PR #15274 introduced the remaining
+hardening: preserving failed-suite status through cache write-back, excluding
+mutable resolver metadata, and observable cache seeding. Follow-up #18065 makes
+safe job-local repository reconstruction part of that contract. The host cache
+copy remains optional and observable, but required job-local de-aliasing,
+mount-boundary inspection, permission repair, and resolver/coordinate pruning
+fail closed before Maven. The reconstruction is centralized in
+`.github/scripts/maven-cache-seed.sh`. The reference workflow always builds
+its own workflow checkout and sources that helper directly. The four SDK call
+sites check for a local helper and, when an older immutable source checkout
+predates it, obtain the same helper version as the running workflow,
+identified by `GITHUB_SHA`.
+A fetch failure or missing helper stops Maven; it never silently degrades to
+the host cache. Each fallback download uses an atomically created `mktemp` file,
+not a fixed output path that could be an existing symlink or hardlink. An
+exit-scoped trap attempts to remove only the downloaded copy, including when
+fetch or seed fails. It never targets the workspace helper, and a removal
+failure preserves the original step status and, when the output channel is
+writable, emits a `::warning::` annotation with the helper's residual path in
+a subshell. A closed log pipe can terminate that diagnostic subshell without
+terminating the step shell before it restores the original status. Other
+source, seed, mount, and prune failures remain fail-closed. Before
+copying, the helper checks the host source for mounts; a mounted or uninspectable
+host source skips that optional copy and uses a clean job-local repository. The
+tooling lookup does not change the immutable source revision being validated.
+The historical lock design below is context, not a new
+relocation delivered by this PR.
+
 Database integration now runs on MySQL only. References below to the former MariaDB integration site retain historical measurements; its unchanged lock, cache write-back and budget rules apply to the retained MySQL job. See the [current database verification scope](managed-runtime-broker-jdbc.md#database-verification-scope).
 
 ## Problem
@@ -108,17 +139,35 @@ the bound.
 
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
-write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; it then drops the two in-house fixed-release
+write-back takes the lock. The host-cache copy (`cp -aln`) runs before the acquisition; a missing host
+cache stays quiet and a cross-device or failed copy falls back to a clean local
+repository. Safe reconstruction is not best-effort: it must sever aliases,
+reclaim historical quarantine, inspect mount boundaries and repair local
+directories before Maven runs. Failure of a required step stops Maven. Failure
+to remove only the newly-created quarantine leaves any undeleted content in
+quarantine and remains warning-only. It also drops the in-house fixed-release
 coordinates from the job-local copy, so the unlocked `mvn install` writes
-fresh inodes instead of rewriting the host cache through a hardlink. Maven's
-tracking markers (`resolver-status.properties`, `*.lastUpdated`,
-`_remote.repositories`) are truncated and rewritten in place, so the seed
-drops those hardlinks too and Maven recreates them job-locally. The
-Maven runs run unlocked; the write-back holds one acquisition, and its `mkdir`
-and bounded `find`/`cp` children drop fd 9 so a survivor cannot retain the
-lock. A hold now measures the copy instead of the suite, and the fast tier's
-budget is again far above one hold.
+fresh inodes instead of rewriting the host cache through a hardlink. Maven
+can truncate and rewrite its tracking markers (`resolver-status.properties`,
+`*.lastUpdated`, `_remote.repositories`), version metadata and checksums
+(`maven-metadata-*.xml*`) in place. The seed drops those entries too, along
+with `*.tmp`, `*.part` and `*.part.lock` residue, so each job resolves this
+state locally; this does not assume every Resolver version writes through an
+existing inode. The prune clears inherited mutable state as well:
+`RUNNER_TEMP` survives across jobs on the pool, so a previous job's
+single-link markers go the same way as the hardlinks this seed created. A
+missing host cache stays quiet while a real copy failure warns, so the
+warning still means the seed failed. Seed removal and the locked host purge
+match `qwencode-sdk` and `qwen-managed-agent-*` at any depth, including the
+legacy nested `repository/com/alibaba/` tree. Both write-back prunes retain
+every explicit coordinate and also exclude that module glob, so a host-side
+unlink cannot make its seeded inode eligible for copy-back. The Maven runs
+run unlocked; the write-back holds one acquisition, and its `mkdir` and
+bounded `find`/`cp` children drop fd 9 so a survivor cannot retain the lock.
+The write-back publishes artifacts only: resolver bookkeeping records this
+run's resolution outcomes and is not copied into the shared cache. A hold now
+measures the copy instead of the suite, and the fast tier's budget is again
+far above one hold.
 
 The test job follows the same rule. Its suite was the other long hold: on
 2026-10-22, run 39771949573's fast-tier job failed at its 5400-second budget
@@ -149,33 +198,40 @@ case-insensitively before it reaches the log, so nothing on that tolerated
 path carries a rerun-classifier signature onto a succeeding step. The same
 policy covers a host fault the helper cannot recover from: a missing `flock`
 or an unusable cache or queue directory warns and skips before the helper
-spins out its budget. In the bare-lock fallback, only `flock`'s timeout
-status is tolerated; any other status is an unknown setup failure and stays
-fatal.
+spins out its budget, and so does an unusable host cache or job-local
+repository at the write-back prelude. In the bare-lock fallback, only
+`flock`'s timeout status is tolerated; any other status is an unknown setup
+failure and stays fatal. Every one of these tolerated paths exits with the
+suite status: the suite captures its own result before the write-back, so a
+failed suite still publishes the dependencies it downloaded and the step
+still reports the failure.
 
-A red suite still reaches the write-back. The test job's Maven runs record a
+A red suite still reaches the write-back. Both jobs' Maven runs record a
 failure in `mvn_status` instead of aborting under errexit, the failure stops
 the remaining suites, and that deferred status fails the step after the copy.
 The downloads the failed run made are therefore published instead of
 re-fetched by the next leg, and a tolerated skip of the copy reports the same
 status rather than turning the step green. A red leg queues only as long as
 the copy itself may run (300 s) instead of spending the green lane's 9600 s
-budget to repeat a failure signal that is already decided. The copy publishes
-artifacts only: the resolver tracking markers and the `*.tmp` fragments an
-interrupted transfer leaves behind stay out, because a published marker would
-make every later reader of the host cache inherit that resolution outcome.
+or 5400 s budget to repeat a failure signal that is already decided. The copy publishes
+artifacts only: resolver tracking markers, metadata and its checksum files,
+current Resolver `*.tmp` fragments, and older Resolver `*.part` / `*.part.lock`
+residue stay out, because a published marker would make every later reader
+of the host cache inherit that resolution outcome.
 Because the write-back output now sits between the failure and the log tail,
 every exit that can end a red step names the failing stage in an annotation;
 Maven exits 1 for nearly every failure mode, so the bare exit code cannot tell
 the three suites apart.
 
-The 9600 s test-lane and 5400 s write-back budgets are unchanged by this PR.
+The green-suite 9600 s test-lane and 5400 s MySQL write-back budgets are unchanged.
+Both lanes cap a failed suite's write-back wait at 300 s.
 They bound the queue, not the hold; the test lane's 9600 s is carried from
 the pre-split topology where its suite could queue behind several holds, and
 with the suite unlocked it is a conservative bound (about 32 queued 300 s
 copies) rather than a measured need. The 1200 s promotion window stays well
-inside both. What changed is that the wait now guards an optional bounded
-copy, so an expired budget skips the copy instead of failing the step.
+inside both green budgets; a red suite expires before promotion. The wait
+guards an optional bounded copy, so an expired budget skips the copy instead
+of failing the step.
 Shortening the test lane's budget to 1800 s (six queued copies) is a
 queue-depth trade-off left to a follow-up.
 
@@ -302,27 +358,64 @@ order this section exists to prevent.
   ordering stubs park `flock --wait` until release, as the kernel does, so a
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
-  `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper, the
+  `scripts/tests/sdk-java-workflow.test.js` keeps the four SDK source sites
+  byte-identical, and requires the reference build to source its checked-out
+  helper directly without a download fallback. It checks the real
+  `maven-cache-seed.sh` including its guarded presence, directory permission
+  and mount-boundary checks, retained and dangling quarantine links,
+  fallback cleanup, and required prune failures. The call stops before Maven
+  when neither a local nor a revision-pinned helper is available, and also on
+  source or required seed/guard failures. A helper already in the workspace, or obtained from the workflow's revision, really sources a warm
+  hardlinked cache in a private fixture. The immutable validation
+  source revision does not change. Downloads use fresh `mktemp` regular files,
+  leaving the targets of pre-existing symlinks or hardlinks untouched, and
+  attempt to remove only the downloaded copy on exit. If that removal fails,
+  cleanup is advisory, preserves the saved step status, and emits a
+  `::warning::` annotation with the residual path when the output channel is
+  writable. The warning subshell confines `SIGPIPE` from a closed log pipe
+  to that diagnostic process, so it cannot abort restoration of the saved step
+  status. Other cleanup and warning I/O failures do not replace that status.
+  Permission-denial cleanup cases are gated by an actual removal probe rather
+  than uid alone, so root CI lanes without DAC bypass still run them.
+  The reference build directly sources its checked-out helper and never
+  requires a fallback fetch. A
+  host-source mount or mount-inspection failure skips the optional copy and
+  uses a clean repository; required job-local guards still stop Maven. It then
+  also pins the sourced helper, the
   test lane's 9600 s budget and 200-minute ceiling, the red leg's 300 s
   clamp, the MariaDB write-back's 5400 s budget and 310-minute ceiling, the
-  prelude and write-back tail at both sites — byte-identical apart from
-  three deliberate differences: the wait budget, the red-path clamp, and the
-  test job's deferred `mvn_status` exits and stage reporter, which the
-  comparison normalizes to `exit 0` and strips in the prelude and cuts off
-  after the write-back in the tail; the MariaDB site's arms keep `exit 0`
-  and never mention `mvn_status` because its suites fail inline — both jobs'
-  Maven runs above their acquisition, every test-lane `mvn` line ending in
-  `|| mvn_status=$?` with a named stage, the tolerated-skip arms exercised
-  with both a green and a red status (the red ones assert the stage
-  annotation and the 300 s budget), their write-back children's fd 9 close,
-  the two in-house coordinates' and the tracking-marker and `*.tmp` names'
-  absence from every seeded job-local repository and from both write-back
-  prunes, the annotation staying clear of `INFRA_FAILURE_SIGNATURES`, and the
-  seed-drop/prune sets agreeing at every site. The fault arms cover a missing
-  `flock`, a broken `mkdir`, a stray queue file, a lock path that is a
-  directory, a timed-out `flock`, and an unexpected `flock` status. The
-  `.size-baseline` entry is re-measured to the workflow's size after the last
-  edit.
+  prelude and write-back tail at both sites — byte-identical apart from the
+  wait budget with its red-path clamp and the helper's tier argument, with
+  the deferred status and stage reporter normalized on both sides before the
+  comparison — both jobs' Maven runs above their acquisition, every `mvn`
+  line ending in `|| mvn_status=$?` with a named stage, the tolerated-skip
+  arms exercised with both a green and a red status (the red ones assert the
+  stage annotation and the 300 s budget), their write-back children's fd 9
+  close, the in-house coordinates' and the resolver bookkeeping's —
+  `_remote.repositories`, `maven-metadata-*.xml*`,
+  `resolver-status.properties`, `*.lastUpdated`, `*.part`, `*.part.lock`, and
+  `*.tmp` — the non-directory resolver and transfer-state files filtered from
+  every seeded job-local repository and both write-back prunes. A legitimate
+  Maven artifact directory is not deleted merely because its name matches
+  those globs. Its JAR files are retained; matching resolver and transfer
+  files within it are the residue removed before Maven,
+  the write-back's host-side, any-depth removal of the
+  in-house coordinates, the host-copy attempt staying best-effort while a
+  failed mount check, permission repair, resolver-state prune or coordinate
+  prune stops Maven before it can use an unsafe local tree, the
+  annotation staying clear of `INFRA_FAILURE_SIGNATURES`, the seed and
+  host-purge family globs agreeing at every site, and each write-back prune
+  retaining every explicit coordinate plus the module glob. The fault arms
+  cover a missing `flock`, a broken `mkdir`, a stray queue file, a lock path
+  that is a directory, a timed-out `flock`, an unexpected `flock` status, an
+  unusable host cache, a missing job-local repository, a historical
+  quarantine or required prune that fails, which must stop Maven before it
+  writes, and inherited single-link resolver state in a reused job-local
+  repository, which the prune must clear. Only deleting the newly-created
+  quarantine remains best-effort and warning-only; previous quarantine
+  symlinks are reclaimed by the full loop, including dangling links that
+  `[ -e ]` cannot see. The `.size-baseline` entry is re-measured to the
+  workflow's size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -333,8 +426,17 @@ order this section exists to prevent.
   its 310-minute ceiling. The test job passes its tier and the MariaDB site
   defaults to normal. Both sites run their Maven suites from a job-local
   repository before the acquisition. Every job that seeds a job-local
-  repository drops the two in-house fixed-release coordinates from the copy
-  before running Maven.
+  repository drops the in-house fixed-release coordinates from the copy
+  before running Maven. A failed or cross-device host copy may fall back to a
+  clean network-backed repository; a mounted or uninspectable host source
+  skips the optional copy without preventing a clean Maven run. An uninspectable
+  job-local mount boundary,
+  unrepairable local directory, historical quarantine that cannot be
+  reclaimed, or required resolver/coordinate prune failure must stop before
+  Maven. An older SDK checkout without the helper must be able to load the same helper
+  version belonging to the workflow revision, still without modifying the
+  immutable source under test. Only deleting the quarantine created for this
+  run remains warning-only; any undeleted contents remain in quarantine.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
@@ -344,8 +446,9 @@ scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   Both call sites downgrade a failed acquisition or a setup fault to a
   warning, skip the write-back, and rewrite the helper's timeout text
   case-insensitively on the way to the log, so an acquisition this workflow
-  now tolerates leaves no classifier signature on a succeeding step. Only an
-  unexpected bare-`flock` status remains fatal.
+  now tolerates leaves no classifier signature on the step whether the suite
+  succeeds or fails, because every tolerated path exits with the captured
+  suite status. Only an unexpected bare-`flock` status remains fatal.
 
 ## Open questions
 

@@ -197,6 +197,186 @@ describe('reasoning declarations', () => {
   });
 
   it.each([
+    'kimi-k3',
+    'kimi-k3.1-pro',
+    'k3.1-pro',
+    'k3.1-pro-highspeed',
+    'k3.1-pro-high-speed',
+    'kimi-k3-20261231',
+    'moonshot/kimi-k3-1-pro-highspeed',
+    'kimi-k3-256k',
+    'k3-256k',
+    'KIMI-K3-256K',
+    'moonshot/kimi-k3-256k:latest',
+  ])('infers Kimi K3 capabilities for custom OpenAI route %s', (modelId) => {
+    const target = { ...route, model: modelId };
+    const resolved = resolveReasoningCapabilities(target, undefined);
+    expect(resolved).toMatchObject({
+      profile: 'openai-effort',
+      thinking: true,
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'max',
+      canDisable: false,
+      disableField: 'reasoning_effort',
+    });
+    expect(
+      getEffectiveReasoning(
+        { ...target, reasoning: { effort: 'xhigh' } },
+        resolved,
+      ),
+    ).toEqual({ effort: 'max' });
+  });
+
+  it.each([
+    { ...route, model: 'kimi-k2.7-code' },
+    { ...route, model: 'k3x' },
+    { ...route, model: 'kimi-k3x' },
+    { ...route, model: 'k3-instruct-nothink' },
+    { ...route, model: 'kimi-k3-highspeed' },
+    { ...route, model: 'kimi-k3.1-pro-instruct-nothink' },
+    { ...route, model: 'k3-256k-instruct-nothink' },
+    { ...route, model: 'kimi-k3-20261231-instruct-nothink' },
+    {
+      ...route,
+      model: 'kimi-k3.1-pro',
+      authType: AuthType.USE_ANTHROPIC,
+    },
+    {
+      ...route,
+      model: 'kimi-k3.1-pro',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+    },
+  ])('does not infer Kimi K3 capabilities for %j', (target) => {
+    expect(resolveReasoningCapabilities(target, undefined)).toBeUndefined();
+  });
+
+  it('inherits Kimi K3 wire behavior in a partial declaration', () => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'kimi-k3.1-pro' },
+        { defaultEffort: 'high' },
+      ),
+    ).toMatchObject({
+      profile: 'openai-effort',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+      canDisable: false,
+      disableField: 'reasoning_effort',
+    });
+  });
+
+  it.each([
+    ['medium', 'high'],
+    ['xhigh', 'max'],
+  ] as const)(
+    'clamps a declared Kimi K3 default %s onto the inherited ladder as %s',
+    (defaultEffort, expected) => {
+      expect(
+        resolveReasoningCapabilities(
+          { ...route, model: 'kimi-k3.1-pro' },
+          { defaultEffort },
+        ),
+      ).toMatchObject({
+        profile: 'openai-effort',
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: expected,
+        canDisable: false,
+      });
+    },
+  );
+
+  it('rejects a non-Kimi declared default outside the inherited ladder', () => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'gpt-5.4' },
+        { defaultEffort: 'max' },
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    'https://openrouter.ai/api/v1',
+    'https://openrouter.ai./api/v1',
+    'https://llm.openrouter.ai./api/v1',
+  ])('uses the OpenRouter reasoning profile for %s', (baseUrl) => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'moonshotai/kimi-k3', baseUrl },
+        undefined,
+      ),
+    ).toMatchObject({
+      profile: 'openai-reasoning',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'max',
+    });
+  });
+
+  it('keeps a complete custom Kimi K3 declaration authoritative', () => {
+    const target = { ...route, model: 'kimi-k3.1-pro' };
+    const resolved = resolveReasoningCapabilities(target, {
+      profile: 'openai-effort',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+    });
+    expect(resolved).toMatchObject({ defaultEffort: 'high' });
+    expect(resolved?.canDisable).toBeUndefined();
+    expect(
+      getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+    ).toBe(false);
+  });
+
+  it('derives the profile for a complete custom Kimi K3 opt-out', () => {
+    const target = { ...route, model: 'kimi-k3.1-pro' };
+    const resolved = resolveReasoningCapabilities(target, {
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'low',
+    });
+    expect(resolved).toMatchObject({
+      profile: 'openai-effort',
+      defaultEffort: 'low',
+    });
+    expect(resolved?.canDisable).toBeUndefined();
+    expect(
+      getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+    ).toBe(false);
+  });
+
+  it('keeps mandatory thinking on the shipped Moonshot K3 route only', () => {
+    const override = {
+      profile: 'openai-effort' as const,
+      efforts: ['low', 'high', 'max'] as const,
+      defaultEffort: 'low' as const,
+    };
+    const shipped = resolveReasoningCapabilities(
+      {
+        ...route,
+        model: 'kimi-k3',
+        baseUrl: 'https://api.moonshot.cn/v1',
+      },
+      override,
+    );
+    const custom = resolveReasoningCapabilities(
+      { ...route, model: 'kimi-k3' },
+      override,
+    );
+    expect(shipped?.canDisable).toBe(false);
+    expect(custom?.canDisable).toBeUndefined();
+  });
+
+  it.each(['dashscope-thinking', 'qwen-chat-template'] as const)(
+    'keeps a complete custom Kimi K3 %s declaration authoritative',
+    (profile) => {
+      const target = { ...route, model: 'kimi-k3.1-pro' };
+      const resolved = resolveReasoningCapabilities(target, { profile });
+      expect(resolved).toMatchObject({ profile, toggleOnly: true });
+      expect(resolved?.canDisable).toBeUndefined();
+      expect(
+        getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
     ['https://api.deepseek.com/v1', 'deepseek-flash', 'low', 'low'],
     ['https://api.deepseek.com/v1', 'deepseek-flash', 'xhigh', 'high'],
     [
@@ -338,6 +518,33 @@ describe('reasoning declarations', () => {
     expect(() => validateReasoningCapabilities(route, value)).toThrow(
       'capabilities.reasoning',
     );
+  });
+
+  it('accepts xhigh but rejects max in an explicit gemini profile declaration', () => {
+    const geminiRoute = {
+      ...route,
+      authType: AuthType.USE_GEMINI,
+      model: 'company-gemini-alias',
+    };
+    expect(
+      validateReasoningCapabilities(geminiRoute, {
+        profile: 'gemini',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'high',
+      }),
+    ).toMatchObject({
+      profile: 'gemini',
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    });
+    expect(() =>
+      validateReasoningCapabilities(geminiRoute, {
+        profile: 'gemini',
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      }),
+    ).toThrow('capabilities.reasoning');
   });
 
   it('clamps an inherited default when replacing the tier set', () => {
@@ -847,14 +1054,20 @@ describe('prompt reasoning snapshots', () => {
   );
 });
 
-it('validates subscription declarations using the Chat wire without assuming capabilities', () => {
+it('defaults subscription routes to medium and honors explicit Chat declarations', () => {
   const subscriptionRoute = {
-    model: 'qwen3.8-max',
+    model: 'future-served-model',
     authType: AuthType.QWEN_SUBSCRIPTION,
     baseUrl: 'https://api.qwen.ai/v1',
   };
   expect(
     resolveReasoningCapabilities(subscriptionRoute, undefined),
+  ).toMatchObject({ defaultEffort: 'medium', disableField: 'enable_thinking' });
+  expect(
+    resolveReasoningCapabilities(
+      { ...subscriptionRoute, authType: AuthType.USE_OPENAI },
+      undefined,
+    ),
   ).toBeUndefined();
   expect(
     resolveReasoningCapabilities(subscriptionRoute, declaration),

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
@@ -82,9 +83,9 @@ final class WorkspaceCreationRoots {
         List<Map<String, Object>> rows = jdbc.query(
                 "SELECT receipt_key, tenant_id, scope_kind, scope_id, idempotency_key, state,"
                         + " result_json FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
-                        + " AND tenant_key = ?",
+                        + " AND tenant_id = ?",
                 (row, index) -> ManagedSchemaRows.read(row), key,
-                ReceiptNamespace.WORKSPACE_CREATE.name(), ManagedSchemaKeys.key(tenant));
+                ReceiptNamespace.WORKSPACE_CREATE.name(), tenant);
         if (rows.size() != 1) {
             return null;
         }
@@ -99,12 +100,12 @@ final class WorkspaceCreationRoots {
                 || !(row.get("idempotency_key") instanceof String idempotency)
                 || !key.equals(ManagedSchemaKeys.receiptKey(ReceiptNamespace.WORKSPACE_CREATE,
                         tenant, ReceiptScope.ACTOR, scope, idempotency))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Details details = details((String) row.get("result_json"), key);
         if (!storage.equals(details.storageId())
                 || !("workspace-" + key).equals(details.workspaceId())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         try {
             if (details.localRoot() != null) {
@@ -117,7 +118,7 @@ final class WorkspaceCreationRoots {
                 return null;
             }
             if (!Objects.equals(baseKey, directoryKey(base))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             Path tenantRoot = base.resolve(ManagedSchemaKeys.key(tenant));
             Path root = tenantRoot.resolve(key);
@@ -125,17 +126,17 @@ final class WorkspaceCreationRoots {
             directoryKey(root);
             return new Root(root, null);
         } catch (IOException | ManagedAgentException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+            throw WorkspaceExecutionStore.unavailable(error);
         }
     }
 
     Path prepare(String tenant, String receiptKey) {
         if (!enabled() || !receiptKey.matches("[a-f0-9]{64}")) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         try {
             if (!Objects.equals(baseKey, directoryKey(base))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             Path tenantRoot = base.resolve(ManagedSchemaKeys.key(tenant));
             createDirectory(tenantRoot);
@@ -147,7 +148,7 @@ final class WorkspaceCreationRoots {
             }
             return root;
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+            throw WorkspaceExecutionStore.unavailable(error);
         }
     }
 
@@ -157,7 +158,7 @@ final class WorkspaceCreationRoots {
 
     Path importedMetadataDirectory(String storage, boolean create) {
         if (!sharedStorage(storage) || stateDirectory == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         try {
             directoryKey(stateDirectory);
@@ -172,7 +173,7 @@ final class WorkspaceCreationRoots {
             }
             return metadata;
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+            throw WorkspaceExecutionStore.unavailable(error);
         }
     }
 
@@ -208,7 +209,7 @@ final class WorkspaceCreationRoots {
             }
             return value;
         } catch (IOException | RuntimeException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+            throw WorkspaceExecutionStore.unavailable(error);
         }
     }
 

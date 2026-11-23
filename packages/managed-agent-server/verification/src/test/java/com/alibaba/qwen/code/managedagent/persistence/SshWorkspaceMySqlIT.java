@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -48,8 +49,8 @@ class SshWorkspaceMySqlIT extends SshWorkspaceStoreTest {
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var blocker = executor.submit(() -> transaction.executeWithoutResult(status -> {
                 WorkspaceStorageKindGuard.lockDomain(jdbc, "tenant");
-                jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE",
-                        SshWorkspaceStore.physicalKey(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore
+                jdbc.queryForList("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE",
+                        JdbcSshWorkspaceStore.physicalKey(SshWorkspaceStore
                                 .object(registration(otherIntent, "/work/other", "9"), "identity")));
                 locked.countDown();
                 try {

@@ -2,10 +2,10 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
 import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
@@ -48,7 +48,9 @@ class ManagedContextRecoveryTest {
 
     @Test
     void deadlineStillCompletesWhenPersistingTheBlockFails() throws Exception {
-        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository delegate = repository(source);
         AtomicInteger blockWrites = new AtomicInteger();
         RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
                 .newProxyInstance(getClass().getClassLoader(),
@@ -66,7 +68,7 @@ class ManagedContextRecoveryTest {
                             }
                         });
         FailingProvisioner provisioner = new FailingProvisioner(true);
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             ExecutionException error = assertThrows(ExecutionException.class,
                     () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
             RuntimeBrokerException timeout = (RuntimeBrokerException) error.getCause();
@@ -83,10 +85,10 @@ class ManagedContextRecoveryTest {
     @Test
     void failedLaunchRemainsBlockedAcrossWarmAndDatabaseReconstruction() throws Exception {
         DataSource source = database();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        ManagedSchema.initialize(source);
         FailingProvisioner provisioner = new FailingProvisioner(false);
         JdbcRuntimeBindingRepository first = repository(source);
-        try (RuntimeBrokerService service = service(first, provisioner)) {
+        try (RuntimeBrokerService service = service(source, first, provisioner)) {
             assertThrows(ExecutionException.class,
                     () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
             for (int index = 0; index < 3; index++) {
@@ -94,7 +96,7 @@ class ManagedContextRecoveryTest {
             }
         }
         JdbcRuntimeBindingRepository restored = repository(source);
-        try (RuntimeBrokerService service = service(restored, provisioner)) {
+        try (RuntimeBrokerService service = service(source, restored, provisioner)) {
             assertBlocked(service);
         }
         assertEquals(1, provisioner.launches.get());
@@ -127,9 +129,8 @@ class ManagedContextRecoveryTest {
         RuntimeProvisionRequest customSecond = new RuntimeProvisionRequest(customScope,
                 "harness-2", "custom", REQUEST.getStorageId());
         DataSource source = database();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        for (RuntimeBindingRepository bindings : List.of(
-                new InMemoryRuntimeBindingRepository(), repository(source))) {
+        ManagedSchema.initialize(source);
+        for (RuntimeBindingRepository bindings : List.of(repository(source))) {
             RuntimeBindingRecord initial = bindings.findOrCreate(first);
             RuntimeBindingRecord claimed = bindings.claimOperation(initial.getBindingId(),
                     "owner", Duration.ofMinutes(1));
@@ -192,9 +193,8 @@ class ManagedContextRecoveryTest {
         RuntimeProvisionRequest third = new RuntimeProvisionRequest(thirdScope,
                 "legacy-harness-c", "local-process");
         DataSource source = database();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        for (RuntimeBindingRepository bindings : List.of(
-                new InMemoryRuntimeBindingRepository(), repository(source))) {
+        ManagedSchema.initialize(source);
+        for (RuntimeBindingRepository bindings : List.of(repository(source))) {
             RuntimeBindingRecord initial = bindings.findOrCreate(first);
             RuntimeBindingRecord claimed = bindings.claimOperation(
                     initial.getBindingId(), "owner", Duration.ofMinutes(1));
@@ -232,14 +232,14 @@ class ManagedContextRecoveryTest {
     @Test
     void persistedMarkerBeforeSpawnBlocksTheFirstCallAfterRestart() throws Exception {
         DataSource source = database();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        ManagedSchema.initialize(source);
         JdbcRuntimeBindingRepository first = repository(source);
         RuntimeBindingRecord initial = first.findOrCreate(REQUEST);
         RuntimeBindingRecord saved = first.claimOperation(initial.getBindingId(), "setup", Duration.ofMinutes(1));
         assertNotNull(first.compareAndSet(saved, saved.withResourceHandle(HANDLE, Instant.now())));
         first.releaseOperation(saved.getBindingId(), "setup", saved.getOperationGeneration());
         FailingProvisioner provisioner = new FailingProvisioner(false);
-        try (RuntimeBrokerService service = service(repository(source), provisioner)) {
+        try (RuntimeBrokerService service = service(source, repository(source), provisioner)) {
             assertBlocked(service);
             assertBlocked(service);
         }
@@ -249,9 +249,9 @@ class ManagedContextRecoveryTest {
     @Test
     void timedOutLaunchIsBlockedAndLateCompletionCannotPublishReady() throws Exception {
         DataSource source = database();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        ManagedSchema.initialize(source);
         FailingProvisioner provisioner = new FailingProvisioner(true);
-        try (RuntimeBrokerService service = service(repository(source), provisioner)) {
+        try (RuntimeBrokerService service = service(source, repository(source), provisioner)) {
             assertBlocked(service);
             assertBlocked(service);
             RuntimeProvisionSeed seed = repository(source).findActive(REQUEST).getProvisionSeed();
@@ -286,11 +286,11 @@ class ManagedContextRecoveryTest {
     void freshSchemaRoundtripsUnboundAndManagedReadyIdentity() throws Exception {
         {
             DataSource source = database();
-            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+            ManagedSchema.initialize(source);
             RuntimeProvisionRequest legacy = new RuntimeProvisionRequest(
                     REQUEST.getScope(), null, REQUEST.getProvisionerKind());
             RuntimeBindingRecord old = repository(source).findOrCreate(legacy);
-            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+            ManagedSchema.initialize(source);
             assertEquals(old.getBindingId(), repository(source).findOrCreate(legacy).getBindingId());
             JdbcRuntimeBindingRepository repo = repository(source);
             RuntimeBindingRecord initial = repo.findOrCreate(REQUEST);
@@ -328,9 +328,11 @@ class ManagedContextRecoveryTest {
 
     @Test
     void aRetryableFailedLaunchReportsTheBlock() throws Exception {
-        InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository bindings = repository(source);
         FailingProvisioner provisioner = new FailingProvisioner(false);
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             assertBlocked(service);
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findActive(REQUEST).getState());
@@ -340,7 +342,9 @@ class ManagedContextRecoveryTest {
 
     @Test
     void aDeadlineWhoseBlockLosesItsWriteStillAnswersTheTimeout() throws Exception {
-        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository delegate = repository(source);
         AtomicInteger blockWrites = new AtomicInteger();
         RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
                 .newProxyInstance(getClass().getClassLoader(),
@@ -354,7 +358,7 @@ class ManagedContextRecoveryTest {
                             return invoke(method, delegate, args);
                         });
         FailingProvisioner provisioner = new FailingProvisioner(true);
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             ExecutionException error = assertThrows(ExecutionException.class,
                     () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
             assertEquals("runtime_broker_provision_timeout",
@@ -366,7 +370,9 @@ class ManagedContextRecoveryTest {
 
     @Test
     void aDeadlineThatFindsTheBindingAlreadyBlockedReportsTheBlock() throws Exception {
-        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository delegate = repository(source);
         AtomicInteger blockWrites = new AtomicInteger();
         java.util.concurrent.CountDownLatch deadlineTried = new java.util.concurrent.CountDownLatch(1);
         // The failure handler records the block, then is still in that
@@ -387,7 +393,7 @@ class ManagedContextRecoveryTest {
                             return invoke(method, delegate, args);
                         });
         FailingProvisioner provisioner = new FailingProvisioner(false);
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             assertBlocked(service);
             assertEquals(2, blockWrites.get());
         }
@@ -396,7 +402,9 @@ class ManagedContextRecoveryTest {
 
     @Test
     void aLateFailureAfterTheDeadlineBlockedReportsTheBlock() throws Exception {
-        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository delegate = repository(source);
         AtomicInteger blockWrites = new AtomicInteger();
         FailingProvisioner provisioner = new FailingProvisioner(true);
         // The launch fails after the deadline recorded the block but before
@@ -414,7 +422,7 @@ class ManagedContextRecoveryTest {
                             }
                             return result;
                         });
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             assertBlocked(service);
             assertEquals(2, blockWrites.get());
         }
@@ -423,10 +431,12 @@ class ManagedContextRecoveryTest {
 
     @Test
     void aNonRetryableFailedLaunchKeepsItsOwnAnswer() throws Exception {
-        InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository bindings = repository(source);
         FailingProvisioner provisioner = new FailingProvisioner(new RuntimeBrokerException(409,
                 "runtime_broker_attestation_conflict", "another Runtime answered", false));
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             ExecutionException error = assertThrows(ExecutionException.class,
                     () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
             assertEquals("runtime_broker_attestation_conflict",
@@ -464,7 +474,9 @@ class ManagedContextRecoveryTest {
      */
     private RuntimeBrokerException failBeforeTheDeadline(RuntimeProvisionRequest request)
             throws Exception {
-        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository delegate = repository(source);
         CompletableFuture<Void> answered = new CompletableFuture<>();
         java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
         RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
@@ -478,7 +490,7 @@ class ManagedContextRecoveryTest {
                             return result;
                         });
         FailingProvisioner provisioner = new FailingProvisioner(request);
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             CompletableFuture<RuntimeBindingRecord> warm = service.warm("harness").toCompletableFuture();
             warm.whenComplete((ignored, error) -> answered.complete(null));
             provisioner.pending.completeExceptionally(ATTESTATION_CONFLICT);
@@ -495,7 +507,9 @@ class ManagedContextRecoveryTest {
 
     @Test
     void aNonRetryableFailureAfterTheDeadlineFiredReportsTheBlock() throws Exception {
-        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository delegate = repository(source);
         AtomicInteger blockWrites = new AtomicInteger();
         CompletableFuture<Void> answered = new CompletableFuture<>();
         CompletableFuture<Void> published = new CompletableFuture<>();
@@ -522,7 +536,7 @@ class ManagedContextRecoveryTest {
                             }
                             return result;
                         });
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             CompletableFuture<RuntimeBindingRecord> warm = service.warm("harness").toCompletableFuture();
             warm.whenComplete((ignored, error) -> answered.complete(null));
             ExecutionException error = assertThrows(ExecutionException.class,
@@ -551,7 +565,9 @@ class ManagedContextRecoveryTest {
 
     @Test
     void aBlockThatCannotBeRecordedKeepsTheFailuresAnswer() throws Exception {
-        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository delegate = repository(source);
         AtomicInteger blockWrites = new AtomicInteger();
         RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
                 .newProxyInstance(getClass().getClassLoader(),
@@ -565,7 +581,7 @@ class ManagedContextRecoveryTest {
                             return invoke(method, delegate, args);
                         });
         FailingProvisioner provisioner = new FailingProvisioner(false);
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             ExecutionException error = assertThrows(ExecutionException.class,
                     () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
             RuntimeBrokerException failure = (RuntimeBrokerException) error.getCause();
@@ -580,9 +596,11 @@ class ManagedContextRecoveryTest {
 
     @Test
     void theCallThatHitsTheDeadlineReportsTheBlock() throws Exception {
-        InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository bindings = repository(source);
         FailingProvisioner provisioner = new FailingProvisioner(true);
-        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+        try (RuntimeBrokerService service = service(source, bindings, provisioner)) {
             assertBlocked(service);
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findActive(REQUEST).getState());
@@ -593,7 +611,9 @@ class ManagedContextRecoveryTest {
 
     @Test
     void unplaceableScopeIsATypedRefusal() throws Exception {
-        try (RuntimeBrokerService service = service(new InMemoryRuntimeBindingRepository(),
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        try (RuntimeBrokerService service = service(source, repository(source),
                 new LocalProcessRuntimeProvisioner(List.of("node"), Path.of("."),
                         new HttpRuntimeTransport(), scope -> null))) {
             ExecutionException failure = assertThrows(ExecutionException.class,
@@ -608,7 +628,7 @@ class ManagedContextRecoveryTest {
     @Test
     void repeatInitializationValidatesWithoutAlteringTables() throws Exception {
         DataSource source = database();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        ManagedSchema.initialize(source);
         AtomicInteger stale = new AtomicInteger();
         DataSource racing = (DataSource) java.lang.reflect.Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[] {DataSource.class},
@@ -617,7 +637,7 @@ class ManagedContextRecoveryTest {
                     return result instanceof Connection connection
                             ? staleConnection(connection, stale) : result;
                 });
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(racing);
+        ManagedSchema.initialize(racing);
         assertEquals(0, stale.get());
     }
 
@@ -652,11 +672,11 @@ class ManagedContextRecoveryTest {
         }
     }
 
-    private static RuntimeBrokerService service(RuntimeBindingRepository bindings,
+    private static RuntimeBrokerService service(DataSource source, RuntimeBindingRepository bindings,
             RuntimeProvisioner provisioner) {
         return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(REQUEST.getScope()),
                 provisioner, new HttpRuntimeTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
+                new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
                 UUID.randomUUID().toString(), Duration.ofMillis(1500), Duration.ofMillis(1500));
     }
 

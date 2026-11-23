@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -51,6 +52,37 @@ final class RuntimeBindingRegistry {
         this.brokerOwnerId = brokerOwnerId;
         this.operationLeaseDuration = operationLeaseDuration;
         this.clock = clock;
+    }
+
+    RuntimeBindingRecord findLatestBindingByHarnessSession(
+            String tenantId, String harnessSessionId, boolean readyOnly) {
+        String after = null;
+        RuntimeBindingRecord best = null;
+        for (;;) {
+            List<RuntimeBindingRecord> page = bindingRepository
+                    .findByHarnessSession(tenantId, harnessSessionId, after, 100);
+            if (page.isEmpty()) {
+                return best;
+            }
+            for (RuntimeBindingRecord candidate : page) {
+                if ((!readyOnly || candidate.getState() == RuntimeBindingRecord.State.READY)
+                        && (best == null || candidate.getBindingId().compareTo(best.getBindingId()) > 0)) {
+                    best = candidate;
+                }
+            }
+            if (page.size() < 100) {
+                return best;
+            }
+            after = page.get(page.size() - 1).getBindingId();
+        }
+    }
+
+    String runtimeProvisionerKind(RuntimeSessionRecord record) {
+        RuntimeBindingRecord binding = bindingRepository.findById(record.getBindingId());
+        if (binding == null || binding.getGeneration() != record.getRuntimeGeneration()) {
+            throw conflict("workspace_close_identity_unverified", "Original Runtime binding is unavailable");
+        }
+        return binding.getRequest().getProvisionerKind();
     }
 
     CompletableFuture<BindingContext> bindingOperation(String bindingId) {
@@ -124,9 +156,9 @@ final class RuntimeBindingRegistry {
 
     CompletionStage<SessionContext> requireSession(
             String harnessSessionId, String runtimeSessionId) {
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         CompletableFuture<SessionContext> context = sessions.get(runtimeId);
         if (context == null) {
@@ -225,7 +257,9 @@ final class RuntimeBindingRegistry {
     static final class SessionContext {
         // One guard for the state below and every context.lock() region at
         // the callers. Like them it must not pin a virtual-thread carrier
-        // when a repository call inside the guard blocks (JDK 21).
+        // when a repository call inside the guard blocks (JDK 21). Getters
+        // are called only inside a caller's lock() region; the writers also
+        // run from completion callbacks, so they take the guard themselves.
         private final ReentrantLock guard = new ReentrantLock();
         private final RuntimeSession session;
         private final RuntimeBindingRecord binding;
@@ -271,12 +305,7 @@ final class RuntimeBindingRegistry {
         }
 
         Set<String> backgroundProcesses() {
-            lock();
-            try {
-                return backgroundProcesses;
-            } finally {
-                unlock();
-            }
+            return backgroundProcesses;
         }
 
         void beginControl() {
@@ -298,12 +327,7 @@ final class RuntimeBindingRegistry {
         }
 
         String mountClaim() {
-            lock();
-            try {
-                return mountClaim;
-            } finally {
-                unlock();
-            }
+            return mountClaim;
         }
 
         void mountClaim(String next) {
@@ -316,21 +340,11 @@ final class RuntimeBindingRegistry {
         }
 
         boolean hasActiveControl() {
-            lock();
-            try {
-                return activeControls > 0;
-            } finally {
-                unlock();
-            }
+            return activeControls > 0;
         }
 
         CompletableFuture<Boolean> release() {
-            lock();
-            try {
-                return release;
-            } finally {
-                unlock();
-            }
+            return release;
         }
 
         void release(CompletableFuture<Boolean> next) {
@@ -343,12 +357,7 @@ final class RuntimeBindingRegistry {
         }
 
         CompletableFuture<Boolean> releaseAttempt() {
-            lock();
-            try {
-                return releaseAttempt;
-            } finally {
-                unlock();
-            }
+            return releaseAttempt;
         }
 
         void releaseAttempt(CompletableFuture<Boolean> next) {

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import jakarta.annotation.PostConstruct;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -64,7 +65,11 @@ public class ManagedAgentProperties
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final ClientFiles clientFiles = new ClientFiles();
+    private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
+    private final SessionResources sessionResources = new SessionResources();
+    private final ObjectStorage objectStorage = new ObjectStorage();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
     private final ManagedExtensions managedExtensions = new ManagedExtensions();
@@ -77,6 +82,7 @@ public class ManagedAgentProperties
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
+    private boolean sideQueriesEnabled;
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
     private List<String> definitionToolProfiles =
@@ -98,11 +104,33 @@ public class ManagedAgentProperties
     @Getter(AccessLevel.NONE)
     private Environment environment;
 
+    @Getter
+    @Setter
+    public static class Memory {
+        private boolean enabled;
+        private String endpoint;
+        private String apiKey;
+    }
+
+    @Override
+    public boolean isMemoryEnabled() {
+        return memory.isEnabled();
+    }
+
     public boolean admitsPublicChildAgents() {
+        // D5′: public children ride the parent's Workspace on a session-scoped
+        // worker, so the durable local-process arm and the SSH arm (the same
+        // capability expression sshFiles uses) both admit them. CSI resident
+        // stays excluded structurally: these provisioner arms never match a
+        // resident Workspace, and isPublicShell refuses its files-only
+        // profile — there is no resident admission gate.
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
-                && runtimeBroker.isDurableLocalProcess()
-                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
-                && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
+                && "session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                && (runtimeBroker.isDurableLocalProcess()
+                        && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(runtimeBroker.getProvisioner())
+                        && !runtimeBroker.getSsh().getNodes().isEmpty()
+                        && "session".equals(runtimeBroker.getIsolationClass()));
     }
 
     public void setModelCatalog(List<ModelOption> modelCatalog) {
@@ -289,9 +317,42 @@ public class ManagedAgentProperties
         if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceId())) {
             sessionStore.setWorkspaceId(runtimeBroker.getWorkspaceId());
         } else if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceCwd())
-                && (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(provisioner)
-                        || "kubernetes".equals(provisioner))) {
+                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(provisioner)) {
             sessionStore.setWorkspaceId(EmbeddedRuntimeBroker.workspaceId(runtimeBroker));
+        }
+    }
+
+    // The Harness reaches the relay MCP endpoint on this server's internal
+    // listener, so the relay URL derives from it the way the store URL does.
+    // Enabling the feature with no derivable URL fails the boot rather than
+    // answering 503 on every registration with no diagnostic.
+    private void applyClientFilesDefaults() {
+        if (!clientFiles.isEnabled()) {
+            return;
+        }
+        // Range-check the numeric settings at boot: a zero queue-depth would
+        // otherwise refuse every admission and silently disable the feature,
+        // and a non-positive TTL or payload bound breaks the relay's lifecycle.
+        if (clientFiles.getQueueDepth() < 1) {
+            throw new IllegalStateException("client-files.queue-depth must be at least 1");
+        }
+        if (clientFiles.getMaxPayloadBytes() < 1) {
+            throw new IllegalStateException("client-files.max-payload-bytes must be at least 1");
+        }
+        if (clientFiles.getRequestTtl() == null || clientFiles.getRequestTtl().isNegative()
+                || clientFiles.getRequestTtl().isZero()) {
+            throw new IllegalStateException("client-files.request-ttl must be positive");
+        }
+        if (clientFiles.getBindingTtl() == null || clientFiles.getBindingTtl().isNegative()
+                || clientFiles.getBindingTtl().isZero()) {
+            throw new IllegalStateException("client-files.binding-ttl must be positive");
+        }
+        if (StringUtils.isBlank(clientFiles.getRelayUrl()) && environment != null) {
+            clientFiles.setRelayUrl(localStoreBaseUrl());
+        }
+        if (StringUtils.isBlank(clientFiles.getRelayUrl())) {
+            throw new IllegalStateException("client-files.enabled requires client-files.relay-url"
+                    + " (or an internal listener to derive it from)");
         }
     }
 
@@ -317,7 +378,14 @@ public class ManagedAgentProperties
     @PostConstruct
     void validateWorkspaceFiles() {
         applySessionStoreDefaults();
+        applyClientFilesDefaults();
         applyHarnessCredentialsFile();
+        if (environment != null
+                && environment.getProperty("qwen.managed-agent.action-parking.enabled", Boolean.class, false)
+                && !environment.getProperty("qwen.managed-agent.wake-dispatch.enabled", Boolean.class, false)) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.action-parking.enabled requires qwen.managed-agent.wake-dispatch.enabled");
+        }
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
@@ -327,6 +395,7 @@ public class ManagedAgentProperties
             throw new IllegalStateException("SSH Runtime requires Workspace files and configured nodes");
         }
         runtimeBroker.getRetention().validate();
+        runtimeBroker.getMcpParking().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
             throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h;"
@@ -338,20 +407,6 @@ public class ManagedAgentProperties
                 && !runtimeBroker.getSsh().getNodes().isEmpty()
                 && "session".equals(runtimeBroker.getIsolationClass())
                 && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
-        boolean residentFiles = "kubernetes-workspace".equals(runtimeBroker.getProvisioner())
-                && "workspace".equals(runtimeBroker.getIsolationClass())
-                && !runtimeBroker.getResidentWorkspaces().isEmpty() && runtimeBroker.getWorkspaceMounts().isEmpty()
-                && runtimeBroker.getSsh().getNodes().isEmpty()
-                && !runtimeBroker.isTrustedLocalRebootRecovery() && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
-                && !runtimeBroker.isChildWorkspacesEnabled() && !harness.isWorkspaceShellEnabled()
-                && !runtimeBroker.getResidentKubernetesApiUrl().isBlank()
-                && !runtimeBroker.getResidentKubernetesTokenFile().isBlank() && !runtimeBroker.getResidentKubernetesCaFile().isBlank();
-        if (!runtimeBroker.getResidentWorkspaces().isEmpty()) {
-            new com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces(runtimeBroker.getResidentWorkspaces());
-            if (!residentFiles || !harness.isWorkspaceFilesEnabled()) {
-                throw new IllegalStateException("Resident Workspaces require exclusive CSI/files configuration");
-            }
-        }
         if (harness.isWorkspaceShellEnabled()
                 && (!harness.isWorkspaceFilesEnabled()
                         || mode == null
@@ -363,7 +418,8 @@ public class ManagedAgentProperties
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !residentFiles && !sshFiles && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                        || !sshFiles && !isExternalWorkspaceFilesConfigured()
+                        && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
@@ -473,6 +529,24 @@ public class ManagedAgentProperties
                         + " under a UTF-8 locale (sun.jnu.encoding is "
                         + System.getProperty("sun.jnu.encoding") + ")");
             }
+        }
+    }
+
+    /** Static configuration eligibility, never negotiated readiness or worker proof. */
+    public boolean isExternalWorkspaceFilesConfigured() {
+        if (!ExternalRuntimeKinds.isWorkspace(runtimeBroker.getProvisioner())
+                || !harness.isWorkspaceFilesEnabled() || !harness.isEnabled()
+                || !sessionStore.isEnabled() || !runtimeBroker.isEnabled()) {
+            return false;
+        }
+        try {
+            new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+                    .require(runtimeBroker.getProvisioner())
+                    .validate(this);
+            return harness.getApprovalMode() != null
+                    && Set.of("yolo", "default", "auto-edit").contains(harness.getApprovalMode().toLowerCase(Locale.ROOT));
+        } catch (IllegalStateException | IllegalArgumentException invalid) {
+            return false;
         }
     }
 
@@ -656,13 +730,6 @@ public class ManagedAgentProperties
         private String keyStorePasswordFile = "";
         private String trustStoreFile = "";
         private String trustStorePasswordFile = "";
-        private String kubernetesApiUrl = "https://kubernetes.default.svc";
-        private String kubernetesTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token";
-        private String kubernetesCaFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-        private String namespace = "";
-        private String serviceName = "";
-        private String serviceUid = "";
-        private String portName = "https";
     }
 
     @Getter
@@ -686,6 +753,23 @@ public class ManagedAgentProperties
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
         private String bindingKey = "";
         private boolean allowInsecureHttp;
+    }
+
+    @Getter
+    @Setter
+    public static class ClientFiles
+            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                    .ClientFiles {
+        private boolean enabled;
+        private int queueDepth = 32;
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration requestTtl = Duration.ofSeconds(25);
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration bindingTtl = Duration.ofHours(8);
+        // A literal (not 60 * 1024) so the configuration-metadata processor
+        // carries the default into the generated reference page.
+        private int maxPayloadBytes = 61440;
+        private String relayUrl = "";
     }
 
     @Getter
@@ -741,10 +825,30 @@ public class ManagedAgentProperties
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
-        private boolean asyncVerificationEnabled;
         private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
+    }
+
+    @Getter
+    @Setter
+    public static class SessionResources
+            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                    .SessionResources {
+        private boolean enabled;
+        private String ossKeyPrefix = "session-resources/";
+        private boolean packJobEnabled;
+        private boolean deletionEnabled;
+        private long packTargetBytes = 16L * 1024 * 1024;
+        private int packMaxTransactions = 4096;
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration deletionGrace = Duration.ofHours(72);
+    }
+
+    @Getter
+    @Setter
+    public static class ObjectStorage {
+        private boolean enabled;
     }
 
     @Getter
@@ -763,6 +867,8 @@ public class ManagedAgentProperties
     public static class Extensions
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
         private boolean enabled;
+        private boolean selfServiceEnabled;
+        private boolean runtimeSkillImportEnabled;
         private String artifactDirectory = "";
         private List<String> allowedActors = List.of();
 
@@ -851,6 +957,7 @@ public class ManagedAgentProperties
 
         private boolean enabled;
         private final Retention retention = new Retention();
+        private final McpParking mcpParking = new McpParking();
         private String host = "127.0.0.1";
         private int port = 4182;
         private boolean allowNonLoopback;
@@ -863,14 +970,12 @@ public class ManagedAgentProperties
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
         private List<WorkspaceMount> workspaceMounts = List.of();
-        private List<ResidentWorkspace> residentWorkspaces = List.of();
-        private String residentKubernetesApiUrl = "";
-        private String residentKubernetesTokenFile = "";
-        private String residentKubernetesCaFile = "";
         private String workspaceCreationRoot = "";
         private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
+        private boolean toolMeasurements;
+        private boolean webTerminal;
         private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
@@ -932,42 +1037,31 @@ public class ManagedAgentProperties
             }
         }
 
-        public record WorkspaceMount(String tenantId, String storageId, String root)
+        /** Keeps idle Sessions' MCP connections across suspension until this idle period ends. */
+        @Getter
+        @Setter
+        public static class McpParking
                 implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
-                        .RuntimeBroker.WorkspaceMount {}
+                        .RuntimeBroker.McpParking {
+            private boolean enabled;
+            @DurationUnit(ChronoUnit.MILLIS)
+            private Duration idleDuration = Duration.ofMinutes(30);
+            private int batchSize = 100;
+            @DurationUnit(ChronoUnit.MILLIS)
+            private Duration scanDelay = Duration.ofMinutes(1);
 
-        public record ResidentWorkspace(
-                String workspaceId,
-                long workspaceGeneration,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration
-                        registration,
-                com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity protection,
-                String image,
-                List<String> command,
-                List<com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact> artifacts)
-                implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
-                        .RuntimeBroker.ResidentWorkspace {
-            public ResidentWorkspace {
-                if (registration == null || protection == null || workspaceId == null || workspaceId.isBlank()
-                        || workspaceGeneration < 1 || image == null || !image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
-                        || command == null || command.isEmpty() || command.size() > 32
-                        || command.stream().anyMatch(value -> value == null || value.isBlank()
-                                || value.length() > 8192 || value.indexOf('\0') >= 0)
-                        || artifacts == null || artifacts.size() > 48
-                        || artifacts.stream().anyMatch(java.util.Objects::isNull)
-                        || artifacts.stream().map(com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact::configMapName)
-                                .distinct().count() != artifacts.size()) {
-                    throw new IllegalArgumentException("Invalid resident Workspace configuration");
+            void validate() {
+                if (idleDuration == null || idleDuration.toMillis() < 1
+                        || scanDelay == null || scanDelay.toMillis() < 1 || batchSize < 1 || batchSize > 1000) {
+                    throw new IllegalStateException("Runtime Broker MCP parking requires positive idle-duration and"
+                            + " scan-delay (at least 1ms), and batch-size between 1 and 1000");
                 }
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(registration.tenantId(),
-                        workspaceId, workspaceGeneration, registration.storageId(), ".",
-                        com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
-                command = List.copyOf(command);
-                artifacts = List.copyOf(artifacts);
             }
         }
 
-        public void setResidentWorkspaces(List<ResidentWorkspace> value) { residentWorkspaces = List.copyOf(value); }
+        public record WorkspaceMount(String tenantId, String storageId, String root)
+                implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                        .RuntimeBroker.WorkspaceMount {}
     }
 
     /** H6b/H6c: the automation scanner, its lease and the slot window. */
@@ -975,7 +1069,7 @@ public class ManagedAgentProperties
     @Setter
     public static class Automation
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Automation {
-        private boolean enabled;
+        private boolean enabled = true;
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration scanDelay = Duration.ofSeconds(10);
         @DurationUnit(ChronoUnit.MILLIS)
