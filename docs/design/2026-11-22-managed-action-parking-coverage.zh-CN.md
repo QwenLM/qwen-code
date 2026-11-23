@@ -104,9 +104,9 @@
 
 ### 4.7 S7：extension command-step 审批
 
-- **方案。** 资格函数接受 `plan.commandStep`，条件是 `plan.commandStep.configRevision` 等于当前 extension 配置修订（`resumeSavedNativeBatch` 本来就会检查这一项，`hosted-workspace-tool-turn.ts:4328`）。Hooks 的放宽只限 command-step 计划，与 `extensionsCommandStepTakeover` 一致，不依赖 S5。
+- **方案。** command-step 等待登记一个真正能冻结的 freeze。停靠资格按接管恢复臂对 command-step 计划要求的 Session 形态条件接受 `plan.commandStep`：extension 已启用，且 Session 有工具 owner。这些条件做成一个共享函数，由两边共同调用，与原生审批那个函数并列。Hooks 的放宽只限 command-step 计划，与 `extensionsCommandStepTakeover` 一致，不依赖 S5。MCP Session 上的 command step 在 S6 之前保持常驻，尽管恢复会接受它。停靠资格不需要配置修订号条件，见下文。
 - **已确认。** 对 Workspace Session，决定投递时的加载带有接管标志，并会接管停靠的 Turn。connector 测试 `resolvesActionsThroughAuthorizedColdAndCachedWorkspaceAttachments` 断言决定投递发出的冷加载带被动恢复标志；Harness 测试 "resumes a parked approval through the passive load decision delivery sends" 表明只带这个标志的加载会经接管恢复臂恢复停靠的审批。
-- **待验证。** 裸加载不得回答停靠中的 command-step：R9-1 的守卫已存在，需要用测试固定下来。停靠期间若 extension 配置被修改，恢复会以修订不匹配拒绝，需要确认这种情况落入有类型的终态拒绝，而不是无限重试。
+- **已确认。** 对停靠中的 command step 做裸加载，返回 409 `turn_unsettled`，journal 里什么都不写，R9-1 守卫成立。Turn 未结算期间 extension 配置无法修改：所有 extension 管理路由在 Turn 活跃时都会拒绝，而停靠的 Session 只能通过接管加载回来，接管会让 Turn 重新活跃。因此 `resumeSavedNativeBatch`（`hosted-workspace-tool-turn.ts:4328`）拒绝的修订不匹配在停靠期间不会出现；即使出现，它也会表现为可重试的 503，而不是带类型的拒绝。Harness 测试 "parks a command-step approval that a bare load leaves unanswered and the decision-delivery load resumes" 固定了这两点。
 - **改动面。** 仅 Harness。
 
 ### 4.8 S8：`uncaptured` 批次
