@@ -48317,6 +48317,34 @@ describe('idle suspension', () => {
     expect(statsOf(server).cleanSuspensions).toBe(1);
   });
 
+  it('reports its suspension counts on the instance metrics route', async () => {
+    const server = await app(false, 'pod-a', true, { idleSuspendMs: 150 });
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+        harnessPlacement: {
+          instanceId: 'pod-a',
+          bootId: BOOT_ID,
+          placementEpoch: 1,
+        },
+      })
+      .expect(200);
+    await vi.waitFor(
+      async () => {
+        expect(
+          (await statusOf(server, created.body.clientId as string)).status,
+        ).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+    const metrics = await headers(
+      supertest(server).get('/internal/hosted-harness/v1/metrics'),
+    ).expect(200);
+    expect(metrics.body.suspension).toMatchObject({ cleanSuspensions: 1 });
+  });
+
   it.each([
     ['parks the MCP owner when the Broker advertises parking', true],
     ['drains the MCP owner when the Broker does not', false],

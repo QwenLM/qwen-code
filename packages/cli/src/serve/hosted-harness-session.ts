@@ -4949,6 +4949,7 @@ export function registerHostedHarnessSessionRoutes(
             ).length,
           }),
           () => startOwnershipDrain(),
+          () => suspensionStats,
         );
   const acceptingWork = () => instance?.accepting !== false;
   if (instance) {
