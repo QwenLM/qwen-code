@@ -43,12 +43,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ClassSizeRatchetTest {
     private static final int LARGE_CLASS_THRESHOLD = 800;
     // 2026-11-11: lowered from 2662 after the JdbcRuntimeBindingRepository
-    // admission/fence extraction. #15512 lowers it again to 2483 after the
-    // publication seal-manifest extraction; ToolPublicationDataStore remains
-    // the current maximum and seeds the ceiling at its actual size.
-    // #17846 lowers it to 2470 after extracting guards and the receipt
-    // predicate to ToolPublicationRequirements; the store is still the maximum.
-    private static final int GLOBAL_MAX_LINES = 2470;
+    // admission/fence extraction. #17478 lowers it again to 2483 after the
+    // publication seal-manifest extraction. #18085 moved ossScope to
+    // ToolPublicationContract (2482); ToolPublicationObjectKeys lowered it to
+    // 2481. #17846 extracts guards and the receipt predicate to
+    // ToolPublicationRequirements; the store remains the maximum.
+    private static final int GLOBAL_MAX_LINES = 2306;
     private static final String PIN_RESOURCE = "/class-size-ratchet.properties";
     private static final List<String> SOURCE_ROOTS =
             List.of("persistence/src/main/java", "runtime-broker/src/main/java");

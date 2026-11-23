@@ -51,8 +51,8 @@ class ManagedDataSourceSqlModeMySqlIT {
                 assertTrue(retired.stream().noneMatch(replacements::contains));
                 try (var connection = source.getConnection(); var statement = connection.createStatement()) {
                     statement.execute("INSERT INTO ma_read_lease"
-                            + " (lease_id, tenant_key, session_key, retirement_generation, expires_at)"
-                            + " VALUES ('session-mode-probe', REPEAT('a',64), REPEAT('b',64), 7, 1)");
+                            + " (lease_id, tenant_id, session_id, retirement_generation, expires_at)"
+                            + " VALUES ('session-mode-probe', REPEAT('a',36), REPEAT('b',64), 7, 1)");
                     var error = assertThrows(SQLException.class, () -> statement.execute(
                             "UPDATE ma_read_lease SET retirement_generation=-1 WHERE lease_id='session-mode-probe'"));
                     assertEquals(1264, error.getErrorCode());

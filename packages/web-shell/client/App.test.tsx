@@ -894,6 +894,7 @@ const {
       updateScheduledTask: vi.fn(),
       deleteScheduledTask: vi.fn(),
       deleteModel: vi.fn().mockResolvedValue(undefined),
+      unarchiveSession: vi.fn().mockResolvedValue(undefined),
       controlGoal: vi.fn().mockResolvedValue({
         snapshot: { v: 2, activity: 'idle', goal: null },
       }),
@@ -1193,6 +1194,18 @@ const {
           workspaceCwd?: string,
         ) => boolean | void | Promise<boolean | void>;
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+      } | null,
+      latestArtifactLibraryProps: null as {
+        workspaceCwd?: string;
+        onOpenSession?: (
+          sessionId: string,
+          archiveState: 'active' | 'archived',
+        ) => void;
+        onJumpToSessionArtifact?: (
+          sessionId: string,
+          artifactId: string,
+          archiveState: 'active' | 'archived',
+        ) => void;
       } | null,
       latestWorkflowRunsProps: null as {
         onCreateViaChat?: () => void;
@@ -2020,6 +2033,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onOpenLive?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenPrWatches?: () => void;
+      onOpenArtifacts?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
       onAddSessionToSplitView?: (sessionId: string) => void;
@@ -2177,6 +2191,18 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onOpenPrWatches?.(),
           },
           'open pr watches',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-artifacts-library',
+            'data-has-artifacts-library': String(
+              Boolean(props.onOpenArtifacts),
+            ),
+            type: 'button',
+            onClick: () => props.onOpenArtifacts?.(),
+          },
+          'open artifacts library',
         ),
         React.createElement(
           'button',
@@ -2970,6 +2996,28 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
     }) => {
       testState.latestGoalsProps = props;
       return React.createElement('div');
+    },
+  };
+});
+vi.doMock('./components/artifacts/WorkspaceArtifactLibraryPage', async () => {
+  const React = await import('react');
+  return {
+    WorkspaceArtifactLibraryPage: (props: {
+      workspaceCwd?: string;
+      onOpenSession?: (
+        sessionId: string,
+        archiveState: 'active' | 'archived',
+      ) => void;
+      onJumpToSessionArtifact?: (
+        sessionId: string,
+        artifactId: string,
+        archiveState: 'active' | 'archived',
+      ) => void;
+    }) => {
+      testState.latestArtifactLibraryProps = props;
+      return React.createElement('div', {
+        'data-testid': 'workspace-artifact-library-mock',
+      });
     },
   };
 });
@@ -13801,6 +13849,7 @@ beforeEach(() => {
   testState.latestScheduledTasksProps = null;
   testState.latestPrWatchesProps = null;
   testState.latestGoalsProps = null;
+  testState.latestArtifactLibraryProps = null;
   testState.latestWorkflowRunsProps = null;
   testState.latestSplitViewProps = null;
   testState.latestArtifactPanelProps = null;
@@ -60321,5 +60370,284 @@ describe('upstream embedded transport reproduction', () => {
     await flush();
     expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(1000);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe('App workspace artifact library wiring (R2-1 & R2-4)', () => {
+  it('gates the sidebar Artifacts entry on workspace_artifact_library, mounts the full page, and reconciles /artifacts when capability is absent (R2-4)', async () => {
+    const { container, rerender, unmount } = renderApp();
+    await flush();
+    const openBtn = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="open-artifacts-library"]',
+      )!;
+    expect(openBtn().dataset.hasArtifactsLibrary).toBe('false');
+    expect(
+      container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).toBeNull();
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['workspace_artifact_library'],
+    };
+    rerender();
+    await flush();
+    expect(openBtn().dataset.hasArtifactsLibrary).toBe('true');
+
+    await act(async () => {
+      openBtn().click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page'),
+    ).toBe('artifacts');
+
+    // Dropping the capability returns the shell to chat
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: [],
+    };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).toBeNull();
+    unmount();
+
+    // URL navigation: initial /artifacts without capability reconciles back to chat
+    window.history.replaceState(null, '', '/artifacts');
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: [],
+    };
+    const navOff = renderApp({}, undefined, false, true);
+    await flush();
+    expect(
+      navOff.container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).toBeNull();
+    expect(window.location.pathname).not.toBe('/artifacts');
+    navOff.unmount();
+
+    // URL navigation: initial /artifacts WITH capability mounts the page and preserves /artifacts
+    window.history.replaceState(null, '', '/artifacts');
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['workspace_artifact_library'],
+    };
+    const navOn = renderApp({}, undefined, false, true);
+    await flush();
+    expect(
+      navOn.container.querySelector('[data-testid="artifacts-library-page"]'),
+    ).not.toBeNull();
+    expect(window.location.pathname).toBe('/artifacts');
+    navOn.unmount();
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('opens the jumped artifact tab after archived unarchive and right-panel restore settle, and cancels if user switches sessions mid-load (R2-1)', async () => {
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['session_artifacts', 'workspace_artifact_library'],
+    };
+    let resolveUnarchive!: () => void;
+    mockWorkspaceActions.unarchiveSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchive = resolve;
+        }),
+    );
+    const targetArtifact = {
+      id: 'art-snap-1',
+      title: 'Archived Snapshot',
+      kind: 'web_page' as const,
+      storage: 'published' as const,
+      managedId: 'preview-1',
+      metadata: { artifactType: 'web_preview_snapshot' },
+      status: 'available' as const,
+      source: 'tool' as const,
+      retention: 'restorable' as const,
+      clientRetained: false,
+      createdAt: '2026-11-21T08:00:00.000Z',
+      updatedAt: '2026-11-21T09:00:00.000Z',
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [targetArtifact],
+    });
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'sess-arch-target';
+      mockConnection.status = 'connected';
+      mockConnection.loadingTranscript = false;
+    });
+
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    // Trigger jump to archived session's snapshot artifact
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-arch-target',
+        'art-snap-1',
+        'archived',
+      );
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.unarchiveSession).toHaveBeenCalledWith(
+      'sess-arch-target',
+    );
+    // Unarchive resolves -> loadSession switches to sess-arch-target -> panel restore commits -> artifact tab opens
+    await act(async () => {
+      resolveUnarchive();
+      await Promise.resolve();
+    });
+    rerender();
+    await flush();
+    rerender();
+    await flush();
+
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.artifactId === 'art-snap-1',
+      ),
+    ).toBe(true);
+
+    // Cancel arm: start a second archived jump, switch sessions mid-unarchive -> never loads or opens its tab
+    let resolveUnarchive2!: () => void;
+    mockWorkspaceActions.unarchiveSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchive2 = resolve;
+        }),
+    );
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-arch-canceled',
+        'art-snap-canceled',
+        'archived',
+      );
+      await Promise.resolve();
+    });
+    // User loads another session ('session-2') while unarchive is still in flight
+    await act(async () => {
+      mockSessionActions.loadSession.mockResolvedValueOnce(undefined);
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveUnarchive2();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.loadSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.any(Object),
+    );
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.artifactId === 'art-snap-canceled',
+      ),
+    ).toBe(false);
+
+    // R1-1: clicking New chat while unarchive is in flight also cancels the
+    // archived-session jump (createNewSession bumps artifactLibraryJumpGenRef).
+    let resolveUnarchiveNewChat!: () => void;
+    mockWorkspaceActions.unarchiveSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchiveNewChat = resolve;
+        }),
+    );
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-arch-newchat',
+        'art-snap-newchat',
+        'archived',
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveUnarchiveNewChat();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalledWith(
+      'sess-arch-newchat',
+      expect.anything(),
+    );
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.artifactId === 'art-snap-newchat',
+      ),
+    ).toBe(false);
+
+    // R1-2 (App-level): when the jump's own loadSession rejects, the dispatch
+    // suppression keeps isCurrent() true so the error alert is surfaced rather
+    // than silently swallowed.
+    mockSessionActions.loadSession.mockRejectedValueOnce(
+      new Error('session deleted mid-jump'),
+    );
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-load-reject',
+        'art-snap-reject',
+        'active',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(onToast).toHaveBeenCalledWith('error', 'session deleted mid-jump');
   });
 });

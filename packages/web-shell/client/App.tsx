@@ -9320,6 +9320,7 @@ export function App({
       : null
     : null;
   const pendingAskUserApprovalRef = useRef(pendingAskUserApproval);
+  const askUserOverlayRef = useRef<HTMLDivElement>(null);
   pendingAskUserApprovalRef.current = pendingAskUserApproval;
   const pendingToolApproval =
     pendingApproval && !isAskUserPermission(pendingApproval)
@@ -11097,6 +11098,10 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   const splitClassificationGenerationRef = useRef(0);
+  const artifactLibraryJumpGenRef = useRef(0);
+  const artifactLibraryJumpDispatchingRef = useRef<string | undefined>(
+    undefined,
+  );
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
@@ -12502,6 +12507,7 @@ export function App({
           // `/clear` carry so the pane session's lineage never inherits the
           // cleared session's title.
           pendingManualTitleRef.current = undefined;
+          artifactLibraryJumpGenRef.current += 1;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -17415,6 +17421,7 @@ export function App({
         ? { displayName: opts.carryManualTitle }
         : undefined;
       splitClassificationGenerationRef.current += 1;
+      artifactLibraryJumpGenRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
       let availableWorkspaces = workspacesRef.current;
@@ -18594,6 +18601,12 @@ export function App({
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
     ) => {
+      // Suppress the generation bump for the jump's own load so a rejection
+      // from `loadSidebarSession` stays current in `runArtifactLibrarySessionJump`'s
+      // catch block and still clears pending state and surfaces the error.
+      if (artifactLibraryJumpDispatchingRef.current !== sessionId) {
+        artifactLibraryJumpGenRef.current += 1;
+      }
       if (
         pendingJumpArtifactOpenRef.current &&
         pendingJumpArtifactOpenRef.current.sessionId !== sessionId
@@ -18686,6 +18699,7 @@ export function App({
       archiveState: 'active' | 'archived',
       artifactId?: string,
     ) => {
+      const jumpGen = ++artifactLibraryJumpGenRef.current;
       const targetCwd =
         resolveWorkspaceMaintenanceTargetCwd() ??
         workspace.capabilities?.workspaceCwd;
@@ -18701,7 +18715,15 @@ export function App({
           workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
         getPendingJumpArtifactOpen: () => pendingJumpArtifactOpenRef.current,
         setPendingJumpArtifactOpen,
-        loadSidebarSession: (id, cwd) => loadSidebarSession(id, cwd),
+        isCurrent: () => artifactLibraryJumpGenRef.current === jumpGen,
+        loadSidebarSession: (id, cwd) => {
+          artifactLibraryJumpDispatchingRef.current = id;
+          try {
+            return loadSidebarSession(id, cwd);
+          } finally {
+            artifactLibraryJumpDispatchingRef.current = undefined;
+          }
+        },
         reportError,
       });
     },
@@ -23749,6 +23771,43 @@ export function App({
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
+  const reserveQuestionSpaceForEnvironmentPanel =
+    environmentPanelVisible &&
+    !environmentPanelFits &&
+    !artifactPanelFullscreen &&
+    pendingAskUserApproval !== null;
+  // The floating panel and the question are in separate stacking contexts.
+  // Give the panel a real scroll boundary above the question, not a z-index
+  // that makes either surface cover the other.
+  useLayoutEffect(() => {
+    if (!reserveQuestionSpaceForEnvironmentPanel) return;
+    const body = contextBodyRef.current;
+    const footer = footerRef.current;
+    const question = askUserOverlayRef.current;
+    if (!body || !footer || !question) return;
+
+    const property = '--web-shell-environment-panel-bottom-inset';
+    const updateInset = () => {
+      const bounds = body.getBoundingClientRect();
+      if (!bounds.height) return;
+      // Convert viewport coordinates back to the panel's CSS pixels if an
+      // embedding host scaled the shell.
+      const inset =
+        ((bounds.bottom - question.getBoundingClientRect().top) *
+          body.offsetHeight) /
+        bounds.height;
+      body.style.setProperty(property, `${Math.max(0, Math.ceil(inset))}px`);
+    };
+    updateInset();
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(body);
+    observer.observe(footer);
+    observer.observe(question);
+    return () => {
+      observer.disconnect();
+      body.style.removeProperty(property);
+    };
+  }, [reserveQuestionSpaceForEnvironmentPanel]);
   const workspaceGitStatusEnabled =
     !managedMode &&
     !activePanel &&
@@ -27049,6 +27108,7 @@ export function App({
                         )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
+                          ref={askUserOverlayRef}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -27080,7 +27140,7 @@ export function App({
                               {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
                             </span>
                             <button type="button" className={styles.composerActionTipButton}
-                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                              onClick={() => { if (connection.sessionId) { artifactLibraryJumpGenRef.current += 1; void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); } }}>
                               {t('capacityChoice.resume')}
                             </button>
                           </div>

@@ -31,10 +31,10 @@ class JdbcParkedMcpOwnersTest {
     }
 
     private void runtimeSession(String id, String state, String storageKey) {
-        jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_session (scope_id, runtime_session_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
                 + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at,"
-                + " execution_storage_key) VALUES (?, ?, ?, 'workspace', '1', '/workspace', 'digest', 'workspace',"
+                + " execution_storage_id) VALUES (?, ?, ?, 'workspace', '1', '/workspace', 'digest', 'workspace',"
                 + " 'session', 'bootstrap', 'binding', 1, ?, 1, 0, ?)",
                 "a".repeat(64), id, TENANT, state, storageKey);
     }
