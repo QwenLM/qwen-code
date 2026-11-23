@@ -51,13 +51,15 @@ describe('TUI agent loop parity suite source pins', () => {
   it('pins the later-turns wait the case ceiling has to cover', () => {
     // The deflake is the wait, not the ceiling: a green run cannot show that a
     // starved host still fits the chain, so reverting either value must red
-    // this pin rather than quietly restore the #18119 flake.
+    // this pin rather than quietly restore the #18119 flake. The wait runs
+    // once per arm and a case runs three arms, so the ceiling must cover three
+    // waits, not one.
     const pollMs = Number(
       /'the session starts its later turns',\s*([\d_]+)/
         .exec(source)?.[1]
         ?.replaceAll('_', ''),
     );
-    expect(pollMs).toBe(240_000);
-    expect(ceilingMs).toBeGreaterThan(pollMs);
+    expect(pollMs).toBe(150_000);
+    expect(ceilingMs).toBeGreaterThanOrEqual(3 * pollMs);
   });
 });

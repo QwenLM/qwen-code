@@ -154,8 +154,8 @@ interface Run {
  * The root config's `retry: 2` would rerun both TUI sessions after a stall,
  * tripling its cost in the required gate. A starved shared host stretches
  * every mocked turn several-fold — the teammate case measured ~395s under
- * contention (#18119) — so the ceiling is 1.5x that. It bounds one case, not
- * all three arms, whose waits sum past it.
+ * contention (#18119) — so the ceiling is 1.5x that. It bounds the whole
+ * three-arm case, whose per-arm later-turns waits are sized to fit inside it.
  */
 const PARITY_CASE_OPTIONS = { retry: 0, timeout: 600_000 };
 
@@ -895,14 +895,17 @@ describeTui(SUITE, () => {
       // The session's own turns — a teammate report reaching the leader, a
       // notification, a cron fire — are delivered after the prompt's turn
       // settled, so this wait carries their whole chain. A starved shared
-      // host stretches it past the old 90s ceiling (#18119).
+      // host stretches it past the old 90s ceiling (#18119). It runs once
+      // per arm and a case runs three arms, so three of these waits must fit
+      // the case ceiling; 150s still covers the contended chain (the three-arm
+      // case measured ~395s, ~132s/arm).
       await until(
         () =>
           streamingCount() >= scenario.requests &&
           (scenario.sideRequests === undefined ||
             sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
-        240_000,
+        150_000,
         () => session!.viewport(),
       );
       await turnEnds(scenario.requests);
