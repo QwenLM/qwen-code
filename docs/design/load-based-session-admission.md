@@ -152,6 +152,13 @@ lookups.
   The standalone creation path (`POST /standalone/sessions`) rethrows the
   refusal from its pre-dispatch rollback catch, so it answers the same 503
   contract instead of a 500 `standalone_creation_rolled_back`.
+- Scheduled-task creation that needs a new bound child preserves the same 503
+  before writing task metadata. Other initial spawn failures retain
+  `scheduled_tasks_session_failed`.
+- For `POST /session` requests requiring a branch or worktree, which force a
+  fresh `thread` child, overload is checked before git preparation. If load
+  changes after that check, the final bridge reservation and existing rollback
+  still apply.
 - A refused scheduled-task `per_run` child retains the same 503 shape, after
   the existing failed-attempt bookkeeping and `sessionDispatchFailed` marker,
   including restoration of a consumed one-shot before returning the error.

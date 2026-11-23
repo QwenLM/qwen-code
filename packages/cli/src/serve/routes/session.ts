@@ -3531,6 +3531,16 @@ export function registerSessionRoutes(
           return;
         }
         assertRuntimeGenerationOpen?.();
+        // This request must allocate a fresh child. Avoid mutating git only
+        // to roll it back when overload admission is closed.
+        const load = getLoadAdmissionSnapshot?.();
+        if (load?.overloaded) {
+          throw new SystemOverloadedError(
+            load.reason ?? 'cpu_load',
+            load.loadRatio,
+            load.eventLoopLagP99Ms,
+          );
+        }
         inFlightBranchWorkspaces.add(workspaceCwd);
         try {
           await createBranch(workspaceCwd, branchName);
@@ -3639,6 +3649,14 @@ export function registerSessionRoutes(
           return;
         }
         assertRuntimeGenerationOpen?.();
+        const load = getLoadAdmissionSnapshot?.();
+        if (load?.overloaded) {
+          throw new SystemOverloadedError(
+            load.reason ?? 'cpu_load',
+            load.loadRatio,
+            load.eventLoopLagP99Ms,
+          );
+        }
         const wtResult = await wtService.createUserWorktree(slug, baseBranch, {
           carryDirtyState: true,
           detached: true,

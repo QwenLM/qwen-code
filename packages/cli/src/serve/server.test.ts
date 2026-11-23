@@ -16056,6 +16056,64 @@ describe('createServeApp', () => {
       }
     });
 
+    it('refuses a fresh worktree session before creating a worktree while overloaded', async () => {
+      const createUserWorktree = vi.fn().mockResolvedValue({
+        success: true,
+        worktree: {
+          path: `${WS_BOUND}/.qwen/worktrees/overloaded`,
+          branch: '',
+        },
+      });
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          getLoadAdmissionSnapshot: () => ({
+            enabled: true,
+            overloaded: true,
+            reason: 'cpu_load',
+            loadRatio: 2.5,
+            eventLoopLagP99Ms: 20,
+            sampledAtMs: 1_000,
+          }),
+        },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree,
+        removeUserWorktree: () => Promise.resolve(),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'overloaded' } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        });
+        expect(createUserWorktree).not.toHaveBeenCalled();
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
     it('500 when worktree creation fails without a typed code (R12-1)', async () => {
       // A genuine environment fault carries no code and stays a 500: the
       // merge-state 409 must not swallow real daemon failures.
@@ -17210,6 +17268,66 @@ describe('createServeApp', () => {
         expect(bridge.calls[0].worktree).toBeUndefined();
       } finally {
         mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('refuses a fresh branch before git mutation while overloaded', async () => {
+      const rollbackCalls: string[] = [];
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          getLoadAdmissionSnapshot: () => ({
+            enabled: true,
+            overloaded: true,
+            reason: 'cpu_load',
+            loadRatio: 2.5,
+            eventLoopLagP99Ms: 20,
+            sampledAtMs: 1_000,
+          }),
+        },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+      mockBranchOps.checkoutRef = () => {
+        rollbackCalls.push('checkout');
+        return Promise.resolve();
+      };
+      mockBranchOps.deleteBranch = () => {
+        rollbackCalls.push('delete');
+        return Promise.resolve();
+      };
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/overloaded' } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        });
+        expect(rollbackCalls).toEqual([]);
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.checkoutRef = undefined;
+        mockBranchOps.deleteBranch = undefined;
       }
     });
 

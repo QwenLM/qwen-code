@@ -970,6 +970,27 @@ describe('scheduled-tasks routes', () => {
     });
   });
 
+  it('preserves overload coding when task creation needs a fresh child', async () => {
+    h.bridge.failNext = new SystemOverloadedError('cpu_load', 2.5, 20);
+
+    const response = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'requires a fresh task child',
+      recurring: true,
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('15');
+    expect(response.body).toMatchObject({
+      code: 'system_overloaded',
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+    });
+    expect(h.bridge.spawned).toEqual([]);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
   it('preserves overload coding for refused per-run children', async () => {
     const created = await create({
       cron: '0 0 1 1 *',

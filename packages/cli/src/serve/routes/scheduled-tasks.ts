@@ -894,6 +894,24 @@ function canonicalCron(cron: string): string | null {
   }
 }
 
+function sendScheduledTaskOverload(
+  res: Response,
+  error: SystemOverloadedError,
+  route: string,
+): void {
+  writeStderrLine(
+    `qwen serve: ${route} load admission rejected (reason=${error.reason}, loadRatio=${error.loadRatio}, eventLoopLagP99Ms=${error.eventLoopLagP99Ms})`,
+  );
+  res.set('Retry-After', '15');
+  res.status(503).json({
+    error: error.message,
+    code: 'system_overloaded',
+    reason: error.reason,
+    loadRatio: error.loadRatio,
+    eventLoopLagP99Ms: error.eventLoopLagP99Ms,
+  });
+}
+
 function registerScheduledTaskCrudRoutes(
   app: Application,
   deps: RegisterScheduledTaskCrudRoutesDeps,
@@ -1252,6 +1270,10 @@ function registerScheduledTaskCrudRoutes(
         } catch (err) {
           if (sendActivityGateError(res, err)) return;
           if (sendGenerationClosedError(res, err)) return;
+          if (err instanceof SystemOverloadedError) {
+            sendScheduledTaskOverload(res, err, `POST ${base}`);
+            return;
+          }
           writeStderrLine(
             `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -2189,17 +2211,7 @@ function registerScheduledTaskCrudRoutes(
             );
           }
           if (error instanceof SystemOverloadedError) {
-            writeStderrLine(
-              `qwen serve: POST ${base}/${id}/run load admission rejected (reason=${error.reason}, loadRatio=${error.loadRatio}, eventLoopLagP99Ms=${error.eventLoopLagP99Ms})`,
-            );
-            res.set('Retry-After', '15');
-            res.status(503).json({
-              error: error.message,
-              code: 'system_overloaded',
-              reason: error.reason,
-              loadRatio: error.loadRatio,
-              eventLoopLagP99Ms: error.eventLoopLagP99Ms,
-            });
+            sendScheduledTaskOverload(res, error, `POST ${base}/${id}/run`);
             return;
           }
           writeStderrLine(

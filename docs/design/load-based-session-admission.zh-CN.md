@@ -133,6 +133,11 @@ runtime 重建时 dispose，跟随 metrics sampler 的生命周期。
   与其他 503 容量形态一致。独立会话创建路径（`POST /standalone/sessions`）
   在其 pre-dispatch 回滚 catch 中重抛该拒绝，因此回答同一 503 契约，而不是
   500 `standalone_creation_rolled_back`。
+- 需要新绑定子会话的定时任务创建，在任务元数据写盘前保留同样的 503；
+  其它首次 spawn 失败仍使用原有的 `scheduled_tasks_session_failed` 响应。
+- `POST /session` 要求创建 branch 或 worktree 时，一定会分配新的 `thread`
+  子进程，因此在 Git 准备前先检查过载；预检后再转为过载时，最终 bridge
+  准入预留与既有回滚仍是兜底。
 - 被拒的计划任务 `per_run` 子会话沿同样的 503 契约返回。既有的失败尝试记录
   与 `sessionDispatchFailed` 标记继续保留；被消费的一次性任务也先在返回错误前
   恢复。其它派发失败仍使用原有的 `scheduled_task_session_dispatch_failed` 响应。
