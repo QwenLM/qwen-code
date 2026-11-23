@@ -588,10 +588,6 @@ import {
   toPermissionOptions,
 } from './permissionUtils.js';
 import {
-  MessageRewriteMiddleware,
-  loadRewriteConfig,
-} from './rewrite/index.js';
-import {
   DaemonTodoStopGuard,
   type TodoStopGuardContinuation,
 } from './daemon-todo-stop-guard.js';
@@ -2989,9 +2985,6 @@ export class Session implements SessionContext {
   private readonly slashCommandPolicy?: NonInteractiveSlashCommandPolicy;
   private managedConversationBinding?: ManagedConversationBinding;
   private managedConversationActivation?: ManagedConversationActivation;
-
-  // Message rewrite middleware (optional, installed after history replay)
-  messageRewriter?: MessageRewriteMiddleware;
 
   /**
    * Phase C worktree restore notice. Set by acpAgent.loadSession when a
@@ -5707,11 +5700,10 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Install the message rewrite middleware if configured, and load the
-   * session's Mods. Must be called AFTER history replay, so that neither hears
-   * historical messages.
+   * Load the session's Mods. Must be called AFTER history replay, so that
+   * they do not hear historical messages.
    */
-  installRewriter(): void {
+  installMods(): void {
     this.mods ??= AcpModSession.create(
       this.config,
       this.settings,
@@ -5720,15 +5712,6 @@ export class Session implements SessionContext {
       this.modRowSites,
     );
     this.modsInstalled = true;
-    const rewriteConfig = loadRewriteConfig(this.settings);
-    if (rewriteConfig?.enabled) {
-      debugLogger.info('Message rewrite middleware enabled');
-      this.messageRewriter = new MessageRewriteMiddleware(
-        this.config,
-        rewriteConfig,
-        (update) => this.sendUpdate(update),
-      );
-    }
   }
 
   /** Answers a Mod row the client draws. */
@@ -9020,10 +9003,6 @@ export class Session implements SessionContext {
 
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
-                  // Kick off rewrite in background (non-blocking, runs parallel to tools)
-                  if (this.messageRewriter) {
-                    this.messageRewriter.flushTurn(pendingSend.signal);
-                  }
 
                   const durationMs = Date.now() - streamStartTime;
                   await this.messageEmitter.emitUsageMetadata(
@@ -9138,11 +9117,6 @@ export class Session implements SessionContext {
                     };
                   }
                 }
-              }
-
-              // Wait for any pending rewrite before returning
-              if (this.messageRewriter) {
-                await this.messageRewriter.waitForPendingRewrites();
               }
 
               // The shared round's stop point ran in the client, so its turn
@@ -9296,7 +9270,6 @@ export class Session implements SessionContext {
       await showBackgroundResponse();
       if (!usageMetadata) return;
       this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
-      this.messageRewriter?.flushTurn(signal);
       await this.messageEmitter.emitUsageMetadata(
         usageMetadata,
         '',
@@ -9837,7 +9810,6 @@ export class Session implements SessionContext {
           };
         }
       }
-      await this.messageRewriter?.waitForPendingRewrites();
       return { stopReason: getAbortAwareEndTurnStopReason(signal) };
     } finally {
       // A turn that left before handing its round the batch ends the round's
@@ -11997,7 +11969,6 @@ export class Session implements SessionContext {
       },
       true,
     );
-    await this.messageRewriter?.waitForPendingRewrites();
   }
 
   /**
@@ -12038,7 +12009,6 @@ export class Session implements SessionContext {
       { role: 'user', parts: toolRun.parts },
       true,
     );
-    await this.messageRewriter?.waitForPendingRewrites();
     if (goalTurn) {
       goalTurn.endingToolCallId = toolRun.parts.findLast(
         (part) => part.functionResponse?.id,
@@ -12276,7 +12246,6 @@ export class Session implements SessionContext {
         },
         true,
       );
-      await this.messageRewriter?.waitForPendingRewrites();
       recordDaemonLoopDetected(
         this.config,
         promptId,
@@ -13884,9 +13853,6 @@ export class Session implements SessionContext {
                       usageMetadata,
                       requestRouteKey,
                     );
-                    if (this.messageRewriter) {
-                      this.messageRewriter.flushTurn(ac.signal);
-                    }
                     const durationMs = Date.now() - streamStartTime;
                     await this.messageEmitter.emitUsageMetadata(
                       usageMetadata,
@@ -15007,8 +14973,6 @@ export class Session implements SessionContext {
                 partial,
               );
               responseTurnComplete = true;
-              await this.messageRewriter?.flushTurn(ac.signal);
-              await this.messageRewriter?.waitForPendingRewrites();
             } catch (error) {
               debugLogger.warn(
                 `Failed to complete background notification response: ${this.#formatError(error)}`,
@@ -15336,10 +15300,6 @@ export class Session implements SessionContext {
 
             await emitBackgroundResponse(responseText);
 
-            if (this.messageRewriter) {
-              await this.messageRewriter.flushTurn(ac.signal);
-            }
-
             if (usageMetadata) {
               this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
               const durationMs = Date.now() - streamStartTime;
@@ -15393,10 +15353,6 @@ export class Session implements SessionContext {
                 nextMessage = { role: 'user', parts: [...input, ...results] };
               }
             }
-          }
-
-          if (this.messageRewriter) {
-            await this.messageRewriter.waitForPendingRewrites();
           }
 
           let stopReason: PromptResponse['stopReason'] = 'end_turn';
@@ -15575,11 +15531,6 @@ export class Session implements SessionContext {
         },
       },
     };
-
-    if (this.messageRewriter) {
-      await this.messageRewriter.interceptUpdate(update, signal);
-      return;
-    }
 
     await this.sendUpdate(update);
   }
