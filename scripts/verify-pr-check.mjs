@@ -561,10 +561,10 @@ function parseIsoTimestamp(value) {
  * cannot pass the publication gate even if the upstream classifier were faulty.
  */
 export function checkTrustClassification(tc, expectedHead = null) {
-  if (tc === null || tc === undefined) {
+  if (tc === undefined) {
     return { errors: [], requiredExecutionClass: null };
   }
-  if (typeof tc !== 'object' || Array.isArray(tc)) {
+  if (tc === null || typeof tc !== 'object' || Array.isArray(tc)) {
     return {
       errors: ['trustClassification must be a JSON object'],
       requiredExecutionClass: 'hardware-isolated',
@@ -1312,7 +1312,7 @@ export function checkArtifacts({
   executionRecordSha256 = null,
   expectedContextSha256 = null,
   requiredExecutionClass = null,
-  trustClassification = null,
+  trustClassification = undefined,
 }) {
   const errors = [];
   const warnings = [];
@@ -1482,7 +1482,7 @@ export function checkArtifacts({
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
   let effectiveRequiredClass = requiredExecutionClass;
-  if (trustClassification !== null && trustClassification !== undefined) {
+  if (trustClassification !== undefined) {
     const tcCheck = checkTrustClassification(trustClassification, expectedHead);
     errors.push(...tcCheck.errors);
     if (
@@ -1892,7 +1892,7 @@ function main(argv) {
   let expectedBase = null;
   let hostContextSha256 = null;
   let requiredExecutionClass = null;
-  let trustClassification = null;
+  let trustClassification = undefined;
   if (contextPath) {
     // A host-held snapshot: the PR clone is mounted read-write, so the round
     // can write ANY path inside it — the artifact dir AND the

@@ -54,6 +54,7 @@ export const AUTHORITY_FILENAMES = new Set([
   'boundary-gate.json',
   'execution-record.json',
 ]);
+export const RESERVED_SUBDIRS = new Set(['evidence', 'logs']);
 export const DEFAULT_ALLOWED_FILES = new Set([
   'report.md',
   'verdict.txt',
@@ -133,6 +134,9 @@ export function validateCollectorFilename(
   if (AUTHORITY_FILENAMES.has(decoded.toLowerCase())) {
     return { ok: false, reason: 'authority-file' };
   }
+  if (RESERVED_SUBDIRS.has(decoded.toLowerCase())) {
+    return { ok: false, reason: 'reserved-namespace' };
+  }
   if (allowedFiles && !allowedFiles.has(decoded)) {
     return { ok: false, reason: 'disallowed-filename' };
   }
@@ -186,7 +190,7 @@ export function startCollectorServer({
   allowedFiles = DEFAULT_ALLOWED_FILES,
   maxFiles = 32,
   maxFileBytes = 2 * 1024 * 1024,
-  maxTotalBytes = 16 * 1024 * 1024,
+  maxTotalBytes = 20 * 1024 * 1024,
   maxFrameBytes = 4096,
   maxChunkBytes = 2048,
   maxOversizeDrainBytes = 2048,
@@ -239,8 +243,19 @@ export function startCollectorServer({
       }
       const vaultEntries = [];
       for (const entry of readdirSync(vaultDir).sort()) {
-        if (entry === 'evidence' || entry === 'logs') {
+        if (RESERVED_SUBDIRS.has(entry)) {
           const sub = join(vaultDir, entry);
+          let isDir = false;
+          try {
+            const st = lstatSync(sub);
+            isDir = st.isDirectory() && !st.isSymbolicLink();
+          } catch {
+            isDir = false;
+          }
+          if (!isDir) {
+            vaultEntries.push(entry);
+            continue;
+          }
           const children = readdirSync(sub).sort();
           if (children.length === 0) {
             try {
@@ -678,11 +693,12 @@ async function main(argv) {
         (n) =>
           !FLAT_FILENAME_RE.test(n) ||
           n.includes('..') ||
-          AUTHORITY_FILENAMES.has(n.toLowerCase()),
+          AUTHORITY_FILENAMES.has(n.toLowerCase()) ||
+          RESERVED_SUBDIRS.has(n.toLowerCase()),
       )
     ) {
       process.stderr.write(
-        'verify-pr vm-collector: --allowed-files requires comma-separated flat non-authority filenames\n',
+        'verify-pr vm-collector: --allowed-files requires comma-separated flat non-authority non-reserved filenames\n',
       );
       return 2;
     }

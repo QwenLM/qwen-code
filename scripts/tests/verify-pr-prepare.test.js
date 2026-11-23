@@ -2091,9 +2091,12 @@ describe('trust classification and mandatory escalation (§4)', () => {
       sponsored: true,
     });
 
-    // 3. Extensionless 100755 executable (tools/release) and 100644 ELF binary (native/agent) escalate even for --local-owner
+    // 3. Extensionless 100755 executable (tools/release), 100644 ELF binary (native/agent),
+    // 120000 symlink (links/tool), and 160000 gitlink (vendor/sub) all escalate even for --local-owner
     mkdirSync(join(dir, 'tools'), { recursive: true });
     mkdirSync(join(dir, 'native'), { recursive: true });
+    mkdirSync(join(dir, 'links'), { recursive: true });
+    mkdirSync(join(dir, 'vendor', 'sub'), { recursive: true });
     writeFileSync(join(dir, 'tools', 'release'), 'echo hi\n');
     chmodSync(join(dir, 'tools', 'release'), 0o755);
     writeFileSync(
@@ -2101,14 +2104,44 @@ describe('trust classification and mandatory escalation (§4)', () => {
       Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]),
     );
     chmodSync(join(dir, 'native', 'agent'), 0o644);
-    execFileSync('git', ['add', 'tools/release', 'native/agent'], {
-      cwd: dir,
+    symlinkSync('../base.txt', join(dir, 'links', 'tool'));
+    // Initialize a minimal nested git repo so the 160000 gitlink has a clean working tree.
+    execFileSync('git', ['init', '-qb', 'main'], {
+      cwd: join(dir, 'vendor', 'sub'),
       env: gitEnv,
     });
-    execFileSync('git', ['commit', '-qm', 'add extensionless executables'], {
-      cwd: dir,
+    writeFileSync(join(dir, 'vendor', 'sub', 'x.txt'), 'sub\n');
+    execFileSync('git', ['add', 'x.txt'], {
+      cwd: join(dir, 'vendor', 'sub'),
       env: gitEnv,
     });
+    execFileSync('git', ['commit', '-qm', 'sub init'], {
+      cwd: join(dir, 'vendor', 'sub'),
+      env: gitEnv,
+    });
+    const subHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: join(dir, 'vendor', 'sub'),
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync(
+      'git',
+      ['add', 'tools/release', 'native/agent', 'links/tool'],
+      {
+        cwd: dir,
+        env: gitEnv,
+      },
+    );
+    execFileSync(
+      'git',
+      ['update-index', '--add', '--cacheinfo', `160000,${subHead},vendor/sub`],
+      { cwd: dir, env: gitEnv },
+    );
+    execFileSync(
+      'git',
+      ['commit', '-qm', 'add extensionless executables, symlink, and gitlink'],
+      { cwd: dir, env: gitEnv },
+    );
     const execHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: dir,
       env: gitEnv,
@@ -2132,6 +2165,12 @@ describe('trust classification and mandatory escalation (§4)', () => {
     );
     expect(tcExec.escalationReasons).toContain(
       'executable-or-binary:native/agent',
+    );
+    expect(tcExec.escalationReasons).toContain(
+      'symlink-or-submodule:links/tool',
+    );
+    expect(tcExec.escalationReasons).toContain(
+      'symlink-or-submodule:vendor/sub',
     );
   });
 });

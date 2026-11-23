@@ -3797,5 +3797,27 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
       expect(cliBad.status).toBe(1);
       expect(cliBad.stderr).toMatch(expectedRe);
     }
+
+    // 8f. Explicit trustClassification: null is rejected (unlike omitted legacy field)
+    expect(checkTrustClassification(undefined, HEAD).errors).toEqual([]);
+    expect(checkTrustClassification(null, HEAD).errors.join('\n')).toMatch(
+      /trustClassification must be a JSON object/,
+    );
+    const nullTcCtx = join(base, 'null-tc.json');
+    const nullTcText = JSON.stringify({ ...ctxObj, trustClassification: null });
+    writeFileSync(nullTcCtx, nullTcText);
+    const cliNullTc = run([
+      '--context',
+      nullTcCtx,
+      '--context-sha256',
+      sha256(nullTcText),
+      '--context-root',
+      clone,
+      containerDir,
+    ]);
+    expect(cliNullTc.status).toBe(1);
+    expect(cliNullTc.stderr).toMatch(
+      /trustClassification must be a JSON object/,
+    );
   });
 });

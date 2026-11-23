@@ -230,21 +230,41 @@ describe('verify-pr-vm-collector', () => {
     expect(sumBad.outputStatus).toBe('rejected');
     expect(sumBad.vaultEntries).toEqual([]);
 
-    // CLI refuses authority filenames in --allowed-files
-    const badAllow = spawnSync(
-      process.execPath,
-      [
-        COLLECTOR_SCRIPT,
-        '--socket',
-        sBad,
-        '--vault',
-        vBad,
-        '--allowed-files',
-        'report.md,boundary.json',
-      ],
-      { encoding: 'utf8' },
-    );
-    expect(badAllow.status).toBe(2);
+    // CLI refuses authority filenames and reserved namespace names in --allowed-files
+    for (const badList of [
+      'report.md,boundary.json',
+      'logs',
+      'evidence',
+      'LOGS',
+    ]) {
+      const badAllow = spawnSync(
+        process.execPath,
+        [
+          COLLECTOR_SCRIPT,
+          '--socket',
+          sBad,
+          '--vault',
+          vBad,
+          '--allowed-files',
+          badList,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(badAllow.status).toBe(2);
+    }
+    for (const reserved of ['logs', 'LOGS', 'evidence', 'Evidence']) {
+      expect(validateCollectorFilename(Buffer.from(reserved), null)).toEqual({
+        ok: false,
+        reason: 'reserved-namespace',
+      });
+    }
+    // Custom non-reserved flat filename still passes when added to allowedFiles
+    expect(
+      validateCollectorFilename(
+        Buffer.from('custom.json'),
+        new Set(['custom.json']),
+      ),
+    ).toMatchObject({ ok: true, name: 'custom.json', subdir: null });
   });
 
   it('commits valid regular files on round-end and closes cleanly without polling lag', async () => {
