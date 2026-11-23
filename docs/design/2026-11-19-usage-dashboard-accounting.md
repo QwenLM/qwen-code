@@ -321,19 +321,21 @@ Cache summaries
 never become warm candidates ahead of directory enumeration: duplicate session
 ids retain first-occurrence-by-directory-order independently of cache warmth.
 A scoped lookup may read exact known files without directory enumeration only
-when its ids resolve to one verified project root with matching persisted
-project identities and the active mapped transcript exists. When the caller
-supplies that workspace, an absent transcript for another known run is skipped
-in place rather than triggering a full directory scan. Unknown, multi-root or
-caller-mismatched identities retain full directory discovery rather than
-guessing. Empty boundary maps also do not prove that a current transcript has
-no real activity: a non-persisted session beside legacy cumulative history
+when every id resolves to exactly one verified transcript path, either from
+matching persisted project metadata or the caller's explicitly supplied active
+workspace. These verified paths may span different project directories. When
+the caller supplies that workspace, an absent transcript for another known run
+is skipped in place rather than triggering a full directory scan. A session id
+with multiple candidate roots, unknown or caller-mismatched identities, or a
+stale file retains full directory discovery rather than guessing. Empty
+boundary maps also do not prove that a current transcript has no real
+activity: a non-persisted session beside legacy cumulative history
 still needs reconstruction. Eliminating the fallback by skipping such a
 session would lose genuine usage; a safe alternative needs a validated
 session-to-directory index, not a guessed absence of work. Discovering new,
 unrecorded daemon sessions always requires bounded discovery.
-That single-project fast path belongs only to `loadUsageHistory` with an
-explicit id allowlist. `loadUsageHistoryWithLive` does not pass
+That verified-scoped-files fast path belongs only to `loadUsageHistory` with
+an explicit id allowlist. `loadUsageHistoryWithLive` does not pass
 `projectChatsDirs`: its unscoped discovery must still examine all project
 `chats` directories in directory order so never-persisted work in another
 project is not lost. A boundary-limited read therefore cannot

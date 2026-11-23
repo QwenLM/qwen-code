@@ -819,6 +819,107 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(usageLines()).toHaveLength(1);
   });
 
+  it('uses every verified project path for multi-project scoped reads', async () => {
+    const start = Date.parse('2026-06-12T00:00:00Z');
+    const fixtures = [
+      { sessionId: 'scope-alpha', project: '/alpha/project', tokens: 600 },
+      { sessionId: 'scope-beta', project: '/beta/project', tokens: 900 },
+    ].map(({ sessionId, project, tokens }) => {
+      const filePath = new SessionService(project, {
+        runtimeBaseDir: process.env['QWEN_HOME']!,
+      }).getSessionTranscriptPath(sessionId);
+      writeTranscript(
+        path.basename(path.dirname(path.dirname(filePath))),
+        sessionId,
+        {
+          cwd: project,
+          day: '2026-06-11',
+          durationMs: 1200,
+          tokens,
+          assistant: true,
+        },
+      );
+      return {
+        filePath,
+        record: {
+          ...runRec(sessionId, tokens, start, start + 60_000),
+          project,
+        },
+      };
+    });
+    writeTranscript('unlisted-project', 'unlisted-session', {
+      cwd: '/unlisted/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 700,
+    });
+    seedPersisted(fixtures.map(({ record }) => record));
+    const projectsDir = path.join(process.env['QWEN_HOME']!, 'projects');
+    const directorySpy = vi.spyOn(fs, 'readdirSync');
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    const selectedPaths = new Set(fixtures.map(({ filePath }) => filePath));
+    try {
+      for (let i = 0; i < 2; i++) {
+        const records = await loadUsageHistory();
+        expect(records.map(({ sessionId }) => sessionId).sort()).toEqual([
+          'scope-alpha',
+          'scope-alpha',
+          'scope-beta',
+          'scope-beta',
+        ]);
+        expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(3000);
+      }
+      expect(
+        openSpy.mock.calls.filter(([openedPath]) =>
+          selectedPaths.has(String(openedPath)),
+        ),
+      ).toHaveLength(2);
+      expect(directorySpy).not.toHaveBeenCalledWith(projectsDir);
+    } finally {
+      directorySpy.mockRestore();
+      openSpy.mockRestore();
+    }
+    expect(usageLines()).toHaveLength(2);
+  });
+
+  it('retains discovery and directory priority when a session has ambiguous roots', async () => {
+    const sessionId = 'ambiguous-scoped-session';
+    const start = Date.parse('2026-06-12T00:00:00Z');
+    const records = ['/a/project', '/z/project'].map((project) => {
+      const filePath = new SessionService(project, {
+        runtimeBaseDir: process.env['QWEN_HOME']!,
+      }).getSessionTranscriptPath(sessionId);
+      writeTranscript(
+        path.basename(path.dirname(path.dirname(filePath))),
+        sessionId,
+        {
+          cwd: project,
+          day: '2026-06-11',
+          durationMs: 1200,
+          tokens: project === '/a/project' ? 1000 : 2000,
+          assistant: true,
+        },
+      );
+      return {
+        filePath,
+        record: { ...runRec(sessionId, 200, start, start + 60_000), project },
+      };
+    });
+    seedPersisted(records.map(({ record }) => record));
+    const projectsDir = path.join(process.env['QWEN_HOME']!, 'projects');
+    const directorySpy = vi.spyOn(fs, 'readdirSync');
+    try {
+      const result = await loadUsageHistory();
+      expect(totalTokensOf(aggregateUsage(result, 'all'))).toBe(1200);
+      expect(result.find((record) => record.transcriptRebuild)?.project).toBe(
+        '/a/project',
+      );
+      expect(directorySpy).toHaveBeenCalledWith(projectsDir);
+    } finally {
+      directorySpy.mockRestore();
+    }
+  });
+
   it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
     // A persisted base means the window engages (old days come from the file).
     seedPersisted([persistedRec('sess-persisted', 500)]);

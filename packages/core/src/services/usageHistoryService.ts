@@ -909,7 +909,7 @@ function scopedProjectChatsDirs(
     }
     chatsDirs.set(path.dirname(chatsDir), chatsDir);
   }
-  return chatsDirs.size === 1
+  return chatsDirs.size > 0
     ? [...chatsDirs.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([, chatsDir]) => chatsDir)

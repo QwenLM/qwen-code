@@ -49,21 +49,26 @@ const metrics = (tokens: number): SessionMetrics =>
     files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
   }) as unknown as SessionMetrics;
 
-function seedTranscript(home: string, chatsDir?: string): void {
+function seedTranscript(
+  home: string,
+  chatsDir?: string,
+  sessionId = B,
+  cwd = home,
+): void {
   const started = Date.now() - 7_200_000;
   const time = (offset: number) => new Date(started + offset).toISOString();
   const records = [
     {
-      sessionId: B,
-      cwd: home,
+      sessionId,
+      cwd,
       uuid: 'b-user',
       timestamp: time(0),
       type: 'user',
       message: { role: 'user', content: 'historical request' },
     },
     {
-      sessionId: B,
-      cwd: home,
+      sessionId,
+      cwd,
       uuid: 'b-telemetry',
       timestamp: time(1_000),
       type: 'system',
@@ -85,8 +90,8 @@ function seedTranscript(home: string, chatsDir?: string): void {
       },
     },
     {
-      sessionId: B,
-      cwd: home,
+      sessionId,
+      cwd,
       uuid: 'b-assistant',
       timestamp: time(2_000),
       type: 'assistant',
@@ -96,7 +101,7 @@ function seedTranscript(home: string, chatsDir?: string): void {
   const dir = chatsDir ?? path.join(home, 'projects', 'main', 'chats');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
-    path.join(dir, `${B}.jsonl`),
+    path.join(dir, `${sessionId}.jsonl`),
     records.map((record) => JSON.stringify(record)).join('\n') + '\n',
   );
 }
@@ -186,6 +191,48 @@ describe('stats cross-session transcript reconstruction', () => {
       .split('\n')
       .map((line) => JSON.parse(line));
     expect(records.map((record) => record.sessionId)).toEqual([A]);
+  });
+
+  it('keeps multiple verified project directories out of the discovery path', async () => {
+    const otherSession = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+    const otherRoot = path.join(home, 'second-project');
+    persistSessionUsage({
+      sessionId: otherSession,
+      project: otherRoot,
+      startTime: new Date(Date.now() - 60_000),
+      endTime: new Date(),
+      metrics: metrics(100),
+    });
+    const files = [
+      { sessionId: A, project: home },
+      { sessionId: otherSession, project: otherRoot },
+    ].map(({ sessionId, project }) => {
+      const filePath = new SessionService(project, {
+        runtimeBaseDir: home,
+      }).getSessionTranscriptPath(sessionId);
+      seedTranscript(home, path.dirname(filePath), sessionId, project);
+      return filePath;
+    });
+    const directorySpy = vi.spyOn(fs, 'readdirSync');
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    const selectedPaths = new Set(files);
+    try {
+      for (let i = 0; i < 2; i++) {
+        const data = await loadStatsData('all', undefined, A, home);
+        expect(data.report.models['qwen-max']?.totalTokens).toBe(2200);
+      }
+      expect(
+        openSpy.mock.calls.filter(([openedPath]) =>
+          selectedPaths.has(String(openedPath)),
+        ),
+      ).toHaveLength(2);
+      expect(directorySpy).not.toHaveBeenCalledWith(
+        path.join(home, 'projects'),
+      );
+    } finally {
+      directorySpy.mockRestore();
+      openSpy.mockRestore();
+    }
   });
 
   it('uses a supplied workspace root without enumerating projects', async () => {
