@@ -111,15 +111,99 @@ export function createMonitorWakeRunTurn(params: {
     turn: HostedMonitorWakeTurn,
     attempted: ChatRecord[],
   ) => Promise<'settled' | 'held' | 'busy' | false>;
+  /**
+   * A wake turn that died waiting for an approval its saved continuation can
+   * resume runs that continuation, as a parked prompt's takeover does,
+   * instead of settling as a crash. Resolves to the resumed run, or undefined
+   * when the turn has no such wait.
+   */
+  readonly resumeInterrupted?: (
+    turn: HostedMonitorWakeTurn,
+  ) => Promise<((abort: AbortController) => Promise<unknown>) | undefined>;
   readonly writeStderr: (line: string) => void;
 }): (
   turn: HostedMonitorWakeTurn,
 ) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   const { session } = params;
+  // A settled turn burns the input either way, so the pump still advances —
+  // but only a completed one proves the child result was delivered to the
+  // model: anything cancelled or errored answers 'settled_incomplete', which
+  // the consumption gate refuses.
+  const settledAs = (turnResult: unknown) =>
+    (turnResult as { systemPayload?: Record<string, unknown> } | null)
+      ?.systemPayload?.['state'] === 'completed'
+      ? ('settled' as const)
+      : ('settled_incomplete' as const);
+  const failed = async (turnId: string, cause: unknown) => {
+    if (params.needsRecovery(cause)) {
+      // Something parked mid-turn: a later settle or takeover consumes
+      // the input, exactly like a parked prompt.
+      session.blocked = true;
+      params.writeStderr(
+        'qwen serve: Monitor wake turn ' +
+          turnId +
+          ' is recovery blocked: ' +
+          String(cause),
+      );
+      return 'recovery' as const;
+    }
+    try {
+      await session.managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: params.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        cwd: params.cwd,
+        version: 'hosted-harness/1',
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: turnId,
+          state: 'error',
+          stopReason: 'error',
+          endedAt: Date.now(),
+        },
+      } as ChatRecord);
+    } catch {
+      // The settle log is best-effort; the pump's caller decides what a
+      // lost journal write means.
+    }
+    throw cause;
+  };
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
     const attempted = await session.managed.sink.project();
     if (wakeHasPriorAttempt(attempted, turn.turnId)) {
+      let resume: ((abort: AbortController) => Promise<unknown>) | undefined;
+      let cancelled = false;
+      try {
+        resume = await params.resumeInterrupted?.(turn);
+        cancelled = !!resume && (await params.cancelled?.(turn)) === true;
+      } catch (cause) {
+        params.writeStderr(
+          'qwen serve: Interrupted wake turn ' +
+            turn.turnId +
+            ' could not read its approval continuation this pass; the next wake attempt reads it again: ' +
+            String(cause),
+        );
+        return 'busy';
+      }
+      if (resume) {
+        if (params.busy() || session.blocked) return 'busy';
+        const abort = new AbortController();
+        // A cancelled source resumes already aborted, as a cancelled
+        // prompt's takeover does: the wait ends cancelled and the
+        // checkpoint moves on, which the crash path cannot do.
+        if (cancelled) abort.abort();
+        session.active = { promptId: turn.turnId, digest: '', abort };
+        try {
+          return settledAs(await resume(abort));
+        } catch (cause) {
+          return await failed(turn.turnId, cause);
+        } finally {
+          session.active = undefined;
+        }
+      }
       let interrupted: 'settled' | 'held' | 'busy' | false | undefined;
       try {
         interrupted = await params.settleInterrupted?.(turn, attempted);
@@ -247,50 +331,11 @@ export function createMonitorWakeRunTurn(params: {
         params.markLoopDelivered?.();
       }
     } catch (cause) {
-      if (params.needsRecovery(cause)) {
-        // Something parked mid-turn: a later settle or takeover consumes
-        // the input, exactly like a parked prompt.
-        session.blocked = true;
-        params.writeStderr(
-          'qwen serve: Monitor wake turn ' +
-            turn.turnId +
-            ' is recovery blocked: ' +
-            String(cause),
-        );
-        return 'recovery';
-      }
-      try {
-        await session.managed.sink.write({
-          uuid: randomUUID(),
-          parentUuid: null,
-          sessionId: params.sessionId,
-          timestamp: new Date().toISOString(),
-          type: 'system',
-          cwd: params.cwd,
-          version: 'hosted-harness/1',
-          subtype: 'turn_result',
-          systemPayload: {
-            promptId: turn.turnId,
-            state: 'error',
-            stopReason: 'error',
-            endedAt: Date.now(),
-          },
-        } as ChatRecord);
-      } catch {
-        // The settle log is best-effort; the pump's caller decides what a
-        // lost journal write means.
-      }
-      throw cause;
+      return await failed(turn.turnId, cause);
     } finally {
       session.active = undefined;
     }
-    // A settled turn burns the input either way, so the pump still
-    // advances — but only a completed one proves the child result was
-    // delivered to the model: anything cancelled or errored answers
-    // 'settled_incomplete', which the consumption gate refuses.
-    return turnResult?.systemPayload?.['state'] === 'completed'
-      ? 'settled'
-      : 'settled_incomplete';
+    return settledAs(turnResult);
   };
 }
 
