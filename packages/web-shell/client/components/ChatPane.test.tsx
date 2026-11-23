@@ -2990,7 +2990,7 @@ describe('ChatPane', () => {
       { id: 'u-stream', kind: 'user', text: 'hi' },
       {
         id: 'bg-1',
-        kind: 'user',
+        kind: 'assistant',
         text: 'Background notice',
         meta: { source: 'background_notification' },
       },

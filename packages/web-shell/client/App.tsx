@@ -5374,7 +5374,8 @@ export function App({
         .some(
           (block) =>
             isDaemonRewindUserBlock(block) ||
-            block.kind === 'assistant' ||
+            (block.kind === 'assistant' &&
+              block.meta?.['source'] !== 'background_notification') ||
             block.kind === 'thought' ||
             block.kind === 'tool',
         )

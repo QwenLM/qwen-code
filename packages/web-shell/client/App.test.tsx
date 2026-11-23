@@ -53262,7 +53262,7 @@ describe('App prompt send failure retry', () => {
         { id: 'u1', kind: 'user', text: 'hello' },
         {
           id: 'background-1',
-          kind: 'user',
+          kind: 'assistant',
           text: 'Background task completed',
           meta: { source: 'background_notification' },
         },
