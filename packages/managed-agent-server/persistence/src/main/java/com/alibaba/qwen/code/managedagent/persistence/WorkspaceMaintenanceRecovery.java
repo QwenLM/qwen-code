@@ -22,7 +22,7 @@ public final class WorkspaceMaintenanceRecovery {
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
     private static final String WORK_KIND = "RECOVERY_EVIDENCE";
-    private static final String[] MOUNT_FIELDS = {"storage_key", "physical_key", "mount_revision", "mount_root",
+    private static final String[] MOUNT_FIELDS = {"storage_key", "mount_revision", "mount_root",
             "mount_host_id", "mount_device", "mount_inode", "mount_birth_time", "mount_registration_id"};
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;

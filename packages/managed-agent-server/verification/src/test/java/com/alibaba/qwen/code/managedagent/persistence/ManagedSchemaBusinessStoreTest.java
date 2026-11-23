@@ -82,8 +82,8 @@ public class ManagedSchemaBusinessStoreTest {
                     .put("schemaVersion", 1).put("byteLength", bytes.length)
                     .put("digest", ToolPublicationContract.sha256(bytes)));
             jdbc.update(
-                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, ?, 'automation-definition', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.key(scope, resourceId), scope, tenant, ownerSession, resourceId,
+                    "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, 'automation-definition', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                    ManagedSchemaKeys.key(scope, resourceId), tenant, ownerSession, resourceId,
                     bytes.length, ToolPublicationContract.sha256(bytes), bytes);
         }
         JdbcManagedExtensionRecordStore records = new JdbcManagedExtensionRecordStore(jdbc);
@@ -125,8 +125,7 @@ public class ManagedSchemaBusinessStoreTest {
         for (String ownerTenant : List.of(tenant, foreignTenant)) {
             String scope = ManagedSessionStore.sessionScopeKey(ownerTenant, session);
             jdbc.update(
-                    "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, revision, record_resource_id, delivery_target, delivery_state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'session_message', 'message', 1, 'body', 'session', 'planned', 0)",
-                    scope, ManagedExtensionProjection.recordKey(session, "session_message", "message"), ownerTenant, session);
+                    "INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id, revision, record_resource_id, delivery_target, delivery_state, gmt_create) VALUES (?, ?, 'workspace', ?, 'session_message', 'message', 1, 'body', 'session', 'planned', 0)", ManagedExtensionProjection.recordKey(session, "session_message", "message"), ownerTenant, session);
         }
         JdbcSessionMessageRelayStore relay = new JdbcSessionMessageRelayStore(jdbc);
         var foreignClaim = relay.claim(foreignTenant, session, "message", "worker", 1000, 1);
@@ -165,8 +164,8 @@ public class ManagedSchemaBusinessStoreTest {
         assertThat(bytes.length).isGreaterThan(64 * 1024);
         String resource = ManagedSchemaKeys.key(scope, "message-body");
         jdbc.update(
-                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, 'message-body', 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                resource, scope, tenant, session, bytes.length, ToolPublicationContract.sha256(bytes), bytes);
+                "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, 'message-body', 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                resource, tenant, session, bytes.length, ToolPublicationContract.sha256(bytes), bytes);
         jdbc.update(
                 "INSERT INTO ma_message (tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, parts_json, body_resource_key) VALUES (?, ?, 'item', 'turn', 'message', 'assistant', 'completed', '{}', 1, 1, 0, 0, '[]', ?)",
                 tenant, session, resource);
@@ -232,13 +231,13 @@ public class ManagedSchemaBusinessStoreTest {
         String scope = ToolPublicationDataStore.scope(key);
         String hash = ManagedSchemaKeys.key("capture");
         jdbc.update(
-                "INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
+                "INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id,"
                     + " session_id, publication_id, execution_key, capture_id, binding_json,"
                     + " binding_digest, token_hash, state, capture_bytes, producer_bytes,"
                     + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete) VALUES"
-                    + " (?, ?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
+                    + " (?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
                     + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
-                scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
+                scope, tenant, session, hash, hash, hash);
         var writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore unknown = new ToolPublicationObjectStore() {
             @Override
@@ -286,8 +285,8 @@ public class ManagedSchemaBusinessStoreTest {
         byte[] bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         String resource = ManagedSchemaKeys.key(scope, "resource");
         jdbc.update(
-                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'resource', 'managed-tool-result-content', 1, ?, ?, 'MYSQL_INLINE', ?, 'PUBLISHED', " + ManagedSchemaTime.SQL_NOW + ")",
-                resource, scope, tenant, session, bytes.length, ToolPublicationContract.sha256(bytes), bytes);
+                "INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, 'workspace', ?, 'resource', 'managed-tool-result-content', 1, ?, ?, 'MYSQL_INLINE', ?, 'PUBLISHED', " + ManagedSchemaTime.SQL_NOW + ")",
+                resource, tenant, session, bytes.length, ToolPublicationContract.sha256(bytes), bytes);
         assertThat(collector.runOnce()).isFalse();
         try (var reader = retention.read(tenant, session)) {
             reader.check();
@@ -327,14 +326,13 @@ public class ManagedSchemaBusinessStoreTest {
         String digest = ToolPublicationContract.sha256(bytes);
         String resource = ManagedSchemaKeys.key(scope, "projection-body");
         jdbc.update(
-                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                resource, scope, tenant, session, "projection-body", "managed-message-body", bytes.length, digest, bytes);
+                "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                resource, tenant, session, "projection-body", "managed-message-body", bytes.length, digest, bytes);
         jdbc.update(
                 "INSERT INTO ma_message (tenant_id, session_id, item_id, turn_id, item_type, item_status, attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, parts_json, body_resource_key) VALUES (?, ?, 'item', 'turn', 'message', 'completed', '{}', 1, 7, 0, 0, '[]', ?)",
                 tenant, session, resource);
         jdbc.update(
-                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'MESSAGE', ?, 1, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                scope, ManagedSchemaKeys.key(scope, "item"), resource, tenant, session, "projection-body");
+                "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES ('MESSAGE', ?, 1, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", ManagedSchemaKeys.key(scope, "item"), resource, tenant, session, "projection-body");
         jdbc.update(
                 "INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, replay_floor_sequence, covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', ?, 7, 2, 5, 0)",
                 tenant, session, "");
@@ -350,7 +348,7 @@ public class ManagedSchemaBusinessStoreTest {
             collector.runOnce();
         }
         assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?", String.class, resource)).isEqualTo("COLLECTED");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?", Long.class, scope)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session)).isZero();
         assertThat(jdbc.queryForMap(
                                 "SELECT last_sequence, replay_floor_sequence, covered_sequence FROM"
                                         + " ma_event_stream WHERE tenant_id = ?", tenant))
@@ -526,8 +524,8 @@ public class ManagedSchemaBusinessStoreTest {
                     excluded.equals("delivered") ? "delivered" : "planned", 0);
             if (excluded.equals("action")) {
                 jdbc.update("UPDATE ma_session_record SET record_kind = 'ACTION', action_id = 'action',"
-                                + " action_version = 1, options_json = '{}' WHERE session_scope_key = ?",
-                        ManagedSessionStore.sessionScopeKey(tenant, ownerSession));
+                                + " action_version = 1, options_json = '{}' WHERE tenant_id = ? AND session_id = ?",
+                        tenant, ownerSession);
             }
         }
         String foreignTenant = tenant + " ";
@@ -553,10 +551,9 @@ public class ManagedSchemaBusinessStoreTest {
     }
 
     private void seedChannelRecord(String ownerTenant, String ownerSession, String id, String domain, String state, long time) {
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id,"
                         + " session_id, record_kind, domain, record_id, revision, record_resource_id,"
-                        + " delivery_state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'DOMAIN', ?, ?, 1, 'body', ?, ?)",
-                ManagedSessionStore.sessionScopeKey(ownerTenant, ownerSession),
+                        + " delivery_state, gmt_create) VALUES (?, ?, 'workspace', ?, 'DOMAIN', ?, ?, 1, 'body', ?, ?)",
                 ManagedExtensionProjection.recordKey(ownerSession, domain, id), ownerTenant, ownerSession, domain, id, state, time);
     }
 
@@ -662,13 +659,13 @@ public class ManagedSchemaBusinessStoreTest {
         String scope = ToolPublicationDataStore.scope(key);
         String hash = ManagedSchemaKeys.key("capture");
         jdbc.update(
-                "INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
+                "INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id,"
                     + " session_id, publication_id, execution_key, capture_id, binding_json,"
                     + " binding_digest, token_hash, state, capture_bytes, producer_bytes,"
                     + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete) VALUES"
-                    + " (?, ?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
+                    + " (?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
                     + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
-                scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
+                scope, tenant, session, hash, hash, hash);
         return key;
     }
 }

@@ -472,10 +472,10 @@ class ManagedArtifactApiIntegrationTest {
     private JsonNode detailsResource(String id, String kind, byte[] bytes) {
         String digest = org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes);
         String scope = ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
-        fixture.jdbc().update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+        fixture.jdbc().update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
-                org.apache.commons.codec.digest.DigestUtils.sha256Hex(id), scope, "tenant-1", "workspace-1", "session-1",
+                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(id), "tenant-1", "workspace-1", "session-1",
                 id, kind, bytes.length, digest, bytes);
         return JSON.createObjectNode().put("resourceId", id).put("kind", kind)
                 .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);

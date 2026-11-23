@@ -491,6 +491,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
   'settings.description.worktree.defaultForNewSessions':
     '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
+  'settings.label.worktree.maxRetained': '保留的会话 Worktree 上限',
+  'settings.description.worktree.maxRetained':
+    '每仓库最近 Web Shell 会话 worktree 的预留保留上限，目前尚未应用：按数量清扫与重开 chat 时恢复均未在此切片实现。删除 chat 仅在必须保留工作树状态时，于移除前创建快照；归档 chat 保留工作树及绑定。设为 0 将用于关闭按数量自动删除。不影响工具/agent worktree，它们保留现有清理语义。后续功能由 #17237 跟踪。',
 };
 
 export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
