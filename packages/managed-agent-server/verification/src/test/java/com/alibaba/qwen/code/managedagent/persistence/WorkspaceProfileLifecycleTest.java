@@ -354,6 +354,54 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
+    @CsvSource({
+            "not_started, none, true, true",
+            "not_started, none, false, false",
+            "success, none, true, false",
+            "success, other, true, false",
+            "success, original, true, true"
+    })
+    void confinedCloseRequiresOriginalInputForDispatchedShell(String status, String evidence,
+            boolean exactReference, boolean allowed) throws Exception {
+        var f = fixture();
+        var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
+        String payload = f.json.writeValueAsString(Map.of("toolName", "run_shell_command", "input", Map.of("command", "pwd")));
+        String digest = "sha256:" + ToolPublicationContract.sha256(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner",
+                "promptId", "turn-1", "callId", "tool-1", "argsDigest", digest, "dispatchMode", "deferred"));
+        if (!exactReference) {
+            reference.put("runtimeProtocol", 3);
+        }
+        var ledger = new JdbcToolExecutionRepository(f.jdbc.getDataSource());
+        var execution = ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(),
+                binding.getGeneration(), f.session, "original-owner", "turn-1", "tool-1", digest, reference));
+        if ("success".equals(status)) {
+            var dispatched = ledger.claimDispatch(execution.getExecutionCallId(), "dispatcher", Duration.ofSeconds(30));
+            assertThat(ledger.compareAndSet(dispatched, dispatched.withResult(Map.of("executionStatus", status), 0,
+                    java.time.Instant.now()), "dispatcher", dispatched.getDispatchGeneration())).isNotNull();
+        } else {
+            ledger.settlePrepared(execution, Map.of("executionStatus", status), java.time.Instant.now());
+        }
+        if (!"none".equals(evidence)) {
+            f.resource("native-input", "managed-tool-input", f.json.createObjectNode()
+                    .put("harnessSessionId", f.session).put("runtimeSessionId", "original-owner")
+                    .put("payloadJson", "other".equals(evidence) ? payload.replace("pwd", "true") : payload));
+        }
+        String profile = WorkspaceToolProfiles.CONFINED_SHELL;
+        var operation = admit(f, profile, OperationKind.CLOSE);
+        var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+        var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
+                beans.getBeanProvider(JdbcManagedToolResultStore.class));
+        Runnable verify = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation, List.of(binding), profile));
+        if (allowed) {
+            verify.run();
+        } else {
+            assertThatThrownBy(verify::run).isInstanceOfSatisfying(ManagedAgentException.class,
+                    error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_resources_unsettled"));
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"not_started", "pre_dispatch_cancel"})
     void closesOnlyAuthoritativelyUnusedPublicationsForTheOriginalExecution(String status) {
         var f = fixture();

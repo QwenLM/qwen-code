@@ -697,7 +697,8 @@ class HostedHarnessClientTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
     void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\",\"hosted-workspace-shell/4\"],"));
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\","
+                        + "\"hosted-workspace-shell/3\",\"hosted-workspace-shell/4\",\"hosted-workspace-confined-shell/1\"],"));
         createSessionRoute();
         AtomicInteger calls = new AtomicInteger();
         AtomicBoolean wrongPhase = new AtomicBoolean();
@@ -726,27 +727,39 @@ class HostedHarnessClientTest {
             var shell4 = new java.util.LinkedHashMap<>(request);
             shell4.put("toolProfile", "hosted-workspace-shell/4");
             assertEquals("close-2", client.settleLifecycle(session, shell4).get("operationId"));
+            var confined = new java.util.LinkedHashMap<>(request);
+            confined.put("toolProfile", "hosted-workspace-confined-shell/1");
+            assertEquals("close-2", client.settleLifecycle(session, confined).get("operationId"));
             wrongPhase.set(true);
             // The Harness answered 200 with a mismatched receipt: a
             // post-answer failure, not a pre-send protocol refusal.
             assertThrows(HostedHarnessSettleAnsweredException.class, () -> client.settleLifecycle(session, request));
+            assertThrows(HostedHarnessSettleAnsweredException.class, () -> client.settleLifecycle(session, confined));
             var unsupported = new java.util.LinkedHashMap<>(request);
             unsupported.put("toolProfile", "hosted-workspace-shell/2");
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
             unsupported.put("protocolVersion", 3);
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
-            assertEquals(4, calls.get());
+            assertEquals(6, calls.get());
         }
     }
 
     @Test
     void oldHarnessDoesNotAdvertiseLifecycleV2() {
+        AtomicInteger lifecycleRequests = new AtomicInteger();
         createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/lifecycle", exchange -> {
+            lifecycleRequests.incrementAndGet();
+            sendSessionJson(exchange, 200, "{}");
+        });
         try (HostedHarnessClient client = newClient()) {
             var session = createSession(client);
             assertTrue(client.capabilities().getLifecycleV2Profiles().isEmpty());
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
                     Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-shell/1")));
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
+                    Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-confined-shell/1")));
+            assertEquals(0, lifecycleRequests.get());
         }
     }
 
