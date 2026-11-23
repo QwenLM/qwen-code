@@ -35669,6 +35669,7 @@ describe('Session', () => {
                         resolve({
                           llmContent: `moved as ${shellId}`,
                           returnDisplay: 'Promoted to background',
+                          keptWhenCancelled: true,
                         });
                       });
                     },
@@ -36161,6 +36162,100 @@ describe('Session', () => {
             });
             expect(requestCancel).not.toHaveBeenCalled();
           });
+
+          /** Starts a prompt under its own admission controller. */
+          const admittedPrompt = (promptId: string) => {
+            const admission = new AbortController();
+            const done = session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'do it' }],
+              },
+              { version: 1, sessionId: 'test-session-id', promptId },
+              admission.signal,
+            );
+            return { admission, done };
+          };
+          /** A shell whose `start` moves it, then supersedes its turn by a
+           * new prompt while the shell's PostToolUse hook runs. */
+          function useSupersededMove() {
+            const shell = useShell();
+            let finishHook!: (output: { decision: 'allow' }) => void;
+            const hookStarted = usePostToolHook(
+              new Promise((resolve) => {
+                finishHook = resolve;
+              }),
+            );
+            mockClient.extMethod = vi.fn().mockResolvedValue({ messages: [] });
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(createStreamWithChunks([shellCall()]))
+              .mockResolvedValue(createEmptyStream());
+            const start = async () => {
+              const first = admittedPrompt('rpc-first');
+              await shell.running;
+              session.sendMidTurnInputNow();
+              await hookStarted;
+              const second = admittedPrompt('rpc-second');
+              await nextTick();
+              return { first, second };
+            };
+            return { ...shell, start, finishHook };
+          }
+
+          it('keeps the result of a moved shell whose turn a new prompt supersedes', async () => {
+            const { start, finishHook, requestCancel } = useSupersededMove();
+            const { first, second } = await start();
+            finishHook({ decision: 'allow' });
+
+            await expect(first.done).resolves.toMatchObject({
+              stopReason: 'cancelled',
+            });
+            await second.done;
+            expect(mockChat.addHistory).toHaveBeenCalledWith({
+              role: 'user',
+              parts: expect.arrayContaining([
+                expect.objectContaining({
+                  functionResponse: expect.objectContaining({
+                    id: 'sh',
+                    response: { output: `moved as ${shellId}` },
+                  }),
+                }),
+              ]),
+            });
+            expect(requestCancel).not.toHaveBeenCalled();
+          });
+
+          it.each(['session/cancel', 'prompt-cancel'] as const)(
+            'stops the shells of a superseded turn still settling on %s',
+            async (stop) => {
+              const { start, finishHook, requestCancel } = useSupersededMove();
+              const { first, second } = await start();
+              if (stop === 'session/cancel') {
+                await session.cancelPendingPrompt(undefined, true);
+              } else {
+                // Stopping only the newer prompt leaves the older turn's shells.
+                session.cancelPromptAdmission(
+                  second.admission,
+                  'qwen:user-cancel',
+                );
+                await nextTick();
+                expect(requestCancel).not.toHaveBeenCalled();
+                session.cancelPromptAdmission(
+                  first.admission,
+                  'qwen:user-cancel',
+                );
+              }
+              const stoppedBeforeHookFinished =
+                requestCancel.mock.calls.slice();
+              finishHook({ decision: 'allow' });
+
+              await first.done;
+              await second.done;
+              expect(stoppedBeforeHookFinished).toEqual([[shellId]]);
+              expect(requestCancel).toHaveBeenCalledOnce();
+            },
+          );
 
           it('cancels an already registered background shell before PostToolUse settles', async () => {
             const { running, requestCancel } = useShell();

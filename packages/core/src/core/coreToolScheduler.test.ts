@@ -12740,6 +12740,61 @@ describe('CoreToolScheduler telemetry spans', () => {
     },
   );
 
+  describe('a result kept when its call is cancelled', () => {
+    const moved: ToolResult = {
+      ...textResult('moved as bg_0123abcd'),
+      keptWhenCancelled: true,
+    };
+    const expectKept = (
+      call: ToolCall,
+      executionStatus: ToolExecutionStatus,
+    ) => {
+      const completedCall = expectSettled(call, 'cancelled', executionStatus);
+      expect(completedCall.response.responseParts).toMatchObject([
+        {
+          functionResponse: {
+            id: completedCall.request.callId,
+            name: 'mockTool',
+            response: { output: 'moved as bg_0123abcd' },
+          },
+        },
+      ]);
+    };
+
+    it('survives a cancellation that lands while PostToolUse runs', async () => {
+      const abort = new AbortController();
+      const entered = deferred<HookRequest>();
+      const releaseHook = deferred<HookExecutionResponse>();
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        hooks: hookBus((request) => {
+          if (request.eventName === 'PostToolUse') {
+            entered.resolve(request);
+            return releaseHook.promise;
+          }
+          return hookResponse(request.eventName, {});
+        }),
+        execute: vi.fn().mockResolvedValue(moved),
+      });
+      const scheduled = scheduler.schedule(
+        mockToolRequest('cancelled-during-post-hook'),
+        abort.signal,
+      );
+      await entered.promise;
+      abort.abort();
+      releaseHook.resolve(hookResponse('PostToolUse', {}));
+      await scheduled;
+
+      const [call] = await settledLastBatch(onAllToolCallsComplete);
+      expectKept(call, 'success');
+    });
+
+    it('survives a cancellation that lands before the result', async () => {
+      const { call } = await runAbortedDuringExecution({}, moved);
+
+      expectKept(call, 'cancelled');
+    });
+  });
+
   it.each([
     {
       hook: 'PostToolUse',

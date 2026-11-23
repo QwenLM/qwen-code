@@ -6978,7 +6978,18 @@ export class CoreToolScheduler {
             ? toolResult.llmContent
             : undefined,
         );
-        observeProducerOutput(cancelledResponse, true);
+        if (toolResult.keptWhenCancelled) {
+          cancelledResponse.responseParts = convertToFunctionResponse(
+            getModelFacingToolName(scheduledCall.request),
+            callId,
+            toolResult.llmContent,
+          );
+          cancelledResponse.contentLength =
+            typeof toolResult.llmContent === 'string'
+              ? toolResult.llmContent.length
+              : undefined;
+        }
+        observeProducerOutput(cancelledResponse, !toolResult.keptWhenCancelled);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return; // Both code paths should return here
@@ -6991,20 +7002,24 @@ export class CoreToolScheduler {
           persistedOutputFiles?: string[];
           visionBridgeNotice?: string;
         },
+        result?: CoreToolCallResponseInfo,
       ): boolean => {
         if (!signal.aborted || (isTimeout && parentAbortedAtExecutionSettle)) {
           return false;
         }
-        const cancelledResponse = createCancelledResponse(
-          scheduledCall.request,
-          // Reached only after `execute()` settled with a result.
-          cancelledAfterCompletionMessage(signal),
-          executionStatus,
-          artifacts,
-          preserved?.persistedOutputFiles,
-          preserved?.visionBridgeNotice,
-        );
-        observeProducerOutput(cancelledResponse, true);
+        const cancelledResponse =
+          result && toolResult.keptWhenCancelled
+            ? result
+            : createCancelledResponse(
+                scheduledCall.request,
+                // Reached only after `execute()` settled with a result.
+                cancelledAfterCompletionMessage(signal),
+                executionStatus,
+                artifacts,
+                preserved?.persistedOutputFiles,
+                preserved?.visionBridgeNotice,
+              );
+        observeProducerOutput(cancelledResponse, cancelledResponse !== result);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return true;
@@ -7567,10 +7582,14 @@ export class CoreToolScheduler {
           }
         }
         if (
-          cancelAfterPostProcessing(artifacts, {
-            persistedOutputFiles: successResponse.persistedOutputFiles,
-            visionBridgeNotice: successResponse.visionBridgeNotice,
-          })
+          cancelAfterPostProcessing(
+            artifacts,
+            {
+              persistedOutputFiles: successResponse.persistedOutputFiles,
+              visionBridgeNotice: successResponse.visionBridgeNotice,
+            },
+            successResponse,
+          )
         ) {
           return;
         }

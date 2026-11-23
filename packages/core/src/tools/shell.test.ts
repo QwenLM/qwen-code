@@ -5693,6 +5693,7 @@ describe('ShellTool', () => {
         // No `error`: promote is success-shaped (#3831 design question 7 /
         // @tanzhenxin's PR-1 review).
         expect(result.error).toBeUndefined();
+        expect(result.keptWhenCancelled).toBeUndefined();
       });
 
       it('reports the registered id and says why when moved for a user message', async () => {
@@ -5723,6 +5724,8 @@ describe('ShellTool', () => {
           `Output snapshot at promote time saved to: ${outputPath}`,
           `task_stop({ task_id: '${shellId}' })`,
         ]);
+        // The process keeps running, so a cancelled call keeps this result.
+        expect(result.keptWhenCancelled).toBe(true);
       });
 
       it('does not offer promotion for a shell that has no process', async () => {

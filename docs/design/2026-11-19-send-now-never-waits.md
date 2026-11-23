@@ -181,16 +181,27 @@ then interrupts the other tools.
    room for the user's message. If `PostToolUse` rejects the tool result,
    the agent requests cancellation of the promoted process. A call cancelled
    because its turn ended for another reason, such as a new prompt, keeps the
-   command running: only Stop and a `PostToolUse` rejection cancel it.
+   command running: only Stop and a `PostToolUse` rejection cancel it. Such
+   a call is recorded as cancelled but keeps this result, because the
+   process it names is still running: the shell tool sets
+   `keptWhenCancelled` on it, and both the legacy loop and the scheduler
+   keep a result marked that way. Otherwise the next turn would know neither
+   the task ID nor the output path, and could not stop the command or avoid
+   running it again. A Stop keeps the result too; the background
+   notification then reports the cancelled task.
 4. When such a shell ends later, ACP's existing background shell notification
    reports it.
 5. Stop cancels the shells moved by its turn. It requests cancellation
    immediately for registered tasks and at registration for moves still in
    progress. This also applies if Send now has already interrupted the turn
-   and it is still settling. The next turn treats those tasks as ordinary
-   background jobs. A cancel the agent starts itself, such as for a
-   tightening workspace change or a subscription sign-out, is not Stop and
-   leaves them running.
+   and it is still settling. The session keeps the moved shells per turn,
+   with the turn's prompt admission, until that turn settles. So a Stop also
+   reaches a turn that a new prompt superseded but that is still settling:
+   `session/cancel` stops every such turn, and the prompt-cancel extension
+   stops the turns of the admissions it cancels. Once the turn has settled,
+   the next turn treats those tasks as ordinary background jobs. A cancel the
+   agent starts itself, such as for a tightening workspace change or a
+   subscription sign-out, is not Stop and leaves them running.
 
 ### Web Shell
 

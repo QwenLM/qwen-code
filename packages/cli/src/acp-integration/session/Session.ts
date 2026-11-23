@@ -2861,11 +2861,13 @@ export class Session implements SessionContext {
         shells: ReadonlySet<MovableShell>;
       }
     | undefined;
-  // Shells moved to the background for a message, stopped if the turn that
-  // moved them is stopped.
-  private shellsMovedFor:
-    | { turn: AbortSignal; shells: MovableShell[] }
-    | undefined;
+  // Shells moved to the background for a message, by the turn that moved
+  // them, until that turn settles: a Stop before then stops them, even once
+  // a newer prompt superseded the turn.
+  private readonly shellsMovedFor = new Map<
+    AbortSignal,
+    { admission: AbortSignal | undefined; shells: MovableShell[] }
+  >();
   // A drain started for an open response and still awaiting its answer. Later
   // drains wait for it, so the messages it takes are never stranded.
   private earlyMidTurnDrain: Promise<void> | undefined;
@@ -4227,10 +4229,13 @@ export class Session implements SessionContext {
       if (!shell.move && promote && !promote.signal.aborted) {
         const move: NonNullable<MovableShell['move']> = {};
         shell.move = move;
-        if (this.shellsMovedFor?.turn !== turn) {
-          this.shellsMovedFor = { turn, shells: [] };
+        let moved = this.shellsMovedFor.get(turn);
+        if (!moved) {
+          // Only the current prompt's turn moves shells.
+          moved = { admission: this.pendingPromptAdmissionSignal, shells: [] };
+          this.shellsMovedFor.set(turn, moved);
         }
-        this.shellsMovedFor.shells.push(shell);
+        moved.shells.push(shell);
         promote.abort({
           kind: 'background',
           forUserMessage: true,
@@ -4247,14 +4252,16 @@ export class Session implements SessionContext {
     return moving;
   }
 
-  /** Stopping a turn (Stop, not Send now) stops the shells it moved to the
-   * background. */
-  #stopShellsMovedFor(turn: AbortSignal): void {
-    const moved = this.shellsMovedFor;
-    if (moved?.turn !== turn) return;
-    this.shellsMovedFor = undefined;
-    for (const shell of moved.shells) {
-      this.#stopMovedShell(shell);
+  /** A Stop (not Send now) stops the shells moved by the turns it stops
+   * that have not settled yet: every such turn without `admission`, else the
+   * turn of that prompt admission. */
+  #stopMovedShells(admission?: AbortSignal): void {
+    for (const [turn, moved] of this.shellsMovedFor) {
+      if (admission && moved.admission !== admission) continue;
+      this.shellsMovedFor.delete(turn);
+      for (const shell of moved.shells) {
+        this.#stopMovedShell(shell);
+      }
     }
   }
 
@@ -6233,12 +6240,7 @@ export class Session implements SessionContext {
       !this.userPromptCancellations.has(controller.signal)
     ) {
       this.userPromptCancellations.set(controller.signal, Date.now());
-      if (
-        this.pendingPrompt &&
-        this.pendingPromptAdmissionSignal === controller.signal
-      ) {
-        this.#stopShellsMovedFor(this.pendingPrompt.signal);
-      }
+      this.#stopMovedShells(controller.signal);
     }
     controller.abort(reason);
   }
@@ -6290,10 +6292,10 @@ export class Session implements SessionContext {
       capture.controller.abort(abortReason);
     }
 
+    if (userStop && abortReason === USER_CANCEL_ABORT_REASON) {
+      this.#stopMovedShells();
+    }
     if (this.pendingPrompt) {
-      if (userStop && abortReason === USER_CANCEL_ABORT_REASON) {
-        this.#stopShellsMovedFor(this.pendingPrompt.signal);
-      }
       this.pendingPrompt.abort(abortReason);
       this.pendingPrompt = null;
       this.pendingPromptAdmissionSignal = undefined;
@@ -6734,9 +6736,7 @@ export class Session implements SessionContext {
       if (this.midTurnSendNowFor === pendingSend.signal) {
         this.midTurnSendNowFor = undefined;
       }
-      if (this.shellsMovedFor?.turn === pendingSend.signal) {
-        this.shellsMovedFor = undefined;
-      }
+      this.shellsMovedFor.delete(pendingSend.signal);
       if (this.pendingPrompt === pendingSend) {
         if (
           !scheduledGoalTurn &&
@@ -20622,6 +20622,10 @@ export class Session implements SessionContext {
             if (aborted) this.todoStopGuard.suspend();
           }
 
+          // A shell moved to the background keeps running when its turn ends,
+          // so a cancelled call keeps the result that names its task.
+          const movedToBackground = toolResult.keptWhenCancelled === true;
+
           // Fire PostToolUse hook on successful execution (aligned with core path)
           if (
             hooksEnabledForTool &&
@@ -20648,7 +20652,7 @@ export class Session implements SessionContext {
               hookOwner,
             );
 
-            if (activeToolAbortSignal.aborted) {
+            if (activeToolAbortSignal.aborted && !movedToBackground) {
               return earlyErrorResponse(
                 new Error(
                   activeToolAbortSignal.reason ===
@@ -20793,20 +20797,22 @@ export class Session implements SessionContext {
             !(isExecutionTimeout && parentAbortedAtExecutionSettle)
           ) {
             status = 'cancelled';
-            // Keep the producer's own partial output as the detail, the way
-            // the scheduler does, instead of discarding it with the notice.
-            const cancelDetail =
-              interruptedBeforeCompletion &&
-              typeof toolResult.llmContent === 'string' &&
-              toolResult.llmContent.trim()
-                ? `\n\n${toolResult.llmContent}`
-                : '';
-            responseParts = convertToFunctionErrorResponse(
-              modelFacingToolName,
-              callId,
-              `${cancelReason}${cancelDetail}`,
-              cancelReason,
-            );
+            if (!movedToBackground) {
+              // Keep the producer's own partial output as the detail, the way
+              // the scheduler does, instead of discarding it with the notice.
+              const cancelDetail =
+                interruptedBeforeCompletion &&
+                typeof toolResult.llmContent === 'string' &&
+                toolResult.llmContent.trim()
+                  ? `\n\n${toolResult.llmContent}`
+                  : '';
+              responseParts = convertToFunctionErrorResponse(
+                modelFacingToolName,
+                callId,
+                `${cancelReason}${cancelDetail}`,
+                cancelReason,
+              );
+            }
           }
           terminalStatus = status;
           finishToolLifecycle(status);

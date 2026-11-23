@@ -5401,6 +5401,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return {
       llmContent,
       returnDisplay: `Promoted to background: ${shellId}`,
+      ...(promoteReason?.forUserMessage === true && {
+        keptWhenCancelled: true,
+      }),
     };
   }
 
