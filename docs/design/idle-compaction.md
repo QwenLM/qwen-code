@@ -2,17 +2,20 @@
 
 [English](idle-compaction.md) | [简体中文](idle-compaction.zh-CN.md)
 
-Status: proposal (issue #16508), revised after the triage round. No
-implementation yet; this document fixes the design so the implementation PR
-has a reviewable contract.
+Status: proposal (issue #16508), revised after the triage and verification
+rounds. No implementation yet; this document fixes the design so the
+implementation PR has a reviewable contract. Line anchors cite the tree this
+revision was written against (base `2258518d`); where drift is likely, the
+symbol is named alongside.
 
 ## Why
 
-Auto-compaction today fires inside `chat.sendMessageStream` when the
-effective prompt estimate crosses the threshold computed by
-`computeThresholds(...)` at `llm-chat.ts:3537` — the only compaction gate in
-the send path (the other `getAutoCompactThreshold()` consumer sizes
-tool-output truncation, not compaction). The summarizer round trip lands
+Auto-compaction today fires inside `chat.sendMessageStream` at two
+`tryCompress` entry points: the threshold gate, where the effective prompt
+estimate crosses the threshold computed by `computeThresholds(...)` before
+the send (`llm-chat.ts:3537`), and the reactive path, where an HTTP 413 /
+context-overflow response forces a mid-turn compaction with `force = true`
+(`llm-chat.ts:4973`). The summarizer round trip lands
 **mid-turn** — the user just asked for something and waits 30–60 s for work
 unrelated to their request — and because the threshold fires late, sessions
 run near the ceiling, where the eventual compaction input is at its largest.
@@ -66,7 +69,23 @@ rewrite is free or already doomed:
 Both estimates reuse the same `computeThresholds(...)` accounting the
 in-turn gate reads, so idle and in-turn triggers cannot disagree about
 fullness. In both regimes, if the idle pass is interrupted the in-turn path
-remains the backstop, unchanged.
+remains the backstop, unchanged — except that exact-route sends skip the
+pre-send gate (`llm-chat.ts:3890`), so under a per-turn route override the
+idle pass is the only compaction those turns would get.
+
+### Passing the cheap gate unforced
+
+The in-turn gate's cheap path NOOPs on `effectiveTokens < auto`
+(`chatCompressionService.ts:585`) unless the screenshot-overflow branch
+fires (`:592-611`), and the only other way through is `force = true` —
+which bypasses the consecutive-failure breaker and reports
+`PreCompactTrigger.Manual` to hooks. The idle pass therefore dispatches
+through the same sub-`auto` branch the screenshot trigger uses: a new
+sibling condition under the same NOOP path (idle tick present, unforced),
+so the pass keeps `auto` semantics at the hook, keeps the breaker armed (a
+summarizer failing repeatedly stops the pass exactly as in-turn
+auto-compaction would), and carries the new `'idle'` notice reason.
+`force = true` is explicitly not used.
 
 ### Concurrent prompt: abort, then a commit gate
 
@@ -77,7 +96,8 @@ uncontrolled history rewrite racing an admitted send is the central hazard
 `compact_history` → `chat.setHistory`, has no in-flight protection today —
 this design does not add a second unprotected writer). The house precedent
 for background LLM work is also clear: speculation is **aborted** when a new
-turn starts (`AppContainer.tsx:4143`).
+turn starts (`AppContainer.tsx:4149-4160`, the Idle → Responding transition
+cleanup; abort at `:4157`).
 
 The idle pass follows the precedent, with a commit gate:
 
@@ -93,15 +113,21 @@ The idle pass follows the precedent, with a commit gate:
 3. The summarizer never blocks prompt admission: it runs on the side-query
    path, and its failure modes are the existing ones.
 
-### Hook contract: no visible change
+### Hook contract: no hook-facing change
 
-A new `'idle'` value in `PreCompactTrigger`/`PostCompactTrigger`
-(`hooks/types.ts:1160`), `CompactTrigger` (`chatCompressionService.ts:280`)
-or `CompactionTriggerReason` (`core/turn.ts:548`) would silently break user
-hooks that match `trigger == "auto"`. The idle pass therefore reports
-**`auto` to hooks** — the idle distinction exists only in internal
-telemetry and the user-facing notice reason. No exported enum changes; the
-changelog records the new notice reason string only.
+Three trigger types exist and only one is hook-facing:
+`PreCompactTrigger`/`PostCompactTrigger` (`hooks/types.ts:1160`) reach user
+hooks; `CompactTrigger` (`chatCompressionService.ts:280`) is the internal
+`'manual' | 'auto'` parameter of the compression entry, and
+`CompactionTriggerReason` (`core/turn.ts:548`) is a notice-only union that
+hooks never see. Adding `'idle'` to the hook-facing enums would silently
+break user hooks that match `trigger == "auto"`, so the idle pass reports
+**`auto` to hooks** — it runs unforced through the sub-`auto` gate branch,
+which derives `PreCompactTrigger.Auto` exactly as in-turn auto-compaction
+does (`chatCompressionService.ts:662-663`). The idle distinction lives in
+`CompactionTriggerReason`, which **gains `'idle'`** as the notice reason and
+internal telemetry value. No hook-facing enum changes; the changelog records
+the new notice reason string only.
 
 ### Scope exclusions
 
@@ -113,7 +139,14 @@ session is the only surface in this proposal.
 ### Notices
 
 On the user's next interaction, the standard auto-compaction notice renders
-with the idle reason. No new surface; the existing notice path carries it.
+with the idle reason — no new surface, but the reason clause is an equality
+chain with a token-limit fallback at three consumers (`use-llm-stream.ts:2981`,
+`opentui/event-adapter.ts:753`, `Session.ts:1245`), and none has an `'idle'`
+branch today. Each needs one (or the chains collapse into one shared
+helper), otherwise an idle pass at 0.7 × auto would announce "approached the
+input token limit", which is untrue. (`Session.ts`'s missing
+`payload_overflow` branch there is pre-existing and out of scope.) The
+implementation PR touches those branches accordingly.
 
 ## Non-goals
 
@@ -142,6 +175,9 @@ with the idle reason. No new surface; the existing notice path carries it.
   turn proceeds on the pre-compaction history exactly as today.
 - Feature disabled by configuration → behavior identical to today.
 - Hooks observe `trigger == "auto"` in all idle-pass events.
+- A summarizer failing repeatedly across idle periods trips the same
+  consecutive-failure breaker as in-turn compaction (the pass never takes
+  the breaker-bypassing forced route).
 - Headless and hosted sessions never trigger it.
 
 ## Open questions

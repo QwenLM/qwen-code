@@ -2,15 +2,17 @@
 
 [English](idle-compaction.md) | [简体中文](idle-compaction.zh-CN.md)
 
-状态：提案（issue #16508），经 triage 轮修订。尚无实现；本文固定设计，使实现
-PR 拥有可评审的契约。
+状态：提案（issue #16508），经 triage 轮与验证轮修订。尚无实现；本文固定
+设计，使实现 PR 拥有可评审的契约。行号锚点以本次修订所依据的树
+（base `2258518d`）为准；易漂移处同时标注符号名。
 
 ## 为什么
 
-当前自动压缩在 `chat.sendMessageStream` 内部触发——`llm-chat.ts:3537` 的
-`computeThresholds(...)` 是发送路径中唯一的压缩门禁（另一处
-`getAutoCompactThreshold()` 消费者计算工具输出截断预算，与压缩无关）。
-摘要往返落在**回合中**：用户刚发出请求，却要为一件与该请求无关的工作等
+当前自动压缩在 `chat.sendMessageStream` 内部经两个 `tryCompress` 入口触发：
+阈值门禁——发送前有效提示估算越过 `computeThresholds(...)` 计算出的阈值
+（`llm-chat.ts:3537`）；以及响应式路径——HTTP 413 / 上下文溢出响应以
+`force = true` 强制回合中压缩（`llm-chat.ts:4973`）。摘要往返落在**回合中**：
+用户刚发出请求，却要为一件与该请求无关的工作等
 30–60 秒；且阈值触发偏晚，会话长期贴近上限运行，压缩输入在其最大时刻才被
 处理。
 
@@ -53,7 +55,20 @@ PR 拥有可评审的契约。
 
 两项估算复用回合内门禁读取的同一套 `computeThresholds(...)` 记账，空闲
 与回合内触发器对"满"的判定不会分歧。两个条件域中，若空闲压缩被打断，
-回合内路径仍是不变的兜底。
+回合内路径仍是不变的兜底——唯一例外是 exact-route 发送会跳过发送前门禁
+（`llm-chat.ts:3890`），按回合覆盖路由时，空闲压缩是那些回合唯一可能的
+压缩。
+
+### 不经 force 通过廉价门禁
+
+回合内门禁的廉价路径在 `effectiveTokens < auto` 时直接 NOOP
+（`chatCompressionService.ts:585`），除非 screenshot-overflow 分支触发
+（`:592-611`）；除此之外唯一的通道是 `force = true`——它会绕过连续失败
+熔断器，并向 hook 报告 `PreCompactTrigger.Manual`。空闲压缩因此走与
+screenshot 触发器相同的 sub-`auto` 分支：在同一 NOOP 路径下新增一个兄弟
+条件（存在空闲心跳、未强制），从而对 hook 保持 `auto` 语义、保持熔断器
+武装（摘要连续失败时与回合内自动压缩一样停下），并携带新的 `'idle'`
+通知原因。明确不使用 `force = true`。
 
 ### 并发提示：中止 + 提交门
 
@@ -62,7 +77,8 @@ PR 拥有可评审的契约。
 带外写入者 `memoryPressureMonitor` 的 `compact_history` → `chat.setHistory`
 至今没有 in-flight 保护——本设计不添加第二个无保护的写入者）。后台 LLM
 工作的仓库先例也明确：新回合开始时推测执行**被中止**（
-`AppContainer.tsx:4143`）。
+`AppContainer.tsx:4149-4160`，Idle → Responding 迁移清理；中止在
+`:4157`）。
 
 空闲压缩遵循先例，并加提交门：
 
@@ -75,14 +91,18 @@ PR 拥有可评审的契约。
    半压缩/过期压缩历史。
 3. 摘要从不阻塞提示准入：走侧查询路径，失败形态沿用现有语义。
 
-### Hook 契约：无可见变更
+### Hook 契约：无 hook 面变更
 
-在 `PreCompactTrigger`/`PostCompactTrigger`（`hooks/types.ts:1160`）、
-`CompactTrigger`（`chatCompressionService.ts:280`）或
-`CompactionTriggerReason`（`core/turn.ts:548`）中新增 `'idle'` 值，会
-静默破坏匹配 `trigger == "auto"` 的用户 hook。空闲压缩因此对 hook 仍
-报告 **`auto`**——idle 区分只存在于内部遥测与面向用户的通知原因中。
-不修改任何导出枚举；changelog 只记录新的通知原因字符串。
+三种触发类型中只有一种是 hook 面的：`PreCompactTrigger`/`PostCompactTrigger`
+（`hooks/types.ts:1160`）会到达用户 hook；`CompactTrigger`
+（`chatCompressionService.ts:280`）是压缩入口的内部 `'manual' | 'auto'`
+参数；`CompactionTriggerReason`（`core/turn.ts:548`）是仅用于通知的联合
+类型，hook 永远看不到它。向 hook 面枚举新增 `'idle'` 会静默破坏匹配
+`trigger == "auto"` 的用户 hook，因此空闲压缩对 hook 仍报告 **`auto`**——
+它未经强制走 sub-`auto` 门禁分支，与回合内自动压缩同样推导出
+`PreCompactTrigger.Auto`（`chatCompressionService.ts:662-663`）。idle 区分
+落在 `CompactionTriggerReason` 中：它**新增 `'idle'`** 作为通知原因与内部
+遥测值。不修改任何 hook 面枚举；changelog 只记录新的通知原因字符串。
 
 ### 范围排除
 
@@ -92,8 +112,13 @@ Headless/SDK 运行（`runNonInteractive`）与 hosted/managed 会话整体禁�
 
 ### 通知
 
-用户下一次交互时，标准自动压缩通知以 idle 原因渲染。无新界面；现有
-通知路径直接承载。
+用户下一次交互时，标准自动压缩通知以 idle 原因渲染——无新界面，但原因
+子句在三个消费者处是带 token 上限回退的等值链（`use-llm-stream.ts:2981`、
+`opentui/event-adapter.ts:753`、`Session.ts:1245`），今天都没有 `'idle'`
+分支。每处需要新增一个分支（或把三条链合并为一个共享 helper），否则
+0.7 × auto 触发的空闲压缩会宣布"接近输入 token 上限"，与事实不符。
+（`Session.ts` 在该处缺 `payload_overflow` 分支是既有问题，不在本设计
+范围内。）实现 PR 会相应改动这些分支。
 
 ## 非目标
 
@@ -121,6 +146,8 @@ Headless/SDK 运行（`runNonInteractive`）与 hosted/managed 会话整体禁�
   在压缩前历史上进行。
 - 配置禁用 → 行为与今天完全一致。
 - 所有空闲压缩事件中 hook 观察到 `trigger == "auto"`。
+- 摘要在多个空闲周期连续失败时，触发与回合内压缩相同的连续失败熔断器
+  （空闲压缩绝不走绕过熔断器的强制路线）。
 - Headless 与 hosted 会话永不触发。
 
 ## 待定问题
