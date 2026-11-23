@@ -2,7 +2,7 @@
 
 [English](2026-11-23-remove-message-rewrite-middleware.md) | [简体中文](2026-11-23-remove-message-rewrite-middleware.zh-CN.md)
 
-Status: implemented. This removes the ACP message rewrite middleware, tracked in #13749, now that Mods rewrite what replies and thoughts show in every Qwen Code interface ([Mod reply rows in the Web Shell](2026-11-18-mod-rows-in-web-shell.md), [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md)).
+Status: implemented. This removes the ACP message rewrite middleware, tracked in #13749. Mods can rewrite displayed replies and thoughts in Ink, OpenTUI and the Web Shell ([Mod reply rows in the Web Shell](2026-11-18-mod-rows-in-web-shell.md), [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md)).
 
 ## Problem and current behavior
 
@@ -14,7 +14,7 @@ The Mod `ui.render` sites are that approach, and they do more:
 - They answer a reload from a cache.
 - They work in the Ink and OpenTUI terminals and the Web Shell.
 
-The middleware, by contrast, reaches only clients that understand its marker. The Web Shell and the SDK never did. The VS Code companion streams the rewritten copy as more text, and the channel bridges skip it.
+Legacy ACP sends the rewrite as a normal text chunk with extra metadata. The Web Shell and SDK can consume it as additional reply text without interpreting the marker. The VS Code companion also streams that text and uses the marker to avoid storing duplicate notifications. The channel bridges use the marker to skip rewritten background replies.
 
 Keeping the middleware costs every ACP turn:
 
@@ -28,22 +28,22 @@ Goals:
 
 - Remove the middleware, its setting reader and its model-call rewriter.
 - Remove the call sites in the ACP session, the emitters and the history replayer.
-- Remove the channel bridges' handling of the marker, which only the middleware emitted.
+- Preserve compatibility with rewritten background replies from older ACP sessions.
 
 Non-goals:
 
-- A replacement in the VS Code companion. Mod rows are drawn by the Ink and OpenTUI terminals and the Web Shell only.
+- Mod rendering in the VS Code companion or Zed.
 - Migrating `messageRewrite` settings into a Mod.
 
 ## Design decisions
 
 ### Removed outright
 
-The setting is undocumented in the settings reference, absent from the settings schema and off by default. A `messageRewrite` key left in a settings file is reported like any other unknown key: a debug log line says it is ignored. No migration code is added.
+The setting was described in the middleware README, was absent from the settings reference and schema, and was off by default. The CLI now ignores a leftover `messageRewrite` key. Startup paths that report unknown settings treat it like any other unknown key.
 
 ### Consumers of the marker
 
-The channel bridges run with the CLI of the same install: one spawns its own child, the other talks to the daemon of the same install. Their skip of `_meta.rewritten` messages can never fire again, so it goes with the middleware.
+Both channel bridges keep filtering discrete background replies marked `_meta.rewritten`. A daemon can reload its channel worker after an in-place upgrade while an older ACP session stays live. A standalone bridge can also be given an older CLI entry path. Filtering prevents duplicate chat delivery and protects the original per-task result in the daemon bridge.
 
 The VS Code companion ships separately and may talk to an older CLI, so it keeps its handling; only its comments now say that older CLIs emit the marker.
 
@@ -70,13 +70,13 @@ A mutation check confirms that each of these tests still fails once the check it
 
 - The CLI, bridge and channel packages typecheck.
 - The full ACP session test file and the ACP agent tests pass.
-- The channel bridge tests pass.
+- The channel bridge tests cover legacy rewritten chunks, including duplicate delivery and per-task result selection.
 - The nine adjusted session tests pass, and the five race tests each fail under the mutation of their guard. One test that only covered the middleware is deleted.
-- A whole-tree search finds no remaining reference to the middleware, its setting reader or its rewriter outside historical design notes.
+- The current CLI has no calls to the middleware, its setting reader or its rewriter.
 
-Acceptance: an ACP session with a `messageRewrite` setting runs as one without it, and sends no rewritten messages.
+Acceptance: a current ACP session with a `messageRewrite` setting runs as one without it and sends no rewritten messages. Channel bridges skip rewritten background chunks received from older sessions.
 
 ## Risks and open questions
 
-- VS Code companion users who set `messageRewrite` lose rewritten summaries with no replacement in that client.
+- Users who enabled `messageRewrite` lose the appended summaries on ACP clients that displayed them, including the Web Shell and the VS Code companion. Mod display rewrites are available in Ink, OpenTUI and the Web Shell.
 - Turn timing changes slightly for every ACP session, because the removed awaits yielded even when the middleware was off. The full session tests cover it.

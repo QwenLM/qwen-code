@@ -4883,7 +4883,12 @@ describe('DaemonChannelBridge', () => {
             },
           },
         });
-        for (const claimed of [true, false]) {
+        for (const [claimed, text, rewritten] of [
+          [true, 'Task result', false],
+          [false, 'Unrelated result', false],
+          [true, 'Rewritten task result', true],
+          [false, 'Rewritten unrelated result', true],
+        ] as const) {
           events.push({
             v: 1,
             type: 'session_update',
@@ -4891,13 +4896,11 @@ describe('DaemonChannelBridge', () => {
               sessionId: 'session-1',
               update: {
                 sessionUpdate: 'agent_message_chunk',
-                content: {
-                  type: 'text',
-                  text: claimed ? 'Task result' : 'Unrelated result',
-                },
+                content: { type: 'text', text },
                 _meta: {
                   qwenDiscreteMessage: true,
                   source: 'background_notification_response',
+                  rewritten,
                   [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
                   backgroundTask: {
                     taskId: 'task-1',

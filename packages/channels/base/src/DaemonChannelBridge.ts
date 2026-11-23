@@ -1200,6 +1200,7 @@ export class DaemonChannelBridge
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
             meta[CHANNEL_TASK_OUTPUT_META_KEY] === true
           ) {
             const taskOutput = this.taskOutputs.get(sessionId);
@@ -1223,6 +1224,7 @@ export class DaemonChannelBridge
           }
           if (
             meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
             meta[CHANNEL_TASK_OUTPUT_META_KEY] !== true
           ) {
             const context = parseBackgroundResponseContext(
