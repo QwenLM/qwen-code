@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
@@ -124,6 +125,24 @@ class SessionRecoveryServiceTest {
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
         assertThat(recovery.nextTurnAllowed()).isTrue();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    // A parked Turn reads as running whether its seal certificate is current
+    // or a later writer acquisition has already cleared it.
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anActionParkedTurnReportsItsActiveTurnWithoutHarnessEvidence(boolean certified) {
+        sealCleanly();
+        jdbc.update(certified ? "UPDATE ma_session_head SET wake_seal_revision = 5"
+                : "UPDATE ma_session_head SET state = 'ACTIVE', activation_phase = 'active'");
+        turn("RUNNING", TurnExecutionStore.HARNESS_ACTION_PARKED);
+
+        var recovery = service.query("tenant", "actor", "session");
+
+        assertThat(recovery.state()).isEqualTo("recovering");
+        assertThat(recovery.reasonCode()).isEqualTo("turn_active");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
         verifyNoInteractions(harness, coordinator);
     }
 
