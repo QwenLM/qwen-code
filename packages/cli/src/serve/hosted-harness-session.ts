@@ -5385,7 +5385,8 @@ export function registerHostedHarnessSessionRoutes(
         if (park) {
           const certificateLost = await refreshBackgroundCertificate();
           const blocked =
-            backgroundCertified ||
+            (backgroundCertified &&
+              session.stores?.supportsBackgroundActionParking?.() !== true) ||
             certificateLost ||
             hostedActionParkRegistration(session.managed) !==
               park.registration ||
@@ -5526,6 +5527,7 @@ export function registerHostedHarnessSessionRoutes(
               wake = {
                 pending: false,
                 dueAt: 0,
+                ...(backgroundCertified ? { backgroundHeld: true } : {}),
                 parkedTurn: {
                   promptId: actionPark.promptId,
                   wakeAt: actionPark.wakeAt,

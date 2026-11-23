@@ -231,44 +231,50 @@ public final class ManagedSessionStoreModels {
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
             boolean replayed, boolean activationLeaseRenewal, ActivationLease activationLease,
-            boolean wakeDispatch, boolean runtimeObservation, boolean actionParking) {
+            boolean wakeDispatch, boolean runtimeObservation, boolean actionParking,
+            boolean backgroundActionParking) {
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 boolean activationLeaseRenewal, ActivationLease activationLease, boolean wakeDispatch,
                 boolean runtimeObservation) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
                     activationEpoch, replayed, activationLeaseRenewal, activationLease, wakeDispatch,
-                    runtimeObservation, false);
+                    runtimeObservation, false, false);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 boolean activationLeaseRenewal, ActivationLease activationLease, boolean wakeDispatch) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
                     activationEpoch, replayed, activationLeaseRenewal, activationLease, wakeDispatch,
-                    false, false);
+                    false, false, false);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 boolean activationLeaseRenewal, ActivationLease activationLease) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, activationLeaseRenewal, activationLease, false, false, false);
+                    activationEpoch, replayed, activationLeaseRenewal, activationLease, false, false, false,
+                    false);
         }
         /** Advertises that this control plane consumes seal-time wake stamps. */
         public WriterGrant withWakeDispatch() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
                     lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
-                    true, runtimeObservation, actionParking);
+                    true, runtimeObservation, actionParking, backgroundActionParking);
         }
         /** Advertises that a background Session may suspend behind the pull. */
         public WriterGrant withRuntimeObservation() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
                     lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
-                    wakeDispatch, true, actionParking);
+                    wakeDispatch, true, actionParking, backgroundActionParking);
         }
+        /**
+         * Advertises Action parking, including a park sealed beside a
+         * background hold; a Harness sends that pair only on the second bit.
+         */
         public WriterGrant withActionParking() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
                     lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
-                    wakeDispatch, runtimeObservation, true);
+                    wakeDispatch, runtimeObservation, true, true);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {

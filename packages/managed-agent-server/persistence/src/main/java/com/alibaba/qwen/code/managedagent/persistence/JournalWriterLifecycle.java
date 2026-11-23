@@ -414,12 +414,13 @@ final class JournalWriterLifecycle {
         boolean effectivePending = wake.pending() || stagedWake;
         ManagedSessionStoreModels.ParkedTurn parked = wake.parkedTurn();
         if (parked != null) {
-            // Only the client's own wake claim contradicts a park certificate;
-            // server-discovered staged work seals through the staged-wake
-            // path below, which clears the parked fields safely.
-            if (wake.pending() || wake.backgroundHeld()) {
+            // Only the client's own wake claim contradicts a park certificate.
+            // A background hold proves its runs separately, and staged work
+            // seals through the staged-wake path below, which makes the park
+            // due now.
+            if (wake.pending()) {
                 throw JournalStoreRows.invalid(
-                        "A parked Turn cannot share a wake-pending or background seal.");
+                        "A parked Turn cannot share a wake-pending seal.");
             }
             JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId", 64);
             JournalStoreRows.validateCounter(parked.wakeAt(), "wake.parkedTurn.wakeAt", 0);
@@ -433,13 +434,16 @@ final class JournalWriterLifecycle {
                     "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
                         + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
                         + " wake_seal_background = ?, is_wake_pending = TRUE,"
-                        + " wake_seal_parked_prompt_id = NULL, wake_seal_parked_until = NULL,"
-                        + " wake_seal_parked_approval_revision = NULL,"
+                        + " wake_seal_parked_prompt_id = ?, wake_seal_parked_until = ?,"
+                        + " wake_seal_parked_approval_revision = ?,"
                         + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
                         + " THEN ? ELSE wake_retry_at END"
                         + " WHERE tenant_id = ? AND harness_session_id = ?",
                     now.getTime(),
                     wake.backgroundHeld(),
+                    parked == null ? null : parked.promptId(),
+                    parked == null ? null : Math.min(parked.wakeAt(), now.getTime()),
+                    parked == null ? null : parked.approvalRevision(),
                     now.getTime(),
                     now.getTime(),
                     tenantId,
