@@ -557,6 +557,44 @@ describe('runAcpToolBatch', () => {
     ]);
   });
 
+  it('reports the status each call settles with', async () => {
+    const shell: ToolCallRequestInfo = {
+      ...read,
+      callId: 'call_shell',
+      name: 'run_shell_command',
+      args: { command: 'npm test' },
+    };
+    const onCallSettled = vi.fn();
+    batch.run = async () => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'error',
+          request: read,
+          response: response(read, { error: new Error('Rejected.') }),
+        },
+        {
+          status: 'cancelled',
+          request: shell,
+          response: response(shell, { responseParts: [] }),
+        },
+      ]);
+      return { parts: [] };
+    };
+
+    await runAcpToolBatch(host, {
+      requests: [read, shell],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+      onCallSettled,
+    });
+
+    expect(onCallSettled.mock.calls).toEqual([
+      [read.callId, 'error'],
+      [shell.callId, 'cancelled'],
+    ]);
+  });
+
   it('asks the client for an approval and answers the scheduler', async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     batch.run = async () => {
