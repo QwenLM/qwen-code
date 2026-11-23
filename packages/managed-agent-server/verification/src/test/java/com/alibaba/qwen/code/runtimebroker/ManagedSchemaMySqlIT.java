@@ -527,11 +527,13 @@ class ManagedSchemaMySqlIT {
             }
             // binding_id is VARCHAR(128): a 129-byte value must be refused,
             // pinning 128 as the ceiling rather than the old 2048-byte budget.
+            // A distinct physical_id keeps the unconditional unique key out of
+            // the way, so the refusal can only come from the column width.
             try (var overflow =
                     connection.prepareStatement(
                             "INSERT INTO ma_storage_owner(physical_id,binding_id,runtime_generation)"
                                     + " VALUES(?,?,1)")) {
-                overflow.setString(1, physical);
+                overflow.setString(1, physical + "-overflow");
                 overflow.setBytes(2,
                         (prefix + "b".repeat(129 - prefix.length())).getBytes(StandardCharsets.UTF_8));
                 assertThrows(SQLException.class, overflow::executeUpdate);

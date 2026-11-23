@@ -484,8 +484,7 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-kill-watermark-"
-                + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
         brokerPort = reservePort();

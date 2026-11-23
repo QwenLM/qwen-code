@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -129,9 +128,8 @@ public class JdbcSessionResourceObjects {
         if (request.byteLength() > ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES) {
             throw JournalStoreRows.payloadTooLarge("Resource exceeds its byte limit.");
         }
-        // The OSS object path keeps its scoped directory component; reads resolve the stored
-        // object_key, so this naming identity is not a schema key.
-        String scope = ManagedSchemaKeys.key(tenantId, sessionId);
+        // The OSS object path below is scoped by tenant/Session; reads resolve
+        // the stored object_key, so this naming identity is not a schema key.
         List<Map<String, Object>> existing = jdbc.queryForList(
                 "SELECT storage_kind, state, object_key, byte_length, sha256 FROM ma_resource"
                         + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? FOR UPDATE",

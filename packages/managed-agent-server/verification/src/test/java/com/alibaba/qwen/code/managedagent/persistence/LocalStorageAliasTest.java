@@ -353,6 +353,36 @@ class LocalStorageAliasTest {
         });
     }
 
+    @Test
+    void theRetentionMarkerAloneGatesHeadScopedSessionAuthority() {
+        String tenant = "other-tenant";
+        String session = "retained-private";
+        session(tenant, "other-storage", session);
+        var transactions = new TransactionTemplate(manager);
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        String token = "a".repeat(64);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        transactions.execute(status -> journal.acquireWriter(tenant, session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 30_000L)));
+        transactions.execute(status -> journal.commit(tenant, session, token, new ManagedSessionStoreModels.CommitTransactionRequest(
+                "workspace", "original", 1, 0, 0, "genesis", "session.create", "genesis-command", com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash(bytes),
+                0, 0, 0, null, null, null, 0, null, 2, java.util.Base64.getEncoder().encodeToString(bytes), com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash(bytes), List.of())));
+        transactions.execute(status -> journal.sealWriter(tenant, session, token,
+                new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", 1)));
+        transactions.executeWithoutResult(status -> ToolPublicationRetentionStore.lockSession(jdbc, tenant, session));
+        // Route the session through its head's workspace scope so the marker
+        // predicate (HEAD_AUTHORITY_SQL), not the direct storage-scoped one,
+        // is the authority that blocks the handover.
+        jdbc.update("UPDATE ma_session SET workspace_storage_id = NULL WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        assertThat(jdbc.queryForObject("SELECT is_publication_retention_registered FROM ma_session WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isFalse();
+        assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
+        // Flip only the marker; gc_completed stays FALSE. If the marker clause
+        // were not load-bearing the authority would persist and this would throw.
+        jdbc.update("UPDATE ma_session SET is_publication_retention_registered = 0 WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        guard.fence("tenant", "storage", 1, UUID.randomUUID().toString());
+    }
+
     private ContextBinding binding(String tenant, String storage) {
         return new ContextBinding(tenant, "workspace", 1, storage, ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
     }

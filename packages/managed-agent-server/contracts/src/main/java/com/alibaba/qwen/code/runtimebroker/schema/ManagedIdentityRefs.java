@@ -13,12 +13,22 @@ import java.nio.charset.StandardCharsets;
  * Java callers handle them as {@code String} and compare them with {@code equals}.
  */
 public final class ManagedIdentityRefs {
-    /** Scoped resource identity (tenant, Session, resource id); cross-table resource references. */
-    public static final int RESOURCE_REF_BYTES = 512;
+    /**
+     * Scoped resource identity (tenant, Session, resource id); cross-table
+     * resource references. Sized to the VARBINARY(1024) reference columns:
+     * a 256-character resource id plus the tenant/Session scope percent-encodes
+     * past 512 bytes for non-ASCII identities. The budget stays an admission
+     * cap — an over-budget tuple is a named 4xx here, never a driver error.
+     */
+    public static final int RESOURCE_REF_BYTES = 1024;
     /** Durable operation identity; cross-table operation references and the operation unique key. */
     public static final int OPERATION_REF_BYTES = 1024;
-    /** Polymorphic resource owner identity within a Session scope. */
-    public static final int OWNER_REF_BYTES = 512;
+    /**
+     * Polymorphic resource owner identity within a Session scope. Sized to the
+     * ma_resource_ref.owner_ref VARBINARY(1024) column so a 256-character
+     * record id under a 64-character Session still encodes; see RESOURCE_REF_BYTES.
+     */
+    public static final int OWNER_REF_BYTES = 1024;
     /** Tool publication scope (tenant, Workspace, Session). */
     public static final int PUBLICATION_SCOPE_REF_BYTES = 512;
     /** Request receipt scope (tenant, raw scope id). */
@@ -34,8 +44,9 @@ public final class ManagedIdentityRefs {
     /** Runtime placement scope identity (tenant, Workspace, generation, cwd, capabilities). */
     public static final int RUNTIME_SCOPE_REF_BYTES = 2048;
     /**
-     * Actor-private side query scope (tenant, Session, actor). A 36-code-point
-     * non-ASCII actor percent-encodes to roughly 521 bytes, so 256 overflowed.
+     * Actor-private side query scope (tenant, Session, actor). The actor is
+     * bounded to 36 UTF-16 units (at most 18 supplementary code points), which
+     * percent-encodes to roughly 253 bytes; 550 covers that plus the scope.
      */
     public static final int ACTOR_SCOPE_REF_BYTES = 550;
 

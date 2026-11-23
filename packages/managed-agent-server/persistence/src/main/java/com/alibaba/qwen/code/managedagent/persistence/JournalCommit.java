@@ -66,7 +66,7 @@ final class JournalCommit {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         ValidatedCommit validated = validateCommit(request);
         if (HostedCleanupReferences.containsCleanup(validated.recordBytes())) {
             fencing.lockPlacementBounded(tenantId);

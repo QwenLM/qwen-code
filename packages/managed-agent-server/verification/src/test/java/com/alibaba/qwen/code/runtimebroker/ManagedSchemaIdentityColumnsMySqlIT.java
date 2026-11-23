@@ -37,7 +37,7 @@ class ManagedSchemaIdentityColumnsMySqlIT {
                         String collation = rows.getString("COLLATION_NAME");
                         long expected = "tenant_id".equals(column)
                                 ? ("ma_tenant_guard".equals(table) ? 96 : 36)
-                                : 64;
+                                : ("runtime_session_id".equals(column) ? 128 : 64);
                         if (!"varchar".equalsIgnoreCase(type) || length != expected
                                 || !"utf8mb4_bin".equalsIgnoreCase(collation)) {
                             violations.add(table + "." + column + " " + type + "(" + length

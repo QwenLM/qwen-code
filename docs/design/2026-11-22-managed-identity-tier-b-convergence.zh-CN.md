@@ -122,9 +122,10 @@ child-operation 路径由 320 收敛到 256。relay ledger 还会把 `childRunId
 
 ## 死列
 
-main 的死对象删除已删 `ma_delivery.provider_id`、`ma_session_record.prompt_id`/`turn_id`、
-`ma_message.tool_call_key`、`public_session_id`、`manifest_sha256`、`decision_scope`、
-`payload_version`、`source_record_key`。Tier B 无需再删死列；不要重新加回这些。
+main 的死对象删除已删 `ma_delivery.provider_id`、`ma_message.tool_call_key`、
+`public_session_id`、`manifest_sha256`、`decision_scope`、`payload_version`、
+`source_record_key`。`ma_session_record.prompt_id`/`turn_id` 在本 V1 基线中仍在，
+随 main 的后续删除落地。Tier B 无需再删死列；不要重新加回已删的，也不要依赖待删的。
 
 ## 贯穿迁移机制（每批）
 

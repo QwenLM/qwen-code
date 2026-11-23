@@ -86,6 +86,7 @@ public class JdbcManagedToolResultStore
                         source.executionCallId().isEmpty()
                                 ? "sequence:" + source.receiptSequence()
                                 : source.executionCallId();
+                JournalStoreRows.validateStableId(executionCallId, "executionCallId", 256);
                 rows.add(new Object[] {
                         ManagedIdentityRefs.operationRef(OperationKind.TOOL_RESULT_PROJECTION.name(),
                                 tenant, "SESSION", session, executionCallId, source.id()),

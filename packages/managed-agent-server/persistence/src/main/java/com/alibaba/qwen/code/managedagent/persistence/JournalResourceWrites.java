@@ -119,7 +119,7 @@ final class JournalResourceWrites {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         JournalStoreRows.validateStableId(request.resourceId(), "resourceId", 256);
         if (ManagedNativeJournalSnapshots.isSnapshotId(request.resourceId())) {

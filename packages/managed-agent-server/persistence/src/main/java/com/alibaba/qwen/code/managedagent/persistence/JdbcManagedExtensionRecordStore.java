@@ -899,6 +899,26 @@ public class JdbcManagedExtensionRecordStore
                 (result, row) -> taskRow(result, tenantId, sessionId));
     }
 
+    @Override
+    public Map<String, TaskRow> findTasks(String tenantId, String sessionId,
+            List<String> taskIds) {
+        Set<String> recordKeys = new HashSet<>();
+        for (String taskId : taskIds) {
+            String key = recordKey(taskId);
+            if (key != null) {
+                recordKeys.add(key);
+            }
+        }
+        Map<String, TaskRow> byKey = ManagedExtensionQueries.tasksByRecordKeys(jdbc, tenantId, sessionId,
+                recordKeys, (result, row) -> taskRow(result, tenantId, sessionId));
+        Map<String, TaskRow> byTaskId = new HashMap<>();
+        for (var entry : byKey.entrySet()) {
+            byTaskId.put(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                    .taskId(entry.getKey()), entry.getValue());
+        }
+        return byTaskId;
+    }
+
     /**
      * #13746 F2: the child Session that runs a child agent or workflow task, once the run's
      * committed record names it (the attach, or a verdict that names a minted child), else null.

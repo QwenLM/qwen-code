@@ -70,7 +70,7 @@ final class JournalWriterLifecycle {
             ManagedNativeJournalSnapshots.PublishRequest request) {
         JournalStoreRows.validateScope(tenant, request.workspaceId(), session);
         fencing.requireCredential(tenant, request.workspaceId(), session, token);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateStableId(request.snapshotId(), "snapshotId");
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         JournalStoreRows.validateCounter(request.expectedJournalRevision(), "expectedJournalRevision", 1);
@@ -143,7 +143,7 @@ final class JournalWriterLifecycle {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         validateLeaseMillis(request.leaseMillis());
         // Acquisition stays serialized with an in-flight delete/retire: while
         // a Session has no head row, the tenant CAS row is the only ordering
@@ -291,7 +291,7 @@ final class JournalWriterLifecycle {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateLeaseMillis(request.leaseMillis());
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
@@ -317,7 +317,7 @@ final class JournalWriterLifecycle {
                 sessionId);
         if (request.activation() != null) {
             var activation = request.activation();
-            JournalStoreRows.validateStableId(activation.activationId(), "activationId");
+            JournalStoreRows.validateStableId(activation.activationId(), "activationId", 128);
             JournalStoreRows.validateCounter(activation.epoch(), "activation epoch", 1);
             JournalStoreRows.validateCounter(activation.renewalSeq(), "activation renewalSeq", 1);
             validateLeaseMillis(activation.leaseDurationMs());
@@ -358,7 +358,7 @@ final class JournalWriterLifecycle {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
         fencing.lockSessionFirst(tenantId, sessionId);
@@ -486,8 +486,8 @@ final class JournalWriterLifecycle {
             ManagedSessionStoreModels.ReleaseOwnershipRequest request) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId, writerToken);
-        JournalStoreRows.validateStableId(request.operationId(), "operationId");
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.operationId(), "operationId", 128);
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         JournalStoreRows.validateCounter(request.journalRevision(), "journalRevision", 1);
         JournalStoreRows.validateCounter(request.placementEpoch(), "placementEpoch", 1);
@@ -585,7 +585,7 @@ final class JournalWriterLifecycle {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         if (!JournalStoreRows.RECOVERY_STATES.contains(request.recoveryStatus())
                 || "READY".equals(request.recoveryStatus())) {

@@ -554,7 +554,9 @@ Completed and verified:
 - the `ma_session` publication-retention registration marker and four filter
   migrations;
 - conversion of all baseline `tenant_id`/`session_id` columns (including the
-  session-family columns) to `VARCHAR(36)/VARCHAR(64)` with NO PAD collation;
+  session-family columns) to `VARCHAR(36)/VARCHAR(64)` under the table-default
+  PAD SPACE collation with uniform trailing-space rejection at admission (see
+  the 2026-11-22 final policy below, which supersedes the NO PAD proposal);
 - Runtime Broker identity binding that distinguishes text from bytes by JDBC
   parameter type;
 - the `ManagedIdentityRef` codec and its unit tests;

@@ -277,7 +277,7 @@ CREATE TABLE ma_journal_pack (
     session_id VARCHAR(64) NOT NULL COMMENT 'Managed Session identity.',
     from_revision BIGINT UNSIGNED NOT NULL COMMENT 'First journal revision covered by the pack.',
     through_revision BIGINT UNSIGNED NOT NULL COMMENT 'Last journal revision covered by the pack.',
-    manifest_resource_ref VARBINARY(512) NOT NULL COMMENT 'Canonical identity reference of the pack manifest resource.',
+    manifest_resource_ref VARBINARY(1024) NOT NULL COMMENT 'Canonical identity reference of the pack manifest resource.',
     object_key VARBINARY(8192) NOT NULL COMMENT 'Object-store key of the immutable pack object.',
     state VARCHAR(16) NOT NULL COMMENT 'Pack lifecycle: BUILDING, VERIFIED, PUBLISHED, EVICTED, or RETIRED.',
     is_put_closed TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether the single physical object creation is proven complete.',
@@ -311,7 +311,7 @@ CREATE TABLE ma_event_stream (
     covered_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Public event sequence covered by the materialized stream projection.',
     wake_covered_sequence BIGINT UNSIGNED COMMENT 'Private journal sequence already claimed for a wake attempt.',
     projection_version INT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Version of the projection format.',
-    artifact_refs_resource_ref VARBINARY(512) COMMENT 'Canonical reference of the resource containing the projected artifact reference set.',
+    artifact_refs_resource_ref VARBINARY(1024) COMMENT 'Canonical reference of the resource containing the projected artifact reference set.',
     output_ranges_json LONGTEXT COMMENT 'Serialized output ranges referenced by the stream projection.',
     is_projection_pending TINYINT UNSIGNED GENERATED ALWAYS AS (last_sequence > covered_sequence)
         COMMENT 'Generated flag indicating public events not yet covered by projection.',
@@ -384,7 +384,7 @@ CREATE TABLE ma_message (
     revision BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Revision of the current message projection.',
     CONSTRAINT uk_ma_message_business_key UNIQUE (tenant_id, session_id, item_id),
     parts_json LONGTEXT NOT NULL COMMENT 'Ordered public content parts for the Item.',
-    body_resource_ref VARBINARY(512) COMMENT 'Canonical reference of the resource containing an immutable message body when stored separately.',
+    body_resource_ref VARBINARY(1024) COMMENT 'Canonical reference of the resource containing an immutable message body when stored separately.',
     execution_call_id VARCHAR(256) COMMENT 'Raw tool execution identity associated with this Item.',
     policy_version VARBINARY(512) COMMENT 'Version of the tool-result projection policy.',
     CONSTRAINT ck_ma_message_revision CHECK (revision > 0),
@@ -506,9 +506,13 @@ CREATE INDEX idx_ma_resource_capture ON ma_resource (scope_ref, publication_id, 
 
 CREATE INDEX idx_ma_resource_delete_intent ON ma_resource (tenant_id, session_id, state, deletion_operation_ref, resource_id);
 
+-- The immutable message-body flush probes foreign-scope reuse of a minted
+-- resource_id; without a leading resource_id key that probe is a table scan.
+CREATE INDEX idx_ma_resource_resource_id ON ma_resource (resource_id);
+
 CREATE TABLE ma_resource_ref (
     owner_kind VARCHAR(32) NOT NULL COMMENT 'Typed resource owner, such as JOURNAL, NATIVE_SNAPSHOT, MESSAGE, or OPERATION.',
-    owner_ref VARBINARY(512) NOT NULL COMMENT 'Canonical identity reference of the owning record.',
+    owner_ref VARBINARY(1024) NOT NULL COMMENT 'Canonical identity reference of the owning record.',
     owner_revision BIGINT UNSIGNED NOT NULL COMMENT 'Owning record revision that retains this resource.',
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARCHAR(512) COMMENT 'Workspace identity within the tenant.',
@@ -518,7 +522,7 @@ CREATE TABLE ma_resource_ref (
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_resource_ref_business_key UNIQUE (tenant_id, session_id, owner_kind, owner_ref, owner_revision, resource_id),
     CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 WHEN 'SIDE_QUERY' THEN 10 WHEN 'RUNTIME_STAGE' THEN 13 ELSE -1 END = CHAR_LENGTH(owner_kind))),
-    runtime_binding_id VARCHAR(64) COMMENT 'Raw Runtime binding identity required for HOSTED_CLEANUP references.',
+    runtime_binding_id VARCHAR(128) COMMENT 'Raw Runtime binding identity required for HOSTED_CLEANUP references.',
     CONSTRAINT ck_ma_ref_binding CHECK ((owner_kind = 'HOSTED_CLEANUP' AND runtime_binding_id IS NOT NULL AND owner_revision > 0) OR (owner_kind <> 'HOSTED_CLEANUP' AND runtime_binding_id IS NULL)),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_resource_ref_id PRIMARY KEY (id)
@@ -569,8 +573,8 @@ CREATE TABLE ma_output_capture (
     collected_at BIGINT UNSIGNED COMMENT 'Collection completion time in Unix epoch milliseconds.',
     collected_bytes BIGINT UNSIGNED COMMENT 'Bytes accounted as collected by retention.',
     released_held_bytes BIGINT UNSIGNED  COMMENT 'Reserved byte capacity released by collection.',
-    manifest_resource_ref VARBINARY(512) COMMENT 'Canonical reference of the resource containing the capture manifest.',
-    seal_manifest_resource_ref VARBINARY(512) COMMENT 'Canonical reference of the resource containing the sealed output manifest.',
+    manifest_resource_ref VARBINARY(1024) COMMENT 'Canonical reference of the resource containing the capture manifest.',
+    seal_manifest_resource_ref VARBINARY(1024) COMMENT 'Canonical reference of the resource containing the sealed output manifest.',
     seal_manifest_sha256 CHAR(64) COMMENT 'SHA-256 digest of the sealed output manifest.',
     gmt_create BIGINT UNSIGNED NOT NULL DEFAULT (CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + FLOOR(EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000)) COMMENT 'Record creation time in Unix epoch milliseconds.',
     gmt_modified BIGINT UNSIGNED NOT NULL DEFAULT (CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + FLOOR(EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000)) COMMENT 'Last record update time in Unix epoch milliseconds.',
@@ -1266,10 +1270,10 @@ CREATE INDEX idx_ma_delivery_session ON ma_delivery (source_scope_id, delivery_k
 CREATE INDEX idx_ma_delivery_source ON ma_delivery (delivery_kind, tenant_id, source_session_id, delivery_id);
 
 CREATE TABLE ma_channel_segment (
-    delivery_id VARCHAR(128) NOT NULL COMMENT 'Raw delivery_id of the parent CHANNEL delivery.',
+    delivery_id VARCHAR(256) NOT NULL COMMENT 'Raw delivery_id of the parent CHANNEL delivery.',
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
     channel_id VARCHAR(128) NOT NULL COMMENT 'External channel instance identity within the tenant.',
-    segment_id VARCHAR(128) NOT NULL COMMENT 'Stable segment identity from the delivery record plan.',
+    segment_id VARCHAR(320) NOT NULL COMMENT 'Stable segment identity from the delivery record plan.',
     segment_ordinal BIGINT UNSIGNED NOT NULL COMMENT 'Ordering position of the segment within the delivery.',
     provider_receipt_json LONGTEXT COMMENT 'Write-once provider receipt for the segment, null until receipted.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',

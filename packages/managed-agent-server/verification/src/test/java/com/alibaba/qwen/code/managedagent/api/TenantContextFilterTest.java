@@ -34,7 +34,7 @@ class TenantContextFilterTest {
     @Test
     void acceptsTrustedActorIdsAtTheUnicodeBoundary() throws Exception {
         for (String actorId : new String[] {"alice@example.com", "a",
-                "𝄞".repeat(36)}) {
+                "𝄞".repeat(18)}) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor("tenant-a", actorId));
             MockHttpServletResponse response = new MockHttpServletResponse();
@@ -68,6 +68,7 @@ class TenantContextFilterTest {
             throws ServletException, IOException {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
+                actor("tenant-a", "𝄞".repeat(19)),
                 actor("tenant-a", "𝄞".repeat(37))
         }) {
             MockHttpServletRequest request = request("tenant-a");

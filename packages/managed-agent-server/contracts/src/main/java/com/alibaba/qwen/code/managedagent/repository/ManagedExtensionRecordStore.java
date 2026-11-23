@@ -100,6 +100,14 @@ public interface ManagedExtensionRecordStore {
     public Optional<TaskRow> findTask(String tenantId, String sessionId,
             String taskId);
 
+    /**
+     * Resolves a page of public task ids in one Session-wide scan, keyed by
+     * task id, so a caller looping over page items does not pay a scan per
+     * item. Ids absent from the Session are simply not returned.
+     */
+    public Map<String, TaskRow> findTasks(String tenantId, String sessionId,
+            List<String> taskIds);
+
     public record ChildTaskDetails(String sessionId, Boolean stopRequested, String approvalMode) { }
 
     public Long activeChildCount(String tenantId, String sessionId);

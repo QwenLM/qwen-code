@@ -127,6 +127,8 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord findOrCreate(ToolExecutionRecord candidate) {
         requireCandidate(candidate);
+        BrokerValues.requireIdempotencyKey(candidate.getIdempotencyKey(),
+                "idempotencyKey");
         ToolExecutionRecord existing = findByIdempotencyKey(
                 candidate.getIdempotencyKey());
         if (existing != null) {
@@ -190,8 +192,9 @@ public final class JdbcToolExecutionRepository
                     "idempotencyKey");
         } catch (IllegalArgumentException malformed) {
             // A malformed key can never equal a stored well-formed key; treat
-            // the lookup as a miss so admission emits the coded refusal instead
-            // of a raw IllegalArgumentException escaping the error channel.
+            // the read-only lookup as a miss. The write path (findOrCreate)
+            // re-validates the key at entry, so a forbidden key is refused
+            // there rather than written unvalidated.
             return null;
         }
         return JdbcRepositorySupport.read(dataSource,

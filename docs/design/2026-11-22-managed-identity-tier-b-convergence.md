@@ -133,11 +133,12 @@ prefixes count characters). This is required regardless of convergence.
 
 ## Dead columns
 
-Main's dead-object removal already dropped `ma_delivery.provider_id`,
-`ma_session_record.prompt_id`/`turn_id`, `ma_message.tool_call_key`,
-`public_session_id`, `manifest_sha256`, `decision_scope`, `payload_version`,
-`source_record_key`. No further dead-column removal is needed for Tier B; do not
-re-add these.
+Main's dead-object removal has dropped `ma_delivery.provider_id`,
+`ma_message.tool_call_key`, `public_session_id`, `manifest_sha256`,
+`decision_scope`, `payload_version`, `source_record_key`.
+`ma_session_record.prompt_id`/`turn_id` are still present in this V1 baseline
+and go with main's follow-up removal. No further dead-column removal is needed
+for Tier B; do not re-add the dropped ones or depend on the pending ones.
 
 ## Cross-cutting migration mechanics (every batch)
 

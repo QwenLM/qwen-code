@@ -12,8 +12,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 final class ManagedExtensionQueries {
     private ManagedExtensionQueries() { }
@@ -184,5 +187,28 @@ final class ManagedExtensionQueries {
                 .filter(identity -> recordKey.equals(
                         ManagedExtensionProjection.recordKey(session, identity[0], identity[1])))
                 .findFirst().orElse(null);
+    }
+
+    // Resolves many record keys in one Session-wide task scan instead of one
+    // scan per key, so a page of activity items costs O(tasks) rather than
+    // O(page x tasks). Keys absent from the Session are simply not returned.
+    static Map<String, TaskRow> tasksByRecordKeys(JdbcTemplate jdbc, String tenant, String session,
+            Set<String> recordKeys, RowMapper<TaskRow> mapper) {
+        if (recordKeys.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, TaskRow> found = new HashMap<>();
+        jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns()
+                        + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?"
+                        + " AND task_kind IS NOT NULL",
+                (result, row) -> {
+                    String key = ManagedExtensionProjection.recordKey(session,
+                            result.getString("domain"), result.getString("record_id"));
+                    if (recordKeys.contains(key)) {
+                        found.put(key, mapper.mapRow(result, row));
+                    }
+                    return null;
+                }, tenant, session);
+        return found;
     }
 }
