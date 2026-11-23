@@ -40,6 +40,7 @@ import {
   type WorktreeCleanupPlan,
 } from './worktree-orphan-cleanup.js';
 import { sessionLiveOnBridge } from './session-archive.js';
+import { reconcileUnrecordedRemovedWorktree } from './worktree-snapshot-binding.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
@@ -284,20 +285,36 @@ async function collectEligible(
       if (await organization.isSessionPinnedStrict(sessionId)) continue;
       const release = await acquireWorktreeCleanupLock(plan);
       try {
-        const eligible = await coordinator.runExclusiveMany(
+        const eligibility = await coordinator.runExclusiveMany(
           [sessionId],
           async () => {
             const ownership = await verifyWorktreeCleanupOwnership(plan, (id) =>
               sessionLiveOnBridge(scope.runtime.bridge, id),
             );
-            return (
-              ownership.ok &&
-              !sessionLiveOnBridge(scope.runtime.bridge, sessionId) &&
-              !boundSessions.has(sessionId)
-            );
+            const claimed =
+              sessionLiveOnBridge(scope.runtime.bridge, sessionId) ||
+              boundSessions.has(sessionId);
+            if (!claimed && ownership.ok) return 'eligible';
+            if (claimed) return 'ineligible';
+            return (await reconcileUnrecordedRemovedWorktree(
+              service,
+              plan.sessionId,
+              plan.sidecarPath,
+              plan.lockKey,
+              scope.root,
+              (id) => sessionLiveOnBridge(scope.runtime.bridge, id),
+            ))
+              ? 'reconciled'
+              : 'ineligible';
           },
         );
-        if (!eligible) continue;
+        if (eligibility === 'ineligible') continue;
+        if (eligibility === 'reconciled') {
+          report.skipped.push(
+            `worktree removal record reconciled from snapshot: ${sessionId}`,
+          );
+          continue;
+        }
       } catch {
         // A moved sidecar or an archive transition only makes this advisory
         // candidate ineligible; the locked deletion check remains decisive.

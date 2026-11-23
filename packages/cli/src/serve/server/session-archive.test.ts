@@ -3697,9 +3697,12 @@ describe('retained snapshot archive lifecycle', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  async function removedBinding(target: RetentionTestRuntime) {
+  async function removedBinding(
+    target: RetentionTestRuntime,
+    options: { writeBinding?: boolean; slug?: string } = {},
+  ) {
     const session = await makeRetainedSession(target, {
-      slug: 'archive-binding',
+      slug: options.slug ?? 'archive-binding',
       dirty: true,
     });
     const plan = await preclassifyWorktreeCleanup(
@@ -3715,10 +3718,12 @@ describe('retained snapshot archive lifecycle', () => {
       throw new Error('Fixture removal did not complete');
     }
     const archiveKey = path.basename(removal.snapshot.snapshotPath);
-    await writeWorktreeSession(session.sidecarPath, {
-      ...session.sidecar,
-      worktreeRemoved: { archiveKey },
-    });
+    if (options.writeBinding !== false) {
+      await writeWorktreeSession(session.sidecarPath, {
+        ...session.sidecar,
+        worktreeRemoved: { archiveKey },
+      });
+    }
     return { ...session, archiveKey, service: target.service };
   }
 
@@ -3821,6 +3826,279 @@ describe('retained snapshot archive lifecycle', () => {
     expect(
       fs.statSync(path.join(state.worktreePath, 'tracked.txt')).mode & 0o777,
     ).toBe(0o755);
+  });
+
+  it('reconciles a missing historical binding before an archive move and remains idempotent', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target, { writeBinding: false });
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+
+    const archived = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+
+    expect(archived.archived).toEqual([state.id]);
+    expect(archived.errors).toEqual([]);
+    const record = await readWorktreeSessionStrict(archivedSidecar);
+    expect(record.state).toBe('valid');
+    if (record.state === 'valid') {
+      expect(record.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+    await expectOwnedPair(state, 'archived');
+    await expect(selectOwnedPair(state, 'active')).resolves.toBeUndefined();
+
+    const retried = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+    expect(retried.alreadyArchived).toEqual([state.id]);
+    expect(retried.errors).toEqual([]);
+    expect(snapshotFiles(path.dirname(archivedSidecar), state.id)).toHaveLength(
+      2,
+    );
+    expect(snapshotFiles(path.dirname(state.sidecarPath), state.id)).toEqual(
+      [],
+    );
+
+    const unarchived = await unarchiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      coordinator,
+    });
+    expect(unarchived.errors).toEqual([]);
+    await expectOwnedPair(state, 'active');
+    await expect(selectOwnedPair(state, 'archived')).resolves.toBeUndefined();
+    const restored = await restoreWorktreeFromSessionSnapshot({
+      runtime: target.runtime,
+      sessionId: state.id,
+      archiveCoordinator: coordinator,
+    });
+    expect(restored.reconstructed).toBe(true);
+  });
+
+  it('keeps the established newest-pair selection for multiple generations on one archive side', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target, { writeBinding: false });
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const olderSnapshot = path.join(
+      path.dirname(sourcePair.snapshotPath),
+      `${state.id}.older.worktree-snapshot.tar.gz`,
+    );
+    const olderMeta = olderSnapshot.replace(/\.tar\.gz$/, '.json');
+    const latestMeta = await readWorktreeSnapshotMeta(sourcePair.metaPath);
+    fs.copyFileSync(sourcePair.snapshotPath, olderSnapshot);
+    fs.writeFileSync(
+      olderMeta,
+      JSON.stringify({ ...latestMeta, createdAt: latestMeta.createdAt - 1 }),
+    );
+    const olderKey = path.basename(olderSnapshot);
+    expect(
+      await selectWorktreeSnapshot({
+        directory: path.dirname(sourcePair.snapshotPath),
+        sessionId: state.id,
+        slug: state.sidecar.slug,
+        archiveKey: olderKey,
+      }),
+    ).toBeDefined();
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+
+    expect(result.errors).toEqual([]);
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const record = await readWorktreeSessionStrict(archivedSidecar);
+    expect(record.state).toBe('valid');
+    if (record.state === 'valid') {
+      expect(record.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+    await expectOwnedPair(state, 'archived');
+    expect(snapshotFiles(path.dirname(archivedSidecar), state.id)).toHaveLength(
+      2,
+    );
+    expect(
+      await selectWorktreeSnapshot({
+        directory: path.dirname(state.sidecarPath),
+        sessionId: state.id,
+        slug: state.sidecar.slug,
+      }),
+    ).toMatchObject({ snapshotPath: olderSnapshot });
+  });
+
+  it.each(['archive', 'unarchive'] as const)(
+    'reconciles a secondary already-archived separation during %s',
+    async (action) => {
+      const target = makeRetentionRepo(root, 'secondary');
+      const state = await removedBinding(target, { writeBinding: false });
+      expect((await target.service.archiveSessions([state.id])).errors).toEqual(
+        [],
+      );
+      const archivedSidecar =
+        target.service.getWorktreeSessionPathForArchiveState(
+          state.id,
+          'archived',
+        );
+      expect(await selectOwnedPair(state, 'active')).toBeDefined();
+      expect(await selectOwnedPair(state, 'archived')).toBeUndefined();
+
+      const result =
+        action === 'archive'
+          ? await archiveDaemonSessions({
+              sessionIds: [state.id],
+              service: target.service,
+              bridge: { closeSession: async () => {} },
+              coordinator,
+            })
+          : await unarchiveDaemonSessions({
+              sessionIds: [state.id],
+              service: target.service,
+              coordinator,
+            });
+
+      expect(result.errors).toEqual([]);
+      const currentState = action === 'archive' ? 'archived' : 'active';
+      const oppositeState = action === 'archive' ? 'active' : 'archived';
+      const currentSidecar =
+        target.service.getWorktreeSessionPathForArchiveState(
+          state.id,
+          currentState,
+        );
+      const record = await readWorktreeSessionStrict(currentSidecar);
+      expect(record.state).toBe('valid');
+      if (record.state === 'valid') {
+        expect(record.session.worktreeRemoved).toEqual({
+          archiveKey: state.archiveKey,
+        });
+      }
+      await expectOwnedPair(state, currentState);
+      await expect(
+        selectOwnedPair(state, oppositeState),
+      ).resolves.toBeUndefined();
+      expect(fs.existsSync(archivedSidecar)).toBe(action === 'archive');
+    },
+  );
+
+  it('does not choose between historical pairs on both sides of an archive', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target, { writeBinding: false });
+    expect((await target.service.archiveSessions([state.id])).errors).toEqual(
+      [],
+    );
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const sourcePair = await expectOwnedPair(state, 'active');
+    for (const file of [sourcePair.snapshotPath, sourcePair.metaPath]) {
+      fs.copyFileSync(
+        file,
+        path.join(path.dirname(archivedSidecar), path.basename(file)),
+      );
+    }
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+
+    expect(result.errors).toHaveLength(1);
+    expect(String(result.errors[0]?.error)).toContain(
+      'ambiguous across archive states',
+    );
+    expect(
+      snapshotFiles(path.dirname(state.sidecarPath), state.id),
+    ).toHaveLength(2);
+    expect(snapshotFiles(path.dirname(archivedSidecar), state.id)).toHaveLength(
+      2,
+    );
+    const record = await readWorktreeSessionStrict(archivedSidecar);
+    expect(record.state).toBe('valid');
+    if (record.state === 'valid') {
+      expect(record.session.worktreeRemoved).toBeUndefined();
+    }
+  });
+
+  it('rejects a non-ENOENT error for the other archive directory without moving the pair', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target, { writeBinding: false });
+    expect((await target.service.archiveSessions([state.id])).errors).toEqual(
+      [],
+    );
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const otherDirectory = path.dirname(state.sidecarPath);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const originalBytes = [sourcePair.snapshotPath, sourcePair.metaPath].map(
+      (file) => fs.readFileSync(file),
+    );
+    const failure = Object.assign(
+      new Error('injected other archive directory read failure'),
+      { code: 'EACCES' },
+    );
+    const lstat = fs.promises.lstat.bind(fs.promises);
+    let injected = false;
+    vi.spyOn(fs.promises, 'lstat').mockImplementation(
+      async (candidate, options) => {
+        if (String(candidate) === otherDirectory) {
+          injected = true;
+          throw failure;
+        }
+        return lstat(candidate, options);
+      },
+    );
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+
+    expect(injected).toBe(true);
+    expect(result.errors).toHaveLength(1);
+    expect(String(result.errors[0]?.error)).toContain(
+      'injected other archive directory read failure',
+    );
+    const record = await readWorktreeSessionStrict(archivedSidecar);
+    expect(record.state).toBe('valid');
+    if (record.state === 'valid') {
+      expect(record.session.worktreeRemoved).toBeUndefined();
+    }
+    expect(snapshotFiles(path.dirname(archivedSidecar), state.id)).toEqual([]);
+    expect(
+      snapshotFiles(path.dirname(state.sidecarPath), state.id),
+    ).toHaveLength(2);
+    expect(
+      [sourcePair.snapshotPath, sourcePair.metaPath].map((file) =>
+        fs.readFileSync(file),
+      ),
+    ).toEqual(originalBytes);
   });
 
   it('rolls back the first file when the second snapshot link fails and retries', async () => {

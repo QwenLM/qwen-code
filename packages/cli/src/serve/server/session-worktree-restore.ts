@@ -29,13 +29,16 @@ import {
   acquireWorktreeCleanupLock,
   canonicalPathForTesting,
   preclassifyWorktreeCleanup,
-  type WorktreeCleanupPlan,
 } from './worktree-orphan-cleanup.js';
 import {
   sessionLiveOnBridge,
   type SessionArchiveCoordinator,
 } from './session-archive.js';
 import type { WorktreeRestoreHandoff } from './session-restore.js';
+import {
+  assertNoConflictingWorktreeOwners,
+  assertRestoreCoordinates,
+} from './worktree-snapshot-binding.js';
 
 async function stateAt(directory: string): Promise<string | null> {
   try {
@@ -56,88 +59,12 @@ async function headAndBranch(
   return { head: head.trim(), branch: branch.trim() };
 }
 
-async function assertRestoreCoordinates(
-  plan: WorktreeCleanupPlan,
-): Promise<void> {
-  if (plan.sidecar.workspaceCwd === undefined) {
-    throw new WorktreeRestoreUnavailableError(
-      'Snapshot restore requires a registered workspace owner',
-    );
-  }
-  const source = new GitWorktreeService(plan.sidecar.originalCwd);
-  const expected = canonicalPathForTesting(
-    source.getUserWorktreePath(plan.sidecar.slug),
-  );
-  if (expected !== canonicalPathForTesting(plan.sidecar.worktreePath)) {
-    throw new WorktreeRestoreUnavailableError(
-      'Snapshot restore path does not match the managed slug',
-    );
-  }
-  if (GitWorktreeService.validateUserWorktreeSlug(plan.sidecar.slug)) {
-    throw new WorktreeRestoreUnavailableError(
-      'Snapshot restore slug is invalid',
-    );
-  }
-}
-
 async function preservedMarkerMatches(
   sessionId: string,
   directory: string,
 ): Promise<boolean> {
   const marker = await readWorktreeSessionMarkerStrict(directory);
   return marker.state === 'valid' && marker.sessionId === sessionId;
-}
-
-async function assertNoConflictingWorktreeOwners(
-  service: ReturnType<typeof createWorkspaceRuntimeSessionService>,
-  runtime: WorkspaceRuntime,
-  sessionId: string,
-  sidecarPath: string,
-  expected: string,
-): Promise<void> {
-  const olderTombstones: string[] = [];
-  for (const state of ['active', 'archived'] as const) {
-    const directory = path.dirname(
-      service.getWorktreeSessionPathForArchiveState('', state),
-    );
-    let entries: string[];
-    try {
-      entries = await fs.readdir(directory);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
-    for (const entry of entries.sort()) {
-      if (!entry.endsWith('.worktree.json')) continue;
-      const filePath = path.join(directory, entry);
-      if (filePath === sidecarPath) continue;
-      const other = await readWorktreeSessionStrict(filePath);
-      if (other.state === 'missing') continue;
-      if (other.state !== 'valid') {
-        throw new WorktreeRestoreUnavailableError(
-          'Other worktree records have become unavailable',
-        );
-      }
-      if (canonicalPathForTesting(other.session.worktreePath) !== expected) {
-        continue;
-      }
-      if (other.session.supersededBy === sessionId) continue;
-      if (other.session.supersededBy !== undefined) {
-        olderTombstones.push(entry.slice(0, -'.worktree.json'.length));
-        continue;
-      }
-      throw new WorktreeRestoreUnavailableError(
-        'The restore target is claimed by another session',
-      );
-    }
-  }
-  for (const otherId of olderTombstones) {
-    if (sessionLiveOnBridge(runtime.bridge, otherId)) {
-      throw new WorktreeRestoreUnavailableError(
-        'An older session still claims the restore target',
-      );
-    }
-  }
 }
 
 async function namedRefAtHead(
@@ -219,10 +146,10 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
       await assertRestoreCoordinates(latest);
       await assertNoConflictingWorktreeOwners(
         service,
-        runtime,
         sessionId,
         latest.sidecarPath,
         expected,
+        (otherId) => sessionLiveOnBridge(runtime.bridge, otherId),
       );
       if (
         latest.sidecar.slug !== initial.sidecar.slug ||

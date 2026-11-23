@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
@@ -40,6 +41,7 @@ import type {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { preclassifyWorktreeCleanup } from './worktree-orphan-cleanup.js';
+import { assertRestoreCoordinates } from './worktree-snapshot-binding.js';
 import {
   PersistedSessionListCache,
   waitForSessionListLoad,
@@ -499,6 +501,21 @@ export async function enrichWorktreeSidecars(
   signal?: AbortSignal,
 ): Promise<void> {
   let runtimeRoots: readonly string[] | undefined;
+  const getRuntimeRoots = async () => {
+    if (runtimeRoots !== undefined) return runtimeRoots;
+    const roots = new Set([sessionService.getProjectRoot()]);
+    try {
+      const repoTop = await new GitWorktreeService(
+        sessionService.getProjectRoot(),
+      ).getRepoTopLevel();
+      if (repoTop) roots.add(repoTop);
+    } catch {
+      // The runtime root still bounds a plain workspace. Ownership
+      // calibration and the actual restore use a fresh Git read.
+    }
+    runtimeRoots = [...roots];
+    return runtimeRoots;
+  };
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
     const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
@@ -537,39 +554,59 @@ export async function enrichWorktreeSidecars(
       }
       continue;
     }
-    const removed = sidecar.worktreeRemoved;
+    let removed = sidecar.worktreeRemoved;
     if (
       !removed &&
       (await readWorktreeSessionMarker(sidecar.worktreePath)) !== sessionId
     ) {
-      if (summary.worktree) {
-        const stripped = { ...summary };
-        delete stripped.worktree;
-        bySessionId.set(sessionId, stripped);
+      // A historical removal can lose the checkout and its marker before the
+      // sidecar binding is written. Only a genuinely absent checkout with an
+      // exact session/slug pair may be exposed as a retained snapshot.
+      try {
+        await fs.lstat(sidecar.worktreePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          const candidate = await preclassifyWorktreeCleanup(
+            sessionService,
+            sessionId,
+            sessionService.getProjectRoot(),
+            { quiet: true, runtimeRoots: await getRuntimeRoots() },
+          );
+          if (candidate) {
+            try {
+              await assertRestoreCoordinates(candidate);
+              const selected = await selectWorktreeSnapshot({
+                directory: path.dirname(candidate.sidecarPath),
+                sessionId,
+                slug: candidate.sidecar.slug,
+              });
+              if (selected) {
+                removed = { archiveKey: path.basename(selected.snapshotPath) };
+              }
+            } catch {
+              // Invalid coordinates or an unreadable pair are not a restore
+              // capability; leave the ordinary missing-owner handling intact.
+            }
+          }
+        }
       }
-      continue;
+      if (!removed) {
+        if (summary.worktree) {
+          const stripped = { ...summary };
+          delete stripped.worktree;
+          bySessionId.set(sessionId, stripped);
+        }
+        continue;
+      }
     }
     let canRestore = false;
     if (removed) {
       try {
-        if (runtimeRoots === undefined) {
-          const roots = new Set([sessionService.getProjectRoot()]);
-          try {
-            const repoTop = await new GitWorktreeService(
-              sessionService.getProjectRoot(),
-            ).getRepoTopLevel();
-            if (repoTop) roots.add(repoTop);
-          } catch {
-            // The runtime root still bounds a plain workspace. Ownership
-            // calibration and the actual restore use a fresh Git read.
-          }
-          runtimeRoots = [...roots];
-        }
         const candidate = await preclassifyWorktreeCleanup(
           sessionService,
           sessionId,
           sessionService.getProjectRoot(),
-          { quiet: true, runtimeRoots },
+          { quiet: true, runtimeRoots: await getRuntimeRoots() },
         );
         canRestore =
           candidate !== undefined &&

@@ -7,12 +7,14 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
+import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type {
   SessionService,
   SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import { canonicalPathForTesting } from './worktree-orphan-cleanup.js';
+import { reconcileUnrecordedRemovedWorktree } from './worktree-snapshot-binding.js';
 
 function otherState(state: SessionArchiveState): SessionArchiveState {
   return state === 'active' ? 'archived' : 'active';
@@ -63,7 +65,7 @@ async function rollbackSnapshotLinks(
   return errors;
 }
 
-/** Move only the exact pair owned by a strict surviving removed-state binding. */
+/** Move an owned exact pair after reconciling any eligible historical binding. */
 export async function moveWorktreeSnapshotsWithSession(
   service: SessionService,
   sessionId: string,
@@ -73,11 +75,26 @@ export async function moveWorktreeSnapshotsWithSession(
     sessionId,
     destination,
   );
-  const record = await readWorktreeSessionStrict(destinationSidecar);
-  // Only an explicit valid removal binding authorizes a pair move. A missing
-  // or unreadable legacy sidecar proves neither ownership nor permission to
-  // move anything, so leave it and any unassociated files untouched.
+  let record = await readWorktreeSessionStrict(destinationSidecar);
+  // Arbitrary orphan files still carry no move authority. When the surviving
+  // record lost its post-removal binding, first prove a unique exact pair on
+  // either side of the same archive, then let the normal move protocol proceed.
   if (record.state !== 'valid') return;
+  if (record.session.worktreeRemoved === undefined) {
+    await reconcileUnrecordedRemovedWorktree(
+      service,
+      sessionId,
+      destinationSidecar,
+      canonicalPathForTesting(record.session.worktreePath),
+      canonicalPathForTesting(
+        new GitWorktreeService(
+          record.session.originalCwd,
+        ).getUserWorktreesDir(),
+      ),
+    );
+    record = await readWorktreeSessionStrict(destinationSidecar);
+    if (record.state !== 'valid') return;
+  }
   const removal = record.session.worktreeRemoved;
   if (!removal) return;
   if (

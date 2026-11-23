@@ -77,7 +77,7 @@ function summaries(target: RetentionTestRuntime, sessionId: string) {
 
 async function removedRecord(
   target: RetentionTestRuntime,
-  options: { slug?: string } = {},
+  options: { slug?: string; writeBinding?: boolean } = {},
 ) {
   const session = await makeRetainedSession(target, {
     slug: options.slug ?? 'preview-removed',
@@ -96,10 +96,12 @@ async function removedRecord(
     throw new Error('Fixture did not remove after capture');
   }
   const archiveKey = path.basename(result.snapshot.snapshotPath);
-  await writeWorktreeSession(session.sidecarPath, {
-    ...session.sidecar,
-    worktreeRemoved: { archiveKey },
-  });
+  if (options.writeBinding !== false) {
+    await writeWorktreeSession(session.sidecarPath, {
+      ...session.sidecar,
+      worktreeRemoved: { archiveKey },
+    });
+  }
   return { ...session, archiveKey };
 }
 
@@ -119,6 +121,59 @@ describe('worktree restoration preview metadata', () => {
     expect(worktree?.branch).toBe('');
     expect(worktree?.worktreeRemoved?.archiveKey).toBe(record.archiveKey);
     expect(worktree?.canRestore).toBe(true);
+  });
+
+  it('offers restoration after a historical removal omitted its binding without writing the record', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target, { writeBinding: false });
+    const map = summaries(target, record.id);
+
+    await enrichWorktreeSidecars(map, target.service, 'active');
+
+    expect(map.get(record.id)!.worktree?.canRestore).toBe(true);
+    expect(map.get(record.id)!.worktree?.worktreeRemoved).toEqual({
+      archiveKey: record.archiveKey,
+    });
+    expect(await readWorktreeSession(record.sidecarPath)).toEqual(
+      expect.objectContaining({ workspaceCwd: target.repo }),
+    );
+    expect(
+      (await readWorktreeSession(record.sidecarPath))?.worktreeRemoved,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    'another-workspace',
+    'occupied-directory',
+    'coordinate-mismatch',
+  ] as const)('does not adopt an unbound snapshot for %s', async (scenario) => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target, { writeBinding: false });
+    if (scenario === 'another-workspace') {
+      const other = makeRetentionRepo(root, 'secondary');
+      await writeWorktreeSession(record.sidecarPath, {
+        ...record.sidecar,
+        workspaceCwd: other.repo,
+      });
+    } else if (scenario === 'occupied-directory') {
+      fs.mkdirSync(record.worktreePath, { recursive: true });
+    } else {
+      await writeWorktreeSession(record.sidecarPath, {
+        ...record.sidecar,
+        worktreePath: path.join(
+          path.dirname(record.worktreePath),
+          'unexpected-coordinate',
+        ),
+      });
+    }
+    const map = summaries(target, record.id);
+
+    await enrichWorktreeSidecars(map, target.service, 'active');
+
+    expect(map.get(record.id)!.worktree).toBeUndefined();
+    expect(
+      (await readWorktreeSession(record.sidecarPath))?.worktreeRemoved,
+    ).toBeUndefined();
   });
 
   it('refuses availability when the owned archive pair no longer exists', async () => {

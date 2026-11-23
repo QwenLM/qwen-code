@@ -49,6 +49,7 @@ import {
 } from '../workspace-runtime-storage.js';
 import { SessionArchiveCoordinator } from './session-archive.js';
 import {
+  executeWorktreeCleanup,
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
 } from './worktree-orphan-cleanup.js';
@@ -70,6 +71,9 @@ const captureGate = vi.hoisted(() => ({
   barrier: undefined as
     | { captured: () => void; release: Promise<void> }
     | undefined,
+}));
+const appearingDirectory = vi.hoisted(() => ({
+  worktreePath: undefined as string | undefined,
 }));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/atomicFileWrite.js',
@@ -127,6 +131,18 @@ vi.mock(
           return result;
         },
       ),
+      selectWorktreeSnapshot: vi.fn(
+        async (
+          options: Parameters<typeof actual.selectWorktreeSnapshot>[0],
+        ) => {
+          const result = await actual.selectWorktreeSnapshot(options);
+          if (result && appearingDirectory.worktreePath) {
+            fs.mkdirSync(appearingDirectory.worktreePath, { recursive: true });
+            appearingDirectory.worktreePath = undefined;
+          }
+          return result;
+        },
+      ),
       verifyRestoredWorktreeSnapshot: vi.fn(
         async (
           options: Parameters<typeof actual.verifyRestoredWorktreeSnapshot>[0],
@@ -176,6 +192,7 @@ let coordinator: SessionArchiveCoordinator;
 
 beforeEach(() => {
   captureGate.barrier = undefined;
+  appearingDirectory.worktreePath = undefined;
   captureInit.worktreePath = undefined;
   captureInit.home = undefined;
   captureInit.sourceRepo = undefined;
@@ -268,6 +285,39 @@ async function expectRetainedSnapshot(
   expect(fs.existsSync(session.transcriptPath)).toBe(true);
 }
 
+async function historicalRemovalWithoutBinding(
+  target: RetentionTestRuntime,
+  slug: string,
+) {
+  const session = await makeRetainedSession(target, {
+    slug,
+    dirty: true,
+    activity: '2026-01-01T00:00:00.000Z',
+  });
+  const plan = await preclassifyWorktreeCleanup(
+    target.service,
+    session.id,
+    target.repo,
+  );
+  if (!plan) throw new Error('Missing historical fixture ownership');
+  const outcome = await executeWorktreeCleanup(plan, {
+    requireSnapshot: true,
+  });
+  if (!outcome.removed || !outcome.snapshot) {
+    throw new Error('Historical fixture did not complete capture and removal');
+  }
+  const archiveKey = path.basename(outcome.snapshot.snapshotPath);
+  expect(
+    await selectWorktreeSnapshot({
+      directory: path.dirname(session.sidecarPath),
+      sessionId: session.id,
+      slug: session.sidecar.slug,
+      archiveKey,
+    }),
+  ).toBeDefined();
+  return { session, archiveKey };
+}
+
 describe('worktree retention with real repositories', () => {
   vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
@@ -316,6 +366,168 @@ describe('worktree retention with real repositories', () => {
       }
     }
   });
+
+  it('reconciles an exact retained pair after a historical record-write failure', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const { session, archiveKey } = await historicalRemovalWithoutBinding(
+      target,
+      'historical-missing-binding',
+    );
+    const pair = snapshotFiles(path.dirname(session.sidecarPath), session.id);
+    const originalPairBytes = pair.map((file) =>
+      fs.readFileSync(path.join(path.dirname(session.sidecarPath), file)),
+    );
+
+    failedJsonWrite.filePath = session.sidecarPath;
+    await sweep(target);
+    const beforeRecovery = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(beforeRecovery.state).toBe('valid');
+    if (beforeRecovery.state === 'valid') {
+      expect(beforeRecovery.session.worktreeRemoved).toBeUndefined();
+    }
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual(pair);
+    expect(fs.existsSync(session.worktreePath)).toBe(false);
+
+    failedJsonWrite.filePath = undefined;
+    const reconciled = await sweep(target);
+    expect(reconciled.skipped).toContain(
+      `worktree removal record reconciled from snapshot: ${session.id}`,
+    );
+
+    let current = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(current.state).toBe('valid');
+    if (current.state === 'valid') {
+      expect(current.session.worktreeRemoved).toEqual({ archiveKey });
+    }
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual(pair);
+    expect(fs.existsSync(session.worktreePath)).toBe(false);
+
+    const repeated = await sweep(target);
+    expect(repeated.skipped).not.toContain(
+      `worktree removal record reconciled from snapshot: ${session.id}`,
+    );
+    current = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(current.state).toBe('valid');
+    if (current.state === 'valid') {
+      expect(current.session.worktreeRemoved).toEqual({ archiveKey });
+    }
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual(pair);
+    expect(
+      pair.map((file) =>
+        fs.readFileSync(path.join(path.dirname(session.sidecarPath), file)),
+      ),
+    ).toEqual(originalPairBytes);
+  });
+
+  it('does not bind a target that appears during snapshot selection', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const { session } = await historicalRemovalWithoutBinding(
+      target,
+      'target-appears-during-selection',
+    );
+    const pair = snapshotFiles(path.dirname(session.sidecarPath), session.id);
+    appearingDirectory.worktreePath = session.worktreePath;
+
+    const report = await sweep(target);
+
+    expect(appearingDirectory.worktreePath).toBeUndefined();
+    expect(fs.statSync(session.worktreePath).isDirectory()).toBe(true);
+    expect(report.skipped).not.toContain(
+      `worktree removal record reconciled from snapshot: ${session.id}`,
+    );
+    const current = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(current.state).toBe('valid');
+    if (current.state === 'valid') {
+      expect(current.session.worktreeRemoved).toBeUndefined();
+    }
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual(pair);
+  });
+
+  it.each([
+    'another-workspace',
+    'occupied-directory',
+    'coordinate-mismatch',
+    'corrupt-pair',
+    'conflicting-owner',
+  ] as const)(
+    'does not reconcile a retained pair after %s',
+    async (scenario) => {
+      const target = makeRetentionRepo(root, 'primary');
+      configureRetention(target, 1);
+      const { session, archiveKey } = await historicalRemovalWithoutBinding(
+        target,
+        `historical-${scenario}`,
+      );
+      let registry = createWorkspaceRegistry([target.runtime]);
+      if (scenario === 'another-workspace') {
+        const other = makeRetentionRepo(root, 'secondary');
+        registry = createWorkspaceRegistry([target.runtime, other.runtime]);
+        await writeWorktreeSession(session.sidecarPath, {
+          ...session.sidecar,
+          workspaceCwd: other.repo,
+        });
+      } else if (scenario === 'occupied-directory') {
+        fs.mkdirSync(session.worktreePath, { recursive: true });
+      } else if (scenario === 'coordinate-mismatch') {
+        await writeWorktreeSession(session.sidecarPath, {
+          ...session.sidecar,
+          worktreePath: path.join(
+            path.dirname(session.worktreePath),
+            'unexpected-coordinate',
+          ),
+        });
+      } else if (scenario === 'corrupt-pair') {
+        fs.writeFileSync(
+          path.join(
+            path.dirname(session.sidecarPath),
+            `${archiveKey.slice(0, -'.tar.gz'.length)}.json`,
+          ),
+          '{corrupt',
+        );
+      } else {
+        const other = await makeRetainedSession(target, {
+          slug: 'other-owner-control',
+        });
+        await writeWorktreeSession(other.sidecarPath, {
+          ...other.sidecar,
+          worktreePath: session.worktreePath,
+        });
+      }
+      const pair = snapshotFiles(path.dirname(session.sidecarPath), session.id);
+
+      await sweep(target, registry);
+
+      const current = await readWorktreeSessionStrict(session.sidecarPath);
+      expect(current.state).toBe('valid');
+      if (current.state === 'valid') {
+        expect(current.session.worktreeRemoved).toBeUndefined();
+      }
+      expect(
+        snapshotFiles(path.dirname(session.sidecarPath), session.id),
+      ).toEqual(pair);
+      if (scenario === 'corrupt-pair') {
+        expect(
+          fs.readFileSync(
+            path.join(
+              path.dirname(session.sidecarPath),
+              `${archiveKey.slice(0, -'.tar.gz'.length)}.json`,
+            ),
+            'utf8',
+          ),
+        ).toBe('{corrupt');
+      }
+    },
+  );
 
   it('sweeps the oldest excess checkouts before newer excess checkouts', async () => {
     const target = makeRetentionRepo(root, 'primary');
