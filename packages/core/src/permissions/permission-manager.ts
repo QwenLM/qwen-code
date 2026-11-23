@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
+import { getTurnSkillSourcePath } from '../skills/turn-skill-snapshot.js';
 import {
   parseRules,
   parseRule,
@@ -491,16 +493,23 @@ export class PermissionManager {
           }
         : undefined;
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
+    const sourcePath =
+      filePath &&
+      getTurnSkillSourcePath(
+        path.resolve(pathCtx?.cwd ?? process.cwd(), filePath),
+      );
+    const filePaths = sourcePath ? [filePath, sourcePath] : [filePath];
+    const matchArgs = (permissionPath: string | undefined) =>
+      [
+        toolName,
+        command,
+        permissionPath,
+        domain,
+        pathCtx,
+        specifier,
+        toolParams,
+        toolAliases,
+      ] as const;
 
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
@@ -512,7 +521,17 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
+        if (
+          filePaths.some((candidate) =>
+            matchesRule(
+              rule,
+              ...matchArgs(candidate),
+              'canonical',
+              mcpIdentity,
+              true,
+            ),
+          )
+        )
           return 'deny';
       }
       // Priority 2: ask rules
@@ -520,7 +539,17 @@ export class PermissionManager {
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
+        if (
+          filePaths.some((candidate) =>
+            matchesRule(
+              rule,
+              ...matchArgs(candidate),
+              'canonical',
+              mcpIdentity,
+              true,
+            ),
+          )
+        )
           return 'ask';
       }
       // Priority 3: allow rules
@@ -529,7 +558,9 @@ export class PermissionManager {
         ...this.persistentRules.allow,
       ]) {
         if (
-          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          filePaths.some((candidate) =>
+            matchesRule(rule, ...matchArgs(candidate), undefined, mcpIdentity),
+          ) &&
           !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity)
         ) {
           return 'allow';

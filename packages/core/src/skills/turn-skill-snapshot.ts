@@ -61,6 +61,22 @@ export function getSkillSource(skill: SkillConfig): SkillConfig {
   return skill;
 }
 
+/** Treat a staged copy as an alias of its source in file permission rules. */
+export function getTurnSkillSourcePath(filePath: string): string | undefined {
+  const snapshot = getTurnSkillSnapshot();
+  for (const skill of snapshot?.skills ?? []) {
+    const relative = path.relative(path.dirname(skill.filePath), filePath);
+    if (
+      relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative)
+    ) {
+      return path.join(path.dirname(skill.sourceFilePath), relative);
+    }
+  }
+  return undefined;
+}
+
 export function getTurnSkillActivation(
   projectRoot: string,
 ): SkillActivationRegistry | undefined {

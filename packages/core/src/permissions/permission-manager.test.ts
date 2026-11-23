@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runWithTurnSkillSnapshot } from '../skills/turn-skill-snapshot.js';
 import {
   parseRule,
   parseRules,
@@ -236,6 +237,46 @@ const PROTO_KEYS = [
 /** The session allow list, which has no public accessor. */
 const sessionAllowRules = (pm: PermissionManager) =>
   (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules.allow;
+
+it('retains source Read restrictions on a prepared skill file', async () => {
+  const manager = makePm({
+    permissionsAllow: ['Read'],
+    permissionsDeny: ['Read(./skills/fixture/private.txt)'],
+  });
+  const source = path.resolve('/project/skills/fixture/SKILL.md');
+  const staged = path.resolve('/snapshot/0/SKILL.md');
+  const request = {
+    toolName: 'read_file',
+    filePath: path.join(path.dirname(staged), 'private.txt'),
+  };
+  expect(await manager.evaluate(request)).toBe('allow');
+  await runWithTurnSkillSnapshot(
+    {
+      version: 1,
+      id: 'fixture',
+      digest: 'fixture',
+      skills: [
+        {
+          name: 'fixture',
+          description: 'fixture',
+          body: 'fixture',
+          level: 'project',
+          filePath: staged,
+          sourceFilePath: source,
+        },
+      ],
+    },
+    async () => {
+      expect(await manager.evaluate(request)).toBe('deny');
+      expect(
+        await manager.evaluate({
+          ...request,
+          filePath: path.join(path.dirname(staged), 'public.txt'),
+        }),
+      ).toBe('allow');
+    },
+  );
+});
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
