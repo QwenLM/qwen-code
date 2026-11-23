@@ -651,3 +651,46 @@ equality" proposal above, and the interim decision to keep actor columns at
   lock ordering is implemented; its MySQL deadlock/race evidence is pending CI.
 - Semantic merge conflict with #18048; full H2 and MySQL 8.4 gates/races/
   performance pending CI.
+
+## 2026-11-23 follow-up: mixed-type identity joins
+
+MySQL compares a `VARCHAR` with a `VARBINARY` operand as binary strings. When the
+binary value probes the `VARBINARY` column's index, the lookup is unaffected. When a
+binary value probes a `VARCHAR` column's index, that column drops out of the index
+lookup: the join keeps only the leading tenant/Session prefix and scans every row
+under it. Constants are unaffected, including `byte[]` binds against `VARCHAR`
+columns, and so is an outer row that a unique key resolves to a single constant row.
+Measured on MySQL 8.4 with the V1 DDL:
+
+| Join                                                                                                            | Before                                                                                     | After                                     |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------- |
+| `ma_resource.resource_id = ma_session_record.record_resource_id` (MCP refs, model contexts on the Session list) | prefix `(tenant_id, session_id)`; 50 records × 20k resources took 2.8 s                    | full `uk_ma_resource_id`, 2.7 ms          |
+| `ma_operation.operation_id = ma_artifact.result_id` (artifact pages)                                            | every `TOOL_RESULT_PROJECTION` row was read before the page                                | single-row lookups per artifact           |
+| `CAST(target_id AS BINARY(512)) = CAST(binding_id AS BINARY(512))` (recovery candidates)                        | the `idx_ma_operation_target` lookup was lost and every operator recovery was materialized | covering `idx_ma_operation_target` lookup |
+
+Decisions:
+
+- `ma_session_record.record_resource_id` becomes `VARCHAR(256)` and
+  `ma_artifact.result_id` becomes `VARCHAR(128)`, the widths of the identities
+  they reference (`ma_resource.resource_id`, `ma_operation.operation_id`). Every
+  writer stores an id that already exists in the referenced column, so no accepted
+  value is lost. This supersedes the earlier statement that `record_resource_id`
+  stays `VARBINARY`.
+- `ma_operation.target_id` stays `VARBINARY(512)`: it is polymorphic (Turn, binding,
+  storage, Workspace, item and execution targets) and as `VARCHAR(512)` it would push
+  `uk_ma_operation_request` past 3072 bytes. Joins keep the binary side as the
+  probed side (`binaryIdentity`), and the one join that probes a `VARCHAR` key with
+  it (cancel evidence → `ma_turn`) converts the target to text instead.
+- Columns that are never compared with a `VARCHAR` column keep their type in this
+  change: canonical refs (by design), `ma_runtime_stage` (separate dehash
+  follow-up), `turn_id` in receipts, Session records and tool executions, and the
+  checkpoint/admission/terminal/side-query input resource ids. Converting the last
+  group would also need tighter admission bounds.
+- Actor admission counts code points, matching the 36-code-point budget and
+  MySQL's `VARCHAR(36)`; the earlier UTF-16 check rejected valid supplementary-plane
+  actors. The widest admitted actor encodes to a 549-byte actor scope ref, inside
+  `ACTOR_SCOPE_REF_BYTES` (550).
+
+Acceptance: `IdentityJoinScaleMySqlIT` asserts the full resource key, a bounded
+artifact page and the `idx_ma_operation_target` probe on MySQL; schema gates and
+the affected H2 suites stay green.

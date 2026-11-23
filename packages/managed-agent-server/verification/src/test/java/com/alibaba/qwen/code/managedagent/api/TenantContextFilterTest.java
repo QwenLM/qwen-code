@@ -68,7 +68,6 @@ class TenantContextFilterTest {
             throws ServletException, IOException {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
-                actor("tenant-a", "𝄞".repeat(19)),
                 actor("tenant-a", "𝄞".repeat(37))
         }) {
             MockHttpServletRequest request = request("tenant-a");

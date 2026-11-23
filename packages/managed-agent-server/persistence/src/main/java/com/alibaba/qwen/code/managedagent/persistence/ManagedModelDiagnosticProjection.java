@@ -235,15 +235,13 @@ final class ManagedModelDiagnosticProjection {
                 + " AND domain = ? AND record_id = 'latest'"
                 + " AND EXISTS (SELECT 1 FROM ma_resource u WHERE u.tenant_id = ma_session_record.tenant_id"
                 + " AND u.session_id = ma_session_record.session_id"
-                + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id")
-                + " = ma_session_record.record_resource_id AND u.kind = ?)", tenantId, sessionId,
+                + " AND u.resource_id = ma_session_record.record_resource_id AND u.kind = ?)", tenantId, sessionId,
                 MODEL_CONTEXT_DOMAIN, ManagedModelDiagnostics.MAIN_KIND);
     }
 
     static void clearLegacyModelContext(JdbcTemplate jdbc, String tenantId, String sessionId) {
         Integer legacy = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record r JOIN ma_resource u"
-                + " ON u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND "
-                + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id") + " = r.record_resource_id"
+                + " ON u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND u.resource_id = r.record_resource_id"
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.domain = ? AND r.record_id = 'latest' AND u.kind = ?",
                 Integer.class, tenantId, sessionId, MODEL_CONTEXT_DOMAIN, MODEL_USAGE_KIND);
         if (legacy != null && legacy > 0) {
