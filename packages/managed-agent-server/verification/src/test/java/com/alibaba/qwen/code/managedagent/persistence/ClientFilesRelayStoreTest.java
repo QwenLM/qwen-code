@@ -36,7 +36,7 @@ class ClientFilesRelayStoreTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         store = new ClientFilesRelayStore(jdbc);
-        tenant = "tenant-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
     }
 
     @Test
@@ -268,7 +268,7 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void tenantsSharingASessionIdStayIsolated() {
-        String otherTenant = "tenant-" + UUID.randomUUID();
+        String otherTenant = UUID.randomUUID().toString();
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.register(otherTenant, session, actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
         assertThat(tx(() -> store.find(tenant, session)).tokenHash()).isEqualTo("a".repeat(64));

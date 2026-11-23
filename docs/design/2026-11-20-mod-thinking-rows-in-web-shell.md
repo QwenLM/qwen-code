@@ -24,7 +24,7 @@ Non-goals:
 - A subagent's thoughts, in its tool card or outside it, as with the terminals' subagent views.
 - The exported transcript, which draws thoughts as they are.
 - Redrawing thoughts a page already holds on `$.ui.invalidate('ui.render')`, as with reply rows.
-- Removing `MessageRewriteMiddleware`. The Web Shell no longer needs it once both sites are drawn, but the VS Code companion still shows its rewritten messages, so removing it is a decision of its own.
+- Removing `MessageRewriteMiddleware`. The Web Shell no longer needs it once both sites are drawn, but the VS Code companion still shows its rewritten messages, so removing it is a decision of its own. It was later removed: [Removing MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.md).
 
 ## Compatibility contract
 

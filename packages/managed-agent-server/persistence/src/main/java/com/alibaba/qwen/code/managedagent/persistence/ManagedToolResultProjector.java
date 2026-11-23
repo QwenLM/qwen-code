@@ -120,12 +120,12 @@ public class ManagedToolResultProjector {
     private Projection resolve(Source source, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) throws IOException {
         guard.run();
         store.verifySource(source);
-        var candidates = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns("p") + ", CASE WHEN is_quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_key = ? AND tenant_id = ?"
-                        + " AND workspace_id = ? AND session_id = ? AND execution_key = ?",
+        var candidates = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns("p") + ", CASE WHEN is_quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_ref = ? AND tenant_id = ?"
+                        + " AND workspace_id = ? AND session_id = ? AND execution_call_id = ?",
                 (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
                 ToolPublicationDataStore.scope(source.sessionKey()),
                 source.tenantId(), source.workspaceId(), source.sessionId(),
-                ToolPublicationContract.sha256(source.executionCallId().getBytes(StandardCharsets.UTF_8)));
+                source.executionCallId());
         if (candidates.isEmpty()) {
             return null;
         }
@@ -302,7 +302,7 @@ public class ManagedToolResultProjector {
     private JsonNode inlineOutcome(Source source) {
         var rows = jdbc.query("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
                         + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
-                        + " AND workspace_id = ? AND deletion_operation_key IS NULL",
+                        + " AND workspace_id = ? AND deletion_operation_ref IS NULL",
                 (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
                 source.tenantId(), source.sessionId(), source.outcomeRef().path("resourceId").asText(),
                 source.workspaceId());

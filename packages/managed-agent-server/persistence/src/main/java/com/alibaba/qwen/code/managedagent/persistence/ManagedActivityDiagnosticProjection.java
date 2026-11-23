@@ -1,13 +1,12 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.ActivityPage;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -304,8 +303,8 @@ final class ManagedActivityDiagnosticProjection {
 
     JsonNode find(String tenant, String session, String domain, String id) {
         return jdbc.queryForList("SELECT record_resource_id FROM ma_session_record WHERE record_kind = 'DOMAIN'"
-                        + " AND tenant_id = ? AND session_id = ? AND record_key = ?", String.class, tenant, session,
-                ManagedExtensionProjection.recordKey(session, domain, id)).stream()
+                        + " AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?", String.class,
+                tenant, session, domain, id).stream()
                 .findFirst().map(resource -> readBody(store.readResource(tenant, session, resource))).orElse(null);
     }
 
@@ -313,13 +312,13 @@ final class ManagedActivityDiagnosticProjection {
         List<Object> args = new ArrayList<>(List.of(tenant, session, domain));
         String position = "";
         if (time != null) {
-            position = " AND (gmt_create < ? OR (gmt_create = ? AND record_key < ?))";
+            position = " AND (gmt_create < ? OR (gmt_create = ? AND record_id < ?))";
             args.addAll(List.of(time, time, key));
         }
         args.add(512);
-        var rows = jdbc.query("SELECT record_resource_id, gmt_create, record_key, first_sequence FROM ma_session_record WHERE"
+        var rows = jdbc.query("SELECT record_resource_id, gmt_create, record_id, first_sequence FROM ma_session_record WHERE"
                         + " record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ? AND domain = ? AND delivery_state IS NULL"
-                        + position + " ORDER BY gmt_create DESC, record_key DESC LIMIT ?",
+                        + position + " ORDER BY gmt_create DESC, record_id DESC LIMIT ?",
                 (row, index) -> new ActivityRow(row.getString(1), row.getLong(2), row.getString(3), row.getLong(4)), args.toArray());
         List<JsonNode> items = new ArrayList<>();
         int bytes = 0;
@@ -356,7 +355,7 @@ final class ManagedActivityDiagnosticProjection {
         return new ActivityPage(List.copyOf(items), more, partial, lastTime, lastKey);
     }
 
-    private record PageRow(String resource, long time, String key) { }
+    private record PageRow(String resource, long time, String domain, String key) { }
     private record ActivityRow(String resource, long time, String key, long firstSequence) { }
 
     /** Called only while acquiring the fenced writer, never by diagnostic reads. */
@@ -369,7 +368,7 @@ final class ManagedActivityDiagnosticProjection {
         if (summary != null && "ready".equals(summary.path("readiness").asText())) {
             return true;
         }
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        String journalOwnerRef = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session);
         if (summary == null) {
             summary = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("schemaVersion", 1)
                     .put("reducerVersion", 1).putNull("epochId").putNull("startEventId").putNull("startedAt")
@@ -381,15 +380,16 @@ final class ManagedActivityDiagnosticProjection {
             return false;
         }
         if ("clearing".equals(summary.path("readiness").asText())) {
-            var clearing = jdbc.query("SELECT record_resource_id, gmt_create, record_key FROM ma_session_record"
-                            + " WHERE tenant_id = ? AND session_id = ? AND domain IN (?, ?, ?, ?) ORDER BY record_key LIMIT 512",
-                    (row, index) -> new PageRow(row.getString(1), row.getLong(2), row.getString(3)), tenant, session,
+            var clearing = jdbc.query("SELECT record_resource_id, gmt_create, domain, record_id FROM ma_session_record"
+                            + " WHERE tenant_id = ? AND session_id = ? AND domain IN (?, ?, ?, ?) ORDER BY record_id LIMIT 512",
+                    (row, index) -> new PageRow(row.getString(1), row.getLong(2), row.getString(3), row.getString(4)), tenant, session,
                     ManagedActivityDiagnostics.TOOLS, ManagedActivityDiagnostics.FILES, ManagedActivityDiagnostics.SKILLS, ManagedActivityDiagnostics.LINKS);
             for (PageRow row : clearing) {
                 jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'SESSION_RECORD'"
-                        + " AND owner_key = ?", tenant, session, row.key());
-                jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND record_key = ?",
-                        tenant, session, row.key());
+                        + " AND owner_ref = ?", tenant, session, ManagedSchemaKeys.identity(
+                        JdbcManagedExtensionRecordStore.sessionRecordOwnerRef(session, row.domain(), row.key())));
+                jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                        tenant, session, row.domain(), row.key());
                 discardUnreferenced(tenant, session, row.resource());
             }
             if (clearing.isEmpty()) {
@@ -416,7 +416,7 @@ final class ManagedActivityDiagnosticProjection {
                     && transaction.sequence() == completedSequence + transaction.events(), "Diagnostic recovery source chain is incomplete.");
             // Bound lookahead when an early transaction exhausts the byte or event budget.
             if (transactionIndex % 32 == 0) {
-                resourceSizes = rebuildResourceSizes(tenant, session, scope, transactions.subList(transactionIndex, Math.min(transactionIndex + 32, transactions.size())));
+                resourceSizes = rebuildResourceSizes(tenant, session, journalOwnerRef, transactions.subList(transactionIndex, Math.min(transactionIndex + 32, transactions.size())));
             }
             transactionIndex++;
             long cost = Math.addExact(transaction.bytes(), resourceSizes.getOrDefault(transaction.revision(), 0L));
@@ -501,23 +501,24 @@ final class ManagedActivityDiagnosticProjection {
                 ready ? Long.parseLong(summary.path("lastEvidenceSequence").asText()) : through, summary.path("startedAt").asLong());
         if (ready && !summary.path("coverageStartSequence").isNull()) {
             jdbc.update("UPDATE ma_session_record SET gmt_create = ?, first_sequence = ? WHERE tenant_id = ? AND session_id = ?"
-                    + " AND record_key = ?",
+                    + " AND domain = ? AND record_id = ?",
                     summary.path("startedAt").longValue(), Long.parseLong(summary.path("coverageStartSequence").asText()),
-                    tenant, session, ManagedExtensionProjection.recordKey(session, ManagedActivityDiagnostics.STATS, "latest"));
+                    tenant, session, ManagedActivityDiagnostics.STATS, "latest");
         }
         return ready;
     }
 
     private record RebuildTransaction(long revision, long first, long sequence, long bytes, int events, String previousDigest, String digest) { }
 
-    private Map<Long, Long> rebuildResourceSizes(String tenant, String session, String scope,
+    private Map<Long, Long> rebuildResourceSizes(String tenant, String session, String ownerRef,
             List<RebuildTransaction> transactions) {
-        List<Object> args = new ArrayList<>(List.of(tenant, session, scope));
+        List<Object> args = new ArrayList<>(List.of(tenant, session, ManagedSchemaKeys.identity(ownerRef)));
         transactions.forEach(transaction -> args.add(transaction.revision()));
         Map<Long, Long> sizes = new HashMap<>();
         jdbc.query("SELECT f.owner_revision, SUM(r.byte_length) FROM ma_resource_ref f JOIN ma_resource r"
-                        + " ON r.resource_key = f.resource_key WHERE f.tenant_id = ? AND f.session_id = ? AND f.owner_kind = 'JOURNAL'"
-                        + " AND f.owner_key = ? AND f.owner_revision IN (" + String.join(", ", Collections.nCopies(transactions.size(), "?"))
+                        + " ON r.resource_id = f.resource_id AND r.tenant_id = f.tenant_id AND r.session_id = f.session_id"
+                        + " WHERE f.tenant_id = ? AND f.session_id = ? AND f.owner_kind = 'JOURNAL'"
+                        + " AND f.owner_ref = ? AND f.owner_revision IN (" + String.join(", ", Collections.nCopies(transactions.size(), "?"))
                         + ") GROUP BY f.owner_revision",
                 row -> { sizes.put(row.getLong(1), row.getLong(2)); }, args.toArray());
         return sizes;
@@ -532,11 +533,10 @@ final class ManagedActivityDiagnosticProjection {
         require(bytes.length <= 65_536, "Activity projection exceeds 64 KiB.");
         String digest = DigestUtils.sha256Hex(bytes);
         String resource = ManagedActivityDiagnostics.PROJECTION_KIND + ":" + digest;
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id,"
                         + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW
-                        + ") ON DUPLICATE KEY UPDATE resource_key = resource_key", ManagedSchemaKeys.key(scope, resource),
+                        + " VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW
+                        + ") ON DUPLICATE KEY UPDATE resource_id = resource_id",
                 tenant, workspace, session, resource, ManagedActivityDiagnostics.PROJECTION_KIND, bytes.length, digest, bytes);
         StoredResource saved = store.readResource(tenant, session, resource);
         require(saved.kind().equals(ManagedActivityDiagnostics.PROJECTION_KIND) && saved.schemaVersion() == 1
@@ -545,24 +545,23 @@ final class ManagedActivityDiagnosticProjection {
     }
 
     private void point(String tenant, String workspace, String session, String domain, String id, String resource, long sequence, long at) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String key = ManagedExtensionProjection.recordKey(session, domain, id);
+        String ownerRef = JdbcManagedExtensionRecordStore.sessionRecordOwnerRef(session, domain, id);
         List<String> old = jdbc.queryForList("SELECT record_resource_id FROM ma_session_record WHERE tenant_id = ?"
-                + " AND session_id = ? AND record_key = ?", String.class, tenant, session, key);
+                + " AND session_id = ? AND domain = ? AND record_id = ?", String.class, tenant, session, domain, id);
         if (old.isEmpty()) {
-            jdbc.update("INSERT INTO ma_session_record (record_kind, record_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_kind, tenant_id, workspace_id,"
                             + " session_id, domain, record_id, revision, record_resource_id, gmt_create, first_sequence)"
-                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", key, tenant, workspace, session,
+                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?)", tenant, workspace, session,
                     domain, id, sequence, resource, at, sequence);
         } else if (Objects.equals(old.getFirst(), resource)) {
             return;
         } else {
             jdbc.update("UPDATE ma_session_record SET revision = ?, record_resource_id = ? WHERE tenant_id = ?"
-                    + " AND session_id = ? AND record_key = ?", sequence, resource, tenant, session, key);
+                    + " AND session_id = ? AND domain = ? AND record_id = ?", sequence, resource, tenant, session, domain, id);
         }
         jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'SESSION_RECORD'"
-                + " AND owner_key = ?", tenant, session, key);
-        JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, sequence, tenant, workspace,
+                + " AND owner_ref = ?", tenant, session, ManagedSchemaKeys.identity(ownerRef));
+        JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, ownerRef, sequence, tenant, workspace,
                 session, resource);
         for (String previous : old) {
             discardUnreferenced(tenant, session, previous);
