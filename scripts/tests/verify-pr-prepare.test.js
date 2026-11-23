@@ -2358,6 +2358,52 @@ describe.skipIf(process.platform === 'win32')(
       expect(existsSync(join(hostDir, 'pr.json')), testCase.name).toBe(false);
     });
 
+    it('refuses a direct state-root at the PR clone before following its registration route', () => {
+      const { dir, base } = makeRepo();
+      const stateRoot = makeTmpDir();
+      mkdirSync(join(stateRoot, '.qwen', 'tmp'), { recursive: true });
+      mkdirSync(join(dir, '.qwen'));
+      symlinkSync(
+        join(stateRoot, '.qwen', 'tmp'),
+        join(dir, '.qwen', 'tmp'),
+        'dir',
+      );
+      const git = (...args) =>
+        execFileSync('git', args, { cwd: dir, env: gitEnv, encoding: 'utf8' });
+      git('add', '.qwen/tmp');
+      git('commit', '-qm', 'track registration route');
+      const head = git('rev-parse', 'HEAD').trim();
+      expect(watchState(stateRoot, head, 2).status).toBe(0);
+      const registrationNonce = registrationNonceFor(stateRoot);
+      const { artifactArgs, hostDir } = command({ head });
+      artifactArgs.splice(
+        artifactArgs.indexOf('--trust-pr-head'),
+        1,
+        '--approval',
+        permalink,
+        '--state-root',
+        dir,
+      );
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body: marker({ head, registrationNonce }),
+          user: { login: 'approver' },
+        },
+        permissions: { approver: { permission: 'admin' } },
+      });
+      // The tracked route and live external registration keep every check
+      // after the direct-root guard valid, so that guard must refuse first.
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status, result.stderr).toBe(3);
+      expect(result.stderr).toBe(
+        'verify-pr prepare: execution approval: --state-root must be a trusted directory outside the PR clone\n',
+      );
+      expect(existsSync(join(dir, 'tmp'))).toBe(false);
+      expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+    });
+
     it('refuses a state-root alias that redirects registration into the PR clone', () => {
       const { dir, base, head } = makeRepo();
       const { artifactArgs, stateRoot, hostDir, registrationNonce } = command({
