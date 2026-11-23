@@ -47486,6 +47486,264 @@ describe('idle suspension', () => {
     }
   });
 
+  async function allowParkedApproval(
+    server: Server,
+    clientId: string,
+    loadFlags: Record<string, true>,
+  ): Promise<void> {
+    await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+      timeout: 5000,
+    });
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const requestId = journal.events.findLast(
+      (event) =>
+        event.kind === 'action.changed' &&
+        event.payload['state'] === 'requested',
+    )!.payload['requestId'] as string;
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store(), ...loadFlags })
+      .expect(200);
+    const resumedClient = loaded.body.clientId as string;
+    await headers(
+      supertest(server).post(
+        `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+      ),
+    )
+      .set('X-Qwen-Client-Id', resumedClient)
+      .send({
+        optionId: 'allow',
+        inputRevision: 1,
+        policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+      })
+      .expect(200);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, resumedClient)).body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      },
+      { timeout: 5000 },
+    );
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, resumedClient)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  }
+
+  // Stage 1 pre-check (#18149): image-only Prompts may park only if a
+  // cold-recovered Turn still hands the model its original image.
+  it('resumes a parked approval with the original image still in its history', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    const live = state.model.getMockImplementation()!;
+    const resumedHistories: Array<readonly ChatRecord[]> = [];
+    state.model.mockImplementation(async (input) => {
+      if (input.resumeFromToolResults)
+        resumedHistories.push(
+          (input as { history?: readonly ChatRecord[] }).history ?? [],
+        );
+      return live(input);
+    });
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
+      'base64',
+    );
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(server, [
+        { type: 'text', text: 'write notes' },
+        { type: 'image', mimeType: 'image/png', data: image },
+      ]);
+      await allowParkedApproval(server, clientId, {
+        driveRuntimeRecovery: true,
+      });
+      expect(resumedHistories).toHaveLength(1);
+      const user = resumedHistories[0].find(
+        (record) =>
+          record.type === 'user' && record.daemonPromptId === PROMPT_ID,
+      );
+      expect(user?.message?.parts).toEqual([
+        { text: 'write notes' },
+        { inlineData: { data: image, mimeType: 'image/png' } },
+      ]);
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // Stage 1 pre-check (#18149): decision delivery cold-loads a Workspace
+  // Session with only the passive recovery flag, and that load must take the
+  // parked Turn over.
+  it('resumes a parked approval through the passive load decision delivery sends', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(server);
+      await allowParkedApproval(server, clientId, {
+        passiveManagedRuntimeRecovery: true,
+      });
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(state.model).toHaveBeenLastCalledWith(
+        expect.objectContaining({ resumeFromToolResults: expect.any(Array) }),
+      );
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // Stage 2 pre-check (#18149): a wake Turn is cancelled only through its
+  // source's own Harness operation (an automation run's cancel_run, a child
+  // run's stop), each sent after a load of its own. A plain load must attach
+  // a Session whose wake Turn died in its approval wait, so that operation
+  // reaches the Turn.
+  it('attaches a Session whose wake Turn died in its approval wait through a plain load', async () => {
+    domainEnablement.monitorRun = true;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const turnId = 'monitor-1:notify:1';
+    mockApprovalTurn();
+    state.model.mockImplementation(async ({ toolTurn, promptId, signal }) => {
+      if (promptId !== turnId)
+        return { text: 'continued', model: 'test-model' };
+      const call = {
+        name: 'write_file',
+        callId: 'plain-load-call',
+        args: { file_path: 'notes.txt', content: 'hello' },
+        isClientInitiated: false,
+        prompt_id: turnId,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      throw new Error('The waiting Turn unexpectedly continued.');
+    });
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    try {
+      const original = await app(true);
+      await headers(supertest(original).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const live = (
+        wakeDeps.last as {
+          session: {
+            managed: ManagedSession;
+            monitorWake?: { kick(): void; close(): void };
+          };
+        }
+      ).session;
+      const monitors = new HostedMonitorSession(
+        {
+          authority: live.managed.authority,
+          resources: live.managed.resources,
+        },
+        key,
+      );
+      const binding = { runtimeBindingId: 'binding-1', generation: '1' };
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: key.sessionId,
+        executionCallId: 'call-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await monitors.dispatchStarted('monitor-1', binding);
+      await monitors.attach('monitor-1', binding, { watch: 'started' });
+      await monitors.observe(
+        'monitor-1',
+        { lines: ['one'] },
+        {
+          input: {
+            inputId: turnId,
+            turnId,
+            source: 'monitor',
+            contentRef: await live.managed.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            admissionRef: await live.managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+          },
+        },
+      );
+      live.monitorWake?.kick();
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      live.monitorWake?.close();
+      await live.managed.close();
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        })
+        .expect(200);
+      expect(loaded.body.clientId).toEqual(expect.any(String));
+      await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .expect(204);
+    } finally {
+      waiting.mockRestore();
+      state.approvalSelections.clear();
+    }
+  });
+
   it('denies a parked approval after cold recovery without executing the sealed call', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;

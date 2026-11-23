@@ -131,6 +131,10 @@ class WakeSealStampTest {
         assertThat(head.get("wake_seal_parked_prompt_id")).isNull();
         assertThat(head.get("wake_seal_parked_until")).isNull();
         assertThat(head.get("wake_seal_parked_approval_revision")).isNull();
+        // The acquisition leaves the head unscanned: a user Turn's park is
+        // still recovered through its ma_turn row, but a wake-owned park has
+        // none, so it must mark the head itself (#18149 Stage 2).
+        assertThat(head.get("is_wake_scan_pending")).isEqualTo(0);
     }
 
     @Test
