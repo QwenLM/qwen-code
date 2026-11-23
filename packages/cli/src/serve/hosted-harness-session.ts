@@ -2902,8 +2902,10 @@ function retainHostedCleanupHolds(
   }
 }
 
-// A resumed approval restarts from this text, so an Action park refuses a
-// Turn without it exactly as the recovery arms do.
+// A resumed Turn restarts from this text, so an Action park refuses a Turn
+// without it exactly as the recovery arms do. A hosted-harness input that
+// carries only attachments restarts from empty text, as its live Turn ran:
+// executeHostedTurn reads the attachments back from the input itself.
 async function hostedOriginalPromptText(
   managed: ManagedSession,
   promptId: string,
@@ -2911,11 +2913,13 @@ async function hostedOriginalPromptText(
   const user = (await managed.sink.project()).find(
     (item) => item.type === 'user' && item.daemonPromptId === promptId,
   );
-  return (
-    user?.message?.parts
-      ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
-      .join('\n') || undefined
-  );
+  const text = user?.message?.parts
+    ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
+    .join('\n');
+  if (text) return text;
+  return (await readHostedInput(managed, promptId, '')).attachments.length
+    ? ''
+    : undefined;
 }
 
 async function retryHostedCleanup(
@@ -5195,9 +5199,12 @@ export function registerHostedHarnessSessionRoutes(
     if (!continuation) return 'no_continuation';
     if (continuation.plan.commandStep !== undefined) return 'command_step';
     if (
-      !(await hostedOriginalPromptText(session.managed, registration.promptId))
+      (await hostedOriginalPromptText(
+        session.managed,
+        registration.promptId,
+      )) === undefined
     )
-      return 'prompt_text_missing';
+      return 'original_prompt_missing';
     let approvalRevision: number | undefined;
     if (registration.livePoll) {
       const settings = registration.settings;
@@ -6752,7 +6759,7 @@ export function registerHostedHarnessSessionRoutes(
               resident.managed,
               parked,
             );
-            if (!text)
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -8671,15 +8678,8 @@ export function registerHostedHarnessSessionRoutes(
         if (!committedModelOutput)
           resumeModel = await findHostedModelRequest(managed, unsettled);
         if (resumeModel) {
-          const user = (await managed.sink.project()).find(
-            (item) => item.type === 'user' && item.daemonPromptId === unsettled,
-          );
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original model Prompt is missing.',
             );
@@ -8716,7 +8716,7 @@ export function registerHostedHarnessSessionRoutes(
             (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const text = await hostedOriginalPromptText(managed, unsettled);
-            if (!text)
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -8764,13 +8764,8 @@ export function registerHostedHarnessSessionRoutes(
           const projected = (await managed.sink.project()).filter(
             (record) => record.daemonPromptId === unsettled,
           );
-          const user = projected.find((record) => record.type === 'user');
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original Prompt is missing.',
             );

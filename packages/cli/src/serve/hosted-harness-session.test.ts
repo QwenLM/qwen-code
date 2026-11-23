@@ -48469,32 +48469,189 @@ describe('idle suspension', () => {
     }
   });
 
-  it('keeps an approval resident when its Prompt has no text to resume from', async () => {
+  const pngImage = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
+    'base64',
+  );
+  const imageOnlyPrompt = [
+    { type: 'image', mimeType: 'image/png', data: pngImage },
+  ];
+
+  type ResumedModelInput = {
+    prompt?: string;
+    history?: readonly ChatRecord[];
+  };
+
+  function captureResumedModelInput(): ResumedModelInput[] {
+    const live = state.model.getMockImplementation()!;
+    const resumed: ResumedModelInput[] = [];
+    state.model.mockImplementation(async (input) => {
+      if (input.resumeFromToolResults) resumed.push(input as ResumedModelInput);
+      return live(input);
+    });
+    return resumed;
+  }
+
+  function expectOriginalImageOnly(resumed: ResumedModelInput) {
+    expect(
+      resumed.history?.find(
+        (record) =>
+          record.type === 'user' && record.daemonPromptId === PROMPT_ID,
+      )?.message?.parts,
+    ).toEqual([{ inlineData: { data: pngImage, mimeType: 'image/png' } }]);
+  }
+
+  it('parks an image-only approval and resumes it with its image through cold recovery', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
     state.wakeStamps.length = 0;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     mockApprovalTurn();
+    const resumed = captureResumedModelInput();
     try {
       const server = await app(true, undefined, true, { idleSuspendMs: 150 });
-      const clientId = await promptAndIdleInApproval(server, [
-        {
-          type: 'image',
-          mimeType: 'image/png',
-          data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
-            'base64',
-          ),
+      const clientId = await promptApproval(server, imageOnlyPrompt);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      expect(statsOf(server).parkRefusals).toEqual({});
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
         },
-      ]);
-      expect(state.wakeStamps).toEqual([]);
-      expect(statsOf(server).cleanSuspensions).toBe(0);
-      expect(statsOf(server).parkRefusals.prompt_text_missing).toBeGreaterThan(
-        0,
+        { timeout: 5000 },
       );
-      await endResidentApproval(server, clientId);
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(resumed).toHaveLength(1);
+      expect(resumed[0].prompt).toBe('');
+      expectOriginalImageOnly(resumed[0]);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
     } finally {
       state.wakeDispatch = false;
       state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // A park is a crash at the wait point to the journal, so the same image-only
+  // wait must also survive its Harness dying in it.
+  it('takes an image-only approval over after its Harness dies in the wait', async () => {
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    const resumed = captureResumedModelInput();
+    const wait = vi
+      .spyOn(HostedApprovalWaiters.prototype, 'wait')
+      .mockRejectedValueOnce(
+        new HostedToolRecoveryRequiredError('approval writer interrupted'),
+      );
+    try {
+      const original = await app(true);
+      const clientId = await promptApproval(original, imageOnlyPrompt);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(original, clientId)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      await (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed.close();
+      wait.mockRestore();
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      await headers(
+        supertest(replacement).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(replacement, resumedClient)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(resumed).toHaveLength(1);
+      expect(resumed[0].prompt).toBe('');
+      expectOriginalImageOnly(resumed[0]);
+    } finally {
+      wait.mockRestore();
       state.approvalSelections.clear();
     }
   });
