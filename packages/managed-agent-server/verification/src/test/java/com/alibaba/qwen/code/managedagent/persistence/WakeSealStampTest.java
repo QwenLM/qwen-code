@@ -153,6 +153,40 @@ class WakeSealStampTest {
         assertThat(head().get("wake_seal_parked_prompt_id")).isNull();
     }
 
+    // S4 (#18149): a wake-started Turn has no Turn row, so its park claims
+    // the wake at the park's own due time and the wake scan resumes it.
+    @Test
+    void aWakeOwnedParkCertificateClaimsItsWake() {
+        long due = System.currentTimeMillis() + 3_600_000L;
+        seal(new WakeStamp(1, true, due, new ParkedTurn("monitor-1:notify:1", due, 7L, "wake")));
+
+        var head = head();
+        assertThat(head.get("state")).isEqualTo("SEALED");
+        assertThat(head.get("is_wake_pending")).isEqualTo(1);
+        assertThat(head.get("wake_retry_at")).isEqualTo(due);
+        assertThat(head.get("wake_seal_parked_prompt_id")).isEqualTo("monitor-1:notify:1");
+        assertThat(head.get("wake_seal_parked_until")).isEqualTo(due);
+        assertThat(head.get("wake_seal_parked_owner")).isEqualTo("wake");
+
+        acquire();
+        assertThat(head().get("wake_seal_parked_prompt_id")).isNull();
+        assertThat(head().get("wake_seal_parked_owner")).isNull();
+        assertThat(head().get("is_wake_pending")).isEqualTo(1);
+    }
+
+    @Test
+    void aWakeOwnedParkCertificateMustClaimItsWake() {
+        for (WakeStamp wake : List.of(
+                new WakeStamp(1, false, 0, new ParkedTurn("monitor-1:notify:1", 1234, 7L, "wake")),
+                new WakeStamp(1, true, 1234, new ParkedTurn("monitor-1:notify:1", 1234, 7L, "pump")))) {
+            assertThatThrownBy(() -> seal(wake))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            refused -> assertThat(refused.getCode()).isEqualTo("invalid_managed_session_store_request"));
+        }
+        assertThat(head().get("state")).isEqualTo("ACTIVE");
+        assertThat(head().get("wake_seal_parked_owner")).isNull();
+    }
+
     // The certificate feeds the park guard's prompt match and ma_turn.retry_after.
     @Test
     void aParkCertificateNeedsAPromptAndNonNegativeCounters() {
@@ -289,7 +323,8 @@ class WakeSealStampTest {
         // Read each column at its Java type: an unsigned BIGINT need not come back as a Long.
         return jdbc.queryForObject("SELECT state, wake_seal_revision, wake_head_revision, is_wake_pending,"
                         + " is_wake_scan_pending, wake_retry_at, wake_seal_background,"
-                        + " wake_seal_parked_prompt_id, wake_seal_parked_until, wake_seal_parked_approval_revision"
+                        + " wake_seal_parked_prompt_id, wake_seal_parked_until, wake_seal_parked_approval_revision,"
+                        + " wake_seal_parked_owner"
                         + " FROM ma_session_head WHERE session_id = ?",
                 (row, index) -> {
                     var values = new java.util.HashMap<String, Object>();
@@ -304,6 +339,7 @@ class WakeSealStampTest {
                     values.put("wake_seal_parked_until", row.getObject("wake_seal_parked_until", Long.class));
                     values.put("wake_seal_parked_approval_revision",
                             row.getObject("wake_seal_parked_approval_revision", Long.class));
+                    values.put("wake_seal_parked_owner", row.getString("wake_seal_parked_owner"));
                     return values;
                 }, session);
     }
