@@ -135,7 +135,6 @@ export class LlmRewriter {
         maxAttempts: 1,
         systemInstruction: this.prompt,
         config: {
-          temperature: 0.3,
           maxOutputTokens: 1024,
         },
         abortSignal: signal ?? new AbortController().signal,

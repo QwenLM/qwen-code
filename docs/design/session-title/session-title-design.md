@@ -182,7 +182,7 @@ service returns `{ok: false, reason: 'empty_result'}`.
 | `model`           | Fast model selected before reading the preference | Prevents a settings change during the read from sending the request to a different model.       |
 | `schema`          | Title schema for the selected prompt              | Forces `{title: string}` and gives the model compatible length and case guidance.               |
 | `maxOutputTokens` | `100`                                             | Enough for a short title plus schema overhead.                                                  |
-| `temperature`     | `0.2`                                             | Mostly deterministic — session titles benefit from stability across regeneration.               |
+| `temperature`     | _(omitted)_                                       | Removed per #12928 — providers increasingly reject or deprecate the parameter; the provider default is used unless the caller configures one. |
 | `maxAttempts`     | `1`                                               | Titles are best-effort cosmetic metadata; retries would queue behind user-visible main traffic. |
 
 Contrast with session-recap, which falls back to the main model. Title
