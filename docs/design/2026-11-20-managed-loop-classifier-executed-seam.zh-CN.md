@@ -57,7 +57,7 @@ managed-agent E2E runner 在每个 fake 模型回调内部回答 `cron_create` �
 
 落位是**解析**出来的、不是匹配拼写，而且只有**一套「臂」的定义**。fake 的臂在其 `startFakeOpenAIServer` **调用点**读取，故声明在 flag 之上、在块内按引用传入的回调仍属于该臂。委托的臂取自**它所在的 fake**；若围绕委托的 flag 与该 fake 的臂不一致，说明该臂根本不会执行它。两份库存都在**第二遍**按「确实委托了的臂集合」过滤，durable-failover fake 因此被排除。臂 flag 是直接测试、**或与字面布尔比较**的布尔局部量；没有委托报告的包装 flag 不算臂。
 
-其余也一律解析：按**引用**传入的 fake 解析到其声明；请求绑定只取绑定 **`body` 属性**的那个 binding element，同一 handler context 的兄弟字段不算；包在**闭包**里的委托——箭头、函数表达式或具名声明——仍属其 fake，类成员不算；**提升**的应答数组沿标识符链跟随，任何有超过一处声明的名字（**有无初始化式都算**）解析为空，而不是瞎猜。
+其余也一律解析：按**引用**传入的 fake 解析到其声明，无论该声明是 `const` 箭头还是具名 `function`；请求绑定只取以标识符名绑定 **`body` 属性**的那个 binding element，同一 handler context 的兄弟字段不算——rest 元素（`{ ...body }`）与带引号的键（`{ 'body': body }`）实测读 `[]`，即既不记功也不判红；包在**闭包**里的委托——箭头、函数表达式或具名声明——仍属其 fake，类成员不算；**提升**的应答数组沿标识符链跟随，任何有超过一处声明的名字（**有无初始化式都算**）解析为空，而不是瞎猜。
 
 应答库存对无法枚举者一律 fail-closed：读不出的属性键**或下标键**、spread 赋值、以及构造之后才建起来的应答——赋值、按下标写、经**变异方法** push、或由原地写入器（`Object.assign`、`defineProperty`、`Reflect.set`）经实参触达成员。对 `toolCalls` 成员的**只读**调用不构造应答，故不判红。**提升**到 fake 之外的 allow 与内联的是同一个应答。应答库存问「最近的 fake」时**不带成员边界**：臂回调自己声明的类成员或对象成员仍是该臂能跑的代码，建在那里的应答就是判定旁的应答；只有委托探针保留该边界，因为死成员不得为委托记功。每条子句都有一条实测能通过了它所取代的更弱形态的敌意用例；等价改写——臂顺序、id 互换、各种门的拼写、箭头常量判定、合法的第三个 fake、合法的 cron 应答——都是正向对照。
 
@@ -67,17 +67,17 @@ managed-agent E2E runner 在每个 fake 模型回调内部回答 `cron_create` �
 
 因此数据流子句是**按决定退役**的，以下内容明确不由快速钉覆盖。每一项在退役前都用已提交判据实测读作 `[]`，故没有一项是静默缺口：
 
-| 不覆盖                         | 实测形状举例                                                                                   |
-| ------------------------------ | ---------------------------------------------------------------------------------------------- |
-| 结果是否被返回                 | 臂绑定了判定却把结果丢弃                                                                       |
-| 门的存在、拼写与极性           | `if (classified === undefined) return classified;`、`undefined === classified`、从错误分支返回 |
-| 对绑定名的重写                 | `classified = undefined`、解构、for-of、`++`、`delete`、`Object.assign`                        |
-| 门之后的 fall-through          | `return classified;`、`return classified ?? fixture;`、直接返回调用                            |
-| 超出参数名本身的来源           | 调用前 `body` 被重写或遮蔽                                                                     |
-| 绑定名的别名                   | `const alias = classified; return alias;`                                                      |
-| 由回调调用的 helper 构造的应答 | `return bypass(body);`——调用点没有 `toolCalls` 属性                                            |
-| loop 臂之外的 fake 里的应答    | durable-failover fake 用 loop call id 作答                                                     |
-| 请求 body 的 schema 被写入     | 臂在委托前把 `shouldBlock` 写进 `body.tools[0]…properties`                                     |
+| 不覆盖                         | 实测形状举例                                                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| 结果是否被返回                 | 臂绑定了判定却把结果丢弃                                                                                              |
+| 门的存在、拼写与极性           | `if (classified === undefined) return classified;`、`undefined === classified`、从错误分支返回                        |
+| 对绑定名的重写                 | `classified = undefined`、解构、for-of、`++`、`delete`、`Object.assign`                                               |
+| 门之后的 fall-through          | `return classified;`、`return classified ?? fixture;`、直接返回调用                                                   |
+| 超出参数名本身的来源           | 调用前 `body` 被重写或遮蔽                                                                                            |
+| 绑定名的别名                   | `const alias = classified; return alias;`                                                                             |
+| 由回调调用的 helper 构造的应答 | `return bypass(body);`——调用点没有 `toolCalls` 属性                                                                   |
+| loop 臂之外的 fake 里的应答    | durable-failover fake 用 loop call id 作答                                                                            |
+| 请求 body 的 schema 被写入     | 臂先绑定 `const tool = body.tools[0]`，再经该别名在委托前写入 `shouldBlock`。经 body 链本身或计算键的写入**会**被判红 |
 
 **这张表里有四行拿到了实测的臂结论；其余五行没有，两个方向都不声称。** 只改 skill 臂的委托，「丢弃判定结果」与「吞掉 fall-through」各自让打包 skill 臂失败（`Cron schedule admission denied: Classifier stage 1 unavailable` 与 `Managed Turn terminal event did not become ready`），而已提交的委托通过。有两行**未经臂验证**：委托前写入请求 body 的 schema 已跑过打包 skill 臂，结果是**通过**（rc=0、modelRounds 6、cronCreate true）；而 durable-failover fake 里的应答根本不在 skill 臂的执行路径上。这两项今天两条通道都不覆盖，如实单列，不并入「臂兜底」的说法。要闭合 body 写入那条需要别名追踪——写入落在由 `body` 派生的绑定上、而非 `body` 本身——那正是本钉已停止判定的数据流家族。
 
@@ -103,7 +103,7 @@ managed-agent E2E runner 在每个 fake 模型回调内部回答 `cron_create` �
 
 第 3 轮里有两种形状属于落位缺陷而非数据流，已在缩小后的钉里修复：被借走的臂 flag（现为 `one-fake-per-arm`，臂按回调键控）与下一层闭包里的应答（库存现在遍历每一层外层函数）。其余即上面列出的已退役数据流检查。
 
-第 3 轮之后由维护者拍板：停止让钉继续长大，把它缩到落位。两项实测支撑该决定：钉已长到约 370 行 AST 分析，守的却是两行委托；且每一轮的修复都生出了下一轮的发现。**行数按版本分别标注，因为第 4 轮又把它撑回去了。** 口径：`classifierDelegation` 与 `delegationViolations` 各自从 `const X = (` 到其闭合 `};` 的括号平衡跨度之和；「非注释」指非空且不以 `//` 起头的行。按此口径，第 3 轮提交 `d1ebe200b2` 上是 161 行（141 非注释），`59857272fc` 上 297 行（254），`6fef090d01` 上 312 行（267），第 5 轮提交 `dd77c9387e` 上 390 行（356），第 6 轮回归修复后**交付版 400 行（362 非注释）**。**因此交付版的钉比它替换掉的约 370 行扫描器更大。** 第 4、5 轮的增长都花在消除落位子句的误红与闭合绕过上；缩减最初的成本论据已不成立，「是否还保留这条钉」应按这个数字重新评估，而不是按第 3 轮那个。扫描耗时**不承重**：单独跑 `classifierDelegation` 七次，本机中位 92.7 ms、区间 81.6–174.5 ms，离散过大，故只把行数当作成本引用。
+第 3 轮之后由维护者拍板：停止让钉继续长大，把它缩到落位。两项实测支撑该决定：钉已长到约 370 行 AST 分析，守的却是两行委托；且每一轮的修复都生出了下一轮的发现。**行数按版本分别标注，因为第 4 轮又把它撑回去了。** 口径：`classifierDelegation` 与 `delegationViolations` 各自**整条 `const` 变量语句**之和，边界取自 TypeScript AST 的语句范围；「非注释」指非空且不以 `//` 起头的行。按此口径，第 3 轮提交 `d1ebe200b2` 上是 161 行（141 非注释），`59857272fc` 上 297 行（254），`6fef090d01` 上 312 行（267），第 5 轮提交 `dd77c9387e` 上 390 行（356），第 6 轮回归修复后**交付版 403 行（363 非注释）**。**因此交付版的钉比它替换掉的约 370 行扫描器更大。** 第 4、5 轮的增长都花在消除落位子句的误红与闭合绕过上；缩减最初的成本论据已不成立，「是否还保留这条钉」应按这个数字重新评估，而不是按第 3 轮那个。扫描耗时**不承重**：单独跑 `classifierDelegation` 七次，本机中位 92.7 ms、区间 81.6–174.5 ms，离散过大，故只把行数当作成本引用。
 
 此前有一条变异存活，已归因而非掩盖：要求门分支内每条 return「读取该绑定且不得读别的」没有隔离夹具，因为它会误红 `return classified ?? other`——门内的死兜底。它被移除，而不是用硬造的夹具去佐证一条会把正确改写判成缺陷的规则。那正是第 3 轮在更大尺度上确认的同一信号。
 

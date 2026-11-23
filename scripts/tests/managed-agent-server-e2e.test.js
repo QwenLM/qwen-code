@@ -177,12 +177,20 @@ const classifierDelegation = (text) => {
   // acceptance must not guess which binding a lookup happened to find.
   const declarations = new Map();
   const collectDeclarations = (node) => {
-    if (isVariableDeclaration(node) && isIdentifier(node.name)) {
-      const name = node.name.text;
-      const seen = declarations.get(name);
-      declarations.set(name, {
+    // A named function declaration binds its name just as a const does, so a
+    // fake passed by reference resolves whether it was written as an arrow or
+    // as `function skillFake(...) {}`.
+    const bound =
+      isVariableDeclaration(node) && isIdentifier(node.name)
+        ? { name: node.name.text, value: node.initializer }
+        : isFunctionDeclaration(node) && node.name !== undefined
+          ? { name: node.name.text, value: node }
+          : undefined;
+    if (bound !== undefined) {
+      const seen = declarations.get(bound.name);
+      declarations.set(bound.name, {
         count: (seen?.count ?? 0) + 1,
-        initializer: seen === undefined ? node.initializer : undefined,
+        initializer: seen === undefined ? bound.value : undefined,
       });
     }
     forEachChild(node, collectDeclarations);
@@ -4734,13 +4742,27 @@ describe('managed-agent-server e2e runner', () => {
           fire(FIRE),
         ].join('\n'),
       ],
-      // A named function declaration is the same closure as an arrow here.
+      // The arm callback written as a named FUNCTION DECLARATION and passed by
+      // reference: a declaration binds its name just as a const does.
+      [
+        'by-reference function declaration',
+        [
+          decision,
+          'if (loopSkill) {\nfunction skillFake({ body }) {\n' +
+            SKILL +
+            '\n}\nfake = await startFakeOpenAIServer(skillFake);\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A named function declaration is the same closure as an arrow here, so
+      // it returns the decision just as the arrow control above does:
+      // discarding it would be the behaviour-breaking shape, not an equivalent.
       [
         'function-declaration closure',
         withSkill(
           'function respond() {\n' +
-            SKILL +
-            '\n}\nconst classified2 = respond();\nvoid classified2;',
+            "return loopClassifierResponse(body, 'loop-classifier');\n" +
+            '}\nconst classified2 = respond();\nif (classified2 !== undefined) return classified2;',
         ),
       ],
       // The flag tested against a literal boolean is the same flag.
