@@ -1,10 +1,10 @@
 # 按宿主支持能力注册 Legacy Agent Team 工具
 
-[English](2026-11-21-agent-team-host-gate.md) | [简体中文](2026-11-21-agent-team-host-gate.zh-CN.md)
+本文说明 [#13785 的 M4](https://github.com/QwenLM/qwen-code/issues/13785) 中的 Legacy Agent Team 工具注册门禁。宿主必须具备团队报告和队友审批的处理能力，并在初始化时显式声明支持，工具注册表才会考虑向模型提供团队工具。
 
 ## 问题
 
-[#13785 的 M4](https://github.com/QwenLM/qwen-code/issues/13785) 要求宿主先声明自己能处理哪些团队能力，再向模型提供 Agent Team 工具。以 `b62d4ab7` 为基线，`Config.isAgentTeamEnabled()` 先检查 Shell 执行沙箱，再检查环境变量或实验设置。ACP 构建同一个 Legacy 工具注册表，但当前主分支的 ACP 没有绑定 Legacy 团队的 leader 消息回调或审批监听器。TeamManager 会让报告留在收件箱里未读，轮询也不会发送团队结束通知。队友的工具审批可能一直等到停滞超时。[#14855](https://github.com/QwenLM/qwen-code/pull/14855) 直接构造 TeamManager，记录了报告投递和团队结束的现有行为。
+在设计基线 `b62d4ab7` 上，`Config.isAgentTeamEnabled()` 先检查 Shell 执行沙箱，再检查环境变量或实验设置。ACP 使用同一个 Legacy 工具注册表，但尚未绑定 Legacy 团队的 leader 消息回调或审批监听器。TeamManager 会让报告留在收件箱里未读，轮询也不会发送团队结束通知。队友的工具审批可能一直等到停滞超时。[#14855](https://github.com/QwenLM/qwen-code/pull/14855) 直接构造 TeamManager，记录了报告投递和团队结束的现有行为。
 
 Ink TUI 绑定 leader 消息回调，并使用交互式队友审批。非交互 CLI 同样绑定 leader 消息回调，并通过 stream-json 控制通道或现有非交互兜底处理审批。这两种路径都支持 Legacy Agent Team。Hosted Harness 通过自己的 `teamsAdmitted()` 声明团队工具，并使用持久记录和 Session 消息。
 
@@ -25,7 +25,7 @@ OpenTUI 在开始初始化 Config 前启动失败时，回退到 Ink 后由 Ink 
 
 ## 与 #15658 的衔接
 
-在 [`c752f6b1`](https://github.com/QwenLM/qwen-code/pull/15658/files)，ACP Session 在 `isAgentTeamEnabled()` 为真时绑定消息接收回调和审批路由。回调负责报告投递和 TeamManager 更换时的重新绑定。审批通过会话级 ACP 请求中继，并通过 bridge 通知撤下已失效的请求。门禁落地后，#15658 的后续版本需要在 ACP Session 首次初始化 Config 时声明宿主支持，满足条件的活跃会话在共用的 `newSessionConfig()` 声明，确保创建、加载和恢复遵循同一规则。握手只声明支持，审批仍由 #15658 的所有权检查授权。
+在 [`c752f6b1`](https://github.com/QwenLM/qwen-code/pull/15658/files)，ACP Session 在 `isAgentTeamEnabled()` 为真时绑定消息接收回调和审批路由。回调负责报告投递和 TeamManager 更换时的重新绑定。审批通过会话级 ACP 请求中继，并通过 bridge 通知撤下已失效的请求。#15658 后续若要启用 ACP 团队工具，需在共用的 `newSessionConfig()` 传入宿主支持声明，使创建、加载和恢复会话遵循同一条首次初始化规则。握手只声明支持，审批仍由 #15658 的所有权检查授权。
 
 ACP 可沿用 `initialize.clientCapabilities._meta` 协商。后续可以使用明确的布尔位 `qwen.agentTeam`，由能向其使用方投递团队报告、展示会话级队友审批的 bridge 或客户端声明。ACP 服务端应同时要求客户端提供严格的 `true`，以及本地具备报告接收和审批接线。旧客户端和通用客户端继续使用普通工具集。本次只引入内部初始化选项。协议协商和 ACP 启用随实际接线一起交付。公共 `multi_agent` 能力、任务输入接口和团队投影另行推进。
 
