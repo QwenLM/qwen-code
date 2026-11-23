@@ -13,6 +13,11 @@ self-hosted-runner:
     - 'ecs-update-hz-2'
     - 'ecs-update-hz-3'
     - 'ecs-update-hz-6'
+    - 'qwen-ecs-hz7-validation'
+    - 'qwen-ecs-hz8-validation'
+    - 'qwen-ecs-hz9-validation'
+    - 'qwen-ecs-hz10-validation'
+    - 'qwen-ecs-hz11-validation'
 
 config-variables: null
 

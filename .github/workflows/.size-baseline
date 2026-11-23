@@ -28,6 +28,7 @@
 10005 dsw-swe-verified-release.yml
 45412 e2e.yml
 13135 finalize-release.yml
+1467 hangzhou-arm64-runner-smoke.yml
 16647 live-host-release.yml
 5950 live-host.yml
 14543 managed-agent-gate.yml

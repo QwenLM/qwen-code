@@ -1,0 +1,51 @@
+name: 'Hangzhou ARM64 Runner Validation'
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/hangzhou-arm64-runner-smoke']
+    paths: ['.github/workflows/hangzhou-arm64-runner-smoke.yml']
+
+permissions:
+  contents: 'read'
+
+jobs:
+  validate:
+    if: github.repository == 'QwenLM/qwen-code'
+    name: 'Validate ${{ matrix.runner }}'
+    runs-on: '${{ matrix.runner }}'
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - 'qwen-ecs-hz7-validation'
+          - 'qwen-ecs-hz8-validation'
+          - 'qwen-ecs-hz9-validation'
+          - 'qwen-ecs-hz10-validation'
+          - 'qwen-ecs-hz11-validation'
+    steps:
+      - name: 'Verify runner architecture'
+        shell: 'bash'
+        run: |
+          printf 'Runner %s (%s)\n' "$RUNNER_NAME" "$RUNNER_ARCH"
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = aarch64
+          test "$(id -un)" = github-runner
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'Verify checkout and tools'
+        shell: 'bash'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git --version
+          node --version | grep -E '^v22\.'
+          npm --version
+          corepack pnpm --version
+          test "$(command -v qwen)" = /usr/local/bin/qwen
+          qwen --version
