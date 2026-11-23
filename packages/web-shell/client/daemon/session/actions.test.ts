@@ -878,6 +878,24 @@ describe('getConnectionAfterSessionClear', () => {
         titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
+        restoredArtifacts: [
+          {
+            id: 'a1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Stale artifact',
+            url: 'https://example.com/stale',
+            retention: 'restorable',
+            clientRetained: true,
+            createdAt: '2026-09-07T00:00:00.000Z',
+            updatedAt: '2026-09-07T00:00:00.000Z',
+          },
+        ],
+        restoredArtifactsSessionId: 'session-a',
+        artifactCountHint: 3,
+        artifactCountHintSessionId: 'session-a',
         backgroundTurn: {
           turnId: 'background-a',
           taskId: 'task-a',
@@ -913,6 +931,10 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
+    expect(next).not.toHaveProperty('restoredArtifacts');
+    expect(next).not.toHaveProperty('restoredArtifactsSessionId');
+    expect(next).not.toHaveProperty('artifactCountHint');
+    expect(next).not.toHaveProperty('artifactCountHintSessionId');
     expect(next).not.toHaveProperty('backgroundTurn');
     expect(next).not.toHaveProperty('finishedBackgroundTurnId');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -3043,6 +3065,10 @@ describe('createDaemonSessionActions', () => {
       expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith(
         'session-b',
         undefined,
+        expect.objectContaining({
+          sessionId: 'session-b',
+          updateMetadata: expect.any(Function),
+        }),
       );
       expect(attachSession).toHaveBeenCalledOnce();
       expect(submitPrompt).toHaveBeenCalledOnce();
@@ -3324,7 +3350,11 @@ describe('createDaemonSessionActions', () => {
     });
     expect(nextSession.detach).not.toHaveBeenCalled();
     expect(onSessionAllocated).toHaveBeenCalledWith('session-b');
-    expect(onSessionCreated).toHaveBeenCalledWith('session-b', nextSession);
+    expect(onSessionCreated).toHaveBeenCalledWith(
+      'session-b',
+      nextSession,
+      nextSession,
+    );
     expect(attachSession).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
     expect(sessionRef.current).toBeUndefined();
@@ -3623,6 +3653,84 @@ describe('createDaemonSessionActions', () => {
       requestTimeoutMs: 70_000,
     });
     expect(getConnection().goalState).toBeUndefined();
+  });
+
+  it('commits the click-time artifact count hint keyed to the target session', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('session-b', { artifactCountHint: 4 })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+  });
+
+  it('clears a stale artifact count hint when the target has none', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
+  });
+
+  it('retires the click-time artifact count hint when the load fails', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+        },
+        session: existingSession,
+      });
+
+    const load = actions.loadSession('session-b', { artifactCountHint: 4 });
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.reject(new Error('load failed'));
+
+    await expect(load).rejects.toThrow('load failed');
+    // The failed target stays visible for the error state, but its count
+    // must not outlive the load: no snapshot or cache entry will ever
+    // retire the hint on the failure path.
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      error: 'load failed',
+    });
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
   });
 
   it('drops workspace previews when switching to a standalone target', () => {
@@ -7711,6 +7819,39 @@ describe('createDaemonSessionActions', () => {
   });
 });
 
+describe('rateAssistantTurn', () => {
+  it('forwards the mark to the session client', async () => {
+    const session = createMockSession('session-a');
+    const h = createActionsHarness({ session });
+
+    await h.actions.rateAssistantTurn('prompt-1', 'up');
+
+    expect(session.rateSessionTurn).toHaveBeenCalledWith('prompt-1', 'up');
+  });
+
+  it('is a no-op without a live session', async () => {
+    const h = createActionsHarness();
+
+    await expect(
+      h.actions.rateAssistantTurn('prompt-1', 'up'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('swallows failures so the local mark never depends on telemetry', async () => {
+    const session = createMockSession('session-a');
+    session.rateSessionTurn.mockRejectedValue(new Error('daemon down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = createActionsHarness({ session });
+
+    await expect(
+      h.actions.rateAssistantTurn('prompt-1', 'down'),
+    ).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
 function createActionsHarness(
   opts: {
     activePrompts?: Map<string, ActivePrompt>;
@@ -7942,6 +8083,7 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    rateSessionTurn: vi.fn(async () => ({ recorded: true })),
     setConfigOption: vi.fn(async (_configId: string, value: string) => ({
       configOptions: reasoningConfigOptions(value),
       persisted: false,

@@ -40,6 +40,7 @@ import {
 } from '../utils/processUtils.js';
 import {
   QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_MANAGED_RUNTIME_ENV,
   QWEN_CODE_SERVE_ENV,
 } from '../config/acp-channel-fallback.js';
 
@@ -96,10 +97,15 @@ export function getSandboxPassthroughEnvArgs(
     HOST_UPDATE_RELAUNCH_ENV_VAR,
     QWEN_CODE_SERVE_ENV,
     QWEN_CODE_DESKTOP_ENV,
+    QWEN_CODE_MANAGED_RUNTIME_ENV,
     // Workflow enablement is an operator decision; the inner CLI would
     // otherwise read only the mounted settings and ignore the exported switch.
     'QWEN_CODE_ENABLE_WORKFLOWS',
     'QWEN_CODE_DISABLE_WORKFLOWS',
+    // Same precedent for the agent-loop switches: the documented env force
+    // on/off must reach the inner CLI, not be shadowed by the mounted settings.
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );

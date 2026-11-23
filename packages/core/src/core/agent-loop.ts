@@ -37,6 +37,9 @@ import {
 } from './turn.js';
 import type { LlmChat } from './llm-chat.js';
 import { runAgentLoopOnBus } from '../event-bus/adapter.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AGENT_LOOP');
 
 type SchedulerOptions = ConstructorParameters<typeof CoreToolScheduler>[0];
 
@@ -142,6 +145,10 @@ export function turnModelRound(
   return {
     sendRound: (round, signal) =>
       runTurn(
+        // Built without isSessionTurn: every production caller of
+        // turnModelRound is a background round (subagent shared loop,
+        // unified-loop speculation) sharing the session Config, so it must not
+        // participate in the live turn's model-availability ledger.
         new Turn(chat, round.promptId),
         model,
         round.parts,
@@ -276,14 +283,17 @@ export interface AgentLoopOptions {
   runtimeView?: RuntimeContentGeneratorView;
   /** Passed to each tool batch; see {@link ToolBatchOptions}. */
   duplicateStateForCall?: ToolBatchOptions['duplicateStateForCall'];
-  keepCancelledResults?: boolean;
+  keepCancelledResults?: ToolBatchOptions['keepCancelledResults'];
   /** Leave recording to the host via `nextRound` or the loop result. */
   deferRecording?: boolean;
+  /** Waits for Runtime execution to settle and rejects if its outcome is unknown. */
+  getPendingToolSettlement?: () => Promise<void> | undefined;
   /**
    * Run the loop on the event-bus implementation instead of the procedural
    * one. Opt-in; the two are behaviorally equivalent, except that a run
    * whose signal aborted ends as `cancelled` once it has not settled within
-   * a cap, and its host hears nothing after that. See
+   * a cap, except when the host still has pending tool settlement.
+   * After the cap the host hears nothing further. See
    * docs/design/2026-11-11-event-bus-agent-loop.md.
    */
   useEventBus?: boolean;
@@ -406,6 +416,12 @@ export async function runModelRound(
   calls: ToolCallRequestInfo[];
   stop?: AgentLoopStopReason;
 }> {
+  // Execution marker: with QWEN_DEBUG_LOG_FILE on, this line proves a round
+  // ran on the shared agent loop rather than a surface's legacy loop. The
+  // wording is deliberately distinct from the TUI surfaces' own "model round
+  // on the shared agent loop" marker so the TUI parity's count of that marker
+  // is not doubled by this one.
+  debugLogger.debug('runModelRound on the shared agent loop');
   const calls: ToolCallRequestInfo[] = [];
   let stop: AgentLoopStopReason | undefined;
   const stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined> =
@@ -470,8 +486,10 @@ export interface ToolBatchOptions {
   /**
    * Finish and record a batch `signal` cancelled and return its results,
    * with the stop reason `cancelled`, for a surface that keeps them.
+   * `'launched'` keeps only the results of calls the batch started.
+   * The host still sees any replays it was told about before cancellation.
    */
-  keepCancelledResults?: boolean;
+  keepCancelledResults?: boolean | 'launched';
   /**
    * Leave each result unrecorded and return its recording as `record` on
    * `responses`, for a surface that records only the results it sends.
@@ -671,29 +689,33 @@ export async function runToolBatch(
   if (aborted && !ended && !options.keepCancelledResults) {
     return { parts: [], stop: 'cancelled' };
   }
-  for (const request of executable) {
-    if (results.has(request)) continue;
-    answer(
-      request,
-      skippedResponse(request, host.skippedOutput?.(request) ?? ''),
-      'skipped',
-    );
-  }
-  for (const request of repeated) {
-    const key = providerKey(request);
-    if (!key) continue;
-    markDuplicateProviderToolCallResponseSent(
-      key,
-      duplicateStateFor(request).responded,
-    );
-    answer(
-      request,
-      createDuplicateProviderToolCallResponse(request),
-      'duplicate',
-    );
+  const keepOnlyLaunched =
+    aborted && options.keepCancelledResults === 'launched';
+  if (!keepOnlyLaunched) {
+    for (const request of executable) {
+      if (results.has(request)) continue;
+      answer(
+        request,
+        skippedResponse(request, host.skippedOutput?.(request) ?? ''),
+        'skipped',
+      );
+    }
+    for (const request of repeated) {
+      const key = providerKey(request);
+      if (!key) continue;
+      markDuplicateProviderToolCallResponseSent(
+        key,
+        duplicateStateFor(request).responded,
+      );
+      answer(
+        request,
+        createDuplicateProviderToolCallResponse(request),
+        'duplicate',
+      );
+    }
   }
 
-  const ordered = calls.flatMap((request) => {
+  const ordered = (keepOnlyLaunched ? toRun : calls).flatMap((request) => {
     const result = results.get(request);
     return result ? [result] : [];
   });
@@ -797,10 +819,16 @@ function skippedResponse(
 /** One `CoreToolScheduler` for the whole batch. */
 export function createSchedulerExecutor(
   config: Config,
-  options: Partial<SchedulerOptions> = {},
+  options: Partial<SchedulerOptions> &
+    Pick<AgentLoopOptions, 'getPendingToolSettlement'> = {},
   runtimeView?: RuntimeContentGeneratorView,
 ): AgentLoopToolExecutor {
-  const { onToolResultFullTurnModel } = options;
+  const {
+    getPendingToolSettlement,
+    onToolResultFullTurnModel,
+    onManagedRuntimeOutcomeUnknown,
+    ...schedulerOptions
+  } = options;
   return {
     run: (requests, signal, hooks) =>
       new Promise<CompletedToolCall[]>((resolve, reject) => {
@@ -809,25 +837,39 @@ export function createSchedulerExecutor(
         // Calls an `exec` script makes report through the same callbacks;
         // their output belongs to the `exec` call.
         const parents = new Map<string, string>();
+        let managedBatchFailed = false;
+        const isFinished = () =>
+          managedBatchFailed || hooks.isFinished?.() === true;
         const scheduler = new CoreToolScheduler({
           getPreferredEditor: () => undefined,
           onEditorClose: () => {},
-          ...options,
+          ...schedulerOptions,
           config,
-          isFinished: hooks.isFinished,
-          ...(hooks.isFinished &&
-            onToolResultFullTurnModel && {
-              onToolResultFullTurnModel: (model) =>
-                !hooks.isFinished?.() &&
-                onToolResultFullTurnModel.call(options, model),
-            }),
+          ...(onManagedRuntimeOutcomeUnknown && {
+            onManagedRuntimeOutcomeUnknown: (error, callId) => {
+              managedBatchFailed = true;
+              onManagedRuntimeOutcomeUnknown(error, callId);
+              // The remaining Runtime calls may still be in flight even though
+              // host post-processing no longer needs to finish before failing.
+              const pending = getPendingToolSettlement?.();
+              if (pending) {
+                void pending.then(() => reject(error), reject);
+              }
+            },
+            onManagedRuntimeBatchFailed: reject,
+          }),
+          isFinished,
+          ...(onToolResultFullTurnModel && {
+            onToolResultFullTurnModel: (model) =>
+              !isFinished() && onToolResultFullTurnModel.call(options, model),
+          }),
           outputUpdateHandler: (callId, chunk) => {
-            if (hooks.isFinished?.()) return;
+            if (isFinished()) return;
             options.outputUpdateHandler?.(callId, chunk);
             hooks.output(parents.get(callId) ?? callId, chunk);
           },
           onToolCallsUpdate: (toolCalls) => {
-            if (hooks.isFinished?.()) return;
+            if (isFinished()) return;
             for (const call of toolCalls) {
               const { callId, parentCallId } = call.request;
               if (!batch.has(callId)) {
@@ -843,9 +885,10 @@ export function createSchedulerExecutor(
             options.onToolCallsUpdate?.(toolCalls);
           },
           beforeToolLaunch: (call: ScheduledToolCall) =>
+            !isFinished() &&
             hooks.beforeLaunch(call.request, [...settled.values()]),
           onAllToolCallsComplete: async (completedCalls) => {
-            if (!hooks.isFinished?.()) {
+            if (!isFinished()) {
               await options.onAllToolCallsComplete?.(completedCalls);
             }
             resolve(completedCalls);

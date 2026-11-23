@@ -79,6 +79,13 @@ export interface SpawnDaemonOptions {
   extraArgs?: string[];
   /** Optional env additions for the spawned daemon. */
   env?: Record<string, string>;
+  /**
+   * Patterns of inherited `process.env` keys to drop before merging `env`.
+   * Hermetic rigs use this to strip host-session leakage (`QWEN_*`,
+   * `OPENAI_*`, proxy vars) that would otherwise redirect storage or
+   * credentials inside the daemon and its ACP children.
+   */
+  envDrop?: readonly RegExp[];
 }
 
 export interface SpawnedDaemon {
@@ -123,9 +130,16 @@ export async function spawnDaemon(
     ...extraArgs,
   ];
 
+  const inheritedEnv = opts.envDrop?.length
+    ? Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => !opts.envDrop!.some((pattern) => pattern.test(key)),
+        ),
+      )
+    : process.env;
   const daemon = spawn(process.execPath, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...opts.env },
+    env: { ...inheritedEnv, ...opts.env },
   });
 
   const stdoutBuf = { value: '' };

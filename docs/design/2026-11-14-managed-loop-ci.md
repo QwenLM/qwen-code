@@ -15,7 +15,7 @@ Both modes explicitly enable the shared loop. `shared` disables the event-bus sw
 
 ## CI integration
 
-The independent `managed-agent-loop.yml` workflow runs on relevant pull requests, main pushes, nightly and manual dispatch. Its two matrix jobs run both scenarios, serially, without retries, using the packaged CLI built from that checkout. It does not depend on the Java gate's `none`/`fast`/`full` selection. Only read permission is granted, no service secrets are needed, and PR code uses disposable runners (or the hosted fallback).
+The independent `managed-agent-loop.yml` workflow runs on relevant pull requests, main pushes, nightly and manual dispatch. Its two matrix jobs run both scenarios, serially, without retries, using the packaged CLI built from that checkout. It does not depend on the Java gate's `none`/`fast`/`full` selection. Only read permission is granted and no service secrets are needed. Pull request code splits by the same trust rule the Linux CI lanes already use: a pull request whose head lives in this repository, or whose author association is owner, member or collaborator, runs on the persistent x64 fleet; every other pull request keeps the disposable pool, and push, schedule and manual runs stay on GitHub-hosted runners. Both self-hosted arms are credential-free, so the split is capacity rather than a new trust boundary.
 
 Each job requires exactly two passing tests and no skipped tests, plus a passing evidence file for each surface. Protocol requests, process output and executed-loop logs are uploaded even on failure. A missing package, failed setup, Legacy fallback, absent loop witness or skipped test cannot become a successful verification result.
 

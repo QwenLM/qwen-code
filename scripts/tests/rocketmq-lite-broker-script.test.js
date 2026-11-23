@@ -278,7 +278,11 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     expect(result.stderr).toContain(
       'stopping what it started: proxy broker namesrv',
     );
-    for (const port of ports) expect(await isFree(port)).toBe(true);
+    // A bind probe races the just-killed listener's socket release on a
+    // shared host; check the listener the way the script does.
+    for (const port of ports) {
+      expect(await waitForNoListener(port)).toBe(true);
+    }
     expect(pidFiles()).toEqual([]);
   }, 200_000);
 
@@ -303,7 +307,10 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
       RMQ_PROXY_GRPC_PORT: '1',
     });
     expect(stopped.status).toBe(0);
-    for (const port of ports) expect(await isFree(port)).toBe(true);
+    // As above, wait for the listener instead of probing with a fresh bind.
+    for (const port of ports) {
+      expect(await waitForNoListener(port)).toBe(true);
+    }
     expect(pidFiles()).toEqual([]);
   }, 200_000);
 

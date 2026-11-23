@@ -67,21 +67,19 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
      * (#13800).
      */
     static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
-        String key = hash(tenant);
         jdbc.execute((ConnectionCallback<Void>) connection -> {
             try (PreparedStatement insert = connection.prepareStatement(
-                    "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                            + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+                    "INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES (?, 'output_publication')"
+                            + " ON DUPLICATE KEY UPDATE tenant_id = tenant_id")) {
                 insert.setQueryTimeout(timeoutSeconds);
-                insert.setString(1, key);
-                insert.setBytes(2, ManagedSchemaKeys.identity(tenant));
+                insert.setString(1, tenant);
                 insert.executeUpdate();
             }
             try (PreparedStatement lock = connection.prepareStatement(
                     "SELECT tenant_id FROM ma_tenant_guard"
-                            + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE")) {
+                            + " WHERE guard_domain = 'output_publication' AND tenant_id = ? FOR UPDATE")) {
                 lock.setQueryTimeout(timeoutSeconds);
-                lock.setString(1, key);
+                lock.setString(1, tenant);
                 try (ResultSet result = lock.executeQuery()) {
                     ToolPublicationContract.require(result.next() && tenant.equals(result.getString("tenant_id")),
                             "Retention tenant conflicts");
@@ -96,36 +94,28 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     /**
-     * Per-Session root row only; takes no tenant-wide guard (#13800). Returns
-     * the root's {@code csi_guard} as committed now: the read is a locking one.
+     * Per-Session root row only; takes no tenant-wide guard (#13800).
+     * Always returns {@code false} (CSI guards have been removed).
      */
     static boolean lockSessionRoot(JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionRoot(jdbc, tenant, session, false, 0);
+        lockSessionRoot(jdbc, tenant, session, 0);
+        return false;
     }
 
-    private static boolean lockSessionRoot(
-            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation, int timeoutSeconds) {
+    private static void lockSessionRoot(
+            JdbcTemplate jdbc, String tenant, String session, int timeoutSeconds) {
         long time = now(jdbc);
-        // Behind a tenant guard this root wait can close a cycle with a
-        // pinned CSI Session's continuation, which holds its root while it
-        // waits for that guard; a deadlock victim here answers
-        // tenant_guard_contended like the guard side (#13800 R1-1).
-        return JdbcManagedSessionStore.namedRootDeadlock(() -> {
+        JdbcManagedSessionStore.namedRootDeadlock(() -> {
             jdbc.update(
                     "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
                     boundedParameters(jdbc, timeoutSeconds, tenant, session, hash(tenant), hash(session),
                             ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
-            return jdbc.query(
-                    "SELECT tenant_id, session_id, is_csi_guard FROM ma_session WHERE tenant_id = ? AND"
+            jdbc.query(
+                    "SELECT tenant_id, session_id FROM ma_session WHERE tenant_id = ? AND"
                             + " session_id = ? FOR UPDATE",
                     boundedParameters(jdbc, timeoutSeconds, tenant, session),
-                    (row, index) -> {
-                        boolean guarded = row.getBoolean("is_csi_guard");
-                        if (legacyMutation) {
-                            ManagedLegacySessionGuard.requireLegacyMutation(guarded);
-                        }
-                        return guarded;
-                    }).getFirst();
+                    (row, index) -> Boolean.TRUE).getFirst();
+            return null;
         });
     }
 
@@ -146,11 +136,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionHead(jdbc, tenant, session, false, true);
+        return lockSessionHead(jdbc, tenant, session, true);
     }
 
     private static Map<String, Object> lockSessionHead(
-            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation, boolean tenantGuard) {
+            JdbcTemplate jdbc, String tenant, String session, boolean tenantGuard) {
         // Bound the root and head waits as well: holding the tenant guard
         // behind one Session's writer must not convoy unrelated Sessions
         // until the database's default lock timeout (#14393 A.2).
@@ -159,13 +149,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             if (tenantGuard) {
                 lockTenant(jdbc, tenant, timeoutSeconds);
             }
-            lockSessionRoot(jdbc, tenant, session, legacyMutation, timeoutSeconds);
+            lockSessionRoot(jdbc, tenant, session, timeoutSeconds);
             var heads = jdbc.query(
                     "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
-                            + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id"
-                            + " = ? FOR UPDATE",
-                    boundedParameters(jdbc, timeoutSeconds, ManagedSchemaKeys.key(tenant),
-                            ManagedSchemaKeys.key(session), tenant, session),
+                            + " tenant_id = ? AND harness_session_id = ? FOR UPDATE",
+                    boundedParameters(jdbc, timeoutSeconds, tenant, session),
                     (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
             return heads.isEmpty() ? null : heads.getFirst();
         });
@@ -206,14 +194,13 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             ToolPublicationContract.require(
                     operation.equals(existing.getFirst().get("operation_id")),
                     "Session was retired by another operation");
+            SessionResourceCollectionCollector.enqueueCollections(jdbc, tenant, session, now(jdbc));
             return;
         }
         var heads =
                 jdbc.query(
-                        "SELECT state, recovery_status, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_active FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                        "SELECT state, recovery_status, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_active FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ? FOR UPDATE",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                        ManagedSchemaKeys.key(tenant),
-                        ManagedSchemaKeys.key(session),
                         tenant,
                         session);
         long time = now(jdbc);
@@ -237,9 +224,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 hash(tenant),
                 hash(session));
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                ManagedSchemaKeys.key(tenant),
-                ManagedSchemaKeys.key(session),
+                "UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL, is_wake_pending = 0, wake_retry_at = 0, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ?",
                 tenant,
                 session);
         jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retention_state = 'RETIRING' WHERE tenant_id = ?"
@@ -251,6 +236,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 JdbcManagedToolResultStore.scope(tenant, session),
                 tenant,
                 session);
+        SessionResourceCollectionCollector.enqueueCollections(jdbc, tenant, session, time);
     }
 
     /**
@@ -259,12 +245,12 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
      * rows is the order collection takes below the guard.
      */
     static Map<String, Object> lockSessionHeadWithoutGuard(JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionHead(jdbc, tenant, session, false, false);
+        return lockSessionHead(jdbc, tenant, session, false);
     }
 
     static Map<String, Object> lockGenericSession(
             JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionHead(jdbc, tenant, session, true, true);
+        return lockSessionHead(jdbc, tenant, session, true);
     }
 
     void lockRetainedPublication(String scope, String publication) {
@@ -280,7 +266,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                 scope,
                                 publication)
                         .getFirst();
-        lockSessionHead(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"), true, tenantGuard);
+        lockSessionHead(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"), tenantGuard);
         String state =
                 jdbc.queryForObject(
                         "SELECT retention_state FROM ma_output_capture"
@@ -406,7 +392,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     public ReadLease read(String tenant, String session) {
         return transactions.execute(
                 status -> {
-                    lockSessionHead(jdbc, tenant, session, true, false);
+                    lockSessionHead(jdbc, tenant, session, false);
                     requireLive(jdbc, tenant, session);
                     long generation =
                             jdbc.queryForObject(
@@ -605,9 +591,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                             OperationKind.OBJECT_PUT, scope, target, id);
                             long time = now(jdbc);
                             jdbc.update(
-                                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_key, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, ?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
+                                    "INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_key, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
                                     originalKey,
-                                    ManagedSessionStore.sessionScopeKey(tenant, session),
                                     scope,
                                     id,
                                     tenant,

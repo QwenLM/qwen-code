@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.ssh;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -31,6 +30,7 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeNode;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import com.sun.net.httpserver.HttpServer;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -388,7 +388,7 @@ class SshRuntimeInteropTest {
                 Map<String, Object> input = new LinkedHashMap<>();
                 input.put("command", "printf should-not-run");
                 input.put("directory", root.resolve("outside").toString());
-                String digest = CsiNativeActivationProof.sha256(JsonCodec.encode(input));
+                String digest = DigestUtils.sha256Hex(JsonCodec.encode(input));
                 Map<String, Object> wire = Map.of("sessionId", "runtime", "promptId", "prompt-no-start",
                         "callId", "call-no-start", "argsDigest", deferred ? "sha256:" + digest : digest);
                 Map<String, Object> reference = new LinkedHashMap<>(wire);
@@ -418,7 +418,7 @@ class SshRuntimeInteropTest {
                             "A".repeat(43), "http://127.0.0.1:" + node.publicationPort() + "/", publication)));
                 } else {
                     await(http.installPublisherV3(binding.getLease(), session.getSession(), Map.of("url", "http://127.0.0.1:"
-                            + node.publicationPort() + "/internal/hosted-shell-publisher/v1", "token", "A".repeat(43))));
+                            + node.publicationPort() + "/internal/hosted-shell-publisher/v1", "token", "A".repeat(43)), null));
                 }
                 Map<String, Object> capture = Map.of("tenantId", "tenant", "sessionId", "harness", "turnId", "prompt-no-start",
                         "executionCallId", prepared.getExecutionCallId(), "bindingGeneration", Long.toString(binding.getGeneration()),
@@ -609,7 +609,7 @@ class SshRuntimeInteropTest {
 
     private ToolExecutionRecord runFile(RuntimeBrokerService service, String runtime, String call) throws Exception {
         Map<String, Object> input = Map.of("file_path", "original.txt");
-        String digest = "sha256:" + CsiNativeActivationProof.sha256(JsonCodec.encode(input));
+        String digest = "sha256:" + DigestUtils.sha256Hex(JsonCodec.encode(input));
         var execution = await(service.createExecution("harness", runtime, call, Map.of("sessionId", runtime,
                 "promptId", "turn-" + call, "callId", call, "argsDigest", digest, "toolName", "read_file", "input", input)));
         for (int attempt = 0; !execution.isTerminal() && attempt < 100; attempt++) {

@@ -30,6 +30,7 @@ class ManagedStoreDecompositionTest {
             AgentSessionCommands.class,
             AgentLifecycleOperations.class,
             AgentSessionAdmissions.class,
+            AgentActionParking.class,
             AgentTurnExecution.class,
             AgentExecutionOperations.class,
             JournalStoreRows.class,
@@ -95,7 +96,7 @@ class ManagedStoreDecompositionTest {
                 insertSessionCommand/11::REQUIRED:DEFAULT:false
                 insertSessionCommand/12::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-
-                replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false insertCsiSessionCommand/7:- requireCsiRequest/2:-
+                replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
                 insertPublicChildSessionCommand/9::REQUIRED:DEFAULT:false replayChildSessionCommand/4::REQUIRED:DEFAULT:false findChildLineage/2:-
                 workspaceSessionOptions/2::REQUIRED:DEFAULT:false supportsPlanMode/1:- hasMcpServers/1:-
@@ -105,6 +106,7 @@ class ManagedStoreDecompositionTest {
                 beginSessionMutation/6::REQUIRED:DEFAULT:false
                 beginSessionMutation/7::REQUIRED:DEFAULT:false completeSessionMutation/7::REQUIRED:DEFAULT:false abandonSessionMutation/4::REQUIRED:DEFAULT:false
                 beginOperation/6::REQUIRED:DEFAULT:false workspaceFilesEnabled/0:- workspaceShellEnabled/0:-
+                creationToolProfile/5::REQUIRED:DEFAULT:false
                 beginWorkspaceClose/7::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/8::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/9::REQUIRED:DEFAULT:false
                 hasCompletedWorkspaceClose/2:- completedWorkspaceCloses/2:- unarchiveWorkspaceSession/5::REQUIRED:DEFAULT:false
                 beginChildClose/8::REQUIRED:DEFAULT:false beginContextCompression/8::REQUIRED:DEFAULT:false contextCompressionState/2:-
@@ -134,7 +136,7 @@ class ManagedStoreDecompositionTest {
                 deferMaterializationTarget/2::REQUIRED:DEFAULT:false findDispatchable/2:- findRuntimeRecoveryParked/2:-
                 claimTurn/5::REQUIRED:DEFAULT:false renewTurn/5::REQUIRED:DEFAULT:false releaseTurnLease/4::REQUIRED:DEFAULT:false
                 markTurnRecoveryBlocked/6::REQUIRED:DEFAULT:false markTurnFailureRecovery/5::REQUIRED:DEFAULT:false requestRecoveryRecheck/3::REQUIRED:DEFAULT:false
-                parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
+                parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false parkTurnForAction/4::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
                 bindHarness/5::REQUIRED:DEFAULT:false bindSessionHarness/3::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
                 withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
                 retractContinuationOutput/6::REQUIRED:DEFAULT:false retractHarnessTurnOutput/7::REQUIRED:DEFAULT:false retractHarnessTurnOutput/10::REQUIRED:DEFAULT:false
@@ -156,9 +158,8 @@ class ManagedStoreDecompositionTest {
                 commandTransaction/7::REQUIRED:READ_COMMITTED:true hasPristineInitialJournal/3::NOT_SUPPORTED:DEFAULT:true readResource/5:-
                 readSnapshotResource/5:- readOwnerResource/5:- publishAgentInstructions/4::REQUIRED:DEFAULT:false
                 publishAgentSkills/4::REQUIRED:DEFAULT:false publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false
-                publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:- requireCsiApplicationCredential/3:-
-                requireCsiHistoricalCredential/5:- preflightCsiTerminal/5:- commitCsiTerminal/5:-
-                validateCsiTerminalBytes/1:- lockCsiOriginal/2:- hasLiveWriter/2::REQUIRED:DEFAULT:false
+                publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:-
+                hasLiveWriter/2::REQUIRED:DEFAULT:false
                 commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }
