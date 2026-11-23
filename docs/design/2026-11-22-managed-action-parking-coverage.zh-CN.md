@@ -102,9 +102,9 @@
 
 - **依赖。** 第二阶段的 `qwen.managed-agent.runtime-broker.mcp-parking.enabled`。只有连接与目录在挂起期间被保留、新 writer 按持久化 owner 身份重新获取时，冷加载看到的 MCP 工具定义才能保证与 continuation 中保存的定义深度相等。不满足时不停靠：停靠后才发现恢复失败，比保持常驻更糟。
 - **方案。** 生产者把 MCP 工具纳入白名单；continuation 记录 MCP 配置的持久化修订与目录 pin。资格要求 MCP 停靠已启用、当前 grant 能续接同一 owner，并且批次中排在前面的 MCP 调用都已提交结果。如果仍有进行中的调用，第一阶段的"Runtime 工作未结算"条件已会拒绝。被等待的 MCP 调用尚未派发，批准后恰好派发一次。
-- **continuation 与目录。** continuation 解析器的工具白名单（`hosted-approval-continuation.ts:55-63`），以及写死 `mcp: false` 的恢复请求（`hosted-workspace-tool-turn.ts:4433-4448`），都要支持 MCP 调用及其 MCP 请求身份。`ParkedMcpReclamationJob` 跳过 Session 持有审批停靠证书的 owner，这样 continuation 固定的目录仍是 Session 会续接的那个；owner 一旦被回收，每次 pin 检查都会变成拒绝。
+- **continuation 与目录。** continuation 解析器的工具白名单（`hosted-approval-continuation.ts:55-63`），以及写死 `mcp: false` 的恢复请求（`hosted-workspace-tool-turn.ts:4433-4448`），都要支持 MCP 调用及其 MCP 请求身份。`ParkedMcpReclamationJob` 必须跳过 Session 持有审批停靠证书的 owner：`JdbcParkedMcpOwners.sealedFor` 目前只检查 `state = 'SEALED'`，因此 S6 要新增停靠证书谓词和回收测试，保证 continuation 固定的目录仍是 Session 会续接的那个；owner 一旦被回收，每次 pin 检查都会变成拒绝。
 - **不变量。** MCP 调用没有原生文件那样的 prepare/receipt 协议，所以绝不重放已派发的调用；任何调用的派发状态不确定时都拒绝。
-- **改动面。** Harness 生产者与恢复臂，以及与 Broker MCP owner 续接的对齐。
+- **改动面。** Harness 生产者与恢复臂、Broker MCP owner 续接，以及 `JdbcParkedMcpOwners.sealedFor` / `ParkedMcpReclamationJob`；新增测试证明持有审批停靠证书的 owner 不会被回收。
 
 ### 4.7 S7：extension command-step 审批
 
@@ -156,7 +156,7 @@
 - **S3**：child Session 的停靠时长超过 relay 的消息 Turn 等待时间，父 Session 仍能收敛；单问题的 child 批次在冷恢复后交还挂载（`questionChild`）。
 - **S4**：由 monitor 通知、loop 触发、automation 运行和 child 结果启动的 Turn，各自停靠后分别走决定、模式变更、到期，以及来源支持时的取消，不经协调器都能完成；清除证书后又崩溃的 writer 会把 head 留给扫描；泵不再按崩溃结算 `await_action` 的 wake 输入。
 - **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发；另有单独用例覆盖 PreToolUse 的 `updatedInput`、PermissionRequest 的 `decision.updatedInput`，以及 Hooks 在第一个审批之前已为兄弟调用运行过的批次。
-- **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放。
+- **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放；持有审批停靠证书的 owner 经过回收作业的空闲窗口扫描后仍保留原目录。
 - **真实进程与 MySQL 8.4**：每个切片至少一个"停靠 → 换代 Harness → 决定"用例进入必跑 CI 层级；H2 结果不能替代。
 
 ## 8. 验收标准
