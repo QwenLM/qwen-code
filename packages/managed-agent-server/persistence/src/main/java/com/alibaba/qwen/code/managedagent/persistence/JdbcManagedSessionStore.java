@@ -60,7 +60,6 @@ public class JdbcManagedSessionStore
     public JdbcManagedSessionStore(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore extensionRecords,
             JdbcManagedActionStore actions) {
         this(jdbc, extensionRecords, actions, null,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null, WriterCredentialPolicy.unbound(), null);
     }
 
@@ -68,7 +67,6 @@ public class JdbcManagedSessionStore
     public JdbcManagedSessionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             JdbcManagedExtensionRecordStore extensionRecords, JdbcManagedActionStore actions,
             com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules,
-            com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
             @org.springframework.lang.Nullable JdbcWorkspaceExecutionStore lifecycleExecution,
             @org.springframework.lang.Nullable SessionQueryStore lifecycleSessions,
             @org.springframework.lang.Nullable ToolPublicationObjectStore publicationObjects,
@@ -88,7 +86,7 @@ public class JdbcManagedSessionStore
         ToolPublicationRetentionStore outputRetention = new ToolPublicationRetentionStore(jdbc, manager);
         this.journalPacks = sessionResourceSettings == null ? null
                 : new JdbcJournalPacks(jdbc, publicationObjects, sessionResourceSettings);
-        this.storeRows = new JournalStoreRows(readerVersion, jdbc, publicationObjects);
+        this.storeRows = new JournalStoreRows(jdbc, publicationObjects);
         this.jdbc = jdbc;
         this.publicationObjects = publicationObjects;
         this.fencing = new JournalFencing(storeRows, jdbc, credentials);
@@ -96,8 +94,8 @@ public class JdbcManagedSessionStore
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
         this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention);
         this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc, sessionResourceSettings);
-        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, extensionRecords);
-        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
+        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, jdbc, credentials, extensionRecords);
+        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
     }
 
     static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS;

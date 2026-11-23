@@ -14,6 +14,10 @@ import {
   getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import { HookSystem } from '../hooks/hookSystem.js';
 import { HookEventName, HookType } from '../hooks/types.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
@@ -111,7 +115,11 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { clampOutputTokensToWindow } from './tokenLimits.js';
-import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import {
+  EMPTY_AUTO_MEMORY_CATALOG,
+  findLatestAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import {
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
@@ -3435,6 +3443,34 @@ describe('LlmChat', async () => {
       mockStream(textStream('after compression'));
       await sendDrain('continue', 'memory-reseed');
       expect(snapshots(requestAt(5).contents as Content[])).toHaveLength(1);
+    });
+
+    it('omits the fresh empty catalog and updates restored sessions when entries change', async () => {
+      let catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const send = async (id: string) => {
+        mockStream(textStream('done'));
+        await sendDrain(id, id);
+        const calls = vi.mocked(mockContentGenerator.generateContentStream).mock
+          .calls;
+        return findLatestAutoMemorySnapshot(
+          calls.at(-1)?.[0].contents as Content[],
+        );
+      };
+
+      expect(await send('fresh')).toBeUndefined();
+      const entry = '- [Fresh entry](topic.md)';
+      catalog = entry;
+      expect((await send('one-entry'))?.text).toContain(entry);
+
+      catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      const empty = await send('deleted-last-entry');
+      expect(empty?.text).toContain(EMPTY_AUTO_MEMORY_CATALOG);
+      chat.setHistory(structuredClone(chat.getHistory()));
+      expect(await send('resume-while-empty')).toEqual(empty);
+
+      catalog = entry;
+      expect((await send('restored-entry'))?.text).toContain(entry);
     });
 
     it('records a snapshot only after successful assembly and deduplicates later sends', async () => {
@@ -7580,6 +7616,14 @@ describe('LlmChat', async () => {
           parts: [nestedPart],
         },
       };
+      const topRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/top.output'],
+      };
+      const responseRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/response.output'],
+      };
+      setToolOutputRecovery(topLevelPart, topRecovery);
+      setToolOutputRecovery(functionResponsePart, responseRecovery);
       const entry = content('user', topLevelPart, functionResponsePart);
       chat.addHistory(entry);
       const structuredCloneSpy = forbidDeepClone();
@@ -7588,12 +7632,17 @@ describe('LlmChat', async () => {
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
       expect(history).toEqual([entry]);
+      expect(JSON.stringify(history)).not.toContain('/tmp/tool-results/');
       expect(history[0]).not.toBe(entry);
       expect(history[0]!.parts).not.toBe(entry.parts);
       expect(history[0]!.parts![0]).not.toBe(topLevelPart);
       expect(history[0]!.parts![0]!.inlineData).toBe(topInlineData);
+      expect(getToolOutputRecovery(history[0]!.parts![0]!)).toBe(topRecovery);
       const copiedFunctionResponsePart = history[0]!.parts![1]!;
       expect(copiedFunctionResponsePart).not.toBe(functionResponsePart);
+      expect(getToolOutputRecovery(copiedFunctionResponsePart)).toBe(
+        responseRecovery,
+      );
       expect(copiedFunctionResponsePart.functionResponse).not.toBe(
         functionResponsePart.functionResponse,
       );
@@ -18568,20 +18617,35 @@ describe('LlmChat', async () => {
         expect(compressSpy).toHaveBeenCalledTimes(2);
       });
 
-      it('surfaces an actionable error when compaction cannot recover the 413', async () => {
-        const compressSpy = noopThen(
-          failed(CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY, 90_000),
-        );
-        failThen([sdkStyle413()]);
-
-        const stream = await send(
-          'next prompt',
+      // Only an API failure is transient and keeps the original 413 (the
+      // propagation cases below). Any other failure status earns the
+      // new-session advice. A history too large for any compression request
+      // belongs here: a later send only adds to it (#9455).
+      it.each([
+        [
+          'compaction cannot recover the 413',
+          CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
           'prompt-id-413-compression-failed',
-        );
-        await expect(collect(stream)).rejects.toThrow(/start a new session/i);
-        expect(compressSpy).toHaveBeenCalledTimes(2);
-        expectStreamCalls(1);
-      });
+        ],
+        [
+          'the history is too large to compress',
+          CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          'prompt-id-413-input-too-large',
+        ],
+      ])(
+        'surfaces an actionable error when %s',
+        async (_label, status, promptId) => {
+          const compressSpy = noopThen(failed(status, 90_000));
+          failThen([sdkStyle413()]);
+
+          const caught = await sendCaught(promptId);
+
+          expect(caught?.message).toMatch(/start a new session/i);
+          expect(caught?.status).toBe(413);
+          expect(compressSpy).toHaveBeenCalledTimes(2);
+          expectStreamCalls(1);
+        },
+      );
 
       it('keeps token-wording overflow on the original reactive path', async () => {
         // Regression guard: the 413 classification must not change how

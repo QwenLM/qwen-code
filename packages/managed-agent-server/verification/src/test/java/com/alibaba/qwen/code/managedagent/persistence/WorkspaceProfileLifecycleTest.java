@@ -12,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -56,8 +55,10 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
+    // D3: FILES joins the v2 settlement witnesses — its verifyResources branch
+    // settles like MCP (no Shell capture/publication/monitor).
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3,
-            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP})
+            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.FILES})
     void closesWithoutResourcesAndDeletesAtomicallyWithPrivateRetirement(String profile) {
         var f = fixture();
         var op = admit(f, profile, OperationKind.DELETE);
@@ -140,7 +141,8 @@ class WorkspaceProfileLifecycleTest {
         f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "expired", 60_000L)));
         f.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
-        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", protocol == 2 ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES);
+        // D3: ordinary files is v2 now; external-files keeps the v1 witness.
+        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", protocol == 2 ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.EXTERNAL_FILES);
         f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session, OperationKind.CLOSE,
                 "owner", "a".repeat(64), "close", "digest", true, protocol));
         assertThat(f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class)).isZero();
@@ -203,8 +205,11 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @Test
-    void filesV1DrainingStillRejectsAnExpiredWriter() {
+    void externalFilesV1DrainingStillRejectsAnExpiredWriter() {
         var f = fixture();
+        // D3: ordinary files moved to v2; external-files keeps the v1 draining
+        // path, so the expired-writer witness rides external-files now.
+        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.EXTERNAL_FILES);
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
@@ -512,11 +517,11 @@ class WorkspaceProfileLifecycleTest {
         var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
         Runnable verify = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation, java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
         if (publication) {
-            f.jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id, execution_key,"
+            f.jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id, publication_id, execution_key,"
                     + " capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
-                    + " admission_resource_id, receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?,"
+                    + " admission_resource_id, receipt_sequence, receipt_revision) VALUES (?, 'tenant', 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?,"
                     + " 'READY', 1024, 1024, 1024, 'REFERENCED', 'outcome', 1, 1)",
-                    "s".repeat(64), "t".repeat(64), f.session, "e".repeat(64), "b".repeat(64), "h".repeat(64));
+                    "s".repeat(64), f.session, "e".repeat(64), "b".repeat(64), "h".repeat(64));
             f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = X'6f7574636f6d65'");
             assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ManagedAgentException.class);
             verify.run();
@@ -611,10 +616,9 @@ class WorkspaceProfileLifecycleTest {
                 .putObject("runtime").put("runtimeBindingId", binding.getBindingId()).put("generation", "1");
         ManagedExtensionRecords.requireChildRun(shell);
         var ref = f.resource("background-record", "managed-child_run", shell);
-        f.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id,"
+        f.jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id,"
                 + " domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create)"
-                + " VALUES (?, ?, 'tenant', 'workspace', ?, 'child_run', 'shell-1', ?, 1, ?, 'background_shell', 'settled', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", f.session), "r".repeat(64), f.session, "o".repeat(64), ref.path("resourceId").asText());
+                + " VALUES (?, 'tenant', 'workspace', ?, 'child_run', 'shell-1', ?, 1, ?, 'background_shell', 'settled', 1)", "r".repeat(64), f.session, "o".repeat(64), ref.path("resourceId").asText());
         var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),

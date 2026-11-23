@@ -16,7 +16,7 @@ Reference: the MySQL chapter, printed pages 32–35, in the
 
 - Give every table an unsigned auto-increment, unique `id`. Use it as the primary
   key except on `ma_session` and `ma_tenant_guard`, which retain their original
-  business primary keys `(tenant_id, session_id)` and `(tenant_key, guard_domain)`.
+  business primary keys `(tenant_id, session_id)` and `(tenant_id, guard_domain)`.
   These two tables coordinate existing records through upserts. With `id` as
   their clustered primary key, native MySQL captured `PRIMARY` supremum locks
   blocking unrelated Sessions, tenants and guard domains during acquisition.

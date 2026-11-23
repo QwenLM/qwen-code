@@ -90,13 +90,13 @@ public class JdbcManagedToolResultStore
                                 .substring(10);
                 rows.add(new Object[] {
                         ManagedSchemaKeys.operationKey(OperationKind.TOOL_RESULT_PROJECTION, sourceScope,
-                                executionKey, source.id()), sourceScope, sourceScope, ManagedSchemaKeys.identity(source.id()),
+                                executionKey, source.id()), sourceScope, ManagedSchemaKeys.identity(source.id()),
                         ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(workspace), ManagedSchemaKeys.identity(session),
                         executionKey, executionKey, JSON.valueToTree(source).toString(), source.sourceDigest(),
                         createdAt, createdAt});
             }
             jdbc.batchUpdate(
-                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, target_kind, target_key, execution_key, request_json, request_digest, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?, 'PROJECTING', 'PENDING', ?, ?)", rows);
+                    "INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, target_kind, target_key, execution_key, request_json, request_digest, phase, state, gmt_create, gmt_modified) VALUES (?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?, 'PROJECTING', 'PENDING', ?, ?)", rows);
         }
     }
 
@@ -421,7 +421,7 @@ public class JdbcManagedToolResultStore
                                         sequence);
                                 String sessionScope = scope(source.tenantId(), source.sessionId());
                                 jdbc.update(
-                                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) SELECT session_scope_key, 'ARTIFACT', ?, 1, resource_key, tenant_id, workspace_id, session_id, resource_id, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource WHERE scope_key = ? AND publication_id = ? AND capture_state = 'VERIFIED' AND deletion_operation_key IS NULL",
+                                        "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) SELECT 'ARTIFACT', ?, 1, resource_key, tenant_id, workspace_id, session_id, resource_id, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource WHERE scope_key = ? AND publication_id = ? AND capture_state = 'VERIFIED' AND deletion_operation_key IS NULL",
                                         ManagedSchemaKeys.key(
                                                 sessionScope,
                                                 artifact.descriptor().path("id").asText()),
@@ -578,21 +578,12 @@ public class JdbcManagedToolResultStore
         require(
                 limit >= 1 && limit <= 100 && (watermark == null) == (beforeId == null),
                 "Invalid workspace artifact page");
-        long through =
-                watermark == null
-                        ? jdbc.queryForObject(
-                                "SELECT COALESCE(MAX(a.id), 0)" + WORKSPACE_ARTIFACT_SOURCE,
-                                Long.class,
-                                tenant,
-                                workspace,
-                                workspace,
-                                actorKey)
-                        : watermark;
-        require(through >= 0, "Invalid workspace artifact watermark");
-        List<Object> args = new ArrayList<>(List.of(tenant, workspace, workspace, actorKey, through));
+        require(watermark == null || watermark >= 0, "Invalid workspace artifact watermark");
+        List<Object> args = new ArrayList<>(List.of(tenant, workspace, workspace, actorKey));
         String cursor = "";
-        if (beforeId != null) {
-            cursor = " AND a.id < ?";
+        if (watermark != null) {
+            cursor = " AND a.id <= ? AND a.id < ?";
+            args.add(watermark);
             args.add(beforeId);
         }
         args.add(limit + 1);
@@ -600,9 +591,11 @@ public class JdbcManagedToolResultStore
                 jdbc.query(
                         "SELECT a.id, " + ManagedSchemaProjection.ARTIFACT.columns("a")
                                 + ", r.request_json" + WORKSPACE_ARTIFACT_SOURCE
-                                + " AND a.id <= ?" + cursor + " ORDER BY a.id DESC LIMIT ?",
+                                + cursor + " ORDER BY a.id DESC LIMIT ?",
                         (row, index) -> new WorkspaceRow(artifact(row, index), row.getLong("id")),
                         args.toArray());
+        // The watermark bounds row ids; visibility is re-evaluated on every page.
+        long through = watermark == null ? (rows.isEmpty() ? 0 : rows.getFirst().id()) : watermark;
         List<WorkspaceRow> page = rows.subList(0, Math.min(rows.size(), limit));
         List<Artifact> artifacts = page.stream().map(WorkspaceRow::artifact).toList();
         long lastId = page.isEmpty() ? 0 : page.getLast().id();

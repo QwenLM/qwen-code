@@ -454,7 +454,11 @@ describe('Hosted context compression', () => {
       sessionId: session.authority.sessionHeader.sessionKey.sessionId,
       sessionIdGenerated: true,
       chatRecording: false,
+      acp: true,
     });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[1]).not.toHaveProperty(
+      'channel',
+    );
     expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]).toMatchObject({
       lspDisabled: true,
     });

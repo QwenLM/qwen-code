@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -224,11 +223,8 @@ public final class ToolPublicationStore {
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
         var head = jdbc.query(
-                                "SELECT workspace_id, state, storage_version, writer_id, writer_generation, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session()).getFirst();
-        require(((Number) head.get("storage_version")).intValue() >= 1
-                && ((Number) head.get("storage_version")).intValue() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED,
-                "Managed Session storage version is unsupported.");
+                                "SELECT workspace_id, state, writer_id, writer_generation, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                row.tenant(), row.session()).getFirst();
         var current = jdbc.query(
                                 "SELECT token_hash, state, expires_at, binding_digest,"
                                     + " binding_json, tenant_id, workspace_id, session_id, CASE"
@@ -277,7 +273,7 @@ public final class ToolPublicationStore {
                 deferActivationLapse);
         nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         Integer writerLive = jdbc.queryForObject(
-                        "SELECT CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session());
+                        "SELECT CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ? FOR UPDATE", Integer.class, row.tenant(), row.session());
         if (writerLive == null || writerLive != 1) {
             require(false, "Original Session or activation expired");
         }
@@ -303,7 +299,6 @@ public final class ToolPublicationStore {
         String tenant = text(key, "tenantId");
         String workspace = text(key, "workspaceId");
         String session = text(key, "sessionId");
-        String tenantKey = ManagedSchemaKeys.key(tenant);
         String scope = hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
         JsonNode candidate = request.get("binding");
         String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
@@ -354,14 +349,14 @@ public final class ToolPublicationStore {
             require(bytes <= capacity.executionBytes(), "Execution capture capacity exceeded");
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
-            quotas.requireCapacity(tenantKey, scope, allocation, writer.now());
-            jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
+            quotas.requireCapacity(tenant, scope, allocation, writer.now());
+            jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id,"
                             + " session_id, publication_id, execution_key, capture_id, binding_json,"
                         + " binding_digest, token_hash, state, expires_at, capture_bytes,"
                         + " producer_bytes, admission_bytes, capture_held_bytes,"
                         + " producer_held_bytes, admission_held_bytes, is_write_evidence) VALUES (?,"
-                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, TRUE)",
-                    scope, tenantKey, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
+                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, TRUE)",
+                    scope, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
                     text(candidate, "captureId"), candidate.toString(), digest, tokenHash, expires, bytes,
                     ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES,
                     bytes, ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES);
@@ -585,10 +580,6 @@ public final class ToolPublicationStore {
         return false;
     }
 
-    ToolExecutionRecord lockOriginalAcknowledgementResult(JsonNode key, String publicationId, JsonNode finished) {
-        throw new IllegalStateException("Original acknowledgement is no longer supported");
-    }
-
     // The admission lanes' entry: placement or the Session root, then root
     // and head, as collection does (design 2026-11-04-managed-publication-placement).
     void lockAdmissionLane(JsonNode key, String publicationId, JsonNode original,
@@ -597,10 +588,6 @@ public final class ToolPublicationStore {
         lockOriginalSettledResult(key, publicationId, original);
         sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerId, writerGeneration, writerToken, placement, false);
-    }
-
-    void requireStagedCall(JsonNode key, String publicationId) {
-        // No CSI ambient check needed; all publications are ordinary.
     }
 
     private static JsonNode grant(String id, Row row) {
