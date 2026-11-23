@@ -786,18 +786,28 @@ describe('local container recipe pins', () => {
       );
     };
     const validDocumentedPath = (token) => {
-      if (typeof token !== 'string') return false;
-      const path =
-        token.length >= 2 &&
-        ((token.startsWith('"') && token.endsWith('"')) ||
-          (token.startsWith("'") && token.endsWith("'")))
-          ? token.slice(1, -1)
-          : token;
-      return (
-        path.length > 0 &&
-        !path.split('/').includes('..') &&
-        !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path)
-      );
+      if (typeof token !== 'string' || token.length === 0) return false;
+      if (token === '"$rd"') return true;
+      const quote = token[0];
+      const quoted = ['"', "'"].includes(quote);
+      if (
+        (quoted && token.at(-1) !== quote) ||
+        (!quoted && ['"', "'"].includes(token.at(-1)))
+      ) {
+        return false;
+      }
+      const path = quoted ? token.slice(1, -1) : token;
+      if (path.length === 0 || /[\s`$;|&()"']/.test(path)) {
+        return false;
+      }
+      const unwrapped =
+        path.startsWith('<') && path.endsWith('>') ? path.slice(1, -1) : path;
+      if (unwrapped.length === 0) return false;
+      const windowsDrive = /^[A-Za-z]:[\\/]/.test(unwrapped);
+      if (!windowsDrive && /^[A-Za-z][A-Za-z0-9+.-]*:/.test(unwrapped)) {
+        return false;
+      }
+      return !unwrapped.split(/[\\/]/).includes('..');
     };
     const validCoordinate = (raw) => {
       let text = raw.replace(/\s+/g, ' ').trim();
@@ -812,7 +822,16 @@ describe('local container recipe pins', () => {
       const options = new Map();
       const positional = [];
       const tokens = text.split(' ').filter(Boolean);
-      if (!tokens.every(validToken)) return false;
+      if (
+        !tokens.every(
+          (token, index) =>
+            validToken(token) ||
+            (['--context-out', '--state-root'].includes(tokens[index - 1]) &&
+              validDocumentedPath(token)),
+        )
+      ) {
+        return false;
+      }
       for (let index = 0; index < tokens.length; index += 1) {
         const token = tokens[index];
         if (token === '--trust-pr-head') {
@@ -882,6 +901,7 @@ describe('local container recipe pins', () => {
     // shell parser. A different entry point, path, option, or value fails.
     const placeholder = '<[A-Za-z0-9_./,:-]+>';
     const value = String.raw`(?:[A-Za-z0-9_~./:+=-]+|${placeholder}|"(?:${placeholder}|\$rd)")`;
+    const pathValue = String.raw`(?:[A-Za-z0-9_~./:+=\\{}<>-]+|${placeholder}|"(?:${placeholder}|\$rd)")`;
     const repo = String.raw`(?:<owner>/<repo>|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)`;
     const head = '(?:<headSha>|<40hex>|<H>)';
     const round = '(?:<r>|[1-9][0-9]*)';
@@ -951,7 +971,7 @@ describe('local container recipe pins', () => {
       if (kind === 'check') {
         const match = text.match(
           exact(
-            String.raw` --context (${value}) --context-sha256 <digest>(?: --context-root (${value}))? (${value})`,
+            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))? (${pathValue})`,
           ),
         );
         return (
@@ -970,7 +990,7 @@ describe('local container recipe pins', () => {
           String.raw` <n> --start --head ${head} --round ${round} --repo ${repo}(?:${stateRoot})?`,
         );
         const complete = exact(
-          String.raw` <n> --complete --head ${head} --round ${round}(?: --registration-nonce <nonce>)? --verdict ${verdict}(?: --artifact-dir (${value}))?(?: --comment-id ${value})? --repo ${repo}(?:${stateRoot})?`,
+          String.raw` <n> --complete --head ${head} --round ${round}(?: --registration-nonce <nonce>)? --verdict ${verdict}(?: --artifact-dir (${pathValue}))?(?: --comment-id ${value})? --repo ${repo}(?:${stateRoot})?`,
         );
         const release = exact(
           String.raw` <n> --release --head ${head}(?: --round ${round})?(?: --registration-nonce <nonce>)? --repo ${repo}(?:${stateRoot})?`,
@@ -1048,9 +1068,11 @@ describe('local container recipe pins', () => {
         }));
       const collectHeredocBodies = (lines, start, selected, inputAt) => {
         const declarations = heredocDeclarations(selected.join('\n'));
+        const bodies = [];
         let index = start;
         let complete = true;
         for (const { stripTabs, delimiter } of declarations) {
+          const bodyStart = index + 1;
           let terminated = false;
           while (index + 1 < lines.length) {
             const input = inputAt(index + 1);
@@ -1062,6 +1084,7 @@ describe('local container recipe pins', () => {
               : withoutCarriageReturn;
             if (closing === delimiter) {
               terminated = true;
+              bodies.push([bodyStart, index - 1]);
               break;
             }
           }
@@ -1070,7 +1093,7 @@ describe('local container recipe pins', () => {
             break;
           }
         }
-        return { index, complete };
+        return { index, complete, bodies };
       };
       const nodeProgramBoundary = (text) =>
         /^node\s+(?:-|["']?(?:\/|<|\$)|(?:\S+\/\S*|\S+\.[cm]?js)(?=\s|$)|[A-Za-z0-9_.-]+\s*$)/.test(
@@ -1191,10 +1214,56 @@ describe('local container recipe pins', () => {
           .trim();
         return !/[;|&$<>]/.test(trailing);
       };
+      const staticText = (node, source) => {
+        const raw = source.slice(node.startIndex, node.endIndex);
+        if (node.type === 'word' || node.type === 'number') return raw;
+        if (node.type === 'raw_string') return raw.slice(1, -1);
+        if (
+          node.type === 'string' &&
+          node.namedChildren.every((child) => child.type === 'string_content')
+        ) {
+          return raw
+            .slice(1, -1)
+            .replace(/\\(["\\$`])/g, '$1')
+            .replace(/\\\r?\n/g, '');
+        }
+        if (node.type === 'command_name' && node.namedChildCount === 1) {
+          return staticText(node.namedChild(0), source);
+        }
+        return null;
+      };
+      const staticCommandName = (node, source) => {
+        if (
+          !node ||
+          node.type !== 'command_name' ||
+          node.namedChildCount !== 1
+        ) {
+          return null;
+        }
+        const child = node.namedChild(0);
+        if (child.type === 'word') {
+          const raw = source.slice(child.startIndex, child.endIndex);
+          return raw.includes('\\') ? null : raw;
+        }
+        return staticText(child, source);
+      };
+      const argumentNodes = (command) => {
+        const result = [];
+        for (let index = 0; index < command.childCount; index += 1) {
+          if (command.fieldNameForChild(index) === 'argument') {
+            result.push(command.child(index));
+          }
+        }
+        return result;
+      };
+      const walk = (node, visit) => {
+        visit(node);
+        for (const child of node.namedChildren) walk(child, visit);
+      };
       // Raw Markdown needs a structural command boundary so ordinary English
       // is not fed to the shell parser. Inside an actual Bash fence there is no
       // such pre-filter: the complete block was already selected above.
-      const executableBoundary = (source) => {
+      const executableBoundary = async (source) => {
         const text = foldContinuations(source).trim();
         const directProgram =
           /^(?:"[^"\r\n]+"|'[^'\r\n]+'|(?![-@A-Z])[^\s;|&()]+)\s+(?:-|\/(?=\S)|\.\/)/.test(
@@ -1229,35 +1298,137 @@ describe('local container recipe pins', () => {
           /(?:^|[;&|]\s*)python3(?=\s|$)/,
           /^(?=[A-Za-z_$/'"\\`])\S+\s+(?:(?:-e|--eval)(?=\s|$)|["']?\S+\.[cm]?js(?=\s|$))/,
         ];
-        return (
+        if (
           nodeProgramBoundary(text) ||
           directProgram ||
           compoundControl ||
           checks.some((check) => check.test(text))
-        );
+        ) {
+          return true;
+        }
+        if (!/\b(?:exec|eval|env|nice|sudo|ruby|python3?)\b/.test(text)) {
+          return false;
+        }
+        let tree;
+        try {
+          tree = await parseShellCommand(
+            text
+              .replace(/<[^<>\r\n]+>/g, (placeholder) =>
+                'P'.repeat(placeholder.length),
+              )
+              .replaceAll('!=', '= '),
+          );
+        } catch {
+          return false;
+        }
+        try {
+          let found = false;
+          const visit = (node) => {
+            if (found || node.type === 'command_substitution') return;
+            if (node.type !== 'command') {
+              for (const child of node.namedChildren) visit(child);
+              return;
+            }
+            const name = staticCommandName(
+              node.childForFieldName('name'),
+              text,
+            );
+            if (!name) return;
+            const args = argumentNodes(node);
+            const basename = name.split('/').at(-1);
+            if (['exec', 'eval'].includes(name) && args.length > 0) {
+              found = true;
+              return;
+            }
+            if (
+              args.length > 0 &&
+              ['env', 'nice', 'sudo', 'ruby', 'python', 'python3'].includes(
+                basename,
+              )
+            ) {
+              found = true;
+              return;
+            }
+          };
+          visit(tree.rootNode);
+          return found;
+        } finally {
+          tree.delete();
+        }
       };
-      const executableInlineTail = (trailing) => {
+      const balancedMarkdownEnd = (text, start, limit) => {
+        const open = text[start];
+        const close = open === '[' ? ']' : ')';
+        let depth = 0;
+        for (
+          let index = start;
+          index < text.length && index - start <= limit;
+          index += 1
+        ) {
+          const char = text[index];
+          if (char === '\n' || char === '\r') return null;
+          if (char === '\\') {
+            index += 1;
+            continue;
+          }
+          if (char === open) {
+            depth += 1;
+            if (depth > 8) return null;
+          } else if (char === close) {
+            depth -= 1;
+            if (depth === 0) return index + 1;
+          }
+        }
+        return null;
+      };
+      const stripMarkdownSuffix = (text) => {
+        const start = text.search(/[^ \t]/);
+        if (start < 0) return null;
+        if (text[start] === ')' || text[start] === '}') return start + 1;
+        let target = start;
+        if (text[target] === ']') {
+          target += 1;
+          while (text[target] === ' ' || text[target] === '\t') target += 1;
+        } else {
+          if (text[target] === '!' && text[target + 1] === '[') target += 1;
+          if (text[target] !== '[') return null;
+          const labelEnd = balancedMarkdownEnd(text, target, 200);
+          if (labelEnd === null) return null;
+          target = labelEnd;
+          while (text[target] === ' ' || text[target] === '\t') target += 1;
+        }
+        if (!['(', '['].includes(text[target])) return null;
+        const targetEnd = balancedMarkdownEnd(
+          text,
+          target,
+          text[target] === '(' ? 1000 : 200,
+        );
+        return targetEnd;
+      };
+      const executableInlineTail = async (trailing) => {
         let remainder = trailing;
         for (let count = 0; count < 8; count += 1) {
-          const withoutClosers = remainder.replace(/^[ \t]*[)\]}]+[ \t]*/, '');
-          const withoutLink = withoutClosers.replace(
-            /^[ \t]*\[[^\]\r\n]{0,200}\]\([^)\r\n]{0,1000}\)[ \t]*/,
-            '',
-          );
-          if (withoutLink === remainder) break;
-          remainder = withoutLink;
+          const end = stripMarkdownSuffix(remainder);
+          if (end === null) break;
+          remainder = remainder.slice(end);
         }
         const tail = remainder.match(
           /^[ \t]*(?:&&|\|\||\|&|[;|&])[ \t]*([\s\S]+)$/,
         )?.[1];
-        return tail && executableBoundary(tail) ? tail : null;
+        return tail && (await executableBoundary(tail)) ? tail : null;
       };
       for (const body of transcriptBodies) {
         const lines = body.split('\n');
         for (let index = 0; index < lines.length; index += 1) {
           const prompted = lines[index].match(/^[ \t]*[$#][ \t]+(.*)$/)?.[1];
           const raw = lines[index].trim();
-          if (prompted === undefined && !executableBoundary(raw)) continue;
+          if (
+            prompted === undefined &&
+            heredocDeclarations(raw).length === 0 &&
+            !(await executableBoundary(raw))
+          ) {
+            continue;
+          }
           const selected = [prompted ?? raw];
           const inputAt = (line) => lines[line]?.replace(/^[ \t]*>[ \t]?/, '');
           while (
@@ -1280,6 +1451,62 @@ describe('local container recipe pins', () => {
           fragments.push({ source: selected.join('\n'), quotedGate: false });
         }
       }
+      const rawLines = document.split('\n');
+      const rawLineOffsets = [];
+      let rawOffset = 0;
+      for (const line of rawLines) {
+        rawLineOffsets.push(rawOffset);
+        rawOffset += line.length + 1;
+      }
+      const rawHeredocs = new Map();
+      const heredocDataRanges = [];
+      for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex += 1) {
+        if (inFences(rawLineOffsets[lineIndex])) continue;
+        let end = lineIndex;
+        let chainContinues = false;
+        while (end + 1 < rawLines.length) {
+          const line = rawLines[end];
+          if (chainContinues && /^\s*#/.test(line)) {
+            end += 1;
+            continue;
+          }
+          chainContinues = /(?:&&|\|\||\|&?)[ \t]*(?:#[^\r\n]*)?\r?$/.test(
+            line,
+          );
+          if (!/\\[ \t]*\r?$/.test(line) && !chainContinues) break;
+          end += 1;
+        }
+        const selected = rawLines.slice(lineIndex, end + 1);
+        const header = selected.join('\n');
+        const declarationAt = header.indexOf('<<');
+        if (
+          declarationAt < 0 ||
+          header.slice(0, declarationAt).includes('`') ||
+          heredocDeclarations(header).length === 0
+        ) {
+          lineIndex = end;
+          continue;
+        }
+        const collected = collectHeredocBodies(
+          rawLines,
+          end,
+          selected,
+          (line) => rawLines[line],
+        );
+        if (!collected.complete) return false;
+        rawHeredocs.set(lineIndex, { index: collected.index });
+        fragments.push({ source: selected.join('\n'), quotedGate: false });
+        for (const [bodyStart, bodyEnd] of collected.bodies) {
+          if (bodyEnd < bodyStart) continue;
+          heredocDataRanges.push([
+            rawLineOffsets[bodyStart],
+            rawLineOffsets[bodyEnd] + rawLines[bodyEnd].length,
+          ]);
+        }
+        lineIndex = collected.index;
+      }
+      const inHeredocData = (index) =>
+        heredocDataRanges.some(([start, end]) => index >= start && index < end);
       const spans = [...document.matchAll(/(`+)([\s\S]*?)\1/g)];
       const inCodeSpan = (index) =>
         spans.some(
@@ -1288,7 +1515,7 @@ describe('local container recipe pins', () => {
         );
       const inlineTailLines = new Set();
       for (const match of spans) {
-        if (inFences(match.index)) continue;
+        if (inFences(match.index) || inHeredocData(match.index)) continue;
         const lineStart = document.lastIndexOf('\n', match.index - 1) + 1;
         if (inlineTailLines.has(lineStart)) continue;
         const closing = match.index + match[0].length;
@@ -1297,15 +1524,21 @@ describe('local container recipe pins', () => {
           closing,
           lineEnd < 0 ? document.length : lineEnd,
         );
-        const tail = executableInlineTail(trailing);
+        const tail = await executableInlineTail(trailing);
         if (!tail) continue;
         fragments.push({ source: tail, quotedGate: false });
         inlineTailLines.add(lineStart);
       }
       for (const match of spans) {
-        if (inFences(match.index) || citation(match)) continue;
+        if (
+          inFences(match.index) ||
+          inHeredocData(match.index) ||
+          citation(match)
+        ) {
+          continue;
+        }
         let source = match[2].trim();
-        if (!executableBoundary(source)) continue;
+        if (!(await executableBoundary(source))) continue;
         let quotedGate = false;
         if (source.startsWith('gate:')) {
           const gate = source.match(/^gate:\s*"([\s\S]+)"$/);
@@ -1316,8 +1549,15 @@ describe('local container recipe pins', () => {
         fragments.push({ source, quotedGate });
       }
       let lineStart = 0;
-      const rawLines = document.split('\n');
       for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex += 1) {
+        const heredoc = rawHeredocs.get(lineIndex);
+        if (heredoc) {
+          for (let index = lineIndex; index <= heredoc.index; index += 1) {
+            lineStart += rawLines[index].length + 1;
+          }
+          lineIndex = heredoc.index;
+          continue;
+        }
         const inFence = inFences(lineStart);
         const inSpan = inCodeSpan(lineStart);
         let continuationEnd = lineIndex;
@@ -1336,22 +1576,7 @@ describe('local container recipe pins', () => {
         }
         const selected = rawLines.slice(lineIndex, continuationEnd + 1);
         const commandHeader = selected.join('\n');
-        if (
-          !inFence &&
-          !inSpan &&
-          heredocDeclarations(commandHeader).length > 0 &&
-          executableBoundary(commandHeader)
-        ) {
-          const collected = collectHeredocBodies(
-            rawLines,
-            continuationEnd,
-            selected,
-            (line) => rawLines[line],
-          );
-          continuationEnd = collected.index;
-          if (!collected.complete) return false;
-        }
-        const source = selected.join('\n');
+        const source = commandHeader;
         const trimmed = rawLines[lineIndex].trim();
         const plainCitation =
           /^[('"]*(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/|scripts\/)?verify-pr-[a-z-]+\.mjs[\s'")\],.:]*$/.test(
@@ -1361,24 +1586,24 @@ describe('local container recipe pins', () => {
           const start = match.index - lineStart;
           return (
             start >= 0 &&
-            start + match[0].length <= rawLines[lineIndex].length &&
-            !rawLines[lineIndex].slice(0, start).trim()
+            start + match[0].length <= commandHeader.length &&
+            !commandHeader.slice(0, start).trim()
           );
         });
         const citationLineWithoutExecutableTrailer =
           leadingCitation &&
-          !executableInlineTail(
-            rawLines[lineIndex].slice(
+          !(await executableInlineTail(
+            commandHeader.slice(
               leadingCitation.index + leadingCitation[0].length - lineStart,
             ),
-          );
+          ));
         if (
           !inFence &&
           !inlineTailLines.has(lineStart) &&
           (!inSpan || leadingCitation) &&
           !plainCitation &&
           !citationLineWithoutExecutableTrailer &&
-          executableBoundary(source)
+          (await executableBoundary(source))
         ) {
           fragments.push({ source, quotedGate: false });
         }
@@ -1389,48 +1614,6 @@ describe('local container recipe pins', () => {
       }
 
       const calls = [];
-      const staticText = (node, source) => {
-        const raw = source.slice(node.startIndex, node.endIndex);
-        if (node.type === 'word' || node.type === 'number') return raw;
-        if (node.type === 'raw_string') return raw.slice(1, -1);
-        if (
-          node.type === 'string' &&
-          node.namedChildren.every((child) => child.type === 'string_content')
-        ) {
-          return raw
-            .slice(1, -1)
-            .replace(/\\(["\\$`])/g, '$1')
-            .replace(/\\\r?\n/g, '');
-        }
-        if (node.type === 'command_name' && node.namedChildCount === 1) {
-          return staticText(node.namedChild(0), source);
-        }
-        return null;
-      };
-      const staticCommandName = (node, source) => {
-        if (node.type !== 'command_name' || node.namedChildCount !== 1) {
-          return null;
-        }
-        const child = node.namedChild(0);
-        if (child.type === 'word') {
-          const raw = source.slice(child.startIndex, child.endIndex);
-          return raw.includes('\\') ? null : raw;
-        }
-        return staticText(child, source);
-      };
-      const argumentNodes = (command) => {
-        const result = [];
-        for (let index = 0; index < command.childCount; index += 1) {
-          if (command.fieldNameForChild(index) === 'argument') {
-            result.push(command.child(index));
-          }
-        }
-        return result;
-      };
-      const walk = (node, visit) => {
-        visit(node);
-        for (const child of node.namedChildren) walk(child, visit);
-      };
       const allowedNodes = new Set(
         'program command command_name word number raw_string string string_content comment list redirected_statement file_redirect file_descriptor compound_statement if_statement test_command unary_expression binary_expression test_operator regex variable_assignment variable_name command_substitution pipeline simple_expansion expansion concatenation else_clause declaration_command special_variable_name unset_command for_statement brace_expression do_group while_statement heredoc_redirect heredoc_start heredoc_body heredoc_end subshell negated_command'.split(
           ' ',
@@ -1525,6 +1708,7 @@ describe('local container recipe pins', () => {
           trustedDockerExec = false,
           credentialFreeDockerExec = false,
           protectedOutput = null,
+          protectedFds = null,
         },
         depth = 0,
       ) => {
@@ -1579,53 +1763,105 @@ describe('local container recipe pins', () => {
           };
           const protectedGroups = [];
           const nestedProtectedOutputs = new Map();
-          const inheritedWriters = (root) => {
-            const writers = [];
-            const visit = (node) => {
-              if (node.type === 'command_substitution') return;
-              if (node.type === 'redirected_statement') {
-                const detached = node.namedChildren.some((child) => {
-                  if (child.type !== 'file_redirect') return false;
-                  const raw = foldContinuations(
-                    source.slice(child.startIndex, child.endIndex),
-                  );
-                  return /^(?:1?>|>&)/.test(raw) && !/^2>/.test(raw);
-                });
-                if (detached) return;
+          const protectedSafetyRedirects = new Set();
+          const redirectRaw = (redirect) =>
+            foldContinuations(
+              source.slice(redirect.startIndex, redirect.endIndex),
+            );
+          const applyRedirects = (statement, inherited, target) => {
+            const fds = { ...inherited };
+            for (const redirect of statement.namedChildren) {
+              if (redirect.type !== 'file_redirect') continue;
+              const raw = redirectRaw(redirect);
+              const output = raw.match(/^(\d*)>(?![>&])/);
+              const duplicate = raw.match(/^(\d*)>&(\d)$/);
+              if (output) {
+                const fd = output[1] === '' ? 1 : Number(output[1]);
+                if (![1, 2].includes(fd)) return null;
+                fds[fd] = protectedOutputTarget(raw) === target;
+              } else if (duplicate) {
+                const fd = duplicate[1] === '' ? 1 : Number(duplicate[1]);
+                const sourceFd = Number(duplicate[2]);
+                if (![1, 2].includes(fd) || ![1, 2].includes(sourceFd)) {
+                  return null;
+                }
+                fds[fd] = fds[sourceFd];
+              } else if (!/^\d*<(?!<)/.test(raw)) {
+                return null;
               }
-              if (node.type === 'command') {
-                writers.push(node);
+            }
+            return fds;
+          };
+          const inheritedWriters = (root, initial, target) => {
+            const writers = [];
+            let unsupported = false;
+            const visit = (node, fds) => {
+              if (unsupported || node.type === 'command_substitution') return;
+              if (node.type === 'redirected_statement') {
+                const next = applyRedirects(node, fds, target);
+                if (!next) {
+                  unsupported = true;
+                  return;
+                }
+                const body = node.childForFieldName('body');
+                if (body) visit(body, next);
                 return;
               }
-              for (const child of node.namedChildren) visit(child);
+              if (node.type === 'command') {
+                if (fds[1] || fds[2]) writers.push({ command: node, fds });
+                return;
+              }
+              for (const child of node.namedChildren) visit(child, fds);
             };
-            visit(root);
-            return writers;
+            visit(root, initial);
+            return unsupported ? null : writers;
+          };
+          const addProtectedGroup = (root, target, initial, redirected) => {
+            const body = redirected ? root.childForFieldName('body') : root;
+            const fds = redirected
+              ? applyRedirects(root, initial, target)
+              : { ...initial };
+            if (!body || !fds) return false;
+            const writers = inheritedWriters(body, fds, target);
+            if (!writers) return false;
+            protectedGroups.push({ target, writers });
+            return true;
           };
           walk(tree.rootNode, (node) => {
             if (node.type !== 'redirected_statement') return;
-            const body = node.childForFieldName('body');
-            if (!body) return;
+            const targets = new Set();
             for (const redirect of node.namedChildren) {
               if (redirect.type !== 'file_redirect') continue;
-              const target = protectedOutputTarget(
-                foldContinuations(
-                  source.slice(redirect.startIndex, redirect.endIndex),
-                ),
-              );
-              if (target) {
-                protectedGroups.push({
-                  target,
-                  writers: inheritedWriters(body),
-                });
+              const raw = redirectRaw(redirect);
+              const target = protectedOutputTarget(raw);
+              if (target) targets.add(target);
+            }
+            for (const target of targets) {
+              for (const redirect of node.namedChildren) {
+                if (redirectRaw(redirect) === '2>/dev/null') {
+                  protectedSafetyRedirects.add(redirect.startIndex);
+                }
+              }
+              const inherited = { 1: false, 2: false };
+              if (!addProtectedGroup(node, target, inherited, true)) {
+                valid = false;
+                return;
               }
             }
           });
+          if (!valid) return false;
           if (protectedOutput) {
-            protectedGroups.push({
-              target: protectedOutput,
-              writers: inheritedWriters(tree.rootNode),
-            });
+            const inherited = protectedFds ?? { 1: true, 2: false };
+            if (
+              !addProtectedGroup(
+                tree.rootNode,
+                protectedOutput,
+                inherited,
+                false,
+              )
+            ) {
+              return false;
+            }
           }
           const silentControl = (command) => {
             const { name, values } = commandParts(command);
@@ -1642,17 +1878,20 @@ describe('local container recipe pins', () => {
           };
           for (const { target, writers } of protectedGroups) {
             const authorities = writers.filter(
-              (command) => !silentControl(command),
+              ({ command }) => !silentControl(command),
             );
             if (
               authorities.length !== 1 ||
-              (!canonicalProtectedWriter(authorities[0], target) &&
-                !nestedShell(authorities[0]))
+              (!canonicalProtectedWriter(authorities[0].command, target) &&
+                !nestedShell(authorities[0].command))
             ) {
               return false;
             }
-            if (nestedShell(authorities[0])) {
-              nestedProtectedOutputs.set(authorities[0].startIndex, target);
+            if (nestedShell(authorities[0].command)) {
+              nestedProtectedOutputs.set(authorities[0].command.startIndex, {
+                target,
+                fds: authorities[0].fds,
+              });
             }
           }
           const validFileRedirect = (redirect) => {
@@ -1672,6 +1911,7 @@ describe('local container recipe pins', () => {
             };
             if (redirect.parent) findOwner(redirect.parent);
             if (!owner) return false;
+            if (protectedSafetyRedirects.has(redirect.startIndex)) return true;
             if (['>&2', '2>&1'].includes(raw)) return true;
             const { name, values, rawValues } = commandParts(owner);
             const modulePath = trustedInterpreters.has(name) ? values[0] : null;
@@ -2007,6 +2247,28 @@ describe('local container recipe pins', () => {
                 end.startIndex < end.endIndex &&
                 unquote(source.slice(start.startIndex, start.endIndex)) ===
                   source.slice(end.startIndex, end.endIndex);
+              if (
+                valid &&
+                !/^['"]/.test(source.slice(start.startIndex, start.endIndex))
+              ) {
+                const body = node.namedChildren.find(
+                  (child) => child.type === 'heredoc_body',
+                );
+                const text = body
+                  ? source.slice(body.startIndex, body.endIndex)
+                  : '';
+                for (let index = 0; index < text.length; index += 1) {
+                  if (text[index] === '\\') {
+                    index += 1;
+                  } else if (
+                    text[index] === '`' ||
+                    (text[index] === '$' && text[index + 1] === '(')
+                  ) {
+                    valid = false;
+                    break;
+                  }
+                }
+              }
               return;
             }
             if (node.type === 'variable_assignment') {
@@ -2178,7 +2440,9 @@ describe('local container recipe pins', () => {
                   trustedDockerExec,
                   credentialFreeDockerExec,
                   protectedOutput:
-                    nestedProtectedOutputs.get(node.startIndex) ?? null,
+                    nestedProtectedOutputs.get(node.startIndex)?.target ?? null,
+                  protectedFds:
+                    nestedProtectedOutputs.get(node.startIndex)?.fds ?? null,
                 });
               }
               return;
@@ -3125,6 +3389,80 @@ describe('local container recipe pins', () => {
       '"',
       '\\"',
     );
+    for (const [label, sample, expected] of [
+      [
+        'outer stderr duplication still exposes the protected file',
+        `{ echo forged >&2; ${containerDeclaration}; } > "$rd/boundary.json" 2>&1`,
+        false,
+      ],
+      [
+        'inner fd duplication precedes the stdout duplication',
+        `{ echo forged 2>&1 >&2; ${containerDeclaration}; } > "$rd/boundary.json"`,
+        false,
+      ],
+      [
+        'previous-report stderr duplication reaches the protected file',
+        '{ echo forged >&2; printf \'%s\\n\' "$PREV"; } > ~/.cache/qwen-verify/pr<n>/previous-report.md 2>&1',
+        false,
+      ],
+      [
+        'stderr is detached before the protected file opens',
+        `{ echo diagnostic >&2; ${containerDeclaration}; } 2>/dev/null > "$rd/boundary.json"`,
+        true,
+      ],
+      [
+        'stderr has an independent null target after the file opens',
+        `{ echo diagnostic >&2; ${containerDeclaration}; } > "$rd/boundary.json" 2>/dev/null`,
+        true,
+      ],
+      [
+        'unsupported file descriptors fail closed',
+        `{ echo diagnostic >&3; ${containerDeclaration}; } > "$rd/boundary.json"`,
+        false,
+      ],
+      [
+        'nested shells inherit both protected descriptors',
+        `bash -c "{ echo forged >&2; ${nestedContainerDeclaration}; }" > "$rd/boundary.json" 2>&1`,
+        false,
+      ],
+      [
+        'nested shells retain an independent diagnostic stderr',
+        `bash -c "{ echo diagnostic >&2; ${nestedContainerDeclaration}; }" > "$rd/boundary.json"`,
+        true,
+      ],
+      '(exec node -e "0 * 0")',
+      '"/usr/bin/env" node -e "0 * 0"',
+      '\'/usr/bin/nice\' node -e "0 * 0"',
+      ['quoted trusted node version', '"/usr/bin/node" --version', true],
+      '/opt/homebrew/bin/node --version',
+      'exec node -e "0 * 0"',
+      'eval node\\ -e\\ "0 * 0"',
+      "ruby <<'RUBY'\nunterminated body",
+      '/usr/bin/ruby <<RUBY\nputs 1\nRUBY',
+      [
+        'quoted here-doc backticks remain literal data',
+        'cat <<\'TEXT\'\n`node -e "0 * 0"`\nTEXT',
+        true,
+      ],
+      'cat <<TEXT\n`node -e "0 * 0"`\nTEXT',
+      'cat <<TEXT\n$(node -e "0 * 0")\nTEXT\ntrue',
+      "cat <<'TEXT'\nliteral data\nTEXT\ntouch /tmp/should-not-write",
+      'cat <<\'TEXT\'\nliteral data\nTEXT\n"/usr/bin/env" node -e "0 * 0"',
+      'For details see `cp -a`[reference](https://example.invalid/a_(b)/c); touch /tmp/should-not-write',
+      'For details see `cp -a`[reference][1]; touch /tmp/should-not-write',
+      'For details see `cp -a`[reference][]; touch /tmp/should-not-write',
+      'For details see ![`cp -a`](https://example.invalid/a_(b)/c); touch /tmp/should-not-write',
+      [
+        'balanced links preserve an ordinary data-command tail',
+        'For details see `cp -a`[reference](https://example.invalid/a_(b)/c "a (title)"); grep -e needle ./notes.txt',
+        true,
+      ],
+    ].map((entry) => (Array.isArray(entry) ? entry : [entry, entry, false]))) {
+      expect(
+        await onlyDocumentedPrepareCalls(`${skill}\n${sample}`),
+        `${label}: ${sample}`,
+      ).toBe(expected);
+    }
     await expectInRawAndBash(
       [
         '{ printf \'%s\\n\' forged; } > "$rd/boundary.json"',
@@ -3422,6 +3760,79 @@ describe('local container recipe pins', () => {
     expect(skill).not.toMatch(
       /node scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)\.mjs/,
     );
+    for (const [index, option, value, expected] of [
+      [0, '--context', '<../forged.json>', false],
+      [0, '--context', 'file:/tmp/pr1-verify-1', false],
+      [0, '--context', 'https:example.invalid/pr.json', false],
+      [0, '--context', '/tmp/pr.json', true],
+      [0, '--context', './tmp/pr.json', true],
+      [0, '--context', 'tmp/pr.json', true],
+      [0, '--context', '{ref}', true],
+      [0, '--context', '<round-dir>', true],
+      [0, '--context', '<owner>/<repo>', true],
+      [0, '--context', '/var/run/docker.sock', true],
+      [0, '--context', '<..\\forged.json>', false],
+      [1, '--artifact-dir', '<../forged.json>', false],
+      [1, '--artifact-dir', 'file:/tmp/pr1-verify-1', false],
+      [1, '--artifact-dir', 'C:\\work\\round', true],
+      [1, '--artifact-dir', '\\\\host\\share\\round', true],
+      [1, '--artifact-dir', '123456', true],
+    ]) {
+      const call = [checkerCall, completeCall][index];
+      const needle = ['--context <host snapshot>', '[--artifact-dir <dir>]'][
+        index
+      ];
+      const replacement =
+        index === 0 ? `--context ${value}` : `--artifact-dir ${value}`;
+      expect(
+        await onlyDocumentedPrepareCalls(
+          skill.replace(call, call.replace(needle, replacement)),
+        ),
+        `${option} ${value}`,
+      ).toBe(expected);
+    }
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace(
+          completeCall,
+          completeCall.replace('[--comment-id <id>]', '--comment-id 123456'),
+        ),
+      ),
+      'numeric comment IDs are not path values',
+    ).toBe(true);
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace(
+          basic.trim(),
+          '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason file:/notes --context-out /tmp/pr.json',
+        ),
+      ),
+      'scheme-looking text in a non-path reason remains valid',
+    ).toBe(true);
+    const realComplete =
+      /`node <clone>\/scripts\/verify-pr-watch-state\.mjs <n> --complete --head <H>[\s\S]*?`/.exec(
+        skill,
+      )?.[0];
+    expect(realComplete).toBeTruthy();
+    const indentedComplete = realComplete.replace(
+      ' --complete ',
+      ' --complete \\\n    ',
+    );
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace(realComplete, indentedComplete),
+      ),
+      'real SKILL indented multi-line inline completion',
+    ).toBe(true);
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace(
+          realComplete,
+          `${indentedComplete}; touch /tmp/should-not-write`,
+        ),
+      ),
+      'an operation after the multi-line span remains executable',
+    ).toBe(false);
   }, 30_000);
 
   it('base-pins `.qwen` and states that root AGENTS/QWEN.md still come from the PR', () => {
