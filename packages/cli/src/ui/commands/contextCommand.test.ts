@@ -996,6 +996,41 @@ describe('collectContextData (contextCommand)', () => {
       expect(data.breakdown.messages).toBe(100 + imageTokens);
     });
 
+    it('prices a parseable image by its resolution, as the compaction gate does', async () => {
+      // The same estimator the gate uses charges a 1920×1080 PNG
+      // ceil(1920 × 1080 / 2048) = 1013 tokens. `/context` must charge what
+      // the gate charges, or the tier it shows disagrees with the one the
+      // gate acts on (#17321).
+      const png = Buffer.alloc(33);
+      png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      png.writeUInt32BE(13, 8);
+      png.write('IHDR', 12);
+      png.writeUInt32BE(1_920, 16);
+      png.writeUInt32BE(1_080, 20);
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            prelude,
+            {
+              role: 'user',
+              parts: [
+                { text: 'a'.repeat(400) },
+                {
+                  inlineData: {
+                    mimeType: 'image/png',
+                    data: png.toString('base64'),
+                  },
+                },
+              ],
+            } as unknown as Content,
+          ],
+        }),
+        false,
+      );
+      expect(data.breakdown.messages).toBe(100 + 1013);
+    });
+
     it('does not deflate rows when the total is itself a char/4 estimate', async () => {
       // `compressFast()` and resume seeding stamp a total measured by core's
       // char/4 estimator. These categories use the CJK-aware one, up to ~6x
