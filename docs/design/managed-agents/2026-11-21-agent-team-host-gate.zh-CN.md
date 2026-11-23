@@ -1,6 +1,6 @@
 # 按宿主支持能力注册 Legacy Agent Team 工具
 
-本文说明 [#13785 的 M4](https://github.com/QwenLM/qwen-code/issues/13785) 中的 Legacy Agent Team 工具注册门禁。宿主必须具备团队报告和队友审批的处理能力，并在初始化时显式声明支持，工具注册表才会考虑向模型提供团队工具。
+Legacy Agent Team 工具注册门禁是 [#13785 总体设计](2026-11-23-managed-multi-agent-public-api.zh-CN.md) 的第 1 步。宿主必须具备团队报告和队友审批的处理能力，并在初始化时显式声明支持，工具注册表才会考虑向模型提供团队工具。
 
 ## 问题
 
@@ -27,7 +27,7 @@ OpenTUI 在开始初始化 Config 前启动失败时，回退到 Ink 后由 Ink 
 
 在 [`c752f6b1`](https://github.com/QwenLM/qwen-code/pull/15658/files)，ACP Session 在 `isAgentTeamEnabled()` 为真时绑定消息接收回调和审批路由。回调负责报告投递和 TeamManager 更换时的重新绑定。审批通过会话级 ACP 请求中继，并通过 bridge 通知撤下已失效的请求。#15658 后续若要启用 ACP 团队工具，需在共用的 `newSessionConfig()` 传入宿主支持声明，使创建、加载和恢复会话遵循同一条首次初始化规则。握手只声明支持，审批仍由 #15658 的所有权检查授权。
 
-ACP 可沿用 `initialize.clientCapabilities._meta` 协商。后续可以使用明确的布尔位 `qwen.agentTeam`，由能向其使用方投递团队报告、展示会话级队友审批的 bridge 或客户端声明。ACP 服务端应同时要求客户端提供严格的 `true`，以及本地具备报告接收和审批接线。旧客户端和通用客户端继续使用普通工具集。本次只引入内部初始化选项。协议协商和 ACP 启用随实际接线一起交付。公共 `multi_agent` 能力、任务输入接口和团队投影另行推进。
+ACP 可沿用 `initialize.clientCapabilities._meta` 协商。后续可以使用明确的布尔位 `qwen.agentTeam`，由能向其使用方投递团队报告、展示会话级队友审批的 bridge 或客户端声明。ACP 服务端应同时要求客户端提供严格的 `true`，以及本地具备报告接收和审批接线。旧客户端和通用客户端继续使用普通工具集。本次只引入内部初始化选项。协议协商和 ACP 启用随实际接线一起交付。公共 `multi_agent` 能力、任务输入接口和团队投影按总体设计的后续步骤推进。
 
 ## 验证
 
