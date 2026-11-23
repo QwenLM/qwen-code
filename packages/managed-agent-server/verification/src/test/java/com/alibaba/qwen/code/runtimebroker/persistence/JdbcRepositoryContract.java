@@ -1338,24 +1338,42 @@ public final class JdbcRepositoryContract {
                 prefix + "-other-digest").withVersion(unknown.getVersion()),
                 result("cancelled"), START));
 
-        // Reading a record checks each lookup identity against the stored
-        // value it indexes. The lookup columns are now the raw identities,
-        // so a stored near-match (trailing space) must not satisfy the
-        // exact lookup; the retained collision guards stay defensive.
+        // H2 compares trailing spaces exactly, but MySQL's utf8mb4_bin is
+        // PAD SPACE. A folded SQL match must trip the Java identity guard;
+        // an exact database miss returns null. Neither path returns the
+        // tampered row.
+        boolean padSpace;
+        try (Connection connection = dataSource.getConnection()) {
+            padSpace = !"H2".equals(connection.getMetaData().getDatabaseProductName());
+        }
         String keyedKey = prefix + "-keyed-idempotency";
         repository.findOrCreate(execution(
                 prefix + "-keyed-execution", keyedKey,
                 prefix + "-keyed-digest"));
         tamper(dataSource, "idempotency_key", prefix + "-keyed-execution",
                 keyedKey + " ");
-        assertNull(repository.findByIdempotencyKey(keyedKey));
+        if (padSpace) {
+            assertEquals("Tool idempotency hash collision",
+                    assertThrows(IllegalStateException.class,
+                            () -> repository.findByIdempotencyKey(keyedKey))
+                            .getMessage());
+        } else {
+            assertNull(repository.findByIdempotencyKey(keyedKey));
+        }
         String indexedId = prefix + "-indexed-execution";
         repository.findOrCreate(execution(
                 indexedId,
                 prefix + "-indexed-idempotency",
                 prefix + "-indexed-digest"));
         tamper(dataSource, "execution_call_id", indexedId, indexedId + " ");
-        assertNull(repository.findByExecutionCallId(indexedId));
+        if (padSpace) {
+            assertEquals("Tool execution-call hash collision",
+                    assertThrows(IllegalStateException.class,
+                            () -> repository.findByExecutionCallId(indexedId))
+                            .getMessage());
+        } else {
+            assertNull(repository.findByExecutionCallId(indexedId));
+        }
         // The runtime-session tamper must stay admissible (no trailing space):
         // reading the record validates it before the reference guard runs. A
         // valid identity that disagrees with the reference still trips the

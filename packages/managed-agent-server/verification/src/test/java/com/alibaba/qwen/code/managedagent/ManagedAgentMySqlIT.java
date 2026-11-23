@@ -1719,7 +1719,8 @@ class ManagedAgentMySqlIT {
                 .extracting(TurnSummary::createdAt, TurnSummary::completedAt)
                 .containsExactly(5000L, 5001L);
         assertThat(store.findTurnSummary(tenant, sessionId, "TURN_B")).isEmpty();
-        // Byte-exact identities reject a trailing-space variant in SQL and the API.
+        // utf8mb4_bin is PAD SPACE, so raw SQL folds the trailing-space
+        // variant to turn_B; the API's Java identity check still rejects it.
         assertThat(
                         jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM"
@@ -1728,7 +1729,7 @@ class ManagedAgentMySqlIT {
                                 Integer.class,
                                 tenant,
                                 sessionId))
-                .isZero();
+                .isEqualTo(1);
         assertThat(store.findTurnSummary(tenant, sessionId, "turn_B  ")).isEmpty();
         assertThat(store.listTurns(tenant.toUpperCase(), sessionId, null, null, 10).turns())
                 .isEmpty();

@@ -162,7 +162,7 @@ public final class ManagedSessionStoreModels {
     }
 
     /** A recoverable Action wait certified by a clean suspension. */
-    public record ParkedTurn(@NotBlank @Size(max = 144) String promptId,
+    public record ParkedTurn(@NotBlank @Size(max = 64) String promptId,
             @Min(0) @Max(MAX_SAFE_COUNTER) long wakeAt,
             @Min(0) @Max(MAX_SAFE_COUNTER) Long approvalRevision) {
     }
