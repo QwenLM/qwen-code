@@ -2099,6 +2099,19 @@ describe('executionApproval host binding', () => {
     ]);
   });
 
+  it('rejects a local-trust basis with otherwise valid comment approval evidence', () => {
+    const mismatched = commentApproval({ basis: 'own-pr' });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(mismatched),
+        snapshot(mismatched),
+        verified,
+      ),
+    ).toEqual([
+      'comment executionApproval needs basis maintainer-comment, an approval permalink, numeric comment.id, 64-hex comment.bodySha256 and its registrationNonce',
+    ]);
+  });
+
   it('requires a host context and a verified digest even for an old valid waiver', () => {
     const legacy = {
       mode: 'waived',
