@@ -47261,6 +47261,17 @@ describe('idle suspension', () => {
       clientId,
     );
 
+  // The journal settles before the wake pump clears the live Turn.
+  const waitForWakeTurnIdle = (server: Server, clientId: string) =>
+    vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).body).toMatchObject({
+          hasActivePrompt: false,
+        });
+      },
+      { timeout: 5000 },
+    );
+
   const loadSession = (server: Server) =>
     headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
       managedSessionStore: store(),
@@ -47586,15 +47597,7 @@ describe('idle suspension', () => {
             isHostedWakeContinuationId(String(event.payload['turnId'])),
         ),
       ).toBe(false);
-      // The journal settles before the wake pump clears the live Turn.
-      await vi.waitFor(
-        async () => {
-          expect((await statusOf(replacement, clientId)).body).toMatchObject({
-            hasActivePrompt: false,
-          });
-        },
-        { timeout: 5000 },
-      );
+      await waitForWakeTurnIdle(replacement, clientId);
       await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
         .set('X-Qwen-Client-Id', clientId)
         .expect(204);
@@ -50418,8 +50421,10 @@ describe('idle suspension', () => {
         )?.payload['state'],
       ).toBe('cancelled');
       expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      const clientId = loaded.body.clientId as string;
+      await waitForWakeTurnIdle(replacement, clientId);
       await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
-        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .set('X-Qwen-Client-Id', clientId)
         .expect(204);
     } finally {
       saved.mockRestore();
