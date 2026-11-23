@@ -18293,7 +18293,7 @@ class QwenAgent implements Agent {
         await options.beforeStartPostReplayServices?.(session);
       }
 
-      // Install rewriter AFTER history replay to avoid rewriting historical messages
+      // Install Mods AFTER history replay so they do not hear historical messages
       if (options.deferWorkspaceActivation !== true) {
         session.installMods();
       }
