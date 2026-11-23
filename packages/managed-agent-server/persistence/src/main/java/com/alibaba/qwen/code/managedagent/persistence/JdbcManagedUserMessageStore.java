@@ -9,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -59,18 +58,24 @@ public class JdbcManagedUserMessageStore
     @Transactional
     public Snapshot command(String tenant, String actor, String session, String key, Command command) {
         agents.authorizeUserMessageActor(tenant, actor, session);
-        if (key == null || key.isBlank() || key.length() > 128) {
+        if (key == null || key.isBlank()) {
+            throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
+        }
+        try {
+            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireIdempotencyKey(key, "Idempotency-Key");
+        } catch (IllegalArgumentException invalid) {
             throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
         }
         lockSession(tenant, session);
         if (command == null || command.action() == null) {
             throw refusal("invalid_request", "A queue action is required.");
         }
-        String commandKey = DigestUtils.sha256Hex(actor + "\n" + key);
         String digest = digests.digest(command);
         var replay = jdbc.query("SELECT request_digest, result_json FROM ma_user_message_command"
-                        + " WHERE tenant_id = ? AND session_id = ? AND command_key = ?",
-                (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session, commandKey);
+                        + " WHERE tenant_id = ? AND session_id = ? AND actor_id = ? AND idempotency_key = ?",
+                (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session,
+                actor,
+                key);
         if (!replay.isEmpty()) {
             if (!digest.equals(replay.getFirst().getKey())) {
                 throw conflict("idempotency_conflict");
@@ -144,8 +149,10 @@ public class JdbcManagedUserMessageStore
             default -> throw refusal("invalid_request", "Unknown user message action.");
         }
         Snapshot result = snapshot(tenant, session);
-        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, command_key, actor_id, request_digest, result_json)"
-                + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session, commandKey, actor, digest, encode(result));
+        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, idempotency_key, actor_id, request_digest, result_json)"
+                + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session,
+                key,
+                actor, digest, encode(result));
         return result;
     }
 

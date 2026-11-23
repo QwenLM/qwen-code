@@ -4,10 +4,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFile
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -232,15 +230,15 @@ public class WorkspaceFileStore {
                 }
             }
         }
-        var rows = jdbc.queryForList("SELECT storage_kind, registration_json, registration_revision, mount_revision, fence_operation_id FROM ma_storage WHERE alias_key = ?"
-                + (lock ? " FOR UPDATE" : ""),
-                RuntimeAdmissionFences.storageAliasKey(tenant, binding.getStorageId()));
+        var rows = jdbc.queryForList("SELECT storage_kind, registration_json, registration_revision, mount_revision, fence_operation_id FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ?" + (lock ? " FOR UPDATE" : ""),
+                tenant, binding.getStorageId());
         if (rows.size() != 1 || rows.getFirst().get("fence_operation_id") != null) {
             throw unavailable();
         }
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id FROM ma_storage_owner"
-                + " WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)",
-                RuntimeAdmissionFences.storageAliasKey(tenant, binding.getStorageId()));
+                + " WHERE physical_id = (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?)",
+                tenant, binding.getStorageId());
         try {
             var identity = locator.sessionId() == null ? List.of(actor, binding.getContextDigest(), rows, owner)
                     : List.of(actor, binding.getContextDigest(), rows, owner, locator.sessionId(), worktreeRevision);
@@ -262,8 +260,7 @@ public class WorkspaceFileStore {
         var bindings = jdbc.query("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                         + " AND status <> 'DELETED' AND (owner_only = 0 OR COALESCE(owner_actor_key, creator_actor_key) = ?)"
                         + (lock ? " FOR UPDATE" : ""),
-                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId,
-                ManagedWorkspaceRegistry.actorKey(tenant, actor));
+                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId, actor);
         if (bindings.size() != 1 || bindings.getFirst() == null
                 || !registry.accessOf(tenant, actor, bindings.getFirst().getWorkspaceId()).canCreate()) {
             throw sessionNotFound();

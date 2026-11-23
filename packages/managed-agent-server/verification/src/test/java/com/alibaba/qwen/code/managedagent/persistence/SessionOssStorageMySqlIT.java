@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -185,7 +185,6 @@ class SessionOssStorageMySqlIT {
     void gcAndPublishBothWaitForRootBeforeLockingPack() throws Exception {
         insertHead(1);
         insertTransaction(1, bytes(4096));
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         JournalPackTransactions transactions = new JournalPackTransactions(jdbc, objects);
         byte[] value = new byte[1];
         transactions.insertBuilding("racing", TENANT, WORKSPACE, SESSION, 1, 1,
@@ -202,7 +201,7 @@ class SessionOssStorageMySqlIT {
                         ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, TENANT, SESSION);
                         Future<Boolean> publish = executor.submit(() -> {
                             try {
-                                publisher.publish("racing", scope, TENANT, WORKSPACE, SESSION, 1, 1,
+                                publisher.publish("racing", TENANT, WORKSPACE, SESSION, 1, 1,
                                         new byte[0]);
                                 return true;
                             } catch (ManagedAgentException conflict) {
@@ -289,14 +288,14 @@ class SessionOssStorageMySqlIT {
 
     private void insertTransaction(long revision, byte[] value) {
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                + " journal_revision, transaction_id, operation, command_id, command_key_hash,"
+                + " journal_revision, transaction_id, operation, command_id, command_ref,"
                 + " content_digest, first_sequence, last_sequence, event_count, events_digest,"
                 + " commit_digest, writer_generation, writer_id, writer_token_hash,"
                 + " activation_epoch, record_encoding, record_bytes, byte_length, record_digest,"
                 + " gmt_create) VALUES (?, ?, ?, ?, ?, 'turn.start', ?, ?, 'content', ?, ?, 1,"
                 + " 'events', ?, 1, 'writer', 'hash', 0, 'identity', ?, ?, ?, 0)",
                 TENANT, WORKSPACE, SESSION, revision, "tx-" + revision, "cmd-" + revision,
-                "cmdkey-" + revision, revision, revision, "commit-" + revision, value,
+                ManagedIdentityRefs.commandRef("turn.start", "cmd-" + revision), revision, revision, "commit-" + revision, value,
                 value.length, JournalStoreRows.sha256(value));
     }
 }

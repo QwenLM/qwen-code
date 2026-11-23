@@ -30,10 +30,9 @@ final class SideQueryConversation {
     }
 
     static ObjectNode state(JdbcTemplate jdbc, String tenant, String session) {
-        String scope = scope(tenant, session);
         var rows = jdbc.query("SELECT options_json FROM ma_session_record WHERE tenant_id=? AND session_id=?"
-                        + " AND record_key=? AND record_kind='CONVERSATION' FOR UPDATE",
-                (row, index) -> row.getString(1), tenant, session, ManagedSchemaKeys.key(scope, DOMAIN));
+                        + " AND domain=? AND record_id=? AND record_kind='CONVERSATION' FOR UPDATE",
+                (row, index) -> row.getString(1), tenant, session, DOMAIN, DOMAIN);
         if (rows.isEmpty()) {
             return JSON.createObjectNode();
         }
@@ -161,22 +160,16 @@ final class SideQueryConversation {
     }
 
     private static void save(JdbcTemplate jdbc, String tenant, String session, ObjectNode state) {
-        String scope = scope(tenant, session);
-        String key = ManagedSchemaKeys.key(scope, DOMAIN);
         int updated = jdbc.update("UPDATE ma_session_record SET options_json=?, revision=revision+1"
-                + " WHERE tenant_id=? AND session_id=? AND record_key=? AND record_kind='CONVERSATION'",
-                state.toString(), tenant, session, key);
+                + " WHERE tenant_id=? AND session_id=? AND domain=? AND record_id=? AND record_kind='CONVERSATION'",
+                state.toString(), tenant, session, DOMAIN, DOMAIN);
         if (updated == 0) {
             String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id=? AND session_id=?",
                     String.class, tenant, session);
-            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,workspace_id,domain,"
-                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,?)",
-                    key, tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
+            jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,workspace_id,domain,"
+                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,1,'CONVERSATION',?,?)",
+                    tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
         }
-    }
-
-    static String scope(String tenant, String session) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
     }
 
     private static long admittedInputs(JdbcTemplate jdbc, String tenant, String session) {
