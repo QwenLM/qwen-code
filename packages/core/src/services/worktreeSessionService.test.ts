@@ -397,6 +397,109 @@ describe('writeWorktreeSession', () => {
     await writeJson({ ...sample, supersedes: null });
     await expectStrictInvalid();
   });
+
+  it('round-trips the worktreeBase creation-base field (R5-4)', async () => {
+    const withBase: WorktreeSession = {
+      ...sample,
+      worktreeBase: 'c'.repeat(40),
+    };
+    await writeWorktreeSession(filePath, withBase);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withBase,
+    });
+  });
+
+  it('rejects a sidecar with a non-string worktreeBase', async () => {
+    await writeJson({ ...sample, worktreeBase: 42 });
+    await expectStrictInvalid();
+  });
+
+  it('round-trips the carriedEntries overlay field (R9-6)', async () => {
+    const withOverlay: WorktreeSession = {
+      ...sample,
+      carriedEntries: [
+        { path: 'README.md', hash: 'a'.repeat(40), executable: false },
+        { path: 'sub/a.txt', hash: null, executable: false },
+        { path: 'run.sh', hash: 'b'.repeat(40), executable: true },
+      ],
+    };
+    await writeWorktreeSession(filePath, withOverlay);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withOverlay,
+    });
+  });
+
+  it('accepts a sidecar without carriedEntries (legacy back-compat, R9-6)', async () => {
+    await writeWorktreeSession(filePath, sample);
+    const read = await strictRead();
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.carriedEntries).toBeUndefined();
+    }
+  });
+
+  it('rejects a sidecar with a wrong-typed carriedEntries (R9-6)', async () => {
+    await writeJson({ ...sample, carriedEntries: 'README.md' });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedEntries: 42 });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedEntries: ['README.md', 7] });
+    await expectStrictInvalid();
+
+    await writeJson({
+      ...sample,
+      carriedEntries: [{ path: 'README.md', hash: 7, executable: false }],
+    });
+    await expectStrictInvalid();
+
+    await writeJson({
+      ...sample,
+      carriedEntries: [{ path: 'README.md', hash: null }],
+    });
+    await expectStrictInvalid();
+  });
+
+  it('drops an oversized carriedEntries so the sidecar stays readable (R9-6)', async () => {
+    const entries = Array.from({ length: 800 }, (_, i) => ({
+      path: `some/long/path/file-${i}.txt`,
+      hash: 'a'.repeat(40),
+      executable: false,
+    }));
+    const big: WorktreeSession = { ...sample, carriedEntries: entries };
+    await writeWorktreeSession(filePath, big);
+    const read = await strictRead();
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      // The exemption metadata is dropped (the reaper snapshots the work),
+      // but the binding itself stays readable rather than orphaned.
+      expect(read.session.carriedEntries).toBeUndefined();
+      expect(read.session.slug).toBe(sample.slug);
+    }
+  });
+
+  it('round-trips the carriedFrom carry-source field (R5-14)', async () => {
+    const withSource: WorktreeSession = {
+      ...sample,
+      carriedFrom: '/repo-sibling',
+    };
+    await writeWorktreeSession(filePath, withSource);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withSource,
+    });
+  });
+
+  it('rejects a sidecar with a non-string carriedFrom (R5-14)', async () => {
+    await writeJson({ ...sample, carriedFrom: 42 });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedFrom: null });
+    await expectStrictInvalid();
+  });
 });
 
 describe('createWorktreeSession', () => {
@@ -471,6 +574,22 @@ describe('createWorktreeSession', () => {
         name.startsWith('test.worktree.json.'),
       ),
     ).toEqual([]);
+  });
+
+  it('drops an oversized carriedEntries overlay so the created sidecar stays readable (round-6)', async () => {
+    const entries = Array.from({ length: 800 }, (_, i) => ({
+      path: `some/long/path/file-${i}.txt`,
+      hash: 'a'.repeat(40),
+      executable: false,
+    }));
+    await createWorktreeSession(filePath, {
+      ...sample,
+      carriedEntries: entries,
+    });
+    const read = await readWorktreeSession(filePath);
+    expect(read).not.toBeNull();
+    expect(read!.carriedEntries).toBeUndefined();
+    expect(read!.slug).toBe(sample.slug);
   });
 });
 
@@ -944,6 +1063,25 @@ describe('restoreWorktreeContext', () => {
     expect(result.contextMessage).toContain(live.worktreeBranch);
     // Sidecar should remain on disk so subsequent reads still see it.
     expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('names detached HEAD in the context message when the branch is empty', async () => {
+    const live = await liveSession('repo-detached', { worktreeBranch: '' });
+    await writeWorktreeSession(filePath, live);
+    await fs.writeFile(
+      path.join(live.worktreePath, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
+
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain('(detached HEAD)');
+    expect(result.contextMessage).not.toContain('(branch:');
   });
 
   it('restores a sidecar caught in the link-then-unlink publish window', async () => {

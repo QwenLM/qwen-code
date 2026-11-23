@@ -91,12 +91,12 @@ class ManagedAgentTraceServiceTest {
         var result = service.list("tenant", "actor", "parent", null, 5);
         assertThat(result.at("/items/0/description").asText()).isEqualTo("Inspect the build");
         assertThat(result.toString()).doesNotContain("secret prompt", "inputRef");
-        when(records.findTaskTarget("tenant", "parent", task.taskId())).thenReturn(Optional.empty());
+        when(records.findTaskTargetByRecord("tenant", "parent", task.domain(), task.recordId())).thenReturn(Optional.empty());
         var missing = service.list("tenant", "actor", "parent", null, 5);
         assertThat(missing.path("items")).hasSize(1);
         assertThat(missing.at("/items/0/description").isNull()).isTrue();
         assertThat(missing.path("availability").asText()).isEqualTo("partial");
-        when(records.findTaskTarget("tenant", "parent", task.taskId()))
+        when(records.findTaskTargetByRecord("tenant", "parent", task.domain(), task.recordId()))
                 .thenThrow(new ManagedAgentException(409, "resource_unavailable", "Unavailable"));
         var unavailable = service.list("tenant", "actor", "parent", null, 5);
         assertThat(unavailable.path("items")).hasSize(1);
@@ -121,12 +121,12 @@ class ManagedAgentTraceServiceTest {
 
     private ObjectNode target(TaskRow task, String child) {
         ObjectNode body = JSON.createObjectNode().put("childSessionId", child).put("depth", 1);
-        when(records.findTaskTarget("tenant", "parent", task.taskId()))
+        when(records.findTaskTargetByRecord("tenant", "parent", task.domain(), task.recordId()))
                 .thenReturn(Optional.of(new TaskTarget("child_run", "run", "child_agent", "running", 1, body)));
         return body;
     }
 
     private static TaskRow task(String digit, long time) {
-        return new TaskRow("task_" + digit.repeat(64), "child_agent", new TaskProjection("running", "running_attached", null, time, time, null), "private-resource");
+        return new TaskRow("task_" + digit.repeat(64), "child_agent", new TaskProjection("running", "running_attached", null, time, time, null), "private-resource", "child_run", "run");
     }
 }

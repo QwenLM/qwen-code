@@ -2,11 +2,10 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -105,11 +104,11 @@ public class JdbcSessionWorktreeStore
         }
         long now = System.currentTimeMillis();
         String physical = JdbcWorkspaceExecutionStore.storageKey(jdbc, plan.source());
-        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_id,"
                         + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, 'PREPARING', 1, ?, ?, ?, ?)",
-                tenant, session, plan.workspaceId(), plan.storageId(), physical, plan.worktreeId(),
-                ManagedWorkspaceRegistry.actorKey(tenant, actor), json(plan), plan.worktreeId(), now, now);
+                tenant, session, plan.workspaceId(), plan.storageId(), ManagedSchemaKeys.identity(physical), plan.worktreeId(),
+                actor, json(plan), plan.worktreeId(), now, now);
         createOperation(tenant, session, plan, plan.worktreeId(), "PREPARING", null);
     }
 
@@ -188,13 +187,12 @@ public class JdbcSessionWorktreeStore
         List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.workspace_id = ? AND w.worktree_id = ?"
                         + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = w.tenant_id"
                         + " AND s.session_id = w.session_id AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?))",
-                JdbcSessionWorktreeStore::row, tenant, workspace, id,
-                ManagedWorkspaceRegistry.actorKey(tenant, actor));
+                JdbcSessionWorktreeStore::row, tenant, workspace, id, actor);
         if (rows.size() != 1) {
             throw notFound();
         }
         if (write && jdbc.queryForList("SELECT 1 FROM ma_session_worktree WHERE tenant_id = ? AND worktree_id = ?"
-                        + " AND owner_actor_key = ?", Integer.class, tenant, id, ManagedWorkspaceRegistry.actorKey(tenant, actor)).isEmpty()) {
+                        + " AND owner_actor_key = ?", Integer.class, tenant, id, actor).isEmpty()) {
             throw notFound();
         }
         return rows.getFirst();
@@ -208,9 +206,8 @@ public class JdbcSessionWorktreeStore
                         + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = w.tenant_id"
                         + " AND s.session_id = w.session_id AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?))"
                         + " ORDER BY w.gmt_create DESC",
-                JdbcSessionWorktreeStore::row, tenant, workspace,
-                ManagedWorkspaceRegistry.actorKey(tenant, actor));
-        var descriptions = descriptors(worktreeFiles, jdbc, tenant, rows.stream().map(Row::sessionId).toList());
+                JdbcSessionWorktreeStore::row, tenant, workspace, actor);
+        var descriptions = descriptors(worktreeFiles, jdbc, rows);
         return rows.stream().map(row -> descriptions.get(row.sessionId())).toList();
     }
 
@@ -232,20 +229,22 @@ public class JdbcSessionWorktreeStore
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, row.tenantId());
             long now = System.currentTimeMillis();
-            if (jdbc.queryForList("SELECT 1 FROM ma_operation WHERE operation_key = ? AND delivery_state = 'PENDING'"
-                            + " AND (claim_until IS NULL OR claim_until <= ?) FOR UPDATE", Integer.class, key(row), now).isEmpty()) {
+            if (jdbc.queryForList("SELECT 1 FROM ma_operation WHERE operation_ref = ? AND delivery_state = 'PENDING'"
+                            + " AND (claim_until IS NULL OR claim_until <= ?) FOR UPDATE", Integer.class,
+                    ManagedSchemaKeys.identity(key(row)), now).isEmpty()) {
                 return null;
             }
             String physical = JdbcWorkspaceExecutionStore.storageKey(jdbc, SessionWorktreeStore.storageBinding(row.plan()));
-            if (!jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND maintenance_id = ?"
-                    + " AND holder_key IS NOT NULL FOR UPDATE", Integer.class, physical, row.operationId()).isEmpty()) {
+            if (!jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE physical_id = ? AND maintenance_id = ?"
+                    + " AND holder_id IS NOT NULL FOR UPDATE", Integer.class,
+                    ManagedSchemaKeys.identity(physical), row.operationId()).isEmpty()) {
                 jdbc.update("UPDATE ma_session_worktree SET state = 'BLOCKED', failure_code = 'maintenance_stop_unverified',"
                         + " revision = revision + 1 WHERE tenant_id = ? AND worktree_id = ?", row.tenantId(), row.worktreeId());
                 return null;
             }
             if (jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = ?, claim_generation = claim_generation + 1"
-                            + " WHERE operation_key = ? AND delivery_state = 'PENDING' AND (claim_until IS NULL OR claim_until <= ?)",
-                    owner, now + leaseMillis, key(row), now) != 1) {
+                            + " WHERE operation_ref = ? AND delivery_state = 'PENDING' AND (claim_until IS NULL OR claim_until <= ?)",
+                    owner, now + leaseMillis, ManagedSchemaKeys.identity(key(row)), now) != 1) {
                 return null;
             }
             return find(jdbc, row.tenantId(), row.sessionId());
@@ -253,9 +252,9 @@ public class JdbcSessionWorktreeStore
     }
 
     public boolean renew(Row row, String owner, long leaseMillis) {
-        return jdbc.update("UPDATE ma_operation SET claim_until = ? WHERE operation_key = ? AND claim_owner = ?"
+        return jdbc.update("UPDATE ma_operation SET claim_until = ? WHERE operation_ref = ? AND claim_owner = ?"
                         + " AND claim_generation = ? AND claim_until > ?", System.currentTimeMillis() + leaseMillis,
-                key(row), owner, row.generation(), System.currentTimeMillis()) == 1;
+                ManagedSchemaKeys.identity(key(row)), owner, row.generation(), System.currentTimeMillis()) == 1;
     }
 
     public boolean complete(Row row, String owner, String state, String identity, String error) {
@@ -267,8 +266,8 @@ public class JdbcSessionWorktreeStore
                             + " failure_code = ?, revision = revision + 1, gmt_modified = ? WHERE tenant_id = ? AND session_id = ?",
                     state, identity, error, System.currentTimeMillis(), row.tenantId(), row.sessionId());
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, delivery_state = 'DONE', failure_code = ?,"
-                            + " completed_at = ?, claim_owner = NULL, claim_until = NULL WHERE operation_key = ?",
-                    state, state, error, System.currentTimeMillis(), key(row));
+                            + " completed_at = ?, claim_owner = NULL, claim_until = NULL WHERE operation_ref = ?",
+                    state, state, error, System.currentTimeMillis(), ManagedSchemaKeys.identity(key(row)));
             return true;
         });
     }
@@ -286,8 +285,8 @@ public class JdbcSessionWorktreeStore
             if (lockClaim(row, owner)) {
                 long delay = failure ? Math.min(60000, 1000L << Math.min(row.attempts(), 6)) : 1000;
                 jdbc.update("UPDATE ma_operation SET available_at = ?, attempt_count = attempt_count + ?,"
-                                + " claim_owner = NULL, claim_until = NULL WHERE operation_key = ?",
-                        System.currentTimeMillis() + delay, failure ? 1 : 0, key(row));
+                                + " claim_owner = NULL, claim_until = NULL WHERE operation_ref = ?",
+                        System.currentTimeMillis() + delay, failure ? 1 : 0, ManagedSchemaKeys.identity(key(row)));
                 jdbc.update("UPDATE ma_session_worktree SET failure_code = ? WHERE tenant_id = ? AND session_id = ?",
                         error, row.tenantId(), row.sessionId());
             }
@@ -312,7 +311,8 @@ public class JdbcSessionWorktreeStore
                 }
                 String state = row.operationId().equals(row.worktreeId()) ? "PREPARING" : "REMOVING";
                 jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, delivery_state = 'PENDING', available_at = 0,"
-                        + " claim_owner = NULL, claim_until = NULL, failure_code = NULL WHERE operation_key = ?", state, state, key(row));
+                        + " claim_owner = NULL, claim_until = NULL, failure_code = NULL WHERE operation_ref = ?",
+                        state, state, ManagedSchemaKeys.identity(key(row)));
                 jdbc.update("UPDATE ma_session_worktree SET state = ?, failure_code = NULL, revision = revision + 1"
                         + " WHERE tenant_id = ? AND session_id = ? AND state = 'BLOCKED'", state, row.tenantId(), row.sessionId());
             });
@@ -320,8 +320,9 @@ public class JdbcSessionWorktreeStore
     }
 
     public boolean maintenanceHeld(Row row) {
-        return !jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND maintenance_id = ?"
-                        + " AND holder_key IS NOT NULL", Integer.class, JdbcWorkspaceExecutionStore.storageKey(jdbc, SessionWorktreeStore.storageBinding(row.plan())),
+        return !jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE physical_id = ? AND maintenance_id = ?"
+                        + " AND holder_id IS NOT NULL", Integer.class,
+                ManagedSchemaKeys.identity(JdbcWorkspaceExecutionStore.storageKey(jdbc, SessionWorktreeStore.storageBinding(row.plan()))),
                 row.operationId()).isEmpty();
     }
 
@@ -363,7 +364,7 @@ public class JdbcSessionWorktreeStore
             return "worktree_session_active";
         }
         if (!jdbc.queryForList("SELECT 1 FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?"
-                        + " AND (session_state <> 'RELEASED' OR execution_storage_key IS NOT NULL)", Integer.class,
+                        + " AND (session_state <> 'RELEASED' OR execution_storage_id IS NOT NULL)", Integer.class,
                 row.tenantId(), row.sessionId()).isEmpty()) {
             return "worktree_runtime_busy";
         }
@@ -382,9 +383,9 @@ public class JdbcSessionWorktreeStore
     }
 
     private boolean lockClaim(Row row, String owner) {
-        return !jdbc.queryForList("SELECT 1 FROM ma_operation WHERE operation_key = ? AND claim_owner = ?"
+        return !jdbc.queryForList("SELECT 1 FROM ma_operation WHERE operation_ref = ? AND claim_owner = ?"
                         + " AND claim_generation = ? AND claim_until > ? FOR UPDATE", Integer.class,
-                key(row), owner, row.generation(), System.currentTimeMillis()).isEmpty();
+                ManagedSchemaKeys.identity(key(row)), owner, row.generation(), System.currentTimeMillis()).isEmpty();
     }
 
     private static long blockIdentity(JdbcTemplate jdbc, Row row, String code) {
@@ -401,13 +402,13 @@ public class JdbcSessionWorktreeStore
     }
 
     private String storageIdentity(ContextBinding binding, boolean lock) {
-        var alias = jdbc.queryForList("SELECT physical_key, registration_revision, mount_revision, fence_operation_id"
-                        + " FROM ma_storage WHERE alias_key = ?" + (lock ? " FOR UPDATE" : ""),
-                RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId()));
+        var alias = jdbc.queryForList("SELECT physical_id, registration_revision, mount_revision, fence_operation_id"
+                        + " FROM ma_storage WHERE tenant_id = ? AND storage_id = ?" + (lock ? " FOR UPDATE" : ""),
+                binding.getTenantId(), binding.getStorageId());
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id"
-                        + " FROM ma_storage_owner WHERE storage_key = ?" + (lock ? " FOR UPDATE" : ""),
-                lock ? JdbcWorkspaceExecutionStore.storageKey(jdbc, binding)
-                        : LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId(), false));
+                        + " FROM ma_storage_owner WHERE physical_id = ?" + (lock ? " FOR UPDATE" : ""),
+                ManagedSchemaKeys.identity(lock ? JdbcWorkspaceExecutionStore.storageKey(jdbc, binding)
+                        : LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId(), false)));
         return org.apache.commons.codec.digest.DigestUtils.sha256Hex(json(List.of(alias, owner)));
     }
 

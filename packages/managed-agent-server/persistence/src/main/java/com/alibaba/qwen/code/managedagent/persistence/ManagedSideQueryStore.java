@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.*;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -12,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSideQueries;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -54,7 +54,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         this.json = json;
         this.sessions = new AgentStoreRows(rules, jdbc, json);
         this.sessionQueries = new AgentSessionQueries(sessions, null, jdbc, List.of());
-        this.journal = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, null);
+        this.journal = new JournalStoreRows(jdbc, null);
         this.workspaces = workspaces;
         this.models = models;
         this.retention = new ToolPublicationRetentionStore(jdbc, manager);
@@ -134,20 +134,20 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         if (!generationAvailable) {
             throw error(503, "side_query_unavailable");
         }
-        if (!jdbc.queryForList("SELECT query_key FROM ma_side_query WHERE actor_scope_key=? AND kind=?"
-                        + " AND state IN ('preparing','running')", scope, request.kind()).isEmpty()) {
+        if (!jdbc.queryForList("SELECT query_id FROM ma_side_query WHERE actor_scope_ref=? AND kind=?"
+                        + " AND state IN ('preparing','running')", ManagedSchemaKeys.identity(scope), request.kind()).isEmpty()) {
             throw error(409, "side_query_active");
         }
         long now = now();
         String id = UUID.randomUUID().toString();
         String lease = retention.read(tenant, session).id;
         List<Pair> pairs = "btw".equals(request.kind()) ? privateHistory(tenant, actor, session) : List.of();
-        jdbc.update("INSERT INTO ma_side_query (query_key,query_id,tenant_id,session_id,session_scope_key,actor_id,"
-                        + "actor_scope_key,kind,trigger_kind,question,state,source_json,private_history_json,model_config_digest,"
+        jdbc.update("INSERT INTO ma_side_query (query_id,tenant_id,session_id,actor_id,"
+                        + "actor_scope_ref,kind,trigger_kind,question,state,source_json,private_history_json,model_config_digest,"
                         + "processing_version,read_lease_id,read_deadline_at,deadline_at,gmt_create,gmt_modified)"
-                        + " VALUES (?,?,?,?,?,?,?,?,?,?,'preparing',?,?,?,?,?,?,?,?,?)",
-                queryKey(tenant, id), id, tenant, session, SideQueryConversation.scope(tenant, session), actor,
-                scope, request.kind(), request.trigger() == null ? "manual" : request.trigger(), request.question(),
+                        + " VALUES (?,?,?,?,?,?,?,?,'preparing',?,?,?,?,?,?,?,?,?)",
+                id, tenant, session, actor,
+                ManagedSchemaKeys.identity(scope), request.kind(), request.trigger() == null ? "manual" : request.trigger(), request.question(),
                 encode(source), encode(pairs), modelDigest, ManagedSideQueryModels.PROCESSING_VERSION, lease,
                 now + ToolPublicationRetentionStore.READ_BUDGET_MILLIS, now + ManagedSideQueryModels.DEADLINE_MILLIS, now, now);
         receipt(tenant, actor, session, scope, request.idempotencyKey(), digest, id);
@@ -178,9 +178,9 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             before = boundary.createdAt();
             beforeId = boundary.queryId();
         }
-        var ids = jdbc.queryForList("SELECT query_id FROM ma_side_query WHERE actor_scope_key=?"
+        var ids = jdbc.queryForList("SELECT query_id FROM ma_side_query WHERE actor_scope_ref=?"
                         + " AND (gmt_create<? OR (gmt_create=? AND query_id<?)) ORDER BY gmt_create DESC,query_id DESC LIMIT ?",
-                String.class, actorScope(tenant, actor, session), before, before, beforeId, limit + 1);
+                String.class, ManagedSchemaKeys.identity(actorScope(tenant, actor, session)), before, before, beforeId, limit + 1);
         boolean more = ids.size() > limit;
         if (more) {
             ids = ids.subList(0, limit);
@@ -203,6 +203,8 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
 
     @Override
     public Claim claim(String tenant, String session, String id, String instance, String boot) {
+        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireInstanceId(instance, "claimInstanceId");
+        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "claimBootId");
         lockRoot(tenant, session);
         Row row = read(tenant, session, id, true);
         authorize(tenant, row.actor(), session, true);
@@ -213,7 +215,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         String token = UUID.randomUUID() + ":" + UUID.randomUUID();
         long generation = row.generation() + 1;
         jdbc.update("UPDATE ma_side_query SET claim_instance_id=?,claim_boot_id=?,claim_generation=?,claim_token_hash=?"
-                + " WHERE query_key=?", instance, boot, generation, ManagedSchemaKeys.key(token), queryKey(tenant, id));
+                + " WHERE tenant_id=? AND query_id=?", instance, boot, generation, ManagedSchemaKeys.key(token), tenant, id);
         return new Claim(instance, boot, generation, token);
     }
 
@@ -281,13 +283,11 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     @Override
     public StoredResource resource(String tenant, String session, String id, Claim claim, String resourceId) {
         Row row = checked(tenant, session, id, claim, true);
-        String scope = SideQueryConversation.scope(tenant, session);
-        String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
-        boolean own = !jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key=?"
-                + " AND resource_key=? AND owner_kind='SIDE_QUERY' AND owner_key=? AND owner_revision=?", scope,
-                key, queryKey(tenant, id), claim.generation()).isEmpty();
-        boolean source = !jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key=?"
-                + " AND resource_key=? AND owner_kind='JOURNAL' AND owner_revision<=?", scope, key,
+        boolean own = !jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=?"
+                + " AND resource_id=? AND owner_kind='SIDE_QUERY' AND owner_ref=? AND owner_revision=?", tenant, session,
+                resourceId, ManagedSchemaKeys.identity(queryKey(tenant, id)), claim.generation()).isEmpty();
+        boolean source = !jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=?"
+                + " AND resource_id=? AND owner_kind='JOURNAL' AND owner_revision<=?", tenant, session, resourceId,
                 row.query().source().journalRevision()).isEmpty();
         if (!own && !source) {
             throw error(404, "side_query_resource_not_found");
@@ -318,27 +318,28 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         if (bytes.length != resource.byteLength() || !JournalStoreRows.sha256(bytes).equals(resource.digest())) {
             throw error(400, "invalid_side_query_resource");
         }
-        String scope = SideQueryConversation.scope(tenant, session);
-        String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resource.resourceId());
-        var existing = jdbc.queryForList("SELECT resource_key FROM ma_resource WHERE resource_key=? FOR UPDATE", key);
+        var existing = jdbc.queryForList("SELECT resource_id FROM ma_resource WHERE tenant_id=? AND session_id=?"
+                + " AND resource_id=? FOR UPDATE", tenant, session, resource.resourceId());
         if (existing.isEmpty()) {
             var totals = jdbc.queryForMap("SELECT COUNT(*) AS resource_count,COALESCE(SUM(r.byte_length),0) AS total_bytes"
-                            + " FROM ma_resource_ref f JOIN ma_resource r ON r.resource_key=f.resource_key"
-                            + " WHERE f.session_scope_key=? AND f.owner_kind='SIDE_QUERY' AND f.owner_key=? AND f.owner_revision=?",
-                    scope, queryKey(tenant, id), claim.generation());
+                            + " FROM ma_resource_ref f JOIN ma_resource r ON r.resource_id=f.resource_id"
+                            + " AND r.tenant_id=f.tenant_id AND r.session_id=f.session_id"
+                            + " WHERE f.tenant_id=? AND f.session_id=? AND f.owner_kind='SIDE_QUERY' AND f.owner_ref=?"
+                            + " AND f.owner_revision=?",
+                    tenant, session, ManagedSchemaKeys.identity(queryKey(tenant, id)), claim.generation());
             if (((Number) totals.get("resource_count")).longValue() >= 1024
                     || ((Number) totals.get("total_bytes")).longValue() + bytes.length
                         > ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES + ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES) {
                 throw error(413, "side_query_input_too_large");
             }
-            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,"
+            jdbc.update("INSERT INTO ma_resource (tenant_id,session_id,resource_id,kind,"
                             + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                            + " VALUES (?,?,?,?,?,?,?,?,?,'MYSQL_INLINE',?,'REFERENCED',?)", key, scope, tenant,
+                            + " VALUES (?,?,?,?,?,?,?,'MYSQL_INLINE',?,'REFERENCED',?)", tenant,
                     session, resource.resourceId(), resource.kind(), resource.schemaVersion(), resource.byteLength(), resource.digest(), bytes, now());
         } else {
-            if (jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key=?"
-                            + " AND owner_kind='SIDE_QUERY' AND owner_key=? AND owner_revision=? AND resource_key=?",
-                    scope, queryKey(tenant, id), claim.generation(), key).isEmpty()) {
+            if (jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=?"
+                            + " AND owner_kind='SIDE_QUERY' AND owner_ref=? AND owner_revision=? AND resource_id=?",
+                    tenant, session, ManagedSchemaKeys.identity(queryKey(tenant, id)), claim.generation(), resource.resourceId()).isEmpty()) {
                 throw error(409, "side_query_resource_conflict");
             }
             StoredResource stored = loadResource(tenant, session, resource.resourceId());
@@ -346,11 +347,12 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
                 throw error(409, "side_query_resource_conflict");
             }
         }
-        if (jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SIDE_QUERY'"
-                        + " AND owner_key=? AND owner_revision=? AND resource_key=?", scope, queryKey(tenant, id), claim.generation(), key).isEmpty()) {
-            jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,"
-                            + "tenant_id,session_id,resource_id,gmt_create) VALUES (?,'SIDE_QUERY',?,?,?,?,?,?,?)",
-                    scope, queryKey(tenant, id), claim.generation(), key, tenant, session, resource.resourceId(), now());
+        if (jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SIDE_QUERY'"
+                        + " AND owner_ref=? AND owner_revision=? AND resource_id=?", tenant, session,
+                ManagedSchemaKeys.identity(queryKey(tenant, id)), claim.generation(), resource.resourceId()).isEmpty()) {
+            jdbc.update("INSERT INTO ma_resource_ref (owner_kind,owner_ref,owner_revision,"
+                            + "tenant_id,session_id,resource_id,gmt_create) VALUES ('SIDE_QUERY',?,?,?,?,?,?)",
+                    ManagedSchemaKeys.identity(queryKey(tenant, id)), claim.generation(), tenant, session, resource.resourceId(), now());
         }
     }
 
@@ -361,11 +363,10 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
                 || !input.resourceIds().contains(input.resourceId())) {
             throw error(409, "side_query_input_conflict");
         }
-        String scope = SideQueryConversation.scope(tenant, session);
         for (String resourceId : input.resourceIds()) {
-            var owned = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key=?"
-                            + " AND owner_kind='SIDE_QUERY' AND owner_key=? AND owner_revision=? AND resource_id=?",
-                    scope, queryKey(tenant, id), claim.generation(), resourceId);
+            var owned = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=?"
+                            + " AND owner_kind='SIDE_QUERY' AND owner_ref=? AND owner_revision=? AND resource_id=?",
+                    tenant, session, ManagedSchemaKeys.identity(queryKey(tenant, id)), claim.generation(), resourceId);
             if (owned.size() != 1) {
                 throw error(409, "side_query_input_conflict");
             }
@@ -377,8 +378,8 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         verifyInputClosure(tenant, session, input, manifest);
         verifyPrefix(tenant, session, row.query().source());
         jdbc.update("UPDATE ma_side_query SET input_resource_id=?,input_digest=?,is_input_ready=1,"
-                        + "result_revision=result_revision+1,gmt_modified=? WHERE query_key=?", input.resourceId(),
-                input.digest(), now(), queryKey(tenant, id));
+                        + "result_revision=result_revision+1,gmt_modified=? WHERE tenant_id=? AND query_id=?", input.resourceId(),
+                input.digest(), now(), tenant, id);
         releaseLease(row);
         return read(tenant, session, id, false).query();
     }
@@ -390,7 +391,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             return false;
         }
         return jdbc.update("UPDATE ma_side_query SET state='running',result_revision=result_revision+1,gmt_modified=?"
-                + " WHERE query_key=? AND state='preparing' AND is_input_ready=1", now(), queryKey(tenant, id)) == 1;
+                + " WHERE tenant_id=? AND query_id=? AND state='preparing' AND is_input_ready=1", now(), tenant, id) == 1;
     }
 
     @Override
@@ -434,7 +435,8 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         long now = now();
         if (now - row.query().updatedAt() >= 1000) {
             jdbc.update("UPDATE ma_side_query SET answer_text=?,usage_json=?,result_revision=result_revision+1,gmt_modified=?"
-                    + " WHERE query_key=?", result.text(), result.usage() == null ? null : encode(result.usage()), now, row.key());
+                    + " WHERE tenant_id=? AND query_id=?", result.text(), result.usage() == null ? null : encode(result.usage()), now,
+                    row.tenant(), row.query().queryId());
         }
         return read(tenant, session, id, false).query();
     }
@@ -478,7 +480,8 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             }
             if (!row.ready()) {
                 var leases = jdbc.queryForList("SELECT l.lease_id FROM ma_read_lease l JOIN ma_session s"
-                                + " ON s.tenant_key=l.tenant_key AND s.session_key=l.session_key WHERE l.lease_id=?"
+                                + " ON s.tenant_id=l.tenant_id AND s.session_id=l.session_id"
+                                + " AND s.is_publication_retention_registered=1 WHERE l.lease_id=?"
                                 + " AND s.tenant_id=? AND s.session_id=? AND s.retired_at IS NULL"
                                 + " AND s.retirement_generation=l.retirement_generation AND l.expires_at>?",
                         row.lease(), tenant, session, now());
@@ -495,43 +498,45 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             return row.query();
         }
         jdbc.update("UPDATE ma_side_query SET state=?,outcome=?,answer_text=?,usage_json=?,error_code=?,"
-                        + "result_revision=result_revision+1,gmt_modified=? WHERE query_key=?", state, outcome, text,
-                usage == null ? null : encode(usage), errorCode, now(), row.key());
-        releaseInput(jdbc, row.tenant(), row.query().sessionId(), row.key(), row.lease());
+                        + "result_revision=result_revision+1,gmt_modified=? WHERE tenant_id=? AND query_id=?", state, outcome, text,
+                usage == null ? null : encode(usage), errorCode, now(), row.tenant(), row.query().queryId());
+        releaseInput(jdbc, row.tenant(), row.query().sessionId(), row.query().queryId(), row.lease());
         return read(row.tenant(), row.query().sessionId(), row.query().queryId(), false).query();
     }
 
     static void cancelSession(JdbcTemplate jdbc, String tenant, String session) {
-        var active = jdbc.query("SELECT query_key,read_lease_id FROM ma_side_query WHERE tenant_id=? AND session_id=?"
+        var active = jdbc.query("SELECT query_id,read_lease_id FROM ma_side_query WHERE tenant_id=? AND session_id=?"
                         + " AND state IN ('preparing','running') FOR UPDATE",
                 (row, index) -> new String[] {row.getString(1), row.getString(2)}, tenant, session);
         for (String[] row : active) {
             jdbc.update("UPDATE ma_side_query SET state='cancelled',outcome='session_closed',result_revision=result_revision+1,"
-                    + "gmt_modified=? WHERE query_key=?", ToolPublicationRetentionStore.now(jdbc), row[0]);
+                    + "gmt_modified=? WHERE tenant_id=? AND query_id=?", ToolPublicationRetentionStore.now(jdbc), tenant, row[0]);
             releaseInput(jdbc, tenant, session, row[0], row[1]);
         }
     }
 
-    private static void releaseInput(JdbcTemplate jdbc, String tenant, String session, String key, String lease) {
-        String scope = SideQueryConversation.scope(tenant, session);
-        ManagedProjectionResourceCollector.release(jdbc, scope, "SIDE_QUERY", key);
-        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SIDE_QUERY' AND owner_key=?", scope, key);
+    private static void releaseInput(JdbcTemplate jdbc, String tenant, String session, String id, String lease) {
+        String key = queryKey(tenant, id);
+        ManagedProjectionResourceCollector.release(jdbc, tenant, session, "SIDE_QUERY", key);
+        jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SIDE_QUERY' AND owner_ref=?",
+                tenant, session, ManagedSchemaKeys.identity(key));
         if (lease != null) {
             jdbc.update("DELETE FROM ma_read_lease WHERE lease_id=?", lease);
         }
         jdbc.update("UPDATE ma_side_query SET read_lease_id=NULL,input_resource_id=NULL,input_digest=NULL,is_input_ready=0,"
-                + "private_history_json='[]' WHERE query_key=?", key);
+                + "private_history_json='[]' WHERE tenant_id=? AND query_id=?", tenant, id);
     }
 
     private void releaseLease(Row row) {
         if (row.lease() != null) {
             jdbc.update("DELETE FROM ma_read_lease WHERE lease_id=?", row.lease());
-            jdbc.update("UPDATE ma_side_query SET read_lease_id=NULL WHERE query_key=?", row.key());
+            jdbc.update("UPDATE ma_side_query SET read_lease_id=NULL WHERE tenant_id=? AND query_id=?", row.tenant(),
+                    row.query().queryId());
         }
     }
 
     private SessionRecord authorize(String tenant, String actor, String session, boolean execute) {
-        SessionRecord visible = sessions.requireLegacySessionForUpdate(tenant, session);
+        SessionRecord visible = sessions.requireSessionForUpdate(tenant, session);
         if ("DELETED".equals(visible.status()) || visible.deletedAt() != null) {
             throw error(404, "session_not_found");
         }
@@ -562,21 +567,16 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private void lockRoot(String tenant, String session) {
-        sessions.requireLegacySessionForUpdate(tenant, session);
+        sessions.requireSessionForUpdate(tenant, session);
     }
 
     private Prefix prefix(String tenant, String session) {
-        var heads = jdbc.queryForList("SELECT journal_revision,committed_sequence,last_commit_digest,storage_version FROM ma_session_head"
+        var heads = jdbc.queryForList("SELECT journal_revision,committed_sequence,last_commit_digest FROM ma_session_head"
                 + " WHERE tenant_id=? AND session_id=? AND head_kind='MANAGED_SESSION' FOR UPDATE", tenant, session);
         if (heads.size() != 1) {
             throw error(409, "side_query_history_unavailable");
         }
         var head = heads.getFirst();
-        int storageVersion = ((Number) head.get("storage_version")).intValue();
-        if (storageVersion < 1 || storageVersion
-                > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED) {
-            throw error(409, "side_query_history_unavailable");
-        }
         return SideQueryConversation.capture(jdbc, tenant, session, ((Number) head.get("journal_revision")).longValue(),
                 ((Number) head.get("committed_sequence")).longValue(), (String) head.get("last_commit_digest"), packs);
     }
@@ -601,17 +601,17 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private Query latestRecap(String tenant, String actor, String session) {
-        var ids = jdbc.queryForList("SELECT query_id FROM ma_side_query WHERE actor_scope_key=? AND kind='recap'"
+        var ids = jdbc.queryForList("SELECT query_id FROM ma_side_query WHERE actor_scope_ref=? AND kind='recap'"
                         + " AND state='completed' AND outcome='success' ORDER BY gmt_create DESC,query_id DESC LIMIT 1",
-                String.class, actorScope(tenant, actor, session));
+                String.class, ManagedSchemaKeys.identity(actorScope(tenant, actor, session)));
         return ids.isEmpty() ? null : read(tenant, session, ids.getFirst(), false).query();
     }
 
     private Query reusableRecap(String tenant, String actor, String session, Prefix prefix, String digest) {
-        var ids = jdbc.queryForList("SELECT query_id FROM ma_side_query WHERE actor_scope_key=? AND kind='recap'"
+        var ids = jdbc.queryForList("SELECT query_id FROM ma_side_query WHERE actor_scope_ref=? AND kind='recap'"
                         + " AND model_config_digest=? AND processing_version=? AND (state IN ('preparing','running')"
                         + " OR (state='completed' AND outcome='success')) ORDER BY gmt_create DESC,query_id DESC LIMIT 32",
-                String.class, actorScope(tenant, actor, session), digest, ManagedSideQueryModels.PROCESSING_VERSION);
+                String.class, ManagedSchemaKeys.identity(actorScope(tenant, actor, session)), digest, ManagedSideQueryModels.PROCESSING_VERSION);
         for (String id : ids) {
             Query query = read(tenant, session, id, false).query();
             if (query.source().contentVersion().equals(prefix.contentVersion())) {
@@ -622,10 +622,11 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private List<Pair> privateHistory(String tenant, String actor, String session) {
-        var pairs = jdbc.query("SELECT question,answer_text FROM ma_side_query WHERE actor_scope_key=?"
+        var pairs = jdbc.query("SELECT question,answer_text FROM ma_side_query WHERE actor_scope_ref=?"
                         + " AND tenant_id=? AND session_id=? AND actor_id=? AND kind='btw'"
                         + " AND state='completed' AND outcome='success' ORDER BY gmt_create DESC,query_id DESC LIMIT 20",
-                (row, index) -> new Pair(row.getString(1), row.getString(2)), actorScope(tenant, actor, session), tenant, session, actor);
+                (row, index) -> new Pair(row.getString(1), row.getString(2)),
+                ManagedSchemaKeys.identity(actorScope(tenant, actor, session)), tenant, session, actor);
         Collections.reverse(pairs);
         return pairs;
     }
@@ -699,19 +700,19 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
 
     private Row read(String tenant, String session, String id, boolean lock) {
         var rows = jdbc.query("SELECT " + ManagedSchemaProjection.SIDE_QUERY.columns()
-                        + " FROM ma_side_query WHERE query_key=? AND tenant_id=? AND session_id=? AND query_id=?"
+                        + " FROM ma_side_query WHERE tenant_id=? AND session_id=? AND query_id=?"
                         + (lock ? " FOR UPDATE" : ""), (row, index) -> {
                     Query query = new Query(id, session, row.getString("kind"), row.getString("trigger_kind"), row.getString("question"),
                             row.getString("state"), row.getString("outcome"), decode(row.getString("source_json"), Prefix.class),
                             row.getLong("result_revision"), row.getString("answer_text"), row.getString("usage_json") == null ? null
                             : decode(row.getString("usage_json"), new TypeReference<Map<String, Object>>() {}), row.getString("error_code"),
                             row.getLong("gmt_create"), row.getLong("gmt_modified"), row.getLong("deadline_at"));
-                    return new Row(row.getString("query_key"), tenant, row.getString("actor_id"), query,
+                    return new Row(tenant, row.getString("actor_id"), query,
                             row.getString("claim_instance_id"), row.getString("claim_boot_id"), row.getLong("claim_generation"),
                             row.getString("claim_token_hash"), row.getString("read_lease_id"), row.getLong("read_deadline_at"),
                             row.getString("model_config_digest"), row.getString("private_history_json"), row.getBoolean("is_input_ready"),
                             row.getString("input_resource_id"), row.getString("input_digest"));
-                }, queryKey(tenant, id), tenant, session, id);
+                }, tenant, session, id);
         if (rows.size() != 1) {
             throw error(404, "side_query_not_found");
         }
@@ -773,18 +774,18 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private static String queryKey(String tenant, String query) {
-        return ManagedSchemaKeys.key(tenant, query);
+        return ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenant, query);
     }
 
     private static String actorScope(String tenant, String actor, String session) {
-        return ManagedSchemaKeys.key(tenant, session, actor);
+        return ManagedIdentityRefs.actorScopeRef(tenant, session, actor);
     }
 
     private static ManagedAgentException error(int status, String code) {
         return new ManagedAgentException(status, code, "The side query request could not be completed.");
     }
 
-    private record Row(String key, String tenant, String actor, Query query, String instance, String boot,
+    private record Row(String tenant, String actor, Query query, String instance, String boot,
             long generation, String claimHash, String lease, long readDeadline, String modelDigest,
             String history, boolean ready, String inputId, String inputDigest) {}
 }

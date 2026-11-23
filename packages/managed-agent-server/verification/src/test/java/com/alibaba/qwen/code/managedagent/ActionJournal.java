@@ -43,7 +43,7 @@ final class ActionJournal {
         this.session = session;
         options =
                 JSON.createObjectNode()
-                        .put("v", 1)
+                        .put("v", 3)
                         .put("requestId", id)
                         .put("turnId", "turn-actions")
                         .put("functionCallId", "call-actions")
@@ -58,7 +58,7 @@ final class ActionJournal {
 
     ActionJournal withInput(byte[] bytes) {
         input = bytes;
-        options.put("v", 2);
+        options.put("v", 3);
         options.set("inputRef", reference(bytes, "managed-tool-input"));
         return this;
     }

@@ -27,7 +27,7 @@ public final class ToolPublicationRetentionClockFixtureMain {
         var tx = new TransactionTemplate(manager);
         var retention = new ToolPublicationRetentionStore(jdbc, manager);
         var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
-        String tenant = "clock-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = "session-clock";
         var key = new ObjectMapper().createObjectNode().put("tenantId", tenant)
                 .put("workspaceId", "workspace-clock").put("sessionId", session);
@@ -36,7 +36,7 @@ public final class ToolPublicationRetentionClockFixtureMain {
             try (var lease = retention.read(key)) {
                 lease.check();
                 long expires = jdbc.queryForObject("SELECT expires_at FROM ma_read_lease"
-                        + " WHERE tenant_key = ?", Long.class, ToolPublicationRetentionStore.hash(tenant));
+                        + " WHERE tenant_id = ?", Long.class, tenant);
                 assertThat(expires - databaseEpoch(jdbc)).isBetween(118_000L, 120_000L);
             }
             tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
@@ -55,12 +55,12 @@ public final class ToolPublicationRetentionClockFixtureMain {
             assertEpoch(jdbc, retired);
             System.out.println("O4_RETENTION_CLOCK_OK");
         } finally {
-            jdbc.update("DELETE FROM ma_read_lease WHERE tenant_key = ?",
-                    ToolPublicationRetentionStore.hash(tenant));
+            jdbc.update("DELETE FROM ma_read_lease WHERE tenant_id = ?",
+                    tenant);
             jdbc.update("DELETE FROM ma_event_stream WHERE tenant_id = ?", tenant);
             jdbc.update("DELETE FROM ma_session_head WHERE tenant_id = ?", tenant);
             jdbc.update("DELETE FROM ma_session WHERE tenant_id = ?", tenant);
-            jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_key = ?", ToolPublicationRetentionStore.hash(tenant));
+            jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_id = ?", tenant);
         }
     }
 

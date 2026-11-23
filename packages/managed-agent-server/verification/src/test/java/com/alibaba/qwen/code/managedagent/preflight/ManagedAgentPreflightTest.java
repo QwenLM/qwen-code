@@ -341,9 +341,11 @@ class ManagedAgentPreflightTest {
 
     @Test
     void requiresTheLifecycleTheWorkspaceToolsNeed() throws IOException {
+        // D3: ordinary files needs lifecycle v2 (external-files keeps v1).
         HttpServer textOnly = capabilitiesServer(capabilities(DIGEST, "")
                 .replace("\"lifecycleProtocolVersion\":1,", ""));
-        HttpServer filesOnly = capabilitiesServer(capabilities(DIGEST, ""));
+        HttpServer filesOnly = capabilitiesServer(
+                capabilities(DIGEST, "\"hosted-workspace-files/1\""));
         try {
             ManagedAgentProperties files = harness(
                     "http://127.0.0.1:" + textOnly.getAddress().getPort());
@@ -351,7 +353,8 @@ class ManagedAgentPreflightTest {
             ManagedAgentPreflight.Check noFiles =
                     ManagedAgentPreflight.harnessCheck(files, null);
             assertEquals(ManagedAgentPreflight.Status.FAIL, noFiles.status());
-            assertTrue(noFiles.detail().endsWith("does not support Workspace files"));
+            assertTrue(noFiles.detail().endsWith("does not offer hosted-workspace-files/1"),
+                    noFiles.detail());
             ManagedAgentProperties shell = harness(
                     "http://127.0.0.1:" + filesOnly.getAddress().getPort());
             shell.getHarness().setWorkspaceFilesEnabled(true);
@@ -361,7 +364,7 @@ class ManagedAgentPreflightTest {
             assertEquals(ManagedAgentPreflight.Status.FAIL, noShell.status());
             assertEquals("add hosted-workspace-shell/1 to QWEN_HOSTED_LIFECYCLE_V2_PROFILES"
                     + " in the Harness environment; an explicit value replaces the whole"
-                    + " list, so set it to hosted-workspace-shell/1", noShell.fix());
+                    + " list, so set it to hosted-workspace-files/1,hosted-workspace-shell/1", noShell.fix());
             // Profiles an AgentDefinition may select need their lifecycle too.
             ManagedAgentProperties mcp = harness(
                     "http://127.0.0.1:" + filesOnly.getAddress().getPort());
@@ -388,14 +391,14 @@ class ManagedAgentPreflightTest {
             ManagedAgentPreflight.Check check = ManagedAgentPreflight.harnessCheck(shell, null);
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
             assertTrue(check.fix().endsWith("so set it to"
-                    + " hosted-workspace-mcp/1,hosted-workspace-shell/1"), check.fix());
+                    + " hosted-workspace-mcp/1,hosted-workspace-files/1,hosted-workspace-shell/1"), check.fix());
         } finally {
             mcpOnly.stop(0);
         }
         HttpServer withShell = capabilitiesServer(
-                capabilities(DIGEST, "\"hosted-workspace-shell/1\""));
+                capabilities(DIGEST, "\"hosted-workspace-files/1\",\"hosted-workspace-shell/1\""));
         HttpServer withShellMcp = capabilitiesServer(
-                capabilities(DIGEST, "\"hosted-workspace-shell/1\"").replace(
+                capabilities(DIGEST, "\"hosted-workspace-files/1\",\"hosted-workspace-shell/1\"").replace(
                         "\"lifecycleProtocolVersion\":1,",
                         "\"features\":[\"workspace-shell-mcp/1\"],\"lifecycleProtocolVersion\":1,"));
         try {
@@ -1697,20 +1700,29 @@ class ManagedAgentPreflightTest {
                 new ManagedAgentProperties().getRuntimeBroker();
         broker.setHost("127.0.0.1");
         broker.setPort(4182);
-        // Node's URL parser folds each of these into the Broker's origin.
-        for (String url : List.of("http://127.1:4182", "http://2130706433:4182",
-                "http:/127.0.0.1:4182", "http:///127.0.0.1:4182",
-                "http://127.0.0.1:4182/./", "http://127.0.0.1:4182/proxy/..")) {
+        // Canonical http(s)://host[:port][/] spellings pass.
+        for (String url : List.of("http://127.0.0.1:4182", "http://127.0.0.1:4182/",
+                "http://localhost:4182", "http://LocalHost:4182", "HTTP://127.0.0.1:4182")) {
             assertEquals(ManagedAgentPreflight.Status.PASS,
                     urlCheck(url, broker).status(), url);
         }
-        // And refuses these, so the Harness never starts.
-        for (String url : List.of("http://127.0.0.08:4182",
-                "http://127.0.0.1:65536", "http://127.0.0.1:99999")) {
+        // Non-canonical WHATWG spellings and invalid ports/octets are refused directly.
+        for (String url : List.of("http://127.1:4182", "http://2130706433:4182",
+                "http://0177.0.0.1:4182", "http://127.0.0.010:4182",
+                "http:/127.0.0.1:4182", "http:///127.0.0.1:4182",
+                "http://127.0.0.08:4182", "http://127.0.0.1:65536",
+                "http://127.0.0.1:99999", "http://127.0.0.1:0", "http://127.0.0.1:")) {
             ManagedAgentPreflight.Check check = urlCheck(url, broker);
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(), url);
             assertEquals("the Hosted Harness refuses " + url
                     + ", which is not a valid URL", check.detail());
+        }
+        // Dot-segment paths are refused as non-origin URLs rather than folded.
+        for (String url : List.of("http://127.0.0.1:4182/./", "http://127.0.0.1:4182/proxy/..")) {
+            ManagedAgentPreflight.Check check = urlCheck(url, broker);
+            assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(), url);
+            assertEquals("the Hosted Harness refuses " + url
+                    + ", which is not an http or https origin", check.detail());
         }
         // Only whether the Harness accepts an https host with an xn-- label
         // depends on IDNA; plain http to one is refused either way.
@@ -1721,10 +1733,7 @@ class ManagedAgentPreflightTest {
         broker.setHost("::1");
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 urlCheck("http://::1:4182", broker).status());
-        // A leading zero makes an octet octal: 010 is 8, not the bound 10.
         broker.setHost("127.0.0.10");
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlCheck("http://127.0.0.010:4182", broker).status());
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 urlCheck("http://127.0.0.10:4182", broker).status());
         // The fix names the bound address, which the Harness accepts

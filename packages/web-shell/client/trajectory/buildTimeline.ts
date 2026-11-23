@@ -17,7 +17,7 @@ export interface TimelineSpan {
   /** Offset into the compressed domain, ms. */
   start: number;
   end: number;
-  /** Requests with a recorded TTFT only: where the first token landed. */
+  /** Requests only: where the first visible output landed. */
   ttftEnd?: number;
   error: boolean;
 }
@@ -65,21 +65,28 @@ interface RawSpan {
   lane: TimelineLane;
   start: number;
   durationMs: number;
-  ttftMs?: number;
+  firstVisibleOffsetMs?: number;
   error: boolean;
 }
 
 function toRawSpan(row: TrajectoryRow): RawSpan | 'dropped' | undefined {
   if (row.kind === 'request') {
-    const { startedAt, durationMs, ttftMs } = row.timing;
+    const {
+      startedAt,
+      durationMs,
+      ttftMs,
+      firstVisibleOffsetMs = ttftMs,
+    } = row.timing;
     if (startedAt === undefined) return 'dropped';
     return {
       row,
       lane: row.depth > 0 ? 2 : 0,
       start: startedAt,
       durationMs,
-      ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
-        ? { ttftMs }
+      ...(firstVisibleOffsetMs !== undefined &&
+      firstVisibleOffsetMs >= 0 &&
+      firstVisibleOffsetMs <= durationMs
+        ? { firstVisibleOffsetMs }
         : {}),
       error: row.status === 'error',
     };
@@ -156,7 +163,9 @@ export function buildTimeline(
       lane: span.lane,
       start,
       end: end - removed,
-      ...(span.ttftMs !== undefined ? { ttftEnd: start + span.ttftMs } : {}),
+      ...(span.firstVisibleOffsetMs !== undefined
+        ? { ttftEnd: start + span.firstVisibleOffsetMs }
+        : {}),
       error: span.error,
     });
   }

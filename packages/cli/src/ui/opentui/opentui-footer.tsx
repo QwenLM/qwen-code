@@ -120,6 +120,7 @@ export interface OpenTuiLoadingIndicatorProps {
    * what the setting removes — only its text.
    */
   showPhrase?: boolean;
+  screenReader?: boolean;
 }
 
 /** Spinner + witty phrase + elapsed time + token estimate, above the composer. */
@@ -129,21 +130,32 @@ export function OpenTuiLoadingIndicator({
   streamingCharsRef,
   isReceivingContent = false,
   showPhrase = true,
+  screenReader = false,
 }: OpenTuiLoadingIndicatorProps) {
   const { width } = useTerminalDimensions();
+  // The screen-reader branch below depends only on `waiting`, and every tick a
+  // source installs commits a frame that re-reads the whole history window.
   // The shared cycler resolves the phrase list for all nine locales and owns
   // the 15s rotation, so this renderer cannot drift from ink's.
-  const phrase = usePhraseCycler(streaming, waiting);
+  const phrase = usePhraseCycler(!screenReader && streaming, waiting);
   // Paused rather than deactivated while a call is parked: useTimer zeroes its
   // accumulated elapsed on a false-to-true edge, so dropping `waiting` out of
   // `isActive` would restart the counter when the parked call resumes.
-  const elapsedTime = useTimer(streaming, 0, waiting);
+  const elapsedTime = useTimer(!screenReader && streaming, 0, waiting);
   const fallbackRef = useRef(0);
   const animatedChars = useAnimationFrame(
     streamingCharsRef ?? fallbackRef,
-    streamingCharsRef && streaming ? 100 : null,
+    !screenReader && streamingCharsRef && streaming ? 100 : null,
   );
   if (!streaming && !waiting) return null;
+  if (screenReader)
+    return (
+      <text id="screen-reader-loading">
+        {waiting
+          ? t('Waiting for confirmation')
+          : t('Working. Escape to cancel.')}
+      </text>
+    );
 
   const isNarrow = isNarrowWidth(width);
   const outputTokens = Math.round(animatedChars / 4);
@@ -187,6 +199,7 @@ export function OpenTuiLoadingIndicator({
 }
 
 export interface OpenTuiFooterProps {
+  screenReader?: boolean;
   config: Config;
   settings: LoadedSettings;
   statusLine: ReturnType<typeof useStatusLineState>;
@@ -205,6 +218,7 @@ export interface OpenTuiFooterProps {
 
 /** The status line (ink `Footer` parity). */
 export function OpenTuiFooter({
+  screenReader = false,
   config,
   settings,
   statusLine,
@@ -266,10 +280,11 @@ export function OpenTuiFooter({
               ]
             : []),
         ];
-  const queuedHint =
+  const queuedLabel =
     queueLength > 0
-      ? `⏳ ${t('{{count}} queued', { count: String(queueLength) })}`
+      ? t('{{count}} queued', { count: String(queueLength) })
       : null;
+  const queuedHint = queuedLabel ? `⏳ ${queuedLabel}` : null;
   // ink renders the badge as a sibling text node beginning with a literal
   // space, so it joins the hint with one space.
   const hintParts: HintPart[] = [
@@ -315,6 +330,64 @@ export function OpenTuiFooter({
   // its status line off while the warning is up, so the warning reads directly
   // under the composer with nothing above it. The queued-message segment sits
   // beside the warning rather than inside the hint it replaces, so it stays.
+  if (screenReader) {
+    const segments: Array<[string, string | null]> = exitHint
+      ? [
+          ['footer-exit', exitHint],
+          ['footer-queue', queuedLabel],
+        ]
+      : [
+          ['footer-sandbox', sandboxLabel ?? ''],
+          // The visual two-row clip keeps the footer from growing mid-turn.
+          // Speech has no such budget and the writer hard-wraps, so it takes
+          // the logical lines whole instead of the clipped display buffer.
+          // Command output is opaque and may refresh on a timer, so it rides
+          // the live lane instead of appending a scrollback line per tick.
+          ...statusLine.lines.map((line, index): [string, string] => [
+            `${statusLine.commandSourced ? 'live' : 'footer'}-status-${index}`,
+            line,
+          ]),
+          ['footer-context', contextLabel],
+          [
+            'footer-worktree',
+            activeWorktree && !settings.merged.ui?.hideBuiltinWorktreeIndicator
+              ? t('Worktree: {{value}}', {
+                  value: `${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`,
+                })
+              : '',
+          ],
+          [
+            'footer-workflow',
+            workflowMode?.requested
+              ? t(
+                  workflowMode.effective
+                    ? 'Workflow mode: on'
+                    : 'Workflow mode: on (unavailable)',
+                )
+              : '',
+          ],
+          // The pause glyph is a visual marker; speech takes the mode label.
+          [
+            'footer-mode',
+            modeHint
+              .map((part) => part.text)
+              .join('')
+              .replace(pausePrefix, ''),
+          ],
+          ['footer-queue', queuedLabel],
+        ];
+    return (
+      <box flexDirection="column">
+        {segments.map(([key, text]) =>
+          text ? (
+            <text key={key} id={`screen-reader-${key}`}>
+              {text}
+            </text>
+          ) : null,
+        )}
+      </box>
+    );
+  }
   if (exitHint) {
     const warningLine = [exitHint, queuedHint]
       .filter((segment): segment is string => segment !== null)
@@ -357,7 +430,7 @@ export function OpenTuiFooter({
             !settings.merged.ui?.hideBuiltinWorktreeIndicator && (
               <text attributes={2}>
                 {truncateToWidth(
-                  `⎇ ${activeWorktree.branch} (${activeWorktree.slug})`,
+                  `⎇ ${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`,
                   statusWidth,
                 )}
               </text>

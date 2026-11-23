@@ -64,9 +64,9 @@ public final class ManagedSchema {
 
     private static void execute(Connection connection, String ddl) throws SQLException {
         try (var statement = connection.createStatement()) {
-            for (String command : ddl.replaceAll("(?m)^--[^\\n]*", "").split(";")) {
+            for (String command : ManagedSchemaDdlParser.splitStatements(ddl)) {
                 if (!command.isBlank()) {
-                    statement.execute(command.trim());
+                    statement.execute(command);
                 }
             }
         }

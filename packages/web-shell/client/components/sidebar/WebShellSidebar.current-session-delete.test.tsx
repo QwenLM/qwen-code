@@ -6,6 +6,7 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import * as React from 'react';
 import { act } from 'react';
 import { createPortal } from 'react-dom';
@@ -217,7 +218,10 @@ function deletionOwner(
   };
 }
 
-function secondaryDeletion(locked: boolean) {
+function secondaryDeletion(
+  locked: boolean,
+  secondaryOverrides: Partial<DaemonSessionSummary> = {},
+) {
   connection.capabilities = {
     qwenCodeVersion: '1.2.3',
     features: ['multi_workspace_sessions', 'workspace_qualified_rest_core'],
@@ -228,6 +232,7 @@ function secondaryDeletion(locked: boolean) {
   const secondary = makeSession('same', {
     workspaceCwd: '/tmp/other',
     displayName: 'Secondary same ID',
+    ...secondaryOverrides,
   });
   const deleteSessionsData = vi.fn().mockResolvedValue({
     removed: ['same'],
@@ -577,6 +582,51 @@ describe('sidebar session selection', () => {
     );
   });
 
+  it('grades "current" by workspace-qualified identity, not session id', async () => {
+    // The dialog compares session ids; the sidebar must not. A same-id row in
+    // another workspace is not the runtime this client would tear down, so a
+    // turn there does not block its Delete.
+    const { props } = secondaryDeletion(false, { hasActivePrompt: true });
+    // Both rows run a turn, so only the notion of "current" separates them.
+    active.sessions = [
+      makeSession('same', {
+        displayName: 'Primary same ID',
+        hasActivePrompt: true,
+      }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'same';
+    connection.workspaceCwd = '/tmp/project';
+    renderSidebar(props);
+    await expandSecondaryWorkspace();
+    expect(findSessionDeleteButton('Primary same ID').disabled).toBe(true);
+    const secondary = findSessionDeleteButton('Secondary same ID');
+    expect(secondary.disabled).toBe(false);
+    // The eligibility check must agree with the button: clicking it has to
+    // reach the confirmation, not be swallowed by an id-based "current".
+    act(() => click(secondary));
+    await flushSidebar();
+    expect(confirmDeleteButton()).toBeDefined();
+  });
+
+  it('blocks a same-id row in another workspace once it has background work', async () => {
+    // Background work blocks any row, so the identity distinction above must
+    // not turn into a blanket exemption for other workspaces.
+    const { props } = secondaryDeletion(false, {
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle',
+    });
+    connection.sessionId = 'same';
+    connection.workspaceCwd = '/tmp/project';
+    renderSidebar(props);
+    await expandSecondaryWorkspace();
+    const secondary = findSessionDeleteButton('Secondary same ID');
+    expect(secondary.disabled).toBe(true);
+    expect(secondary.getAttribute('title')).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+  });
+
   it('keeps matching session IDs in different workspaces separate', async () => {
     const { props } = secondaryDeletion(false);
     connection.capabilities!.features.push(
@@ -612,6 +662,33 @@ describe('sidebar session selection', () => {
     await flushSidebar();
     expect(action('Archive').disabled).toBe(true);
     expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('tracks background work starting and finishing in a selected idle session', async () => {
+    // The toolbar reads the selection's own copy, so the refresh contract has
+    // to carry the background flag in both directions — a monitor grades idle
+    // and would otherwise be archived with its work still running.
+    await enterSelection();
+    act(() => click(selection('First session')));
+    expect(action('Archive').disabled).toBe(false);
+    const setBackground = async (running: boolean) => {
+      active.sessions = active.sessions.map((session) =>
+        session.sessionId === 'first'
+          ? {
+              ...session,
+              hasRunningBackgroundTasks: running,
+              activeWorkState: 'idle' as const,
+            }
+          : session,
+      );
+      active.data = active.sessions;
+      renderSidebar();
+      await flushSidebar();
+    };
+    await setBackground(true);
+    expect(action('Archive').disabled).toBe(true);
+    await setBackground(false);
+    expect(action('Archive').disabled).toBe(false);
   });
 
   it('does not restore failed selections after changing session content during archiving', async () => {
@@ -851,6 +928,65 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     renderSidebar({ currentSessionActive: false });
     await flushSidebar();
     expect(findSessionDeleteButton('Current session').disabled).toBe(true);
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('gates the attached session row Delete on background work alone', async () => {
+    // Paired with the idle case so this cannot pass by blocking every attached
+    // session: #12619 keeps it deletable once nothing runs.
+    const renderCurrent = async (overrides: Partial<DaemonSessionSummary>) => {
+      active.sessions = [
+        makeSession('session-current', {
+          displayName: 'Current session',
+          ...overrides,
+        }),
+      ];
+      active.data = active.sessions;
+      connection.sessionId = 'session-current';
+      renderSidebar({ currentSessionActive: false });
+      await flushSidebar();
+    };
+    await renderCurrent({ activeWorkState: 'idle' });
+    expect(findSessionDeleteButton('Current session').disabled).toBe(false);
+    await renderCurrent({
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle',
+    });
+    const busy = findSessionDeleteButton('Current session');
+    expect(busy.disabled).toBe(true);
+    expect(busy.getAttribute('title')).toBe(
+      'The current session is running and cannot be deleted',
+    );
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('gates a non-attached row Delete on background work too', async () => {
+    // The delete route has no idle guard, so a background-only row that is not
+    // the attached session would otherwise kill work it advertises — while the
+    // Session Overview card already refuses the same session.
+    const renderOther = async (overrides: Partial<DaemonSessionSummary>) => {
+      active.sessions = [
+        makeSession('other-session', {
+          displayName: 'Other session',
+          ...overrides,
+        }),
+      ];
+      active.data = active.sessions;
+      connection.sessionId = 'session-current';
+      renderSidebar({ currentSessionActive: false });
+      await flushSidebar();
+    };
+    await renderOther({ activeWorkState: 'idle' });
+    expect(findSessionDeleteButton('Other session').disabled).toBe(false);
+    await renderOther({
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle',
+    });
+    const busy = findSessionDeleteButton('Other session');
+    expect(busy.disabled).toBe(true);
+    expect(busy.getAttribute('title')).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
     expect(active.deleteSession).not.toHaveBeenCalled();
   });
 

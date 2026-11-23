@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,8 +61,8 @@ public final class WorkspaceIdentityReattestationStore {
         String physical = text(input, "physicalKey");
         var owners = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, mount_root, mount_host_id,"
                 + " mount_device, mount_inode, mount_birth_time, mount_registration_id, mount_revision"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'"
-                + " AND mount_state = 'READY' AND mount_operation_id IS NULL", physical, physical);
+                + " FROM ma_storage_owner WHERE physical_id = ? AND storage_kind = 'LOCAL'"
+                + " AND mount_state = 'READY' AND mount_operation_id IS NULL", physical);
         check(owners.size() == 1, "owner_unavailable");
         JsonNode owner = JSON.valueToTree(owners.getFirst());
         check(owner.path("mount_device").asText().matches("[0-9]{1,20}"), "legacy_owner_required");
@@ -78,9 +77,7 @@ public final class WorkspaceIdentityReattestationStore {
         check(inventory.path("aliases").size() > 0 && inventory.path("aliases").size() <= 128, "alias_inventory_limit");
         for (JsonNode alias : inventory.path("aliases")) {
             check("LOCAL".equals(alias.path("storage_kind").asText()) && "REGISTERED".equals(alias.path("registration_state").asText())
-                    && alias.path("registration_revision").asLong() > 0
-                    && alias.path("alias_key").asText().equals(RuntimeAdmissionFences.storageAliasKey(
-                            alias.path("tenant_id").asText(), alias.path("storage_id").asText())), "alias_inventory_conflict");
+                    && alias.path("registration_revision").asLong() > 0, "alias_inventory_conflict");
         }
         check(hasAlias(inventory, text(input, "tenantId"), text(input, "storageId")), "alias_inventory_conflict");
         var changes = inventory.putArray("files");
@@ -150,14 +147,14 @@ public final class WorkspaceIdentityReattestationStore {
             lock(request);
             requireRows(request);
             requireNoOtherOperations(request);
-            check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_key = ? AND fence_operation_id IS NOT NULL",
+            check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_id = ? AND fence_operation_id IS NOT NULL",
                     Integer.class, text(request, "physicalKey")).isEmpty(), "storage_fenced");
             operations.create(KIND, id, WorkspaceOperations.values("storage_id", text(request, "storageId"),
                     "state", "RETIRING", "phase", PHASE, "request_json", new String(bytes, java.nio.charset.StandardCharsets.UTF_8),
                     "request_digest", WorkspaceEvidenceResources.digest(bytes)));
-            jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE physical_key = ?", id, text(request, "physicalKey"));
+            jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE physical_id = ?", id, text(request, "physicalKey"));
             check(jdbc.update("UPDATE ma_storage_owner SET mount_state = 'FENCED', mount_operation_id = ?,"
-                    + " mount_completed_operation_id = NULL WHERE storage_key = ? AND mount_state = 'READY'"
+                    + " mount_completed_operation_id = NULL WHERE physical_id = ? AND mount_state = 'READY'"
                     + " AND mount_operation_id IS NULL", id, text(request, "physicalKey")) == 1, "owner_conflict");
         });
     }
@@ -235,21 +232,21 @@ public final class WorkspaceIdentityReattestationStore {
             requireFences(request);
             String previous = text(request, "physicalKey");
             String next = inventory.path("newPhysicalKey").asText();
-            jdbc.update("UPDATE ma_storage_owner SET storage_key = ?, physical_key = ?, mount_device = ?,"
+            jdbc.update("UPDATE ma_storage_owner SET physical_id = ?, mount_device = ?,"
                     + " mount_revision = mount_revision + 1, mount_state = 'READY', mount_operation_id = NULL,"
-                    + " mount_completed_operation_id = ? WHERE storage_key = ?", next, next,
+                    + " mount_completed_operation_id = ? WHERE physical_id = ?", next,
                     inventory.path("identity").path("device").asText(), id, previous);
-            jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_revision = registration_revision + 1,"
-                    + " fence_operation_id = NULL WHERE physical_key = ? AND fence_operation_id = ?", next, previous, id);
+            jdbc.update("UPDATE ma_storage SET physical_id = ?, registration_revision = registration_revision + 1,"
+                    + " fence_operation_id = NULL WHERE physical_id = ? AND fence_operation_id = ?", next, previous, id);
             for (JsonNode checkout : inventory.path("worktrees")) {
-                check(jdbc.update("UPDATE ma_session_worktree SET physical_key = ?, plan_json = ?, identity_json = ?,"
+                check(jdbc.update("UPDATE ma_session_worktree SET physical_id = ?, plan_json = ?, identity_json = ?,"
                         + " state = 'READY', failure_code = NULL, revision = revision + 1"
-                        + " WHERE tenant_id = ? AND session_id = ? AND physical_key = ? AND revision = ?",
+                        + " WHERE tenant_id = ? AND session_id = ? AND physical_id = ? AND revision = ?",
                         next, checkout.path("new_plan_json").asText(), checkout.path("new_identity_json").asText(),
                         checkout.path("tenant_id").asText(), checkout.path("session_id").asText(), previous,
                         checkout.path("revision").asLong()) == 1, "worktree_conflict");
-                check(jdbc.update("UPDATE ma_operation SET physical_key = ? WHERE operation_kind = 'SESSION_WORKTREE'"
-                        + " AND tenant_id = ? AND operation_id = ? AND physical_key = ?", next,
+                check(jdbc.update("UPDATE ma_operation SET physical_id = ? WHERE operation_kind = 'SESSION_WORKTREE'"
+                        + " AND tenant_id = ? AND operation_id = ? AND physical_id = ?", next,
                         checkout.path("tenant_id").asText(), checkout.path("operation_id").asText(), previous) == 1, "worktree_operation_conflict");
             }
             for (String state : List.of("RETIRED", "PREPARING", "PREPARED", "COMPLETED")) {
@@ -263,25 +260,25 @@ public final class WorkspaceIdentityReattestationStore {
         var inventory = request.path("inventory");
         String next = inventory.path("newPhysicalKey").asText();
         String previous = text(request, "physicalKey");
-        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ?"
+        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE physical_id = ?"
                 + " AND mount_state = 'READY' AND mount_operation_id IS NULL AND mount_completed_operation_id = ?"
-                + " AND mount_device = ? AND mount_revision = ?", Integer.class, next, next, text(request, "operationId"),
+                + " AND mount_device = ? AND mount_revision = ?", Integer.class, next, text(request, "operationId"),
                 inventory.path("identity").path("device").asText(), inventory.path("owner").path("mount_revision").asLong() + 1).size() == 1,
                 "committed_owner_changed");
-        check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_key = ?", Integer.class, previous).isEmpty(), "committed_alias_changed");
+        check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_id = ?", Integer.class, previous).isEmpty(), "committed_alias_changed");
         var expectedAliases = inventory.path("aliases").deepCopy();
         for (JsonNode alias : expectedAliases) {
-            ((ObjectNode) alias).put("physical_key", next).put("registration_revision", alias.path("registration_revision").asLong() + 1);
+            ((ObjectNode) alias).put("physical_id", next).put("registration_revision", alias.path("registration_revision").asLong() + 1);
         }
         check(expectedAliases.equals(aliases(next)), "committed_alias_changed");
         for (JsonNode checkout : inventory.path("worktrees")) {
             check(jdbc.queryForList("SELECT 1 FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?"
-                    + " AND physical_key = ? AND state = 'READY' AND revision = ? AND plan_json = ? AND identity_json = ?", Integer.class,
+                    + " AND physical_id = ? AND state = 'READY' AND revision = ? AND plan_json = ? AND identity_json = ?", Integer.class,
                     checkout.path("tenant_id").asText(), checkout.path("session_id").asText(), next,
                     checkout.path("revision").asLong() + 1, checkout.path("new_plan_json").asText(), checkout.path("new_identity_json").asText()).size() == 1,
                     "committed_worktree_changed");
             check(jdbc.queryForList("SELECT 1 FROM ma_operation WHERE operation_kind = 'SESSION_WORKTREE' AND tenant_id = ?"
-                    + " AND operation_id = ? AND physical_key = ?", Integer.class, checkout.path("tenant_id").asText(),
+                    + " AND operation_id = ? AND physical_id = ?", Integer.class, checkout.path("tenant_id").asText(),
                     checkout.path("operation_id").asText(), next).size() == 1, "committed_worktree_changed");
         }
     }
@@ -291,7 +288,7 @@ public final class WorkspaceIdentityReattestationStore {
         String physical = text(request, "physicalKey");
         var owners = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, mount_root, mount_host_id,"
                 + " mount_device, mount_inode, mount_birth_time, mount_registration_id, mount_revision"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", physical, physical);
+                + " FROM ma_storage_owner WHERE physical_id = ? AND storage_kind = 'LOCAL' FOR UPDATE", physical);
         check(owners.size() == 1 && inventory.path("owner").equals(JSON.valueToTree(owners.getFirst())), "owner_changed");
         requireOnlyOwner(inventory.path("owner"), physical);
         check(inventory.path("aliases").equals(aliases(physical)), "aliases_changed");
@@ -303,14 +300,14 @@ public final class WorkspaceIdentityReattestationStore {
     }
 
     private JsonNode aliases(String physical) {
-        return JSON.valueToTree(WorkspaceOperations.rows(jdbc, "SELECT alias_key, tenant_id, storage_id, physical_key,"
-                + " storage_kind, registration_state, registration_revision FROM ma_storage WHERE physical_key = ? ORDER BY alias_key", physical));
+        return JSON.valueToTree(WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, physical_id,"
+                + " storage_kind, registration_state, registration_revision FROM ma_storage WHERE physical_id = ? ORDER BY tenant_id, storage_id", physical));
     }
 
     private JsonNode checkoutRows(String physical) {
         return JSON.valueToTree(WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, storage_id, worktree_id,"
                 + " state, revision, plan_json, identity_json, operation_id, failure_code FROM ma_session_worktree"
-                + " WHERE physical_key = ? AND state <> 'REMOVED' ORDER BY tenant_id, session_id", physical));
+                + " WHERE physical_id = ? AND state <> 'REMOVED' ORDER BY tenant_id, session_id", physical));
     }
 
     private static boolean hasAlias(JsonNode inventory, String tenant, String storage) {
@@ -325,9 +322,9 @@ public final class WorkspaceIdentityReattestationStore {
 
     private void requireOnlyOwner(JsonNode owner, String physical) {
         Path root = Path.of(owner.path("mount_root").asText());
-        for (var other : WorkspaceOperations.rows(jdbc, "SELECT storage_key, mount_root FROM ma_storage_owner"
+        for (var other : WorkspaceOperations.rows(jdbc, "SELECT physical_id, mount_root FROM ma_storage_owner"
                 + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", owner.path("mount_host_id").asText())) {
-            if (!physical.equals(other.get("storage_key")) && other.get("mount_root") instanceof String path) {
+            if (!physical.equals(other.get("physical_id")) && other.get("mount_root") instanceof String path) {
                 check(!root.startsWith(Path.of(path)) && !Path.of(path).startsWith(root), "overlapping_owner");
             }
         }
@@ -335,7 +332,7 @@ public final class WorkspaceIdentityReattestationStore {
 
     private void requireNoOtherOperations(JsonNode request) {
         for (var operation : WorkspaceOperations.rows(jdbc, "SELECT operation_kind, state, operation_id FROM ma_operation"
-                + " WHERE physical_key = ?", text(request, "physicalKey"))) {
+                + " WHERE physical_id = ?", text(request, "physicalKey"))) {
             String kind = (String) operation.get("operation_kind");
             String state = (String) operation.get("state");
             check(KIND.name().equals(kind) && text(request, "operationId").equals(operation.get("operation_id"))
@@ -347,14 +344,14 @@ public final class WorkspaceIdentityReattestationStore {
 
     private void requireIdle(JsonNode request) {
         String physical = text(request, "physicalKey");
-        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND (holder_key IS NOT NULL"
+        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE physical_id = ? AND (holder_id IS NOT NULL"
                 + " OR binding_id IS NOT NULL OR runtime_generation IS NOT NULL OR runtime_session_id IS NOT NULL"
                 + " OR member_count <> 0 OR maintenance_id IS NOT NULL)", Integer.class, physical).isEmpty(), "writers_active");
-        check(jdbc.queryForList("SELECT 1 FROM ma_runtime_session WHERE execution_storage_key = ?", Integer.class, physical).isEmpty(), "writers_active");
+        check(jdbc.queryForList("SELECT 1 FROM ma_runtime_session WHERE execution_storage_id = ?", Integer.class, physical).isEmpty(), "writers_active");
         for (JsonNode alias : request.path("inventory").path("aliases")) {
-            check(jdbc.queryForList("SELECT 1 FROM ma_runtime_binding WHERE storage_alias_key = ?"
+            check(jdbc.queryForList("SELECT 1 FROM ma_runtime_binding WHERE tenant_id = ? AND storage_id = ?"
                     + " AND (binding_state <> 'RELEASED' OR (stop_evidence_json IS NULL AND drain_receipt_json IS NULL))",
-                    Integer.class, alias.path("alias_key").asText()).isEmpty(), "runtime_not_retired");
+                    Integer.class, alias.path("tenant_id").asText(), alias.path("storage_id").asText()).isEmpty(), "runtime_not_retired");
             check(jdbc.queryForList("SELECT 1 FROM ma_session_head h JOIN ma_workspace w ON w.tenant_id = h.tenant_id"
                     + " AND w.workspace_id = h.workspace_id WHERE w.tenant_id = ? AND w.storage_id = ?"
                     + " AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > ?)", Integer.class, alias.path("tenant_id").asText(),
@@ -381,7 +378,8 @@ public final class WorkspaceIdentityReattestationStore {
     private void lock(JsonNode request) {
         for (JsonNode alias : request.path("inventory").path("aliases")) {
             WorkspaceStorageKindGuard.lockDomain(jdbc, alias.path("tenant_id").asText());
-            jdbc.queryForList("SELECT alias_key FROM ma_storage WHERE alias_key = ? FOR UPDATE", alias.path("alias_key").asText());
+            jdbc.queryForList("SELECT tenant_id, storage_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ? FOR UPDATE",
+                    alias.path("tenant_id").asText(), alias.path("storage_id").asText());
         }
         WorkspaceStorageKindGuard.lockDomain(jdbc, "local-storage-host/" + text(request, "hostId"));
     }
@@ -389,9 +387,9 @@ public final class WorkspaceIdentityReattestationStore {
     private void requireFences(JsonNode request) {
         String physical = text(request, "physicalKey");
         String id = text(request, "operationId");
-        check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_key = ? AND (fence_operation_id IS NULL OR fence_operation_id <> ?)",
+        check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_id = ? AND (fence_operation_id IS NULL OR fence_operation_id <> ?)",
                 Integer.class, physical, id).isEmpty(), "fence_changed");
-        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND mount_state = 'FENCED' AND mount_operation_id = ?",
+        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE physical_id = ? AND mount_state = 'FENCED' AND mount_operation_id = ?",
                 Integer.class, physical, id).size() == 1, "fence_changed");
     }
 

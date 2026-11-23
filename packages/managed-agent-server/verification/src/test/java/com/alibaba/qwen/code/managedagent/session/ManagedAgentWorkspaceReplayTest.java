@@ -14,10 +14,9 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegist
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.assertj.core.api.ThrowableAssert;
@@ -174,7 +173,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aRecordedSubmitAnswersThroughAWorkspaceFilesOutage() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         AtomicBoolean files = new AtomicBoolean(true);
         ManagedAgentService service = service(files);
@@ -239,7 +238,7 @@ class ManagedAgentWorkspaceReplayTest {
         properties.getHarness().setApprovalMode("default");
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = service(new AtomicBoolean(true));
         ToolPublicationArtifactReader reader = mock(ToolPublicationArtifactReader.class);
@@ -281,7 +280,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aDeletedLegacySessionReplaysItsRenameAsLastVisible() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         ManagedAgentService service = service(new AtomicBoolean(true));
         String sessionId = transaction.execute(status -> store
                 .insertSessionCommand(tenant, "CREATE_SESSION", "create",
@@ -322,7 +321,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aFreshKeyAgainstADeletedSessionAnswers404() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         ManagedAgentService service = service(new AtomicBoolean(true));
         List<InputBlock> input = List.of(new InputBlock("text", "go"));
         String bound = boundSession(tenant);
@@ -361,7 +360,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aReusedKeyAgainstADeletedSessionAnswers404ToAGrantlessActor() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         ManagedAgentService service = service(new AtomicBoolean(true));
         List<InputBlock> input = List.of(new InputBlock("text", "go"));
         String bound = boundSession(tenant);
@@ -397,7 +396,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aDeletedArchivedBoundSessionReplaysItsRenameAsArchived() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = service(new AtomicBoolean(true));
 
@@ -422,7 +421,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aRecordedCancelAnswersThroughAWorkspaceFilesOutage() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         AtomicBoolean files = new AtomicBoolean(true);
         ManagedAgentService service = service(files);
@@ -479,7 +478,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aNonCreatorOperatorReplaysHisOwnRecordedCommands() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         // A third actor holding OPERATOR who never records a key.
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
@@ -536,7 +535,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void unstampedReceiptsRetainTheCreatorGate() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
@@ -628,7 +627,7 @@ class ManagedAgentWorkspaceReplayTest {
     @Test
     void aDeletedBoundSessionAnswers404AboveTheRoleAndReplayGates() {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         // actor-r can read the Workspace but is below OPERATOR; actor-c
         // holds OPERATOR but never records a key.
@@ -697,7 +696,7 @@ class ManagedAgentWorkspaceReplayTest {
     void aRecordedAdmissionRacedByANonCreatorOperatorIsRefused()
             throws Exception {
         freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
@@ -800,24 +799,21 @@ class ManagedAgentWorkspaceReplayTest {
     // then the Session row as a tombstone.
     private void recordDelete(String tenant, String sessionId,
             String statusBefore) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
-        String target = ManagedSchemaKeys.key(sessionId);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
-                        + " session_scope_key, operation_id, operation_kind,"
-                        + " tenant_id, session_id, target_kind, target_key,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id,"
+                        + " operation_id, operation_kind,"
+                        + " tenant_id, session_id, target_kind,"
                         + " target_id, actor_digest, idempotency_key,"
                         + " idempotency_digest, request_digest, request_json,"
                         + " state, phase, admission_stage, delivery_state,"
                         + " session_status_before, available_at, gmt_create,"
-                        + " gmt_modified, completed_at) VALUES (?, ?, ?,"
-                        + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, ?, '',"
+                        + " gmt_modified, completed_at) VALUES (?, 'SESSION', ?,"
+                        + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, '',"
                         + " 'delete', ?, 'delete-digest', '{}', 'COMPLETED',"
                         + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', ?, 0, 0,"
                         + " 0, 0)",
-                ManagedSchemaKeys.operationKey(
-                        ManagedSchemaContract.OperationKind.DELETE, scope,
-                        target, "op-del"),
-                scope, scope, tenant, sessionId, target, sessionId,
+                ManagedIdentityRefs.operationRef("DELETE", tenant, "SESSION",
+                        sessionId, sessionId, "op-del"),
+                sessionId, tenant, sessionId, sessionId,
                 ManagedSchemaKeys.key("delete"), statusBefore);
         jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1, gmt_modified = 1, version ="

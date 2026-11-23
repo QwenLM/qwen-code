@@ -51,6 +51,7 @@ import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 import {
   clipToWidth,
+  cpLen,
   getCachedStringWidth,
   sanitizeTerminalLine,
   truncateToWidth,
@@ -99,7 +100,7 @@ function PermissionInput({
     ? sanitizeTerminalLine(spans.after)
     : truncateToWidth(placeholder, Math.max(0, width - 1));
   return (
-    <box flexDirection="row">
+    <box id="screen-reader-input-line" flexDirection="row">
       {before ? <text fg={C.text}>{before}</text> : null}
       <text bg={C.accent}>{sanitizeTerminalLine(spans.at) || ' '}</text>
       {after ? <text fg={value ? C.text : C.dim}>{after}</text> : null}
@@ -1045,6 +1046,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         {tabs.map((tab, i) => (
           <box key={tab.id} marginRight={2}>
             <text
+              id={
+                i === activeTabIndex
+                  ? 'screen-reader-selected-tab'
+                  : 'screen-reader-unselected-tab'
+              }
               fg={i === activeTabIndex ? '#000000' : C.dim}
               bg={i === activeTabIndex ? C.accent : undefined}
               attributes={i === activeTabIndex ? 1 : undefined}
@@ -1073,6 +1079,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         <text fg={C.text}>{activeTab.description}</text>
       </box>
       <box
+        id={
+          searchQuery
+            ? 'screen-reader-input-line'
+            : 'screen-reader-input-line-placeholder'
+        }
         borderStyle="rounded"
         borderColor={C.dim}
         paddingX={1}
@@ -1080,13 +1091,22 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         width={60}
         flexDirection="row"
       >
-        <text fg={C.accent}>{'> '}</text>
+        <text id="screen-reader-input-glyph" fg={C.accent}>
+          {'> '}
+        </text>
         {searchQuery ? (
           // A query longer than the box would wrap it onto a second content
           // row the chrome budget does not pay for.
-          <text fg={C.text}>{truncateToWidth(searchQuery, 54)}</text>
+          <text
+            id={`screen-reader-caret-active-${cpLen(searchQuery)}`}
+            fg={C.text}
+          >
+            {truncateToWidth(searchQuery, 54)}
+          </text>
         ) : (
-          <text fg={C.dim}>{t('Search…')}</text>
+          <text id="screen-reader-caret-active-0" fg={C.dim}>
+            {t('Search…')}
+          </text>
         )}
       </box>
       <box height={1} />
