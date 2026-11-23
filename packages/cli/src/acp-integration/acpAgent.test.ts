@@ -7708,7 +7708,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.cancel({ sessionId: 'session-idle-cancel' }),
     ).resolves.toBeUndefined();
 
-    expect(lastSessionMock!.cancelPendingPrompt).toHaveBeenCalledOnce();
+    // The client's cancel is the user's Stop, which also stops the shells
+    // Send now moved to the background.
+    expect(
+      lastSessionMock!.cancelPendingPrompt,
+    ).toHaveBeenCalledExactlyOnceWith(expect.any(String), true);
     mockConnectionState.resolve();
     await agentPromise;
   });

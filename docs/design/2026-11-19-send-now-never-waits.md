@@ -168,7 +168,8 @@ then interrupts the other tools.
    PR 1. An earlier interrupt would replace the moved shells' results with the
    interrupt text. The model would lose the background ID or the finished
    output and might run the command again. The drain and late-message checks
-   of PR 1 apply to that interrupt only, and are checked when it fires. A
+   of PR 1 apply to that interrupt only, and are checked when the request
+   arrives and again when it fires. A
    later Send now request can move shells that have since started. It updates
    the same batch's wait to include those shells. A request that arrives once
    every call of the batch has settled, before the batch ends, leaves the

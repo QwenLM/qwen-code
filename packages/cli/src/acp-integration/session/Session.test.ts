@@ -34951,6 +34951,33 @@ describe('Session', () => {
             });
           });
 
+          it('leaves the shell of a channel turn in the foreground', async () => {
+            const { state, running } = useShell();
+            mockClient.extMethod = vi
+              .fn()
+              .mockResolvedValue({ messages: ['not now'] });
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(createStreamWithChunks([shellCall()]))
+              .mockResolvedValue(createEmptyStream());
+
+            const done = session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'channel task' }],
+              _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+            });
+            await running;
+            session.sendMidTurnInputNow();
+            await nextTick();
+            const reason = state.reason;
+            await session.cancelPendingPrompt();
+
+            await expect(done).resolves.toMatchObject({
+              stopReason: 'cancelled',
+            });
+            expect(reason).toBeUndefined();
+          });
+
           it('ends the turn once a moved shell settles when other tools remain', async () => {
             let settleMove!: () => void;
             const { state, running, readExecute } = useShell(

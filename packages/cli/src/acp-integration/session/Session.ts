@@ -4118,8 +4118,13 @@ export class Session implements SessionContext {
     this.pullForOpenResponse?.();
     // A running foreground shell keeps running in the background, and its
     // tool call settles at once: when only such shells were left, the batch
-    // ends and the tool boundary brings the input into this turn.
-    const moving = this.#moveShellsToBackground(pending.signal);
+    // ends and the tool boundary brings the input into this turn. Only a turn
+    // whose tool phase takes Send now moves its shells; a channel turn keeps
+    // tool-boundary delivery.
+    const moving =
+      this.midTurnToolPhaseFor === pending.signal
+        ? this.#moveShellsToBackground(pending.signal)
+        : [];
     // The host sends this request only while it holds user input, and only
     // once every drain that took input has answered, on the same ordered
     // connection: with no drain out, the input is still with the host and is
