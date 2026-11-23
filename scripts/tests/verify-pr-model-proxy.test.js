@@ -1126,8 +1126,36 @@ describe('local container recipe pins', () => {
         }
         fragments.push({ source: body, quotedGate: false });
       }
-      const inFences = (index) =>
-        fencedRanges.some(([start, end]) => index >= start && index < end);
+      const mergeRanges = (ranges) => {
+        const merged = [];
+        const sorted = [...ranges].sort(
+          ([startA, endA], [startB, endB]) => startA - startB || endA - endB,
+        );
+        for (const [start, end] of sorted) {
+          const previous = merged.at(-1);
+          if (previous && start <= previous[1]) {
+            previous[1] = Math.max(previous[1], end);
+          } else {
+            merged.push([start, end]);
+          }
+        }
+        return merged;
+      };
+      const inRanges = (ranges, index) => {
+        let low = 0;
+        let high = ranges.length;
+        while (low < high) {
+          const middle = (low + high) >>> 1;
+          if (ranges[middle][0] <= index) {
+            low = middle + 1;
+          } else {
+            high = middle;
+          }
+        }
+        return low > 0 && index < ranges[low - 1][1];
+      };
+      const mergedFencedRanges = mergeRanges(fencedRanges);
+      const inFences = (index) => inRanges(mergedFencedRanges, index);
       const proseCommandFragments = new Set([
         'bash setup.sh | tail -30',
         'chmod 444',
@@ -1505,14 +1533,13 @@ describe('local container recipe pins', () => {
         }
         lineIndex = collected.index;
       }
-      const inHeredocData = (index) =>
-        heredocDataRanges.some(([start, end]) => index >= start && index < end);
+      const mergedHeredocDataRanges = mergeRanges(heredocDataRanges);
+      const inHeredocData = (index) => inRanges(mergedHeredocDataRanges, index);
       const spans = [...document.matchAll(/(`+)([\s\S]*?)\1/g)];
-      const inCodeSpan = (index) =>
-        spans.some(
-          (match) =>
-            index >= match.index && index < match.index + match[0].length,
-        );
+      const codeSpanRanges = mergeRanges(
+        spans.map((match) => [match.index, match.index + match[0].length]),
+      );
+      const inCodeSpan = (index) => inRanges(codeSpanRanges, index);
       const inlineTailLines = new Set();
       for (const match of spans) {
         if (inFences(match.index) || inHeredocData(match.index)) continue;
@@ -1549,6 +1576,7 @@ describe('local container recipe pins', () => {
         fragments.push({ source, quotedGate });
       }
       let lineStart = 0;
+      let leadingCitationSpanIndex = 0;
       for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex += 1) {
         const heredoc = rawHeredocs.get(lineIndex);
         if (heredoc) {
@@ -1582,14 +1610,29 @@ describe('local container recipe pins', () => {
           /^[('"]*(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/|scripts\/)?verify-pr-[a-z-]+\.mjs[\s'")\],.:]*$/.test(
             trimmed,
           );
-        const leadingCitation = spans.find((match) => {
+        while (
+          leadingCitationSpanIndex < spans.length &&
+          spans[leadingCitationSpanIndex].index < lineStart
+        ) {
+          leadingCitationSpanIndex += 1;
+        }
+        let leadingCitation;
+        for (
+          let spanIndex = leadingCitationSpanIndex;
+          spanIndex < spans.length;
+          spanIndex += 1
+        ) {
+          const match = spans[spanIndex];
           const start = match.index - lineStart;
-          return (
-            start >= 0 &&
+          if (start >= commandHeader.length) break;
+          if (
             start + match[0].length <= commandHeader.length &&
             !commandHeader.slice(0, start).trim()
-          );
-        });
+          ) {
+            leadingCitation = match;
+            break;
+          }
+        }
         const citationLineWithoutExecutableTrailer =
           leadingCitation &&
           !(await executableInlineTail(
