@@ -14,6 +14,10 @@ import {
   getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import { HookSystem } from '../hooks/hookSystem.js';
 import { HookEventName, HookType } from '../hooks/types.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
@@ -29,7 +33,14 @@ import type {
   Tool,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import {
+  AuthType,
+  type ContentGenerator,
+  type ContentGeneratorConfig,
+} from './contentGenerator.js';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { DefaultOpenAICompatibleProvider } from './openaiContentGenerator/provider/default.js';
 import { FinishReason } from './genai-compat.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
@@ -49,6 +60,7 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './llm-chat.js';
+import { ModelAvailabilityService } from './model-availability-service.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { WorkflowModeContext } from './workflow-mode.js';
 import {
@@ -92,6 +104,8 @@ import {
   TOOL_LOOP_SKIPPED_METADATA,
   type ChatCompressionInfo,
 } from './turn.js';
+import { turnModelRound } from './agent-loop.js';
+import { SendMessageType } from './client.js';
 import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
@@ -360,6 +374,8 @@ describe('LlmChat', async () => {
       getEffectiveInputModalities: vi.fn().mockReturnValue({ image: true }),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getModelFallbacks: vi.fn().mockReturnValue([]),
+      isModelAvailabilityTrackingEnabled: vi.fn().mockReturnValue(false),
+      getModelAvailabilityService: vi.fn(),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getClearContextOnIdle: vi.fn().mockReturnValue({
         toolResultsThresholdMinutes: 30,
@@ -424,6 +440,29 @@ describe('LlmChat', async () => {
     promptId: string,
     target: LlmChat = chat,
   ) => collect(await send(message, promptId, target));
+
+  /**
+   * A session-turn send (`isSessionTurn`), then collect. The availability
+   * ledger participates only for these; background sends use `sendCollect`
+   * (no flag) so the ledger excludes them.
+   */
+  const sendSessionCollect = async (
+    message: string | Part[],
+    promptId: string,
+    isExplicitRetry = false,
+  ) =>
+    collect(
+      await chat.sendMessageStream(
+        'test-model',
+        { message },
+        promptId,
+        undefined,
+        {
+          isSessionTurn: true,
+          ...(isExplicitRetry ? { isExplicitRetry: true } : {}),
+        },
+      ),
+    );
 
   /** `send`, then drain the stream. */
   const sendDrain = async (
@@ -1411,6 +1450,57 @@ describe('LlmChat', async () => {
       expect(chat.getHistory().at(-1)?.parts).toContainEqual({
         text: 'recovered',
       });
+    });
+
+    it('a prepared resume binds the ledger turn boundary (isSessionTurn)', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const service = new ModelAvailabilityService();
+      const beginTurn = vi.spyOn(service, 'beginTurn');
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: {},
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'recovered' }])),
+      );
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved,
+          'prepared-prompt',
+          new AbortController().signal,
+          vi.fn(),
+        ),
+      );
+      // The prepared resume hardcodes isSessionTurn, so it must bind the ledger
+      // turn boundary like the interactive path (R7-5).
+      expect(beginTurn).toHaveBeenCalledWith('prepared-prompt');
     });
 
     it('refuses a saved request whose model no longer matches the route', async () => {
@@ -7494,6 +7584,14 @@ describe('LlmChat', async () => {
           parts: [nestedPart],
         },
       };
+      const topRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/top.output'],
+      };
+      const responseRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/response.output'],
+      };
+      setToolOutputRecovery(topLevelPart, topRecovery);
+      setToolOutputRecovery(functionResponsePart, responseRecovery);
       const entry = content('user', topLevelPart, functionResponsePart);
       chat.addHistory(entry);
       const structuredCloneSpy = forbidDeepClone();
@@ -7502,12 +7600,17 @@ describe('LlmChat', async () => {
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
       expect(history).toEqual([entry]);
+      expect(JSON.stringify(history)).not.toContain('/tmp/tool-results/');
       expect(history[0]).not.toBe(entry);
       expect(history[0]!.parts).not.toBe(entry.parts);
       expect(history[0]!.parts![0]).not.toBe(topLevelPart);
       expect(history[0]!.parts![0]!.inlineData).toBe(topInlineData);
+      expect(getToolOutputRecovery(history[0]!.parts![0]!)).toBe(topRecovery);
       const copiedFunctionResponsePart = history[0]!.parts![1]!;
       expect(copiedFunctionResponsePart).not.toBe(functionResponsePart);
+      expect(getToolOutputRecovery(copiedFunctionResponsePart)).toBe(
+        responseRecovery,
+      );
       expect(copiedFunctionResponsePart.functionResponse).not.toBe(
         functionResponsePart.functionResponse,
       );
@@ -7689,6 +7792,17 @@ describe('LlmChat', async () => {
     ) {
       mockGeneratorConfig({ maxRetries: 0, ...generatorConfig });
       vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(fallbacks);
+      // The ledger keys fallbacks by resolved route identity; give each model
+      // a distinct identity so the fallback tests discriminate routes (the
+      // constant default would collapse every fallback onto one key). Include
+      // the route's authType when a fallback config carries one, so the helper
+      // can also express same-model different-route health (R15).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        (model?: string, config?: { authType?: string }) =>
+          model
+            ? `${model}@${config?.authType ?? 'test0001'}`
+            : 'gemini-pro@test0001',
+      );
       return mockResolver(resolveForModel);
     }
 
@@ -8516,6 +8630,901 @@ describe('LlmChat', async () => {
       expect(fallbackEvents(events)).toHaveLength(1);
       expect(fallbackB).toHaveBeenCalledTimes(1);
       expect(hasChunkText(events, 'fallback-b ok')).toBe(true);
+    });
+
+    it('skips a fallback exhausted earlier in the same turn when tracking is on', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary exhausts, fallback-a exhausts, fallback-b serves.
+      const events1 = await sendSessionCollect('test', 'prompt-availability');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+
+      // Request 2, same turn: fallback-a is skipped, fallback-b serves again.
+      const events2 = await sendSessionCollect('test', 'prompt-availability');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+
+      // Request 3, new turn: fallback-a is re-probed once (and exhausts again).
+      const events3 = await sendSessionCollect(
+        'test',
+        'prompt-availability-turn-2',
+      );
+      expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(3);
+    });
+
+    it('still attempts the primary each request even when the ledger marks it unavailable (R8-F9)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      // The ledger gates only fallback selection. The primary is still attempted
+      // each request (it may have recovered), even when the ledger marks it
+      // unavailable; a mutant gating the primary on the ledger would skip it.
+      // fallback-a is marked unavailable so request 2 also exercises the skip read.
+      // Marks use the resolved route key the ledger keys on (wireFallbacks mock).
+      service.markTerminal('test-model@test0001', 'quota');
+      service.markTerminal('fallback-a@test0001', 'quota');
+
+      // Request 1: the primary serves despite being marked unavailable.
+      streamMock().mockImplementationOnce(async () => textStream('primary ok'));
+      const events1 = await sendSessionCollect(
+        'test',
+        'prompt-primary-unavailable',
+      );
+      expect(hasChunkText(events1, 'primary ok')).toBe(true);
+      expect(fallbackEvents(events1)).toHaveLength(0);
+
+      // Request 2, same turn: the primary is attempted again (now fails), the
+      // ledger skips fallback-a, and fallback-b serves.
+      streamMock().mockRejectedValueOnce(tpmCapacityError());
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+      const events2 = await sendSessionCollect(
+        'test',
+        'prompt-primary-unavailable',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).not.toHaveBeenCalled();
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+      // The primary was attempted on both requests despite the terminal mark.
+      expectStreamCalls(2);
+    });
+
+    it('counts only attempted fallbacks in the MODEL_FALLBACK ordinal across a ledger skip (R8-F10)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary exhausts, fallback-a exhausts (ordinal 1), fallback-b
+      // serves (ordinal 2).
+      const events1 = await sendSessionCollect('test', 'prompt-ordinal');
+      expect(fallbackEvents(events1)).toEqual([
+        fallbackEvent('test-model', 'fallback-a', 1),
+        fallbackEvent('fallback-a', 'fallback-b', 2),
+      ]);
+
+      // Request 2, same turn: fallback-a is skipped by the ledger BEFORE the
+      // ordinal increments, so fallback-b's ordinal is 1, not 2. A mutant moving
+      // the skip below fallbackIndex++ would report 2 here.
+      const events2 = await sendSessionCollect('test', 'prompt-ordinal');
+      expect(fallbackEvents(events2)).toEqual([
+        fallbackEvent('test-model', 'fallback-b', 1),
+      ]);
+    });
+
+    it('an explicit Retry re-probes fallbacks consumed earlier in the turn', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a exhausts and is marked unavailable for the turn.
+      const events1 = await sendSessionCollect('test', 'prompt-retry');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+
+      // Request 2 reuses the prompt id but is an explicit Retry: it is a turn
+      // boundary, so fallback-a is re-probed instead of staying skipped.
+      const events2 = await sendSessionCollect('test', 'prompt-retry', true);
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+    });
+
+    it('a subagent send does not wipe the live turn consumed fallback state', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Live turn 1: fallback-a exhausts and is consumed for this turn.
+      await sendSessionCollect('test', 'turn-1');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A subagent send shares the Config (deriveConfig) but is not a session
+      // turn and uses an id no prompt-id blacklist would match. It must not
+      // rotate the live turn's key (which would un-consume fallback-a); it keeps
+      // the gate-off behaviour and tries fallback-a itself.
+      await sendCollect('test', 'session-1#agent-1#0');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+
+      // Back on live turn 1: fallback-a is still consumed, so it stays skipped.
+      const events3 = await sendSessionCollect('test', 'turn-1');
+      expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(3);
+    });
+
+    it('a shared-loop background round does not wipe the live turn ledger', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary: 429 on live request 1, serves the background round, 429 on
+      // live request 2.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('background ok'))
+        .mockRejectedValueOnce(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Live turn 1 consumes fallback-a.
+      await sendSessionCollect('test', 'turn-1');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A background round driven through turnModelRound (the subagent shared
+      // loop / unified-loop speculation shape) shares the Config but is not a
+      // session turn; it must not rotate the live turn's key.
+      const background = turnModelRound(chat, 'test-model');
+      const iterator = background.sendRound(
+        {
+          parts: [{ text: 'bg' }],
+          promptId: 'speculation',
+          options: { type: SendMessageType.UserQuery },
+        },
+        new AbortController().signal,
+      );
+      let step = await iterator.next();
+      while (!step.done) {
+        step = await iterator.next();
+      }
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Live turn 1's next request still skips fallback-a.
+      const events2 = await sendSessionCollect('test', 'turn-1');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+    });
+
+    it('two consecutive forked sends re-probe a transiently exhausted fallback', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      wireFallbacks(
+        ['fallback-a'],
+        vi
+          .fn()
+          .mockImplementation(async () =>
+            fallbackRoute('fallback-a', fallbackA),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a 429s once, then recovers.
+      fallbackA
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('fallback-a ok'));
+
+      // First forked send: fallback-a exhausts; the request fails. The internal
+      // send must not mark fallback-a consumed in the shared ledger.
+      await expect(sendCollect('test', 'forked_query')).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Second forked send: fallback-a has recovered and must be tried again,
+      // not skipped because a prior forked send consumed it.
+      const events2 = await sendCollect('test', 'forked_query');
+      expect(hasChunkText(events2, 'fallback-a ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+    });
+
+    it('a background send leaves the live turn’s consumed fallback mark untouched', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      wireFallbacks(
+        ['fallback-a'],
+        vi
+          .fn()
+          .mockImplementation(async () =>
+            fallbackRoute('fallback-a', fallbackA),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary 429s on the live turn, then recovers for the background send.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('primary ok'));
+      fallbackA.mockRejectedValue(capacityError);
+
+      // Live turn: fallback-a exhausts and is consumed for the turn.
+      await expect(
+        sendSessionCollect('test', 'prompt-live-mark'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'retry_once_per_turn',
+      });
+
+      // A background send (no isSessionTurn) served by the recovered primary
+      // must not rotate the turn key or clear the live turn's consumed mark —
+      // not merely be skipped itself. Observe the write half directly: the
+      // background send issues no ledger write or turn-boundary call at all.
+      const ledgerWrites = [
+        vi.spyOn(service, 'markRetryOncePerTurn'),
+        vi.spyOn(service, 'consumeStickyAttempt'),
+        vi.spyOn(service, 'markHealthy'),
+        vi.spyOn(service, 'markTerminal'),
+        vi.spyOn(service, 'resetTurn'),
+        vi.spyOn(service, 'beginTurn'),
+      ];
+      const events = await sendCollect('test', 'forked_query');
+      expect(hasChunkText(events, 'primary ok')).toBe(true);
+      for (const write of ledgerWrites) {
+        expect(write).not.toHaveBeenCalled();
+      }
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'retry_once_per_turn',
+      });
+    });
+
+    it('an explicit Retry served by the primary still re-probes consumed fallbacks', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary: 429 on request 1, recovered on the Retry, 429 again on request 3.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('primary ok'))
+        .mockRejectedValueOnce(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a exhausts and is consumed for the turn.
+      await sendSessionCollect('test', 'prompt-retry-primary');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 2 is an explicit Retry that the recovered primary serves. The
+      // turn boundary must still reset the ledger even though no fallback runs.
+      const retryEvents = await sendSessionCollect(
+        'test',
+        'prompt-retry-primary',
+        true,
+      );
+      expect(hasChunkText(retryEvents, 'primary ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 3 (a continuation, not a Retry) hits a capacity error again:
+      // fallback-a was re-probed by the Retry's reset, so it is attempted.
+      await sendSessionCollect('test', 'prompt-retry-primary');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+    });
+
+    it('the gate off keeps the fallback chain stateless even with a service present', async () => {
+      const service = new ModelAvailabilityService();
+      // Gate OFF, but a real service is injected: the gate must short-circuit
+      // before the getter, and the chain must not skip exhausted fallbacks.
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        false,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      await sendSessionCollect('test', 'prompt-gate-off');
+      await sendSessionCollect('test', 'prompt-gate-off');
+
+      // With the gate off the exhausted fallback-a is retried on request 2.
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+      expect(mockConfig.getModelAvailabilityService).not.toHaveBeenCalled();
+    });
+
+    it('skips a fallback that failed after emitting output earlier in the turn', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a emits a chunk, then exhausts its budget on a capacity error.
+      fallbackA.mockResolvedValue(
+        streamThenThrow([textChunk('fallback-a partial')], capacityError),
+      );
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a emits output then fails; the chain stops (no
+      // fallback-b) but the ledger must still record fallback-a as consumed.
+      await expect(
+        sendSessionCollect('test', 'prompt-output-then-fail'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).not.toHaveBeenCalled();
+
+      // Request 2, same turn: fallback-a is skipped, so fallback-b serves.
+      const events2 = await sendSessionCollect(
+        'test',
+        'prompt-output-then-fail',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not record a fallback that failed after output on a non-eligible error', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      const authError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"401","message":"Unauthorized"}}',
+        ),
+        { status: 401 },
+      );
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a emits a chunk, then fails on a non-eligible auth error. A
+      // fresh generator per call (mockImplementation, not mockResolvedValue) so
+      // request 2 genuinely replays the post-output 401 rather than reading an
+      // already-drained stream.
+      fallbackA.mockImplementation(async () =>
+        streamThenThrow([textChunk('fallback-a partial')], authError),
+      );
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a emits output then fails on auth; the chain stops
+      // and the ledger must NOT record fallback-a (auth is not capacity).
+      await expect(
+        sendSessionCollect('test', 'prompt-output-auth'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 2, same turn: fallback-a was not recorded, so it is attempted
+      // again rather than skipped. Capture the stream to pin that the fresh
+      // generator genuinely replays the post-output chunk — a shared,
+      // already-drained stream (mockResolvedValue) would emit nothing here.
+      const stream2 = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-output-auth',
+        undefined,
+        { isSessionTurn: true },
+      );
+      const events2: StreamEvent[] = [];
+      await expect(
+        (async () => {
+          for await (const event of stream2) events2.push(event);
+        })(),
+      ).rejects.toThrow();
+      expect(hasChunkText(events2, 'fallback-a partial')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).not.toHaveBeenCalled();
+    });
+
+    it('real HTTP: the ledger skips an exhausted fallback on the next same-turn request', async () => {
+      // Real-scenario witness: a real local OpenAI-compatible server answers
+      // 429 capacity for the primary and fallback-a and streams a completion
+      // for fallback-b. The real OpenAI SDK + fetch path drives the real
+      // fallback chain and the real ModelAvailabilityService over real sockets.
+      const { preloadRuntimeFetchModule } = await import(
+        '../utils/runtimeFetchOptions.js'
+      );
+      await preloadRuntimeFetchModule();
+      const requests: string[] = [];
+      const server: Server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const model = (
+            JSON.parse(Buffer.concat(chunks).toString()) as { model: string }
+          ).model;
+          requests.push(model);
+          if (model === 'fallback-b') {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: 'assistant', content: 'real-ok' },
+                    finish_reason: null,
+                  },
+                ],
+              })}\n\n`,
+            );
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              })}\n\n`,
+            );
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: { message: 'Throttling: TPM(1/1)', code: '429' },
+            }),
+          );
+        });
+      });
+      await new Promise<void>((resolve) => {
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const { port } = server.address() as AddressInfo;
+      const baseUrl = `http://127.0.0.1:${port}/v1`;
+      const generatorCliConfig = {
+        getCliVersion: () => '0.0.0-test',
+        getProxy: () => undefined,
+        getSessionId: () => 'test-session-id',
+      } as unknown as Config;
+      const realGenerator = (model: string): OpenAIContentGenerator => {
+        const contentGeneratorConfig: ContentGeneratorConfig = {
+          model,
+          apiKey: 'test-key',
+          baseUrl,
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 0,
+        };
+        return new OpenAIContentGenerator(
+          contentGeneratorConfig,
+          generatorCliConfig,
+          new DefaultOpenAICompatibleProvider(
+            contentGeneratorConfig,
+            generatorCliConfig,
+          ),
+        );
+      };
+      try {
+        const service = new ModelAvailabilityService();
+        vi.mocked(
+          mockConfig.isModelAvailabilityTrackingEnabled,
+        ).mockReturnValue(true);
+        vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+          service,
+        );
+        // Distinct route identity per fallback model so the ledger discriminates
+        // them (the constant default would collapse both onto one key).
+        vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+          (model?: string) => (model ? `${model}@real` : 'gemini-pro@test0001'),
+        );
+        vi.mocked(mockConfig.getContentGenerator).mockReturnValue(
+          realGenerator('test-model'),
+        );
+        mockGeneratorConfig({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'test-key',
+          baseUrl,
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+          'fallback-a',
+          'fallback-b',
+        ]);
+        mockResolver(
+          vi.fn().mockImplementation(async (modelId: string) => ({
+            contentGenerator: realGenerator(modelId),
+            contentGeneratorConfig: {
+              model: modelId,
+              authType: AuthType.USE_OPENAI,
+              apiKey: 'test-key',
+              baseUrl,
+              maxRetries: 0,
+            },
+            retryAuthType: AuthType.USE_OPENAI,
+            model: modelId,
+          })),
+        );
+
+        // Request 1: primary 429 -> fallback-a 429 (recorded) -> fallback-b serves.
+        const events1 = await sendSessionCollect(
+          'test',
+          'real-http-ledger-turn',
+        );
+        expect(hasChunkText(events1, 'real-ok')).toBe(true);
+        expect(requests).toContain('fallback-a');
+
+        // Request 2, same turn: the ledger skips the exhausted fallback-a.
+        requests.length = 0;
+        const events2 = await sendSessionCollect(
+          'test',
+          'real-http-ledger-turn',
+        );
+        expect(hasChunkText(events2, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-b');
+        expect(requests).not.toContain('fallback-a');
+
+        // Request 3, a fresh ledger turn key (the headless runtime Goal run's
+        // boundary, R10-4): same base prompt id, but the new ledgerTurnKey
+        // resets the consumed mark, so the exhausted fallback-a is re-probed
+        // over the real socket instead of staying skipped.
+        requests.length = 0;
+        const events3 = await collect(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'real-http-ledger-turn',
+            undefined,
+            {
+              isSessionTurn: true,
+              ledgerTurnKey: 'real-http-ledger-turn/goal/goal-runtime:g1',
+            },
+          ),
+        );
+        expect(hasChunkText(events3, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-a');
+        expect(requests).toContain('fallback-b');
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    });
+
+    it('skips by the resolved model id when resolution rewrites the entry', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      // Two configured entries alias the SAME resolved model; a third is
+      // healthy. Keying the ledger by the configured id would let the second
+      // alias re-probe the exhausted resolved model on the next request, while
+      // resolved-id keying skips both aliases. (Within request 1 the second
+      // alias is caught by the same-model guard, so the discrimination is the
+      // second request, where it is reached with the primary still current.)
+      const aliasA = vi.fn();
+      const aliasB = vi.fn();
+      const healthy = vi.fn();
+      wireFallbacks(
+        ['alias-a', 'alias-b', 'fallback-c'],
+        vi.fn().mockImplementation(async (modelId: string) => {
+          if (modelId === 'alias-a') return fallbackRoute('model-x', aliasA);
+          if (modelId === 'alias-b') return fallbackRoute('model-x', aliasB);
+          return fallbackRoute('fallback-c', healthy);
+        }),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      aliasA.mockRejectedValue(capacityError);
+      aliasB.mockRejectedValue(capacityError);
+      healthy.mockImplementation(async () => textStream('fallback-c ok'));
+
+      // Request 1: alias-a exhausts model-x; alias-b is the same resolved model
+      // (same-model guard); fallback-c serves.
+      const events1 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events1, 'fallback-c ok')).toBe(true);
+      expect(aliasA).toHaveBeenCalledTimes(1);
+      expect(aliasB).toHaveBeenCalledTimes(0);
+
+      // Request 2, same turn: model-x is consumed under its RESOLVED id, so
+      // both aliases skip it. Configured-id keying would re-probe via alias-b.
+      const events2 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events2, 'fallback-c ok')).toBe(true);
+      expect(aliasA).toHaveBeenCalledTimes(1);
+      expect(aliasB).toHaveBeenCalledTimes(0);
+      expect(healthy).toHaveBeenCalledTimes(2);
+    });
+
+    it('keys the ledger by resolved route so same-model different-route fallbacks keep separate health (P2)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const openaiShared = vi.fn();
+      const bridge = vi.fn();
+      const anthropicShared = vi.fn();
+      wireFallbacks(
+        ['openai-shared', 'bridge', 'anthropic-shared'],
+        vi.fn().mockImplementation(async (modelId: string) => {
+          if (modelId === 'openai-shared') {
+            return fallbackRoute('shared', openaiShared, {
+              authType: 'openai',
+            });
+          }
+          if (modelId === 'bridge') {
+            return fallbackRoute('bridge', bridge, { authType: 'openai' });
+          }
+          return fallbackRoute('shared', anthropicShared, {
+            authType: 'anthropic',
+          });
+        }),
+      );
+      // wireFallbacks keys route identity by model + authType, so the two
+      // routes resolving to the same model id ('shared') keep separate health.
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      openaiShared.mockRejectedValue(capacityError);
+      bridge.mockRejectedValue(capacityError);
+      anthropicShared.mockImplementation(async () =>
+        textStream('anthropic ok'),
+      );
+
+      // primary 429 -> openai:shared 429 (recorded) -> bridge 429 (intervening
+      // model resets the same-model guard) -> anthropic:shared resolves to the
+      // SAME model id 'shared' but a different route. It must be re-probed and
+      // serve, not skipped by the openai route's consumed mark.
+      const events = await sendSessionCollect('test', 'prompt-route-key');
+      expect(hasChunkText(events, 'anthropic ok')).toBe(true);
+      expect(openaiShared).toHaveBeenCalledTimes(1);
+      expect(bridge).toHaveBeenCalledTimes(1);
+      expect(anthropicShared).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the ledger turn key stable across a continuation prompt-id rewrite', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1 under the turn's base prompt id consumes fallback-a.
+      await sendSessionCollect('test', 'turn-base');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A mid-turn continuation rewrites the prompt id but passes the base
+      // ledger key, so it must not reset the turn's consumed marks. Without
+      // ledgerTurnKey the suffixed id would rotate the key and re-probe.
+      const events2 = await collect(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'turn-base_todo_stop_guard_1',
+          undefined,
+          { isSessionTurn: true, ledgerTurnKey: 'turn-base' },
+        ),
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
     });
 
     it('does not try the next fallback after a fallback emits output', async () => {
@@ -13786,6 +14795,10 @@ describe('LlmChat', async () => {
       expect(eventsOfType(events, StreamEventType.RETRY)).toEqual([
         { type: StreamEventType.RETRY, maxOutputTokensEscalated: 64_000 },
       ]);
+      // #16417 M5: the per-response limit the Turn reads must track the
+      // escalation — a MAX_TOKENS cut during the escalated round names the
+      // escalated limit, not the initial grant.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(64_000);
       expect(mockLogContentRetry).not.toHaveBeenCalledWith(
         mockConfig,
         expect.objectContaining({ error_type: 'NO_RESPONSE_TEXT' }),
@@ -13794,6 +14807,24 @@ describe('LlmChat', async () => {
         userText('complete the tool call'),
         modelText('Completed after escalation.'),
       ]);
+    });
+
+    it('records the initial clamp as the request maxOutputTokens (#16417 M4)', async () => {
+      // M4: deleting the initial-clamp assignment leaves this getter
+      // undefined on the ordinary first-send path, so a MAX_TOKENS cut in
+      // that round cannot name the limit — the assignment is load-bearing
+      // even when no escalation or recovery follows.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      serveStreams(streamOf(textChunk('hello', 'STOP')));
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-initial-clamp'),
+      );
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(0).config?.maxOutputTokens,
+      );
     });
 
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
@@ -13828,6 +14859,12 @@ describe('LlmChat', async () => {
       expect(requestAt(0).config?.maxOutputTokens).toBe(49_721);
       // Recovery: the prompt grew to ~121K → the 4,000 floor, not 49,721.
       expect(requestAt(1).config?.maxOutputTokens).toBe(4_000);
+      // #16417 P2: the per-response limit the Turn reads must track the
+      // recovery re-clamp, not the initial grant — otherwise a MAX_TOKENS
+      // cut in the recovery round would name a stale, oversized limit.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(1).config?.maxOutputTokens,
+      );
     });
 
     it('re-clamps recovery sends even when an intermediate response omits usage metadata', async () => {
@@ -16600,6 +17637,8 @@ describe('LlmChat', async () => {
       vi.mocked(promptMirror()).mockClear();
       vi.mocked(cachedMirror()).mockClear();
       catalog = 'catalog';
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
       expect(chat.getLastCachedContentTokenCount()).toBe(0);
@@ -16651,12 +17690,16 @@ describe('LlmChat', async () => {
     it('restores retained counts when the route switches back (#9506)', () => {
       chat.seedResumeTokenCounts(321, 45, true);
       switchRoute('anthropic-model@beef1234');
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
 
       // Back on the original route: the exact retained prompt, output and
       // provenance, not the zero a foreign touch used to leave behind.
       switchRoute('gemini-pro@test0001');
+      vi.mocked(promptMirror()).mockClear();
+      expect(chat.peekLastPromptTokenCount()).toBe(321);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(321);
       expect(chat.getLastOutputTokenCount()).toBe(45);
       expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
@@ -17542,20 +18585,35 @@ describe('LlmChat', async () => {
         expect(compressSpy).toHaveBeenCalledTimes(2);
       });
 
-      it('surfaces an actionable error when compaction cannot recover the 413', async () => {
-        const compressSpy = noopThen(
-          failed(CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY, 90_000),
-        );
-        failThen([sdkStyle413()]);
-
-        const stream = await send(
-          'next prompt',
+      // Only an API failure is transient and keeps the original 413 (the
+      // propagation cases below). Any other failure status earns the
+      // new-session advice. A history too large for any compression request
+      // belongs here: a later send only adds to it (#9455).
+      it.each([
+        [
+          'compaction cannot recover the 413',
+          CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
           'prompt-id-413-compression-failed',
-        );
-        await expect(collect(stream)).rejects.toThrow(/start a new session/i);
-        expect(compressSpy).toHaveBeenCalledTimes(2);
-        expectStreamCalls(1);
-      });
+        ],
+        [
+          'the history is too large to compress',
+          CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          'prompt-id-413-input-too-large',
+        ],
+      ])(
+        'surfaces an actionable error when %s',
+        async (_label, status, promptId) => {
+          const compressSpy = noopThen(failed(status, 90_000));
+          failThen([sdkStyle413()]);
+
+          const caught = await sendCaught(promptId);
+
+          expect(caught?.message).toMatch(/start a new session/i);
+          expect(caught?.status).toBe(413);
+          expect(compressSpy).toHaveBeenCalledTimes(2);
+          expectStreamCalls(1);
+        },
+      );
 
       it('keeps token-wording overflow on the original reactive path', async () => {
         // Regression guard: the 413 classification must not change how

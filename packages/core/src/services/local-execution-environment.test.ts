@@ -323,7 +323,7 @@ describe('LocalExecutionEnvironment', () => {
           file_path: file,
         });
         expect(full.llmContent).toContain('external-header-v2');
-        expect(full.llmContent).not.toContain('unchanged since last read');
+        expect(full.llmContent).not.toContain('Wasted call');
       }
       const allowed = await execute('allowed', ToolNames.WRITE_FILE, {
         file_path: file,
@@ -475,11 +475,11 @@ describe('LocalExecutionEnvironment', () => {
       });
       expect(full.error).toBeUndefined();
       expect(full.llmContent).toContain(replacement);
-      expect(full.llmContent).not.toContain('unchanged since last read');
+      expect(full.llmContent).not.toContain('Wasted call');
       const cached = await execute('cached', ToolNames.READ_FILE, {
         file_path: file,
       });
-      expect(cached.llmContent).toContain('unchanged since last read');
+      expect(cached.llmContent).toContain('Wasted call');
     },
   );
 
@@ -549,7 +549,7 @@ describe('LocalExecutionEnvironment', () => {
     const cached = await execute('cached', ToolNames.READ_FILE, {
       file_path: file,
     });
-    expect(cached.llmContent).toContain('unchanged since last read');
+    expect(cached.llmContent).toContain('Wasted call');
     await environment.invalidateReadCache([file]);
     const reread = await execute('reread', ToolNames.READ_FILE, {
       file_path: file,

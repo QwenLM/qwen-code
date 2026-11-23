@@ -68,7 +68,7 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 1. 环境变量，当它指向该入口时；
 2. 显式设置（`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`），当它被设置时；
-3. 该入口的内置默认值——共享 loop 在 headless、Ink TUI 和 AgentCore 默认开启。内核在 headless 默认开启。每个开关在其余入口默认关闭。每个灰度 PR 只翻转一个入口的默认值。
+3. 该入口的内置默认值——共享 loop 在 headless、ACP、两个 TUI 和 AgentCore 默认开启。内核在 headless 默认开启。每个开关在其余入口默认关闭。每个灰度 PR 只翻转一个入口的默认值。
 
 **入口标识符。** `headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`，Hosted Harness 是 `hosted`——它只开启模型轮，其 journal 化工具派发仍留在 `hosted-harness-model.ts`。
 

@@ -891,6 +891,12 @@ describe('Hosted Harness model boundary', () => {
       expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
         modelConfiguration: generation,
       });
+      expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+        acp: true,
+      });
+      expect(
+        vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1],
+      ).not.toHaveProperty('channel');
       expect(switchModel).not.toHaveBeenCalled();
     },
   );

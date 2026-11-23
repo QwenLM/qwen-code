@@ -29,7 +29,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegist
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositoryContract;
@@ -95,6 +94,16 @@ class ManagedAgentMySqlIT {
         if (database != null) {
             database.close();
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TASK", "SESSION"})
+    void latestTurnIgnoresOtherStreamsWithTheSameSequence(String streamKind) {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        ManagedTurnQueryTest.assertLatestTurnStreamIsolation(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source),
+                new ObjectMapper(), streamKind);
     }
 
     @ParameterizedTest
@@ -1058,20 +1067,18 @@ class ManagedAgentMySqlIT {
         // A first revision checks its opening command through an index, not
         // by reading every record of its Session. The plan is asked of a
         // Session with enough records for the choice to matter.
-        String scopeKey = sha256("explain-" + session);
         jdbc.batchUpdate(
                 "INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, gmt_create) VALUES (?, ?,"
+                        + " task_kind, task_state, gmt_create) VALUES (?,"
                         + " ?, ?, ?, 'monitor_run', ?, ?, 1, ?, 'monitor',"
                         + " 'pending', ?)",
                 IntStream.range(0, 500)
                         .mapToObj(
                                 index ->
                                         new Object[] {
-                                            scopeKey,
                                             sha256("record-" + index),
                                             tenant,
                                             "mysql-extension-workspace",
@@ -1086,7 +1093,8 @@ class ManagedAgentMySqlIT {
         assertThat(
                         jdbc.queryForList(
                                 "EXPLAIN " + JdbcManagedExtensionRecordStore.OPENING_COMMAND_QUERY,
-                                scopeKey,
+                                tenant,
+                                "explain",
                                 sha256("command-7")))
                 .extracting(row -> row.get("key"))
                 .containsExactly("idx_ma_record_operation");
@@ -1930,7 +1938,6 @@ class ManagedAgentMySqlIT {
         JdbcTemplate jdbc =
                 new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
         jdbc.queryForList("ANALYZE TABLE ma_session_record");
-        String scopeKey = ManagedSessionStore.sessionScopeKey("mysql-hook-index", session);
         for (Object[] lookup :
                 List.of(
                         new Object[] {
@@ -1950,13 +1957,14 @@ class ManagedAgentMySqlIT {
                             "hook_definition_hash = ?",
                             sha256("catalog-1\u00001")
                         })) {
-            Object[] arguments = new Object[lookup.length - 1];
-            arguments[0] = scopeKey;
-            System.arraycopy(lookup, 2, arguments, 1, lookup.length - 2);
+            Object[] arguments = new Object[lookup.length];
+            arguments[0] = "mysql-hook-index";
+            arguments[1] = session;
+            System.arraycopy(lookup, 2, arguments, 2, lookup.length - 2);
             String query =
                     "SELECT record_resource_id FROM"
                             + " ma_session_record WHERE record_kind = 'DOMAIN'"
-                            + " AND session_scope_key = ? AND "
+                            + " AND tenant_id = ? AND session_id = ? AND "
                             + lookup[1]
                             + " LIMIT 1";
             assertThat(history.sql()).as((String) lookup[1]).contains(query);

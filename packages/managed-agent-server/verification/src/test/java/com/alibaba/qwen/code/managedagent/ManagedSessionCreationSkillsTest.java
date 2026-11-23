@@ -4,10 +4,13 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedSkillCatalogSource;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -23,6 +26,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -33,7 +37,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Answers.RETURNS_DEFAULTS;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -54,6 +60,7 @@ class ManagedSessionCreationSkillsTest {
     @Autowired private com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore childWorkspaces;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
+    @Autowired private ManagedAgentService sessions;
     @Qualifier("managedAgentTransactionManager")
     @Autowired private org.springframework.transaction.PlatformTransactionManager transactionManager;
     @TempDir private Path archiveDirectory;
@@ -64,6 +71,7 @@ class ManagedSessionCreationSkillsTest {
     private static volatile boolean publicChildAgentsSupported;
     private String tenant;
     private Boolean previousShellEnabled;
+    private ManagedSkillCatalogSource catalogSource;
     private final Map<String, Object> skill = Map.of("name", "review", "description", "Review changes",
             "body", "ORIGINAL_INSTRUCTIONS", "base_directory", "docs");
 
@@ -137,6 +145,268 @@ class ManagedSessionCreationSkillsTest {
             submit(body, "new-source-session", true).andExpect(status().isNotFound());
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Long.class, tenant)).isEqualTo(1);
         } finally {
+            extensionPackages.configureSources(List.of());
+            extensionPackages.configurePreparation(harness);
+            properties.getExtensions().setSelfServiceEnabled(false);
+        }
+    }
+
+    @Test
+    void catalogDefaultsArePinnedAcrossRevisionChangesAndRevocation() throws Exception {
+        configureSkillCatalog();
+        var body = request("qwen-code", List.of());
+        body.remove("skills");
+        when(catalogSource.catalog(any())).thenReturn(List.of(catalogEntry("1", true), catalogEntry("unused", false)));
+        String first = create(body, "default-one", true).required("sessionId").asText();
+        JsonNode firstPins = json.valueToTree(snapshots.initialSelection(tenant, first).get("extensions"));
+        assertThat(firstPins.size()).isEqualTo(1);
+        assertThat(firstPins.get(0).required("packageDigest").asText())
+                .isEqualTo(org.apache.commons.codec.digest.DigestUtils.sha256Hex("1"));
+        assertThat(snapshots.snapshot(tenant, first)).isNull();
+        assertThat(sessionSkillCatalog(first)).isEqualTo(json.valueToTree(List.of(
+                Map.of("name", "review:review", "description", "Review changes 1"))));
+
+        when(catalogSource.catalog(any())).thenReturn(List.of(catalogEntry("2", true)));
+        String second = create(request("qwen-code", List.of()), "default-two", false).required("id").asText();
+        JsonNode secondPins = json.valueToTree(snapshots.initialSelection(tenant, second).get("extensions"));
+        assertThat(secondPins.get(0).required("packageDigest").asText())
+                .isEqualTo(org.apache.commons.codec.digest.DigestUtils.sha256Hex("2"));
+        assertThat(sessionSkillCatalog(second).get(0).required("description").asText()).isEqualTo("Review changes 2");
+        assertThat(sessionSkillCatalog(first).get(0).required("description").asText()).isEqualTo("Review changes 1");
+
+        when(catalogSource.resolve(any(), any())).thenThrow(new ManagedExtensionSource.Failure(
+                ManagedExtensionSource.Failure.Reason.NOT_FOUND, null));
+        submit(body, "revoked", true).andExpect(status().isNotFound());
+        when(catalogSource.catalog(any())).thenThrow(new java.io.IOException("catalog unavailable"));
+        assertThat(create(body, "default-one", true).required("sessionId").asText()).isEqualTo(first);
+        assertThat(sessionSkillCatalog(first).get(0).required("description").asText()).isEqualTo("Review changes 1");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Integer.class, tenant)).isEqualTo(2);
+    }
+
+    @Test
+    void catalogDefaultsRespectExplicitSelectionsAndProviderScope() throws Exception {
+        configureSkillCatalog();
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'ws', ?, 'OPERATOR')",
+                tenant, "teammate".getBytes(StandardCharsets.UTF_8));
+        var hidden = catalogEntry("hidden", true);
+        var optional = catalogEntry("optional", false);
+        when(catalogSource.catalog(any())).thenReturn(List.of(hidden, catalogEntry("another-revision", true)));
+        submit(request("qwen-code", List.of()), "conflicting-defaults", true).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("extension_source_invalid"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Integer.class, tenant)).isZero();
+        when(catalogSource.catalog(any())).thenAnswer(call -> {
+            ManagedExtensionSource.Context context = call.getArgument(0);
+            assertThat(context.tenantId()).isEqualTo(tenant);
+            assertThat(context.workspaceId()).isEqualTo("ws");
+            assertThat(context.requestId()).isNotBlank();
+            context.checkDeadline();
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return switch (context.actorId()) {
+                case "actor" -> List.of(hidden, optional);
+                case "teammate" -> List.of(optional);
+                default -> throw new AssertionError(context.actorId());
+            };
+        });
+        assertThat(extensionPackages.skillCatalog(tenant, "teammate", "ws", "discovery")).containsExactly(optional);
+        String modelOnly = create(request("qwen-code", List.of()), "hidden-default", true).required("sessionId").asText();
+        assertThat(snapshots.initialSelection(tenant, modelOnly).get("extensions")).asList().hasSize(1);
+        assertThat(sessionSkillCatalog(modelOnly).size()).isZero();
+
+        org.mockito.Mockito.doThrow(new AssertionError("explicit selections must skip discovery")).when(catalogSource).catalog(any());
+        var emptyPins = request("qwen-code", List.of());
+        emptyPins.putArray("extensionPins");
+        String optedOut = create(emptyPins, "explicit-pins", true).required("sessionId").asText();
+        assertThat(snapshots.initialSelection(tenant, optedOut).get("extensions")).isEqualTo(List.of());
+        String explicit = create(request("qwen-code", List.of(skill)), "explicit-skills", true).required("sessionId").asText();
+        assertThat(snapshots.effective(store.requireSession(tenant, explicit))).containsExactly(skill);
+        assertThat(snapshots.initialSelection(tenant, explicit)).isNull();
+
+        extensionPackages.configureSources(List.of());
+        String ordinary = create(request("qwen-code", List.of()), "no-provider", true).required("sessionId").asText();
+        assertThat(snapshots.initialSelection(tenant, ordinary)).isNull();
+        assertThat(sessionSkillCatalog(ordinary).size()).isZero();
+    }
+
+    @Test
+    void rejectsDefaultSkillThatConflictsWithThePinnedAgentBeforeAdmission() throws Exception {
+        configureSkillCatalog();
+        when(catalogSource.catalog(any())).thenReturn(List.of(catalogEntry("1", true)));
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object profiles = VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", List.of("hosted-workspace-shell/1"));
+        try {
+            String agent = defineProfile("hosted-workspace-shell/1", "custom-shell",
+                    List.of(Map.of("name", "review:review", "description", "Local review", "body", "Read")));
+            submit(request(agent, List.of()), "conflicting-name", true).andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("extension_skill_unavailable"));
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Long.class, tenant)).isZero();
+        } finally {
+            VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", profiles);
+        }
+    }
+
+    @Test
+    void refusesAnOversizedCombinedSkillCatalogBeforeCreatingTheSession() throws Exception {
+        var preparer = configureSkillCatalog();
+        var target = new ManagedExtensionPackages.Target("linux", "any");
+        var defaults = java.util.stream.IntStream.range(0, 6).mapToObj(index -> {
+            String name = "capacity-" + index;
+            return new ManagedSkillCatalogSource.Entry(new ManagedExtensionSource.Reference("business", "skill", name, name),
+                    target, name, "Capacity test", true);
+        }).toList();
+        org.mockito.Mockito.doAnswer(call -> {
+            InputStream input = call.getArgument(1);
+            byte[] archive = input.readAllBytes();
+            String name = new String(archive, StandardCharsets.UTF_8);
+            var manifest = new ManagedExtensionPackages.Manifest(1, 1, name, "1.0.0", target, List.of("skills"));
+            var skill = compiledSkill(name, "Capacity test", "x".repeat(400 * 1024), true);
+            return new HarnessConnector.PreparedPackage(Map.of("manifest", manifest, "standaloneSkill", skill,
+                    "packageDigest", org.apache.commons.codec.digest.DigestUtils.sha256Hex(archive)), new ByteArrayInputStream(archive));
+        }).when(preparer).preparePackage(any(), any());
+
+        var body = request("qwen-code", List.of());
+        when(catalogSource.catalog(any())).thenReturn(defaults.subList(0, 5));
+        String session = create(body, "five-defaults", true).required("sessionId").asText();
+        var pins = snapshots.initialSelection(tenant, session).get("extensions");
+        assertThat(pins).asList().hasSize(5);
+        when(catalogSource.catalog(any())).thenReturn(defaults);
+        submit(body, "six-defaults", true).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("extension_skill_unavailable"));
+
+        var mixed = request("qwen-code", List.of(Map.of("name", "base", "description", "Base", "body", "y".repeat(50 * 1024))));
+        mixed.set("extensionPins", json.valueToTree(pins));
+        submit(mixed, "five-plus-static", true).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("extension_skill_unavailable"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Integer.class, tenant)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=? AND namespace='SESSION_CREATE_ACTOR'",
+                Integer.class, tenant)).isEqualTo(1);
+    }
+
+    @Test
+    void retryAfterHarnessUpgradeCanPublishAPreviouslyUnsupportedDefault() throws Exception {
+        var current = configureSkillCatalog();
+        var entry = catalogEntry("1", true);
+        when(catalogSource.catalog(any())).thenReturn(List.of(entry));
+        var legacy = mock(HarnessConnector.class);
+        when(legacy.supportsPackagePreparation()).thenReturn(true);
+        when(legacy.preparePackage(any(), any())).thenAnswer(call -> {
+            var manifest = new ManagedExtensionPackages.Manifest(1, 1, "review", "1.0.0", entry.target(), List.of("skills"));
+            byte[] archive = "1".getBytes(StandardCharsets.UTF_8);
+            return new HarnessConnector.PreparedPackage(Map.of("manifest", manifest,
+                    "packageDigest", org.apache.commons.codec.digest.DigestUtils.sha256Hex(archive)), new ByteArrayInputStream(archive));
+        });
+        extensionPackages.configurePreparation(legacy);
+        var body = request("qwen-code", List.of());
+        submit(body, "upgrade", true).andExpect(status().isConflict());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package WHERE tenant_id=?", Integer.class, tenant)).isZero();
+        extensionPackages.configurePreparation(current);
+        String id = create(body, "upgrade", true).required("sessionId").asText();
+        assertThat(sessionSkillCatalog(id).get(0).required("name").textValue()).isEqualTo("review:review");
+    }
+
+    @Test
+    void filesProfileSkipsDefaultDiscoveryWithoutPackageWrites() throws Exception {
+        configureSkillCatalog(false);
+        org.mockito.Mockito.doThrow(new AssertionError("FILES creations must skip discovery")).when(catalogSource).catalog(any());
+        var body = request("qwen-code", List.of());
+        body.remove("skills");
+        String id = create(body, "files-default", true).required("sessionId").asText();
+        assertThat(store.requireSession(tenant, id).toolProfile()).isEqualTo("hosted-workspace-files/1");
+        assertThat(snapshots.initialSelection(tenant, id)).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package WHERE tenant_id=?", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_source_import WHERE tenant_id=?", Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void disabledSelfServiceSkipsDefaultDiscovery() throws Exception {
+        configureSkillCatalog();
+        properties.getExtensions().setSelfServiceEnabled(false);
+        org.mockito.Mockito.doThrow(new AssertionError("unsupported imports must skip discovery")).when(catalogSource).catalog(any());
+        var body = request("qwen-code", List.of());
+        body.remove("skills");
+        String id = create(body, "self-service-off", true).required("sessionId").asText();
+        assertThat(snapshots.initialSelection(tenant, id)).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package WHERE tenant_id=?", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_source_import WHERE tenant_id=?", Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void emptyDefaultsKeepTheOmittedWorkspaceSelection() throws Exception {
+        configureSkillCatalog();
+        jdbc.update("UPDATE ma_workspace SET is_default = TRUE WHERE tenant_id = ? AND workspace_id = ?",
+                tenant.getBytes(StandardCharsets.UTF_8), "ws".getBytes(StandardCharsets.UTF_8));
+        when(catalogSource.catalog(any())).thenReturn(List.of(catalogEntry("optional", false)));
+        var admitted = sessions.createWorkspaceSession(tenant, "actor", "empty-defaults",
+                "qwen-code", null, null, null, List.of(), null, null);
+        assertThat(store.requireSession(tenant, admitted.sessionId()).workspace().getWorkspaceId()).isEqualTo("ws");
+        assertThat(snapshots.initialSelection(tenant, admitted.sessionId())).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package WHERE tenant_id=?", Integer.class, tenant)).isZero();
+    }
+
+    private ManagedSkillCatalogSource.Entry catalogEntry(String revision, boolean preinstall) {
+        var reference = new ManagedExtensionSource.Reference("business", "skill",
+                preinstall ? "review" : "optional", revision);
+        return new ManagedSkillCatalogSource.Entry(reference, new ManagedExtensionPackages.Target("linux", "any"),
+                reference.resourceId(), "Business catalog " + revision, preinstall);
+    }
+
+    private JsonNode sessionSkillCatalog(String session) throws Exception {
+        var response = mvc.perform(post("/api/agent/web-shell/v1/session-skills/query").principal(actor("actor"))
+                        .header(TenantContextFilter.HEADER, tenant).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsBytes(Map.of("sessionId", session))))
+                .andExpect(status().isOk()).andReturn();
+        return json.readTree(response.getResponse().getContentAsString()).required("skills");
+    }
+
+    private HarnessConnector configureSkillCatalog() throws Exception {
+        return configureSkillCatalog(true);
+    }
+
+    private HarnessConnector configureSkillCatalog(boolean shell) throws Exception {
+        if (shell) {
+            enableBuiltinShell();
+        }
+        properties.getExtensions().setEnabled(true);
+        properties.getExtensions().setSelfServiceEnabled(true);
+        properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
+        properties.getExtensions().setAllowedActors(List.of("actor", "teammate"));
+        catalogSource = mock(ManagedSkillCatalogSource.class);
+        when(catalogSource.id()).thenReturn("business");
+        when(catalogSource.resolve(any(), any())).thenAnswer(call ->
+                new ManagedExtensionSource.Resolved(call.getArgument(1), "private/archive", null));
+        when(catalogSource.open(any(), any())).thenAnswer(call -> {
+            ManagedExtensionSource.Resolved resolved = call.getArgument(1);
+            return new ByteArrayInputStream(resolved.reference().revision().getBytes(StandardCharsets.UTF_8));
+        });
+        var preparer = mock(HarnessConnector.class);
+        when(preparer.supportsPackagePreparation()).thenReturn(true);
+        when(preparer.preparePackage(any(), any())).thenAnswer(call -> {
+            InputStream input = call.getArgument(1);
+            byte[] archive = input.readAllBytes();
+            String revision = new String(archive, StandardCharsets.UTF_8);
+            var manifest = new ManagedExtensionPackages.Manifest(1, 1, "review", "1.0.0",
+                    new ManagedExtensionPackages.Target("linux", "any"), List.of("skills"));
+            var metadata = compiledSkill("review", "Review changes " + revision, "Review this change.", !"hidden".equals(revision));
+            return new HarnessConnector.PreparedPackage(Map.of("manifest", manifest, "standaloneSkill", metadata,
+                    "packageDigest", org.apache.commons.codec.digest.DigestUtils.sha256Hex(archive)), new ByteArrayInputStream(archive));
+        });
+        extensionPackages.configureSources(List.of(catalogSource));
+        extensionPackages.configurePreparation(preparer);
+        return preparer;
+    }
+
+    private ManagedExtensionPackages.StandaloneSkill compiledSkill(String name, String description, String body, boolean userInvocable)
+            throws com.fasterxml.jackson.core.JsonProcessingException {
+        String qualified = name + ":" + name;
+        var entry = Map.of("name", qualified, "description", description, "body", body, "model_invocable", true,
+                "user_invocable", userInvocable, "asset_directory", "extension://ext_00000000-0000-4000-8000-000000000000/skills/" + name + "/");
+        int catalogEntryBytes = json.writeValueAsString(entry).getBytes(StandardCharsets.UTF_8).length;
+        return new ManagedExtensionPackages.StandaloneSkill(qualified, description, userInvocable, catalogEntryBytes);
+    }
+
+    @AfterEach
+    void restoreSkillCatalog() {
+        if (catalogSource != null) {
             extensionPackages.configureSources(List.of());
             extensionPackages.configurePreparation(harness);
             properties.getExtensions().setSelfServiceEnabled(false);
@@ -676,7 +946,7 @@ class ManagedSessionCreationSkillsTest {
         definition.putObject("model");
         definition.put("instructions", "");
         definition.putArray("tools").addObject().put("type", "hosted_profile").put("profile", profile);
-        definition.putObject("permission_policy");
+        definition.putObject("permission_policy").put("approval_mode", "default");
         if (!skills.isEmpty()) {
             definition.set("skills", json.valueToTree(skills));
         }

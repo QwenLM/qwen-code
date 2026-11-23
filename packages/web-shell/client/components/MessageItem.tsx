@@ -11,6 +11,7 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
+  ToolGroupMessage,
 } from '../adapters/types';
 import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { CompactModeContext } from '../WebShellContexts';
@@ -30,10 +31,10 @@ import {
   isCompletedAskUserQuestion,
 } from './messages/toolFormatting';
 import {
-  AssistantMessage,
   ThinkingMessage,
   type SessionContentGenerator,
 } from './messages/AssistantMessage';
+import { AssistantMessageRow } from './messages/AssistantMessageRow';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
@@ -219,6 +220,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <UserMessage
             content={message.content}
+            source={message.source}
             images={message.images}
             files={message.files}
             inputAnnotations={message.inputAnnotations}
@@ -232,11 +234,14 @@ export const MessageItem = memo(function MessageItem({
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             author={message.author}
+            sentFrom={message.sentFrom}
+            sentTo={message.agentMessage?.sentTo}
           />
         );
       case 'assistant':
         return (
-          <AssistantMessage
+          <AssistantMessageRow
+            messageId={message.id}
             hookTurn={hookTurn}
             content={message.content}
             author={message.author}
@@ -262,6 +267,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             author={message.author}
             isStreaming={message.isStreaming}
+            fromSubagent={message.parentToolCallId !== undefined}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
             generateContent={generateContent}
@@ -595,6 +601,25 @@ function agentMessagesEqual(
   );
 }
 
+function stableFilesEqual(
+  prev: Extract<Message, { role: 'user' }>['files'] | undefined,
+  next: Extract<Message, { role: 'user' }>['files'] | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every((file, index) => {
+    const other = next[index];
+    return (
+      other !== undefined &&
+      file.name === other.name &&
+      file.mimeType === other.mimeType &&
+      file.text === other.text &&
+      file.attachmentId === other.attachmentId &&
+      file.data === other.data
+    );
+  });
+}
+
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
@@ -610,7 +635,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         next.role === 'user' &&
         prev.content === next.content &&
         prev.source === next.source &&
-        stableImagesEqual(prev.images, next.images)
+        stableImagesEqual(prev.images, next.images) &&
+        stableFilesEqual(prev.files, next.files)
       );
     case 'assistant':
       return (
@@ -623,7 +649,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'thinking' &&
         prev.content === next.content &&
-        prev.isStreaming === next.isStreaming
+        prev.isStreaming === next.isStreaming &&
+        prev.parentToolCallId === next.parentToolCallId
       );
     case 'system':
       return (
@@ -718,28 +745,18 @@ function areToolCallsEqual(
 }
 
 function areToolGroupThoughtsEqual(
-  prev:
-    | Array<{
-        content: string;
-        isStreaming?: boolean;
-        beforeToolCallId?: string;
-      }>
-    | undefined,
-  next:
-    | Array<{
-        content: string;
-        isStreaming?: boolean;
-        beforeToolCallId?: string;
-      }>
-    | undefined,
+  prev: ToolGroupMessage['thoughts'],
+  next: ToolGroupMessage['thoughts'],
 ): boolean {
   if (prev === next) return true;
   if (!prev || !next || prev.length !== next.length) return false;
   return prev.every(
     (thought, index) =>
+      thought.id === next[index]?.id &&
       thought.content === next[index]?.content &&
       thought.isStreaming === next[index]?.isStreaming &&
-      thought.beforeToolCallId === next[index]?.beforeToolCallId,
+      thought.beforeToolCallId === next[index]?.beforeToolCallId &&
+      thought.parentToolCallId === next[index]?.parentToolCallId,
   );
 }
 
@@ -755,13 +772,28 @@ function areToolListsEqual(
 const jsonCache = new WeakMap<object, string>();
 
 function stableImagesEqual(
-  a: Array<{ data: string; mimeType: string }> | undefined,
-  b: Array<{ data: string; mimeType: string }> | undefined,
+  a:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
+  b:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b || a.length !== b.length) return false;
   return a.every(
-    (img, i) => img.data === b[i].data && img.mimeType === b[i].mimeType,
+    (img, i) =>
+      img.data === b[i].data &&
+      img.mimeType === b[i].mimeType &&
+      img.attachmentId === b[i].attachmentId,
   );
 }
 

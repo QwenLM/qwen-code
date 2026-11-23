@@ -2,8 +2,9 @@
 
 [English](generated-ui-view-state.md) | [简体中文](generated-ui-view-state.zh-CN.md)
 
-Status: proposed. Step 1 (storage and daemon routes) is implemented by the PR
-that adds this document; steps 2 and 3 are not implemented yet.
+Status: in progress. Step 1 (storage and daemon routes) landed in #17448. Step 2
+(card runtime and host) is implemented by the PR that updates this document.
+Step 3 is not implemented yet.
 
 ## Problem
 
@@ -53,7 +54,8 @@ recorded ids collide within a session, replay renames later ones to `id:2`,
 `id:3`, while the live path keeps the original.
 
 Card ids match `^gc_[A-Za-z0-9_-]{16,64}$`. The daemon rejects other ids before
-they reach the agent.
+they reach the agent. Results recorded before card ids existed have none; those
+cards run as before and save nothing.
 
 ## Storage
 
@@ -103,8 +105,10 @@ write from matching a revision issued again after rewind, even after reopening.
 
 ## Wire contract
 
-Both routes require a session-bound `X-Qwen-Client-Id` (403 otherwise) and a
-valid card id (400 `invalid_card_id`).
+Both routes require a session-bound `X-Qwen-Client-Id` and a valid card id (400
+`invalid_card_id`). A missing client id returns 403; a malformed client id, or
+one bound to another session, returns 400 `invalid_client_id`, as on the other
+session routes.
 
 `GET /session/:id/generated-ui/state/:cardId` returns
 `{ cardId, revision, value }`. A card that was never saved has `revision: 0`
@@ -144,19 +148,74 @@ errors; nothing falls back to the primary runtime. Unlike App tool calls, state
 access does not wait for an idle session and writes no conversation record, so a
 card can save while a turn is running.
 
+## Card runtime and host
+
+**Card API.** Generated JavaScript reads the saved value with
+`ui.state.get()`, which returns a fresh copy, or `null` when nothing is saved.
+`ui.state.set(value)` replaces it synchronously, so a later `get()` in the same
+round sees it; when a round calls it more than once, the last value counts. A
+value that is not JSON, or whose JSON exceeds 16 KiB, throws an error the card
+can catch. `ui.state` is frozen like the rest of `ui`.
+
+**Worker messages.** The `init` message carries the saved state as JSON text. A
+round's response carries the state when the round set one. The App forwards
+that state even when the user changed an input during the round and its patches
+are dropped, because the Worker already holds it.
+
+**App and host.** The App frame sends two host requests,
+`qwen-code/generated-ui-state/load` and `qwen-code/generated-ui-state/save`,
+only when the host advertises the experimental
+`qwen-code/generated-ui-state` capability. The requests name no card: the host
+answers for the card it mounted, with the card id taken from the recorded
+result. Generated content therefore cannot read or write another card's state.
+Web Shell advertises the capability only for the bundled Generated UI server,
+only when the daemon advertises `generated_ui_state` and the session has a bound
+client, and never in the static transcript view. A retained card needs its
+owner lease to start a read or submit a new save. If the card is folded, a save
+the host already accepted can finish while the same frame, slot and owner are
+still current.
+
+**Loading.** The App reads the state before `init`, while the view mounts. The
+read has its own time limit and does not count against the startup limit. If
+the read fails or the App cancels it at its deadline, the card starts without
+state and saves nothing. The host shows that the saved state could not be loaded
+and discards any late result.
+
+**Saving.** The host keeps the card's revision. It sends a change as soon as the
+previous write settles and coalesces only the changes made while a write is in
+flight. A debounce would lose the last change when the page reloads. An
+unchanged value is not sent. After a `stale` outcome, this mount stops saving
+and the host asks the user to refresh the page to load the latest state. A value
+over 16 KiB is not sent. A failed write is reported and the next change tries
+again. A card mounted again reads its state only after an earlier mount's write
+has landed.
+
+**Outcome.** The host shows the save outcome in its own bar above the card,
+outside the sandbox, so generated content cannot imitate it. The element
+carries `data-generated-ui-save` with `saving`, `saved`, `stale`, `too_large`,
+`failed` or `unavailable`. Once the card saves, the App frame stops saying that
+changes stay only in the page.
+
+**Reopen and reset.** Reopening a card that was released restores its saved
+state. The host's "Reopen and reset" action first clears the saved state: it
+reads the current revision, saves `null` against it, and then mounts the card
+again. If clearing fails, the card is not mounted again, this mount stops
+saving, and the bar reports the failure.
+
 ## Limits
 
 - One card's serialized value: 16 KiB (UTF-8).
 - Cards with saved state per session: 128.
-- Write frequency is limited in the App (step 2), which coalesces saves before
-  sending them; the daemon does not rate-limit.
+- Write frequency: the host sends at most one write at a time per card and
+  coalesces changes made while one is in flight; the daemon does not
+  rate-limit.
 
 ## Rollout
 
-1. **Storage and routes** (this PR): transcript record, branch selection, fork
+1. **Storage and routes** (#17448): transcript record, branch selection, fork
    carry-over, agent service and ext methods, bridge, daemon routes, SDK client,
    capability.
-2. **Runtime and host:** mint `cardId`; add `state` to the Worker `init`
+2. **Runtime and host** (this PR): mint `cardId`; add `state` to the Worker `init`
    message; add `ui.state.get()` / `ui.state.set(value)` (synchronous, one write
    per round, last write wins); load state in the App before `init` and show a
    load failure instead of starting empty; coalesce and save each round's state;
@@ -170,8 +229,10 @@ card can save while a turn is running.
 
 ## Risks
 
-- **Transcript growth:** every changed save appends up to 16 KiB. Step 2 must
-  coalesce saves; unchanged values append nothing.
+- **Transcript growth:** every changed save appends up to 16 KiB. The host
+  coalesces only changes made while a write is in flight, so a card that saves
+  on every keystroke appends a record per settled write. Unchanged values append
+  nothing; the skill (step 3) teaches saving meaningful changes.
 - **Downgrade:** an older binary does not know the subtype. It reports the
   record as unknown and may treat a trailing save as the conversation leaf. A
   session with saved state should not be resumed by an older binary and then
@@ -207,8 +268,23 @@ Step 1:
   nothing; an unknown session returns 404. Rewind through the daemon is covered
   only by the recorder tests.
 
-Steps 2 and 3 add browser coverage (reload, reopen, two tabs, two sessions, an
-oversized value and a refused write) and the acceptance pins.
+Step 2:
+
+- Runtime tests: the saved state at `init`, `get()` copies, the last `set()` in
+  a round, rounds that set nothing, catchable errors for non-JSON and oversized
+  values, a frozen API, and refused saved state.
+- App tests: the state loads before `init`, a slow load is not a startup
+  timeout, a failed load starts without state and saves nothing, a superseded
+  round still saves, and requests are sent only when the host advertises the
+  capability and the result has a card id.
+- Host tests: immediate sends, coalescing while in flight, revision tracking,
+  each outcome, no saves before the state was read, ordering across remounts,
+  and reset clearing from a fresh read.
+- Browser check against a real daemon: a card saves, survives a reload and
+  reopening the session, another session sees nothing, a rewind restores the
+  earlier value, and reset clears it.
+
+Step 3 adds the acceptance pins.
 
 ## Acceptance criteria
 

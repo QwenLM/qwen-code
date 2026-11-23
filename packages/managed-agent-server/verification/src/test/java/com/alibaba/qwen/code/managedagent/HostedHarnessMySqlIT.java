@@ -226,7 +226,7 @@ class HostedHarnessMySqlIT {
 
     private JsonNode modelStatistics() {
         var snapshots = jdbc.query("SELECT DISTINCT u.inline_bytes FROM ma_resource u JOIN ma_resource_ref r"
-                        + " ON r.session_scope_key = u.session_scope_key AND r.resource_id = u.resource_id"
+                        + " ON r.tenant_id = u.tenant_id AND r.session_id = u.session_id AND r.resource_id = u.resource_id"
                         + " WHERE u.tenant_id = ? AND u.session_id = ? AND r.owner_kind = 'JOURNAL'"
                         + " AND u.kind IN ('managed-hosted-model-usage-v2', 'managed-hook-model-usage-v2', 'managed-session-model-stats')",
                 (row, index) -> {
@@ -237,9 +237,9 @@ class HostedHarnessMySqlIT {
                     }
                 }, tenant, sessionId);
         assertThat(snapshots).as("Committed diagnostic resources from the packaged Harness").isNotEmpty();
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head"
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head"
                         + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                Integer.class, tenant, sessionId)).isEqualTo(4);
+                Boolean.class, tenant, sessionId)).isTrue();
         return snapshots.stream().max(java.util.Comparator.comparingLong(value -> value.path("snapshotRevision").asLong())).orElseThrow();
     }
 
