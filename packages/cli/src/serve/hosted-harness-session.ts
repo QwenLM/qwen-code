@@ -67,6 +67,7 @@ import {
 import {
   hostedActionParkRegistration,
   hostedApprovalResumeShapeRefusal,
+  hostedCommandStepResumeShapeRefusal,
   registerHostedActionPark,
   type HostedActionParkRefusal,
   type HostedActionParkRegistration,
@@ -2902,8 +2903,10 @@ function retainHostedCleanupHolds(
   }
 }
 
-// A resumed approval restarts from this text, so an Action park refuses a
-// Turn without it exactly as the recovery arms do.
+// A resumed Turn restarts from this text, so an Action park refuses a Turn
+// without it exactly as the recovery arms do. A hosted-harness input that
+// carries only attachments restarts from empty text, as its live Turn ran:
+// executeHostedTurn reads the attachments back from the input itself.
 async function hostedOriginalPromptText(
   managed: ManagedSession,
   promptId: string,
@@ -2911,11 +2914,13 @@ async function hostedOriginalPromptText(
   const user = (await managed.sink.project()).find(
     (item) => item.type === 'user' && item.daemonPromptId === promptId,
   );
-  return (
-    user?.message?.parts
-      ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
-      .join('\n') || undefined
-  );
+  const text = user?.message?.parts
+    ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
+    .join('\n');
+  if (text) return text;
+  return (await readHostedInput(managed, promptId, '')).attachments.length
+    ? ''
+    : undefined;
 }
 
 async function retryHostedCleanup(
@@ -5162,8 +5167,6 @@ export function registerHostedHarnessSessionRoutes(
       return 'turn_mismatch';
     if (session.recoveredTurn !== undefined) return 'recovered_turn';
     if (session.definition?.['lineage'] !== undefined) return 'lineage';
-    const shape = hostedApprovalResumeShapeRefusal(session, brokerOptions);
-    if (shape) return shape;
     if (
       session.stores?.supportsActionParking?.() !== true ||
       session.stores?.supportsWakeDispatch?.() !== true
@@ -5193,11 +5196,21 @@ export function registerHostedHarnessSessionRoutes(
       registration.promptId,
     );
     if (!continuation) return 'no_continuation';
-    if (continuation.plan.commandStep !== undefined) return 'command_step';
+    const commandStep = continuation.plan.commandStep;
+    const shape = commandStep
+      ? hostedCommandStepResumeShapeRefusal(session, brokerOptions)
+      : hostedApprovalResumeShapeRefusal(session, brokerOptions);
+    if (shape) return shape;
+    // Recovery admits a command step on an MCP Session, but parking one waits
+    // for MCP parking (#18149 Stage 4).
+    if (commandStep && session.mcp) return 'mcp';
     if (
-      !(await hostedOriginalPromptText(session.managed, registration.promptId))
+      (await hostedOriginalPromptText(
+        session.managed,
+        registration.promptId,
+      )) === undefined
     )
-      return 'prompt_text_missing';
+      return 'original_prompt_missing';
     let approvalRevision: number | undefined;
     if (registration.livePoll) {
       const settings = registration.settings;
@@ -5372,7 +5385,8 @@ export function registerHostedHarnessSessionRoutes(
         if (park) {
           const certificateLost = await refreshBackgroundCertificate();
           const blocked =
-            backgroundCertified ||
+            (backgroundCertified &&
+              session.stores?.supportsBackgroundActionParking?.() !== true) ||
             certificateLost ||
             hostedActionParkRegistration(session.managed) !==
               park.registration ||
@@ -5513,6 +5527,7 @@ export function registerHostedHarnessSessionRoutes(
               wake = {
                 pending: false,
                 dueAt: 0,
+                ...(backgroundCertified ? { backgroundHeld: true } : {}),
                 parkedTurn: {
                   promptId: actionPark.promptId,
                   wakeAt: actionPark.wakeAt,
@@ -6752,7 +6767,7 @@ export function registerHostedHarnessSessionRoutes(
               resident.managed,
               parked,
             );
-            if (!text)
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -8243,6 +8258,76 @@ export function registerHostedHarnessSessionRoutes(
               // terminal settlement from their own funnel; monitor turns
               // keep the recovery-blocked freeze their fleet owns.
               settleInterrupted: settleInterruptedChannelWake,
+              // A wake turn's native approval wait resumes on the terms the
+              // takeover arm applies to a parked prompt's. Channel, pr_event
+              // and session-message turns keep their own settlement for now
+              // (#18149 Stage 2).
+              resumeInterrupted: async (turn) => {
+                const source = turn.source ?? '';
+                if (
+                  !(
+                    source === 'monitor' ||
+                    source === AUTOMATION_INPUT_SOURCE ||
+                    source === LOOP_INPUT_SOURCE ||
+                    isChildNotificationSource(source)
+                  ) ||
+                  hostedApprovalResumeShapeRefusal(session, brokerOptions)
+                )
+                  return undefined;
+                const verdict =
+                  await session.managed.authority.harnessRunAuthorization();
+                if (
+                  verdict.status !== 'runnable' ||
+                  verdict.checkpoint.identity.turnId !== turn.turnId ||
+                  verdict.checkpoint.continuation.phase !== 'await_action'
+                )
+                  return undefined;
+                let continuation:
+                  | RestoredHostedApprovalContinuation
+                  | undefined;
+                try {
+                  continuation = await findHostedApprovalContinuation(
+                    session.managed,
+                    turn.turnId,
+                  );
+                } catch (cause) {
+                  // A Store fault says nothing about the saved continuation,
+                  // so the pump retries it. Any other rejection is fixed in
+                  // the journal and would fail every pass: the Turn takes the
+                  // crash path instead, as it did before it could resume.
+                  if (
+                    cause instanceof ManagedSessionStoreTransportError ||
+                    (cause instanceof ManagedSessionStoreHttpError &&
+                      (cause.status === 429 || cause.status >= 500))
+                  )
+                    throw cause;
+                  writeStderrLineSafe(
+                    `qwen serve: Interrupted wake turn ${turn.turnId} cannot resume its approval wait: ${String(cause)}`,
+                  );
+                  return undefined;
+                }
+                if (!continuation || continuation.plan.commandStep)
+                  return undefined;
+                const text = await hostedOriginalPromptText(
+                  session.managed,
+                  turn.turnId,
+                );
+                if (text === undefined) return undefined;
+                return (abort) =>
+                  executeHostedTurn(
+                    session,
+                    sessionId,
+                    cwd,
+                    turn.turnId,
+                    text,
+                    abort,
+                    brokerOptions,
+                    undefined,
+                    undefined,
+                    undefined,
+                    continuation,
+                  );
+              },
               writeStderr: writeStderrLineSafe,
             });
             // H6c: the automation turn settled; its run settles from the
@@ -8671,15 +8756,8 @@ export function registerHostedHarnessSessionRoutes(
         if (!committedModelOutput)
           resumeModel = await findHostedModelRequest(managed, unsettled);
         if (resumeModel) {
-          const user = (await managed.sink.project()).find(
-            (item) => item.type === 'user' && item.daemonPromptId === unsettled,
-          );
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original model Prompt is missing.',
             );
@@ -8700,9 +8778,9 @@ export function registerHostedHarnessSessionRoutes(
         ((takeover &&
           hostedApprovalResumeShapeRefusal(session, brokerOptions) ===
             undefined) ||
-          (session.toolProfile &&
-            brokerOptions &&
-            extensionsCommandStepTakeover))
+          (extensionsCommandStepTakeover &&
+            hostedCommandStepResumeShapeRefusal(session, brokerOptions) ===
+              undefined))
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -8716,7 +8794,7 @@ export function registerHostedHarnessSessionRoutes(
             (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const text = await hostedOriginalPromptText(managed, unsettled);
-            if (!text)
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -8764,13 +8842,8 @@ export function registerHostedHarnessSessionRoutes(
           const projected = (await managed.sink.project()).filter(
             (record) => record.daemonPromptId === unsettled,
           );
-          const user = projected.find((record) => record.type === 'user');
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original Prompt is missing.',
             );
@@ -9107,7 +9180,9 @@ export function registerHostedHarnessSessionRoutes(
         (hasUnsettledInput(session, unsettledThrough) &&
           !resume &&
           !settlePromptId &&
-          !session.hooks &&
+          // A Hooks Session otherwise recovers through this load, but only a
+          // takeover may resume a parked command step (R9-1).
+          (!session.hooks || commandStepPark) &&
           !recovery &&
           !inapplicableAnswer)
       ) {
