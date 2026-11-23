@@ -47,12 +47,13 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
     }
     const snapshot = chat.getContextUsageSnapshot();
     const used = snapshot.promptTokens + snapshot.outputTokens;
-    // Counts recorded for a different route (a `/model` switch or an
-    // override turn) must not be presented as the current route's usage
-    // (#17320 R6-3) — treat them as unmeasured.
-    const measured = snapshot.countsMatchActiveRoute && used > 0;
+    // Counts another route recorded do not describe the route the current
+    // turn sends to, and presenting them as its usage would certify a
+    // falsehood (#17320 R6-3) — treat them as unmeasured.
+    const measured = snapshot.countsMatchRequestRoute && used > 0;
     const remaining = Math.max(0, snapshot.contextWindowTokens - used);
-    // The real send-path ladder, not a flat percentage: auto is
+    // The send path's own ladder, computed on the window the send layer last
+    // used — not a flat percentage: auto is
     // min(pct * window, (window - SUMMARY_RESERVE) - AUTOCOMPACT_BUFFER),
     // and the pct is user-overridable. Rounded so the model never sees a
     // fractional token count (#17320 R4-4).
@@ -80,23 +81,17 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
     const estimateNote = snapshot.promptTokensIsEstimated
       ? ' (estimated until the model reports real counts)'
       : '';
-    // Zero counts with carried-over history means the route was switched,
-    // not that the session is empty (#17320 F2): a new LlmChat starts with
-    // fresh counters while the conversation stays.
-    let zeroNote =
-      ' (no measurement yet — this is a fresh session or the first request is in flight)';
-    const history = chat.getHistory?.();
-    if (history && history.length > 0) {
-      zeroNote =
-        ' (no measurement on this model route yet — switching the model resets the counters while the conversation history carries over)';
-    }
     const lines = [
       `Context window: ${snapshot.contextWindowTokens} tokens`,
-      `Used: ${used} tokens${used === 0 ? zeroNote : estimateNote}`,
+      // A call can only follow a model response, which is a turn in the
+      // history by the time this runs. Zero counts therefore mean the route
+      // reported none for that response — never that the session is empty,
+      // and not something to pin on a model switch (#17320).
+      `Used: ${used} tokens${used === 0 ? ' (no token count has been reported for this model route yet)' : estimateNote}`,
     ];
     if (measured) {
       // Derived figures only when a real measurement backs them: printing
-      // the whole window as free headroom on an unmeasured session is the
+      // the whole window as free headroom on unmeasured counts is the
       // exact falsehood the send path refuses to commit (#17320 R6-2 —
       // the gate estimates from history instead of trusting zero counts).
       lines.push(
@@ -104,11 +99,11 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
       );
     } else if (used > 0) {
       lines.push(
-        `Remaining window headroom: unmeasured on this model route — the counts above were recorded for the previous route and do not describe it.`,
+        `Remaining window headroom: unmeasured on this model route — the counts above were recorded for a different route and do not describe it.`,
       );
     } else {
       lines.push(
-        `Remaining window headroom: unmeasured — derived figures are withheld until the first request reports counts for this route.`,
+        `Remaining window headroom: unmeasured — withheld until a response reports token counts for this route.`,
       );
     }
     lines.push(`Auto-compaction level: ${autoCompactAt} tokens`);

@@ -14810,6 +14810,68 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('reports the window of the route the last request used (#17320)', async () => {
+      // The send path sizes its ladder on the window it resolved for the
+      // request. An exact route can carry another window than the session's
+      // active model, so the snapshot must report that one, and say whether
+      // the counters still describe that route.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `route:${model}` : 'route:active',
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: {
+            model: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            contextWindowSize: 32_768,
+          },
+          retryAuthType: AuthType.USE_OPENAI,
+          model: 'vision-agent',
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 200_000,
+      });
+      serveStreams(
+        streamOf(
+          textChunk('hello', 'STOP', {
+            promptTokenCount: 321,
+            totalTokenCount: 400,
+          }),
+        ),
+      );
+
+      // The session's own window is 200K; the request went to a 32K route.
+      const requestRoute = 'route:vision-agent';
+      await drain(
+        await sendOn(
+          'openai:vision-agent\0https://vision.example.com/v1\0',
+          'hi',
+          'prompt-request-window',
+        ),
+      );
+      expect(chat.getContextUsageSnapshot()).toMatchObject({
+        contextWindowTokens: 32_768,
+        promptTokens: 321,
+        countsMatchRequestRoute: true,
+      });
+
+      // A later keyed read for another route moves the counters to that
+      // route's. The read stays pure — it moves nothing itself — and the
+      // snapshot then says the counters no longer describe the request's.
+      chat.getLastPromptTokenCount('route:somewhere-else');
+      expect(chat.getContextUsageSnapshot()).toMatchObject({
+        contextWindowTokens: 32_768,
+        promptTokens: 0,
+        countsMatchRequestRoute: false,
+      });
+      // Reading did not hand the counters back: the request route's count
+      // is still where the keyed read for it left it.
+      expect(chat.getLastPromptTokenCount(requestRoute)).toBe(321);
+    });
+
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
       // #5950 at recovery time: 131,072 window, 71,349 prompt, 64K ceiling.
       // The initial 49,722 grant truncates; the ~121K recovery prompt would

@@ -782,6 +782,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'toolName.savememory': '儲存記憶',
   'toolName.askuserquestion': '詢問使用者',
   'toolName.toolsearch': '工具搜尋',
+  'toolName.get_context_remaining': '查詢剩餘上下文',
   'about.auth': '認證',
   'about.baseUrl': 'Base URL',
   'about.fastModel': '快速模型',

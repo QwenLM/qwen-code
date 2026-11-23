@@ -15,23 +15,20 @@ function configWithChat(
     promptTokensIsEstimated: boolean;
     outputTokens: number;
     contextWindowTokens: number;
-    countsMatchActiveRoute?: boolean;
+    countsMatchRequestRoute?: boolean;
   },
   options?: {
     sessionTokenLimit?: number;
     autoCompactThreshold?: number;
-    historyLength?: number;
     throwOnClient?: boolean;
   },
 ) {
   const chat = snapshot
     ? {
         getContextUsageSnapshot: () => ({
-          countsMatchActiveRoute: true,
+          countsMatchRequestRoute: true,
           ...snapshot,
         }),
-        getHistory: () =>
-          Array.from({ length: options?.historyLength ?? 0 }, () => ({})),
       }
     : undefined;
   const llmClient = chat ? { getChat: () => chat } : undefined;
@@ -113,7 +110,7 @@ describe('GetContextRemainingTool', () => {
             promptTokensIsEstimated: false,
             outputTokens: 1_000,
             contextWindowTokens: 128_000,
-            countsMatchActiveRoute: true,
+            countsMatchRequestRoute: true,
           }),
         }),
       }),
@@ -224,37 +221,36 @@ describe('GetContextRemainingTool', () => {
     expect(text).not.toContain('until the session token limit');
   });
 
-  it('does not call a history-carrying session fresh after a model switch (#17320 F2)', async () => {
-    // Counts reset when the route switches; history carries over. The tool
-    // must not claim a fresh session and a fully free window.
-    const text = await runTool(
-      configWithChat(
-        {
-          promptTokens: 0,
-          promptTokensIsEstimated: true,
-          outputTokens: 0,
-          contextWindowTokens: 128_000,
-        },
-        { historyLength: 6 },
-      ),
-    );
-    expect(text).toContain(
-      'no measurement on this model route yet — switching the model resets the counters while the conversation history carries over',
-    );
-    expect(text).not.toContain('fresh session');
-  });
-
-  it('calls a truly empty session fresh (R1-6 M4)', async () => {
-    const text = await runTool(
-      configWithChat({
-        promptTokens: 0,
-        promptTokensIsEstimated: true,
-        outputTokens: 0,
-        contextWindowTokens: 128_000,
+  // A call can only follow a model response, and that response is a turn in
+  // the history by the time the tool runs; zero counts at that point mean
+  // the route reported none. The note states that and nothing else: pinning
+  // it on a model switch was false for a brand-new session, and reading the
+  // history to tell the two apart deep-cloned the whole conversation.
+  it('states that no count was reported without naming a cause or reading the history (#17320)', async () => {
+    const getHistory = vi.fn();
+    const text = await runTool({
+      getLlmClient: vi.fn().mockReturnValue({
+        getChat: () => ({
+          getContextUsageSnapshot: () => ({
+            promptTokens: 0,
+            promptTokensIsEstimated: true,
+            outputTokens: 0,
+            contextWindowTokens: 128_000,
+            countsMatchRequestRoute: true,
+          }),
+          getHistory,
+        }),
       }),
+      getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config);
+
+    expect(text).toContain(
+      'Used: 0 tokens (no token count has been reported for this model route yet)',
     );
-    expect(text).toContain('no measurement yet');
-    expect(text).toContain('fresh session');
+    expect(text).toContain('unmeasured');
+    expect(text).not.toContain('fresh session');
+    expect(text).not.toContain('switch');
+    expect(getHistory).not.toHaveBeenCalled();
   });
 
   it('advises that screenshots can trigger compaction before the ladder (#17320 R4-5)', async () => {
@@ -285,20 +281,40 @@ describe('GetContextRemainingTool', () => {
     expect(text).toContain('Auto-compaction level: 95000 tokens');
   });
 
-  it('flags counts recorded for a previous route instead of adopting them (#17320 R6-3)', async () => {
+  it('does not present another route\u2019s counts as the request route\u2019s (#17320 R6-3)', async () => {
     const text = await runTool(
       configWithChat({
         promptTokens: 77_000,
         promptTokensIsEstimated: false,
         outputTokens: 2_000,
         contextWindowTokens: 128_000,
-        countsMatchActiveRoute: false,
+        countsMatchRequestRoute: false,
       }),
     );
     expect(text).toContain('Used: 79000 tokens');
-    expect(text).toContain('unmeasured on this model route');
-    expect(text).toContain('recorded for the previous route');
+    expect(text).toContain(
+      'recorded for a different route and do not describe it',
+    );
     expect(text).not.toContain('Remaining window headroom: 49000');
+  });
+
+  it('reports the window of the route the last request used (#17320)', async () => {
+    // The send path sizes its ladder on the request route's window; the
+    // tool reads that number from the snapshot instead of the session's.
+    const text = await runTool(
+      configWithChat({
+        promptTokens: 9_000,
+        promptTokensIsEstimated: false,
+        outputTokens: 1_000,
+        contextWindowTokens: 64_000,
+      }),
+    );
+    // min(0.85 * 64000, 64000 - 20000 - 13000) = 31000.
+    expect(text).toContain('Context window: 64000 tokens');
+    expect(text).toContain('Auto-compaction level: 31000 tokens');
+    expect(text).toContain(
+      'Remaining window headroom: 54000 tokens (against the window; 21000 until auto-compaction)',
+    );
   });
 
   it('ships a complete description naming every reported field', () => {

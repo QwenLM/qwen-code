@@ -2581,6 +2581,16 @@ export class LlmChat {
   private lastCachedContentTokenCount = 0;
 
   /**
+   * The route and the context window of the most recent request on this
+   * chat, as the send layer resolved them. An exact route or a full-turn
+   * override sends to another route than the session's active one, against
+   * that route's window. Read by `getContextUsageSnapshot`; `undefined`
+   * until the first request (#17320).
+   */
+  private lastRequestRouteKey: string | undefined;
+  private lastRequestContextWindowTokens: number | undefined;
+
+  /**
    * The live context-usage numbers behind `get_context_remaining`: the last
    * prompt count the route reported (or the local estimate when the route
    * has not reported yet), the previous response's output count, and the
@@ -2593,29 +2603,31 @@ export class LlmChat {
     outputTokens: number;
     contextWindowTokens: number;
     /**
-     * Whether the counts describe the session's ACTIVE route. The slots hold
-     * whatever route last reported them; on a `/model` switch (or an override
-     * turn) that route differs from the active one, and presenting its
-     * numbers as the current route's usage would certify a falsehood
-     * (#17320 R6-3).
+     * Whether the counts describe the route of the most recent request —
+     * the route the current turn's next request goes to. Usage is recorded
+     * under the route that reported it (#9454), and a later keyed read can
+     * move the counters to another route's; presenting that route's numbers
+     * as the request route's usage would certify a falsehood (#17320 R6-3).
      */
-    countsMatchActiveRoute: boolean;
+    countsMatchRequestRoute: boolean;
   } {
     // PURE read of the single-slot counters — no adoption, so the read
     // cannot mutate the slots, the retained per-route map, or telemetry.
-    // `tokenCountsRouteKey` names the route that recorded the counts; the
-    // caller decides what to do when it is not the active route.
-    const recordedRouteKey = this.tokenCountsRouteKey;
+    const requestRouteKey = this.lastRequestRouteKey;
     return {
       promptTokens: this.lastPromptTokenCount,
       promptTokensIsEstimated: this.lastPromptTokenCountIsEstimated,
       outputTokens: this.lastOutputTokenCount,
+      // The window the send layer last used; until the first request, the
+      // session's own.
       contextWindowTokens:
+        this.lastRequestContextWindowTokens ??
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT,
-      countsMatchActiveRoute:
-        recordedRouteKey === undefined ||
-        recordedRouteKey === this.currentRouteKey(),
+      countsMatchRequestRoute:
+        requestRouteKey === undefined ||
+        this.tokenCountsRouteKey === undefined ||
+        this.tokenCountsRouteKey === requestRouteKey,
     };
   }
 
@@ -3762,6 +3774,8 @@ export class LlmChat {
     // estimate.
     const contextWindowForClamp =
       cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
+    this.lastRequestRouteKey = requestRouteKey;
+    this.lastRequestContextWindowTokens = contextWindowForClamp;
     let promptTokensForClamp = 0;
 
     const previousGenerationConfig = options?.preparedRequest
