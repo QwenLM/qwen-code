@@ -2693,8 +2693,8 @@ export default {
     'Дождитесь завершения фоновых агентов или остановите их в /tasks, прежде чем менять каталог.',
   'Fast context compression without AI. Strips old tool outputs and thinking parts.':
     'Быстрое сжатие контекста без ИИ. Удаляет старые выводы инструментов и фрагменты рассуждений.',
-  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
-    'Копировать в буфер: ответ, код (по языку), LaTeX или Mermaid. N — N-е с конца сообщение, index — номер блока',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest AI message with text, index = block number':
+    'Копировать в буфер: ответ, код (по языку), LaTeX или Mermaid. N — N-е с конца сообщение ИИ с текстом, index — номер блока',
   'Show working-tree change stats versus HEAD':
     'Показать статистику изменений рабочего дерева относительно HEAD',
   'Could not determine current working directory.':
