@@ -868,8 +868,9 @@ interface TryCompressOptions {
    * The same estimate without this send's pending content (the pending
    * message plus a memory snapshot sent with it). Compression sizes the
    * compacted count from it, since the post-compaction estimates add the
-   * pending content back (#15486). Without it, only the pending message is
-   * subtracted from `precomputedEffectiveTokens`.
+   * pending content back (#15486). Without it, the pending turn as the
+   * request carries it (the message plus that snapshot) is subtracted from
+   * `precomputedEffectiveTokens`.
    */
   precomputedBaselineTokens?: number;
   /**

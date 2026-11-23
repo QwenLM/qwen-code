@@ -4874,7 +4874,7 @@ describe('LlmChat', async () => {
     it('keeps the pending message in the compaction gate input (#15486)', async () => {
       // Compression sizes the compacted count from a baseline without the
       // pending message, but its gate must still read the full effective
-      // count. Here the baseline alone (165K) is below the 170K auto
+      // count. Here the baseline alone (165K) is below the 167K auto
       // threshold and only the pending message (10K) takes the prompt over
       // it, below the 177K hard tier: a gate that read the baseline would
       // skip a compaction this send needs.
@@ -4925,6 +4925,42 @@ describe('LlmChat', async () => {
       );
       expect(generateText).not.toHaveBeenCalled();
       expect(coldSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('sizes the compacted count from the history walk on a first send with no count (#15486)', async () => {
+      // At count 0 both send-path estimates walk the history; the baseline
+      // walks it with the pending turn's parts emptied. The 165K history is
+      // below the 167K auto threshold and the 10K message takes the
+      // effective count over it, below the 177K hard tier. A baseline that
+      // kept the message would carry it into the compacted count, and every
+      // later estimate would add it again.
+      const history: Content[] = [
+        userText('x'.repeat(660_000)),
+        modelText('ack'),
+        userText('follow up'),
+        modelText('response'),
+      ];
+      chat.setHistory(history);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue(
+        snapshotReply() as never,
+      );
+      withBaseLlmClient(vi.fn());
+      mockStream(textStream('done'));
+      const message = 'y'.repeat(40_000);
+
+      expectCompressedEvent(await sendCollect(message, 'prompt-15486-count-0'));
+
+      const opts = compressSpy.mock.calls[0][1];
+      expect(opts.force).toBe(false);
+      expect(opts.originalTokenCount).toBe(estimateContentTokens(history));
+      expect(opts.precomputedEffectiveTokens).toBe(
+        estimateContentTokens([...history, userText(message)]),
+      );
     });
 
     it.each([
@@ -17057,6 +17093,19 @@ describe('LlmChat', async () => {
         6199, // 6200 − char/4 of 'next' (1)
         true,
       ],
+      // The fallback never goes below zero, even when the pending turn's
+      // estimate exceeds the effective count the caller passed (#15486).
+      [
+        'clamps the fallback original count at zero when the pending turn exceeds the effective count',
+        'p-precomputed-effective-clamped',
+        {
+          precomputedEffectiveTokens: 500,
+          pendingUserMessage: userText('x'.repeat(4_000)),
+          trigger: 'auto',
+        },
+        0, // 500 − char/4 of 4,000 characters (1,000), clamped
+        true,
+      ],
       // No provider count: the limit/config/default fallback is a projection.
       [
         'keeps a fallback override estimated while publishing its count',
@@ -17090,6 +17139,40 @@ describe('LlmChat', async () => {
 
       expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(sentCount);
       expect(info.originalTokenCountIsEstimated).toBe(estimated);
+    });
+
+    it('takes a memory snapshot out with the pending message when only the effective count is passed (#15486)', async () => {
+      // A caller that passes no baseline gets the pending turn subtracted as
+      // the request carries it. With a catalog the request attaches a
+      // snapshot to the message, so subtracting the bare message would leave
+      // the snapshot in the original count, and the compacted count would
+      // carry it into every later estimate.
+      const catalog = 'c'.repeat(4_000);
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const compressSpy = mockCompressionService('compressed');
+      const history = [userText('a'), modelText('b')];
+      chat.setHistory(history);
+      chat.seedResumeTokenCounts(5000, 0, false);
+      const pending = userText('next');
+      const snapshot = getAutoMemorySnapshot([...history, pending], catalog);
+      expect(snapshot).toBeDefined();
+      const turnTokens = estimateContentTokens([
+        { ...pending, parts: [...(pending.parts ?? []), snapshot!] },
+      ]);
+      // The snapshot alone is about 1,000 tokens, so the readings differ.
+      expect(turnTokens - estimateContentTokens([pending])).toBeGreaterThan(
+        900,
+      );
+
+      await chat.tryCompress('p-fallback-memory-snapshot', true, undefined, {
+        precomputedEffectiveTokens: 6200,
+        pendingUserMessage: pending,
+        trigger: 'auto',
+      });
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(
+        6200 - turnTokens,
+      );
     });
   });
 

@@ -53,7 +53,7 @@ The send path computes the same estimate twice: once with this send's pending co
 
 Fallbacks:
 
-- A caller that passes only the effective count gets the pending message's estimate subtracted from it.
+- A caller that passes only the effective count gets the pending turn subtracted from it as the request carries it: the message plus a memory snapshot sent with it.
 - Without a precomputed count, the local estimate walks the history without the pending message.
 
 Only the original count changes. The compression gate still reads the effective count, pending content included (`precomputedEffectiveTokens`), and so does the size check of the cache-sharing request. A send whose baseline is below the auto threshold, but whose pending message takes it over, still compacts.
@@ -130,11 +130,13 @@ The window clamp has no design document of its own under `docs/design/`. This se
   - **Baseline:**
     - it leaves out the pending message and keeps the previous output;
     - it also leaves out a memory snapshot sent with the message;
-    - it leaves out the pending message without a precomputed count.
+    - it leaves out the pending message without a precomputed count;
+    - a caller that passes only the effective count gets the message and its memory snapshot subtracted, and never a count below zero;
+    - on a first send with no count, the original count is the history walk and the effective count adds the message to it.
   - **End to end through the real compression service:**
     - the C1 case, for a pending tool result and pending text, on both the cache-sharing and the cold accounting paths. The turn is sent, and the compacted count is smaller than the pending message;
     - both branches of the cold formula, with and without a retained tail. The compacted count is exactly the baseline minus the summarized history plus the summary (and the note before a retained tail), and the side query carries the pending result only without a tail;
-    - the gate: a 165K baseline is below the 170K auto threshold, and a 10K pending message takes the effective count to 175K. Compaction runs through the real gate, with the full count passed as `precomputedEffectiveTokens`.
+    - the gate: a 165K baseline is below the 167K auto threshold (200K window: min(85% of 200K, 200K − 20K − 13K)), and a 10K pending message takes the effective count to 175K. Compaction runs through the real gate, with the full count passed as `precomputedEffectiveTokens`.
   - **Records:** the hard-tier and auto compression records count the pending message, while the adopted count and the `COMPRESSED` event keep the compacted count. On both record paths the record adds exactly the turn the request carried: with a fresh memory snapshot, with a snapshot that compaction dropped from the history and the send attached again, and without a replayed snapshot the request strips, which the record still stores.
   - **First send:** a 16K window after a compaction gets 4,000 instead of 1, and a fresh session keeps the padded cap (1,999 on a 32K window).
   - **Recovery:**
@@ -144,7 +146,7 @@ The window clamp has no design document of its own under `docs/design/`. This se
     - a count-based estimate equal to the walk caps the floor: the check is inclusive;
     - a fresh session whose first grant the pad squeezed to about 500 tokens gets 4,000 on recovery once usage shows room, and a caller's ceiling of 2,000 still bounds it.
 - Existing tests updated: two expected original counts now leave out the pending message, and one expected record count includes it.
-- Mutation check: 14 hand-written mutants, each undoing one decision above (the record add-back, the adopted count, the gate input, the floor's scope on the first send and on recovery sends, either cold-path branch, the baseline itself), each make at least one of these tests fail. Five more for the round-one fixes do too: each record path adding the raw message, the auto record adding the pre-compaction effective count minus the baseline (which misses a snapshot compaction drops), and the recovery check written as `>` or as `> 0`. Three more for the recovery ceiling (back to the first grant, always the request's ceiling, always the escalation ceiling) each fail a test as well.
+- Mutation check: 14 hand-written mutants, each undoing one decision above (the record add-back, the adopted count, the gate input, the floor's scope on the first send and on recovery sends, either cold-path branch, the baseline itself), each make at least one of these tests fail. Five more for the round-one fixes do too: each record path adding the raw message, the auto record adding the pre-compaction effective count minus the baseline (which misses a snapshot compaction drops), and the recovery check written as `>` or as `> 0`. Three more for the recovery ceiling (back to the first grant, always the request's ceiling, always the escalation ceiling) each fail a test as well, and so do three for round two: the effective-count-only fallback subtracting the bare message, the same fallback without its zero clamp, and the send-path baseline keeping the pending content.
 - End-to-end runs against a mock provider and a real provider are reported on the PR.
 
 ## Acceptance criteria
