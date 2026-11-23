@@ -19,6 +19,7 @@ import {
   getCachedStringWidth,
 } from '../../utils/textUtils.js';
 import { editTextInExternalEditor } from '../../utils/external-editor.js';
+import { isUncPath } from '../../utils/file-uri.js';
 import {
   releaseProgramStatus,
   restoreProgramStatus,
@@ -2030,6 +2031,9 @@ function tryExtractFilePaths(
   content: string,
   isValidPath: (p: string) => boolean,
 ): string[] | null {
+  // Skip fs probing on UNC shares (\\host\share or //host/share) so pasted
+  // network paths cannot trigger Windows SMB authentication.
+  const checkValidPath = (p: string) => !isUncPath(p) && isValidPath(p);
   const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const lines = normalized.split(/\n/).filter((s) => s.trim().length > 0);
 
@@ -2040,9 +2044,11 @@ function tryExtractFilePaths(
     // Short-circuit: once any token is flagged as non-path, the result will be null
     if (hadNonPathToken.value) break;
 
-    // Use a regex that only matches quoted content starting with path-like chars
-    // to avoid false matches on English contractions (e.g., "don't").
-    const quotedPathRegex = /'((?:[~/.]|[A-Za-z]:)[^']*)'/g;
+    // Match single- or double-quoted content starting with path-like chars
+    // to support both POSIX terminals ('...') and Windows Explorer "Copy as
+    // path" ("...") while avoiding false matches on contractions (e.g., "don't").
+    const quotedPathRegex =
+      /'((?:[~/.]|[A-Za-z]:)[^']*)'|"((?:[~/.]|[A-Za-z]:)[^"]*)"/g;
     let lastIndex = 0;
     let match;
     let hasQuotedPaths = false;
@@ -2052,17 +2058,19 @@ function tryExtractFilePaths(
       if (gap) {
         const gapPaths = extractPathsFromSegment(
           gap,
-          isValidPath,
+          checkValidPath,
           hadNonPathToken,
         );
         validPaths.push(...gapPaths);
+        if (hadNonPathToken.value) break;
       }
-      const unescaped = unescapePath(match[1]);
-      if (isValidPath(unescaped)) {
+      const unescaped = unescapePath(match[1] ?? match[2]);
+      if (checkValidPath(unescaped)) {
         validPaths.push(`@${escapePath(unescaped)}`);
       } else {
         // Quoted path found but not a valid path — mark as non-path
         hadNonPathToken.value = true;
+        break;
       }
       lastIndex = quotedPathRegex.lastIndex;
       hasQuotedPaths = true;
@@ -2073,7 +2081,7 @@ function tryExtractFilePaths(
       if (trailing) {
         const trailingPaths = extractPathsFromSegment(
           trailing,
-          isValidPath,
+          checkValidPath,
           hadNonPathToken,
         );
         validPaths.push(...trailingPaths);
@@ -2081,7 +2089,7 @@ function tryExtractFilePaths(
     } else {
       const linePaths = extractPathsFromSegment(
         line.trim(),
-        isValidPath,
+        checkValidPath,
         hadNonPathToken,
       );
       validPaths.push(...linePaths);
@@ -2131,9 +2139,9 @@ function extractPathsFromSegment(
     for (let j = tokens.length; j >= i + 1; j--) {
       const candidate = tokens.slice(i, j).join(' ');
       let unquoted = candidate;
-      const quoteMatch = unquoted.match(/^'(.*)'$/);
+      const quoteMatch = unquoted.match(/^(['"])(.*)\1$/);
       if (quoteMatch) {
-        unquoted = quoteMatch[1];
+        unquoted = quoteMatch[2];
       }
       const unescaped = unescapePath(unquoted);
       if (isValidPath(unescaped)) {
