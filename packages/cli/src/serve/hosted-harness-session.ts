@@ -2124,6 +2124,18 @@ export async function settleCrashedWakeTurnAftermath(params: {
 // pending notification counts as an unsettled Turn on every load while
 // the pump that would deliver it can never run. H6: an automation input
 // rides the same pump and the same rules; H5: so does a channel input.
+/** The wake sources whose interrupted approval wait the pump resumes, so
+ * the only ones whose wait may park (#18149 S4). Channel, `pr_event` and
+ * session-message Turns keep their own settlement. */
+function isResumableWakeSource(source: unknown): boolean {
+  return (
+    source === 'monitor' ||
+    source === AUTOMATION_INPUT_SOURCE ||
+    source === LOOP_INPUT_SOURCE ||
+    isChildNotificationSource(source)
+  );
+}
+
 function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   if (event.kind !== 'input.accepted') return false;
   if (isWakeInputSource(event.payload['source'] as string)) return true;
@@ -5153,6 +5165,8 @@ export function registerHostedHarnessSessionRoutes(
     readonly wakeAt: number;
     readonly approvalRevision?: number;
     readonly cleanupExempt: boolean;
+    /** A wake-started Turn: the wake scan, not a Turn row, resumes it. */
+    readonly wakeOwned: boolean;
   }
 
   // Undefined means no Turn is waiting; a refusal names why a waiting Turn
@@ -5182,9 +5196,24 @@ export function registerHostedHarnessSessionRoutes(
         event.payload['turnId'] === registration.promptId,
     );
     if (!accepted) return 'input_missing';
-    if (isWakeOwnedInput(accepted)) return 'wake_owned';
+    // A wake-started Turn parks only where the pump resumes its wait, and
+    // only on a control plane that accepts its wake-claiming certificate.
+    const wakeOwned = isWakeOwnedInput(accepted);
+    if (
+      wakeOwned &&
+      (!isResumableWakeSource(accepted.payload['source']) ||
+        session.stores?.supportsWakeActionParking?.() !== true)
+    )
+      return 'wake_owned';
+    // The pump owns wake inputs, so the unsettled set never holds a wake
+    // Turn's own: it must hold nothing else. A second wake input still
+    // refuses at the gate, which reads every pending input.
     const unsettled = unsettledInputs(session);
-    if (unsettled.size !== 1 || !unsettled.has(registration.promptId))
+    if (
+      wakeOwned
+        ? unsettled.size !== 0
+        : unsettled.size !== 1 || !unsettled.has(registration.promptId)
+    )
       return 'other_unsettled_input';
     if (
       session.managed.authority.action(registration.options.requestId)
@@ -5204,6 +5233,8 @@ export function registerHostedHarnessSessionRoutes(
     // Recovery admits a command step on an MCP Session, but parking one waits
     // for MCP parking (#18149 Stage 4).
     if (commandStep && session.mcp) return 'mcp';
+    // The pump resumes only a native wait.
+    if (commandStep && wakeOwned) return 'wake_owned';
     if (
       (await hostedOriginalPromptText(
         session.managed,
@@ -5243,6 +5274,7 @@ export function registerHostedHarnessSessionRoutes(
         session.managed,
         registration.promptId,
       )),
+      wakeOwned,
     };
   };
 
@@ -5385,7 +5417,8 @@ export function registerHostedHarnessSessionRoutes(
         if (park) {
           const certificateLost = await refreshBackgroundCertificate();
           const blocked =
-            backgroundCertified ||
+            (backgroundCertified &&
+              session.stores?.supportsBackgroundActionParking?.() !== true) ||
             certificateLost ||
             hostedActionParkRegistration(session.managed) !==
               park.registration ||
@@ -5523,15 +5556,19 @@ export function registerHostedHarnessSessionRoutes(
             // closes, recomputed on every retry.
             let wake: ManagedSessionWakeStamp | undefined;
             if (actionPark) {
+              // A wake-started Turn has no Turn row to redispatch: its park
+              // claims the wake at its own due time, and the scan resumes it.
               wake = {
-                pending: false,
-                dueAt: 0,
+                pending: actionPark.wakeOwned,
+                dueAt: actionPark.wakeOwned ? actionPark.wakeAt : 0,
+                ...(backgroundCertified ? { backgroundHeld: true } : {}),
                 parkedTurn: {
                   promptId: actionPark.promptId,
                   wakeAt: actionPark.wakeAt,
                   ...(actionPark.approvalRevision === undefined
                     ? {}
                     : { approvalRevision: actionPark.approvalRevision }),
+                  ...(actionPark.wakeOwned ? { owner: 'wake' as const } : {}),
                 },
               };
             } else if (session.stores?.supportsWakeDispatch?.()) {
@@ -8256,6 +8293,70 @@ export function registerHostedHarnessSessionRoutes(
               // terminal settlement from their own funnel; monitor turns
               // keep the recovery-blocked freeze their fleet owns.
               settleInterrupted: settleInterruptedChannelWake,
+              // A wake turn's native approval wait resumes on the terms the
+              // takeover arm applies to a parked prompt's. Channel, pr_event
+              // and session-message turns keep their own settlement for now
+              // (#18149 Stage 2).
+              resumeInterrupted: async (turn) => {
+                if (
+                  !isResumableWakeSource(turn.source) ||
+                  hostedApprovalResumeShapeRefusal(session, brokerOptions)
+                )
+                  return undefined;
+                const verdict =
+                  await session.managed.authority.harnessRunAuthorization();
+                if (
+                  verdict.status !== 'runnable' ||
+                  verdict.checkpoint.identity.turnId !== turn.turnId ||
+                  verdict.checkpoint.continuation.phase !== 'await_action'
+                )
+                  return undefined;
+                let continuation:
+                  | RestoredHostedApprovalContinuation
+                  | undefined;
+                try {
+                  continuation = await findHostedApprovalContinuation(
+                    session.managed,
+                    turn.turnId,
+                  );
+                } catch (cause) {
+                  // A Store fault says nothing about the saved continuation,
+                  // so the pump retries it. Any other rejection is fixed in
+                  // the journal and would fail every pass: the Turn takes the
+                  // crash path instead, as it did before it could resume.
+                  if (
+                    cause instanceof ManagedSessionStoreTransportError ||
+                    (cause instanceof ManagedSessionStoreHttpError &&
+                      (cause.status === 429 || cause.status >= 500))
+                  )
+                    throw cause;
+                  writeStderrLineSafe(
+                    `qwen serve: Interrupted wake turn ${turn.turnId} cannot resume its approval wait: ${String(cause)}`,
+                  );
+                  return undefined;
+                }
+                if (!continuation || continuation.plan.commandStep)
+                  return undefined;
+                const text = await hostedOriginalPromptText(
+                  session.managed,
+                  turn.turnId,
+                );
+                if (text === undefined) return undefined;
+                return (abort) =>
+                  executeHostedTurn(
+                    session,
+                    sessionId,
+                    cwd,
+                    turn.turnId,
+                    text,
+                    abort,
+                    brokerOptions,
+                    undefined,
+                    undefined,
+                    undefined,
+                    continuation,
+                  );
+              },
               writeStderr: writeStderrLineSafe,
             });
             // H6c: the automation turn settled; its run settles from the
