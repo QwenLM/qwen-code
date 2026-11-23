@@ -342,9 +342,16 @@ export function hostedActionAllowed(
   );
 }
 
+interface HostedApprovalWaiter {
+  readonly resolve: () => void;
+  readonly clear: () => void;
+  readonly polling: () => boolean;
+}
+
 /** Wakes a waiting tool turn when its Action is answered. */
 export class HostedApprovalWaiters {
-  private readonly waiting = new Map<string, () => void>();
+  private readonly waiting = new Map<string, HostedApprovalWaiter>();
+  private readonly resolving = new Map<string, number>();
 
   /**
    * Resolves once `isFinal` holds, the expiry passes, or the signal aborts.
@@ -363,7 +370,16 @@ export class HostedApprovalWaiters {
     try {
       await new Promise<void>((resolve, reject) => {
         let polling = false;
-        this.waiting.set(requestId, resolve);
+        const clear = (): void => {
+          clearTimeout(timer);
+          clearInterval(poll);
+          signal.removeEventListener('abort', onAbort);
+        };
+        this.waiting.set(requestId, {
+          resolve,
+          clear,
+          polling: () => polling,
+        });
         onAbort = resolve;
         signal.addEventListener('abort', onAbort, { once: true });
         timer = setTimeout(resolve, Math.max(0, expiresAt - Date.now()));
@@ -396,8 +412,27 @@ export class HostedApprovalWaiters {
     }
   }
 
+  park(requestId: string): boolean {
+    const waiter = this.waiting.get(requestId);
+    if (!waiter || waiter.polling() || (this.resolving.get(requestId) ?? 0) > 0)
+      return false;
+    waiter.clear();
+    this.waiting.delete(requestId);
+    return true;
+  }
+
+  beginResolution(requestId: string): void {
+    this.resolving.set(requestId, (this.resolving.get(requestId) ?? 0) + 1);
+  }
+
+  endResolution(requestId: string): void {
+    const remaining = (this.resolving.get(requestId) ?? 0) - 1;
+    if (remaining > 0) this.resolving.set(requestId, remaining);
+    else this.resolving.delete(requestId);
+  }
+
   notify(requestId: string): void {
-    this.waiting.get(requestId)?.();
+    this.waiting.get(requestId)?.resolve();
   }
 }
 
@@ -509,6 +544,27 @@ const ENDED_CODES = {
  * checked just before each write, since the Turn may block meanwhile.
  */
 export async function resolveHostedAction(
+  session: ManagedSession,
+  waiters: HostedApprovalWaiters,
+  requestId: string,
+  body: unknown,
+  isBlocked: () => boolean = () => false,
+): Promise<HostedActionResolution> {
+  waiters.beginResolution(requestId);
+  try {
+    return await resolveHostedActionRegistered(
+      session,
+      waiters,
+      requestId,
+      body,
+      isBlocked,
+    );
+  } finally {
+    waiters.endResolution(requestId);
+  }
+}
+
+async function resolveHostedActionRegistered(
   session: ManagedSession,
   waiters: HostedApprovalWaiters,
   requestId: string,

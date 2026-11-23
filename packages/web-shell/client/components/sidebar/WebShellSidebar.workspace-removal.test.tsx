@@ -8624,3 +8624,144 @@ describe('WebShellSidebar goal markers', () => {
     );
   });
 });
+
+describe('WebShellSidebar status dot precedence', () => {
+  const findRow = (name: string) =>
+    Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((r) => r.textContent?.includes(name));
+
+  it('lets the background dot own the slot over the unread dot', async () => {
+    const session = {
+      sessionId: 'bg-unread',
+      workspaceCwd: '/tmp/project',
+      displayName: 'BG unread',
+      hasRunningBackgroundTasks: true,
+    };
+    active.sessions = [{ ...session, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('BG unread')?.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    // Control phase: prove the running→idle promotion actually marked the
+    // row unread — with no background work the unread dot owns the slot.
+    active.sessions = [
+      { ...session, hasActivePrompt: false, hasRunningBackgroundTasks: false },
+    ];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('BG unread')?.querySelector(
+        '[data-web-shell-session-completed-unread]',
+      ),
+    ).not.toBeNull();
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    const bgRow = findRow('BG unread');
+    expect(bgRow).toBeDefined();
+    expect(
+      bgRow!.querySelector('[data-web-shell-session-background-running]'),
+    ).not.toBeNull();
+    expect(
+      bgRow!.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    // The running dot's !completedUnread guard is defensive for the
+    // render-before-effect transient; the unread-over-running leg is pinned
+    // at hover level by the tooltip unread matrix, and the resume cleanup is
+    // pinned directly below.
+  });
+
+  it('lets the unread dot own the slot over the active-work dot', async () => {
+    const unreadSession = {
+      sessionId: 'unread-active',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Unread active',
+    };
+    const controlSession = {
+      sessionId: 'active-only',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Active control',
+      hasActivePrompt: false,
+      activeWorkState: 'active' as const,
+    };
+    active.sessions = [
+      { ...unreadSession, hasActivePrompt: true },
+      controlSession,
+    ];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('Unread active')?.querySelector(
+        '[data-web-shell-session-running]',
+      ),
+    ).not.toBeNull();
+    active.sessions = [
+      {
+        ...unreadSession,
+        hasActivePrompt: false,
+        activeWorkState: 'active' as const,
+      },
+      controlSession,
+    ];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    const unreadRow = findRow('Unread active');
+    const controlRow = findRow('Active control');
+    expect(unreadRow).toBeDefined();
+    expect(controlRow).toBeDefined();
+    // Control row proves activeWorkState='active' actually drives the
+    // active-work dot in this render, so the null check below is non-vacuous.
+    expect(
+      controlRow!.querySelector('[data-web-shell-session-active-work]'),
+    ).not.toBeNull();
+    expect(
+      unreadRow!.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    expect(
+      unreadRow!.querySelector('[data-web-shell-session-active-work]'),
+    ).toBeNull();
+  });
+
+  it('clears the unread dot when a completed session starts running again', async () => {
+    const session = {
+      sessionId: 'unread-resume',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Unread resume',
+    };
+    active.sessions = [{ ...session, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('Unread resume')?.querySelector(
+        '[data-web-shell-session-running]',
+      ),
+    ).not.toBeNull();
+    // Control phase: prove the running→idle promotion marked the row unread.
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      findRow('Unread resume')?.querySelector(
+        '[data-web-shell-session-completed-unread]',
+      ),
+    ).not.toBeNull();
+    // Resume phase: once the session runs again, the tracker clears unread
+    // and the running dot reclaims the slot.
+    active.sessions = [{ ...session, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    const resumedRow = findRow('Unread resume');
+    expect(resumedRow).toBeDefined();
+    expect(
+      resumedRow!.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(
+      resumedRow!.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+  });
+});

@@ -84,6 +84,7 @@ public final class ManagedSchemaRows {
                     "occurrence_key",
                     "turn_id",
                     "prompt_id",
+                    "wake_seal_parked_prompt_id",
                     "item_id",
                     "action_id",
                     "task_id",
