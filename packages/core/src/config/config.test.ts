@@ -7472,10 +7472,27 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to off for every surface', () => {
+      it('defaults to on for headless and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
-          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(
+            surface === 'headless',
+          );
         }
+      });
+
+      it('keeps headless on the procedural path when the setting is false', () => {
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('keeps headless on the procedural path when the environment turns it off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless=0');
+        expect(makeConfig().isEventBusAgentLoopEnabled('headless')).toBe(false);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+        expect(makeConfig().isEventBusAgentLoopEnabled('headless')).toBe(false);
       });
 
       it('honors the constructor parameter', () => {
@@ -7688,10 +7705,14 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to shared for headless, ACP, both TUIs and AgentCore and legacy for every other surface', () => {
+      it('defaults to the kernel for headless, shared for ACP, both TUIs and AgentCore, and legacy elsewhere', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().getAgentLoopPath(surface)).toBe(
-            ON_BY_DEFAULT.has(surface) ? 'shared' : 'legacy',
+            surface === 'headless'
+              ? 'kernel'
+              : ON_BY_DEFAULT.has(surface)
+                ? 'shared'
+                : 'legacy',
           );
         }
       });
@@ -7724,11 +7745,18 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('follows the env overrides that drive the switches', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless');
-        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless');
+        // Name surfaces whose defaults are off, so each env override shows.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'hosted');
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'acp');
         const config = makeConfig();
-        expect(config.getAgentLoopPath('headless')).toBe('kernel');
-        expect(config.getAgentLoopPath('hosted')).toBe('legacy');
+        expect(config.getAgentLoopPath('acp')).toBe('kernel');
+        expect(config.getAgentLoopPath('hosted')).toBe('shared');
+        expect(config.getAgentLoopPath('ink')).toBe('shared');
+      });
+
+      it('keeps headless on the shared loop when the kernel is turned off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless=0');
+        expect(makeConfig().getAgentLoopPath('headless')).toBe('shared');
       });
 
       it('caps speculation and hosted at shared even with both switches on', () => {
@@ -9230,7 +9258,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     const policy = config.getAutoMemoryPrompt();
-    expect(policy).toContain('## Types and where they go');
+    expect(policy).toContain('Check the current catalog for duplicates first.');
     expect(policy).not.toContain('<types>');
     expect(policy).not.toContain('load the `auto-memory` skill');
     const subagent = deriveConfig(config);
@@ -10729,7 +10757,7 @@ describe('Server Config (config.ts)', () => {
         'MEMORY.md is currently empty',
       );
       expect(config.getAutoMemoryContext()).toContain(
-        'MEMORY.md is currently empty',
+        'The auto-memory catalog is empty.',
       );
     }
   });

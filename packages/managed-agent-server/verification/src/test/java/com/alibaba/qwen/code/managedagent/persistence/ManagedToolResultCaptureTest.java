@@ -70,6 +70,7 @@ class ManagedToolResultCaptureTest {
         var sql = ArgumentCaptor.forClass(String.class);
         var args = ArgumentCaptor.forClass(Object[].class);
         verify(jdbc).query(sql.capture(), any(RowMapper.class), args.capture());
+        verify(jdbc).execute(any(org.springframework.jdbc.core.ConnectionCallback.class));
         verifyNoMoreInteractions(jdbc);
         assertThat(sql.getValue()).contains(
                 "FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION'",
@@ -101,6 +102,7 @@ class ManagedToolResultCaptureTest {
         var sql = ArgumentCaptor.forClass(String.class);
         var args = ArgumentCaptor.forClass(Object[].class);
         verify(jdbc).query(sql.capture(), any(RowMapper.class), args.capture());
+        verify(jdbc).execute(any(org.springframework.jdbc.core.ConnectionCallback.class));
         verifyNoMoreInteractions(jdbc);
         assertThat(sql.getValue()).endsWith(" AND a.id <= ? AND a.id < ? ORDER BY a.id DESC LIMIT ?");
         assertThat(args.getValue()).containsExactly("t", "w", "w", actorKey, 42L, 40L, 3);
@@ -119,6 +121,7 @@ class ManagedToolResultCaptureTest {
             assertThat(page.lastId()).isZero();
             assertThat(page.hasMore()).isFalse();
             verify(jdbc).query(anyString(), any(RowMapper.class), any(Object[].class));
+            verify(jdbc).execute(any(org.springframework.jdbc.core.ConnectionCallback.class));
             verifyNoMoreInteractions(jdbc);
             clearInvocations(jdbc);
         }

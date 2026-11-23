@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHookRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
@@ -12,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -29,8 +27,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -228,12 +224,10 @@ class WorkspaceLifecycleStoreTest {
         var fixture = fixture();
         String storage = fixture.jdbc.queryForObject(
                 "SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
-                (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
-                "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        fixture.jdbc.update("INSERT INTO ma_storage (alias_key,"
-                        + " tenant_id, storage_id, storage_kind) VALUES (?, 'tenant', ?, 'EXTERNAL')",
-                RuntimeAdmissionFences.storageAliasKey("tenant", storage), storage);
+                (row, index) -> row.getString(1),
+                "tenant", "workspace");
+        fixture.jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, storage_kind) VALUES ('tenant', ?, 'EXTERNAL')",
+                storage);
         fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES);
         var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
@@ -388,10 +382,9 @@ class WorkspaceLifecycleStoreTest {
             }
             ManagedHookRecords.requireExecution(record);
             var ref = fixture.resource(event + "-record", "hook-execution", record);
-            fixture.jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id,"
-                    + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
-                    + " VALUES (?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                    ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", id),
+            fixture.jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id,"
+                    + " session_id, domain, record_id, operation_id, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
+                    + " VALUES ('tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                     fixture.session, id, "a".repeat(64), ref.path("resourceId").asText());
             effects.addObject().put("event", event).set("recordRef", ref);
         }
@@ -465,10 +458,9 @@ class WorkspaceLifecycleStoreTest {
         }
         ManagedHookRecords.requireExecution(record);
         var ref = fixture.resource("SessionEnd-record", "hook-execution", record);
-        fixture.jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id,"
-                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
-                + " VALUES (?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", occurrence),
+        fixture.jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id,"
+                + " session_id, domain, record_id, operation_id, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
+                + " VALUES ('tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                 fixture.session, occurrence, "a".repeat(64), ref.path("resourceId").asText());
         // The first close persists its effects — the fence moves to
         // DRAINING — and only then fails terminally; the writer is sealed
@@ -759,18 +751,18 @@ class WorkspaceLifecycleStoreTest {
         var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
                 "cancel-failed-turn", "digest", fixture.session, turn, "owner"));
         assertThat(cancel.commandEffect()).isFalse();
-        var operations = fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class);
+        var operations = fixture.jdbc.queryForList("SELECT operation_ref FROM ma_operation", String.class);
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> {
             try {
                 fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.CLOSE, "owner",
                         "a".repeat(64), "close-failed-turn", "digest", true, 2);
             } catch (ManagedAgentException refusal) {
-                assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+                assertThat(fixture.jdbc.queryForList("SELECT operation_ref FROM ma_operation", String.class))
                         .containsExactlyInAnyOrderElementsOf(operations);
                 throw refusal;
             }
         })).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
-        assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+        assertThat(fixture.jdbc.queryForList("SELECT operation_ref FROM ma_operation", String.class))
                 .containsExactlyInAnyOrderElementsOf(operations);
         assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
     }
@@ -977,8 +969,8 @@ class WorkspaceLifecycleStoreTest {
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant", session), id), session, id, kind, bytes.length, digest, bytes);
+            jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES ('tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                    session, id, kind, bytes.length, digest, bytes);
             return json.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         }
 

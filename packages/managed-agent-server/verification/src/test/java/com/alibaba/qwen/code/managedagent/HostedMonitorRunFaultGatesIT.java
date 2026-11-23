@@ -4,9 +4,9 @@ import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -156,7 +156,7 @@ class HostedMonitorRunFaultGatesIT {
                 "fg8-cases", letter);
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
-        String tenant = "hosted-monitor-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Path cli = cliEntry();
         String node = System.getProperty("node.executable");
         Files.createDirectory(temporary.resolve("runtime"));
@@ -248,22 +248,7 @@ class HostedMonitorRunFaultGatesIT {
             // finished registration leaves behind, or claim() refuses every
             // acquire as workspace_unavailable.
             for (int index = 0; index < cases.size(); index++) {
-                String physical = UUID.randomUUID().toString()
-                        .replace("-", "");
-                jdbc.update("INSERT INTO ma_storage (alias_key,"
-                        + " tenant_id, storage_id,"
-                        + " physical_key, storage_kind, registration_state,"
-                        + " registration_revision, registration_json) VALUES"
-                        + " (?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
-                        + " '{}')",
-                        RuntimeAdmissionFences.storageAliasKey(tenant,
-                                "storage-" + index),
-                        tenant, "storage-" + index, physical);
-                jdbc.update("INSERT INTO ma_storage_owner (storage_key,"
-                        + " storage_kind, tenant_id,"
-                        + " storage_id, mount_state) VALUES (?, 'LOCAL',"
-                        + " ?, ?, 'READY')",
-                        physical, tenant, "storage-" + index);
+                WorkspaceTestStorage.register(jdbc, tenant, "storage-" + index);
             }
         }
         var sessions = new ArrayList<Map<String, Object>>();
@@ -482,7 +467,7 @@ class HostedMonitorRunFaultGatesIT {
                 : json.readTree(process.get("result_json").toString())
                         .path("evidence");
         var bindings = jdbc.queryForList(
-                "SELECT CAST(binding_id AS CHAR) AS binding_id, request_key,"
+                "SELECT CAST(binding_id AS CHAR) AS binding_id, request_id,"
                         + " binding_state, runtime_generation,"
                         + " stop_evidence_json IS NOT NULL AS stopped,"
                         + " loss_evidence_json IS NOT NULL AS lost FROM"
@@ -496,8 +481,8 @@ class HostedMonitorRunFaultGatesIT {
                 .as(name + " generation").isEqualTo(1);
         var slot = jdbc.queryForMap("SELECT last_generation,"
                 + " CAST(active_binding_id AS CHAR) AS active_binding_id"
-                + " FROM ma_runtime_slot WHERE request_key = ?",
-                binding.get("request_key"));
+                + " FROM ma_runtime_slot WHERE request_id = ?",
+                binding.get("request_id"));
         assertThat(((Number) slot.get("last_generation")).longValue())
                 .as(name + " slot generation").isEqualTo(1);
         assertThat(slot.get("active_binding_id")).as(name + " slot binding")
@@ -1107,7 +1092,7 @@ class HostedMonitorRunFaultGatesIT {
         // streamed.
         Integer events = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ma_public_event WHERE stream_kind ="
-                        + " 'SESSION' AND stream_id = X'' AND tenant_id = ?"
+                        + " 'SESSION' AND stream_id = '' AND tenant_id = ?"
                         + " AND session_id = ?", Integer.class, tenant,
                 sessionId);
         assertThat(events).as(name + " projected events").isNotNull();
