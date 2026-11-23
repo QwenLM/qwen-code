@@ -622,6 +622,14 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.general.enableAutoUpdate': 'Включить автообновление',
   'settings.description.general.enableAutoUpdate':
     'При запуске автоматически проверять и устанавливать обновления.',
+  'settings.label.general.updateMode': 'Режим обновления',
+  'settings.description.general.updateMode':
+    'Управляет обновлением при запуске: "auto" — проверять обновления и устанавливать их в фоновом режиме; "notify" — только проверять и показывать команду обновления, никогда не устанавливать; "off" — полностью пропускать проверку при запуске. Старый ключ enableAutoUpdate пересчитывается автоматически: false эквивалентен "off", true — "auto"; явный updateMode имеет приоритет.',
+  'settings.option.general.updateMode.auto': 'Авто (проверка и установка)',
+  'settings.option.general.updateMode.notify':
+    'Только уведомление (проверять, не устанавливать)',
+  'settings.option.general.updateMode.off':
+    'Выключено (без проверки при запуске)',
   'settings.label.general.showSessionRecap': 'Показывать обзор сессии',
   'settings.description.general.showSessionRecap':
     'После возвращения в терминал спустя некоторое время автоматически показать строку «на чём остановились». По умолчанию выключено. В любой момент можно вызвать вручную через /recap.',
