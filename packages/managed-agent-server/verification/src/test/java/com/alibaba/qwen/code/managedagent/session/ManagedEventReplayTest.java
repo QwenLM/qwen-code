@@ -385,6 +385,6 @@ class ManagedEventReplayTest {
     }
 
     private static String tenant() {
-        return "tenant-replay-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 }

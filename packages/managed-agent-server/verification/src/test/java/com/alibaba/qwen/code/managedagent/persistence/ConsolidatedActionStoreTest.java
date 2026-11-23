@@ -7,12 +7,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -40,7 +38,6 @@ class ConsolidatedActionStoreTest {
     private JdbcTemplate jdbc;
     private JdbcManagedActionStore actions;
     private TransactionTemplate transactions;
-    private String scope;
 
     @BeforeEach
     void initialize() throws Exception {
@@ -49,7 +46,6 @@ class ConsolidatedActionStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,gmt_create,gmt_modified)"
                 + " VALUES (?,?,?,'ACTIVE','manual',0,0)", "tenant", "session", "agent");
         AgentStateStore state = mock(AgentStateStore.class);
@@ -172,18 +168,18 @@ class ConsolidatedActionStoreTest {
         ObjectNode record = JSON.createObjectNode().put("subtype", "managed_session_event_v1");
         record.set("managedSession", envelope);
         transactions.executeWithoutResult(status -> actions.apply("tenant", "workspace", "session", sequence, 1,
-                record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key=?",
+                record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id=? AND session_id=? AND resource_id=?",
                         (row, n) -> new StoredResource(id, row.getString("kind"), row.getInt("schema_version"), row.getLong("byte_length"),
-                                row.getString("sha256"), row.getBytes("inline_bytes")), ManagedSchemaKeys.key(scope, id))));
+                                row.getString("sha256"), row.getBytes("inline_bytes")), "tenant", "session", id)));
     }
 
     private ObjectNode storeBody(String id, String kind, JsonNode body) throws Exception {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id,workspace_id,session_id,resource_id,kind,"
                         + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                        + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                ManagedSchemaKeys.key(scope, id), scope, "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
+                        + " VALUES (?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_id=resource_id",
+                "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
         return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
     }
 

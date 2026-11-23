@@ -1841,6 +1841,47 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     expect(onCreate).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards an automatic workspace approval requirement', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-auto' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const workspaceGeneration = '5103aa8c-9a6e-4ad6-9b3b-7c765cdcbee5';
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'go',
+        completion: 'first-turn',
+        workspace: 'workspace-id',
+        workspaceGeneration,
+        requiresAutoMode: true,
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-auto' });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'first-turn',
+      workspace: 'workspace-id',
+      workspaceGeneration,
+      requiresAutoMode: true,
+      callerSessionId: 'caller-1',
+    });
+    for (const requiresAutoMode of [
+      false,
+      'true',
+      { requiresAutoMode: true },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'first-turn',
+          workspace: 'workspace-id',
+          workspaceGeneration,
+          requiresAutoMode,
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow('requiresAutoMode');
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   it('forwards a follow-up session id and returns the completion task id', async () => {
     const onCreate = vi.fn(async () => ({
       sessionId: 'kid',

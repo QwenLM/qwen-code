@@ -171,6 +171,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/AssistantMessageRow.transcript-stub.tsx',
     ],
     [
+      './client/components/messages/ThinkingBody.tsx',
+      './client/components/messages/ThinkingBody.transcript-stub.tsx',
+    ],
+    [
       './client/components/streaming-tail.ts',
       './client/components/streaming-tail.transcript-stub.ts',
     ],
@@ -254,6 +258,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/managed/managed-artifact-library-messages.ts',
       './client/components/managed/managed-artifact-library-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/workspace-artifact-library-messages.ts',
+      './client/components/artifacts/workspace-artifact-library-messages.transcript-stub.ts',
     ],
     ['./client/i18n-catalogs.ts', './client/i18n-catalogs.eager.ts'],
     ['./client/i18n-zh-tw.ts', './client/i18n-zh-tw.transcript-stub.ts'],

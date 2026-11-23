@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -14,12 +15,14 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.evidence.CancelEvidence;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementSetter;
@@ -624,7 +627,7 @@ class ManagedTurnCommandOperationTest {
         assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
         journalTurnResult(turn, "cancelled");
         assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.committed());
-        jdbc.update("UPDATE ma_operation SET target_key = ? WHERE operation_id = ?",
+        jdbc.update("UPDATE ma_operation SET target_id = ? WHERE operation_id = ?",
                 "0".repeat(64), cancel.operationId());
         assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
     }
@@ -662,6 +665,118 @@ class ManagedTurnCommandOperationTest {
                 cancelEvidence(cancel).orElseThrow(), now.get() + 300_000)).isTrue();
         assertThat(operation(cancel.operationId()).attemptCount()).isEqualTo(1);
         assertThat(store.findParkedOperations(50)).isEmpty();
+    }
+
+    @Test
+    void anActionParkReleasesTheLeaseAndItsDueClaimClearsTheMark() {
+        Admission turn = actionParkableTurn();
+        var before = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
+
+        assertThat(store.parkTurnForAction(TENANT, sessionId, turn.turnId(), OWNER)).isTrue();
+
+        var parked = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
+        assertThat(parked.errorCode()).isEqualTo(TurnExecutionStore.HARNESS_ACTION_PARKED);
+        assertThat(parked.retryAfter()).isEqualTo(now.get() + 1000);
+        assertThat(parked.dispatchOwner()).isNull();
+        assertThat(parked.dispatchLeaseUntil()).isNull();
+        assertThat(parked.retryCount()).isEqualTo(before.retryCount());
+        assertThat(parked.consecutiveFailures()).isEqualTo(before.consecutiveFailures());
+        assertThat(store.findDispatchable(now.get(), 10)).noneMatch(row -> row.turnId().equals(turn.turnId()));
+
+        now.addAndGet(1000);
+        assertThat(store.findDispatchable(now.get(), 10)).anyMatch(row -> row.turnId().equals(turn.turnId()));
+        var claimed = store.claimTurn(TENANT, sessionId, turn.turnId(), OWNER, Duration.ofMinutes(1));
+        assertThat(claimed).isPresent();
+        assertThat(claimed.orElseThrow().errorCode()).isNull();
+    }
+
+    @Test
+    void aClaimKeepsEveryOtherErrorCode() {
+        Admission turn = submit("other-code", "digest-other-code");
+        jdbc.update("UPDATE ma_turn SET error_code = ? WHERE turn_id = ?",
+                TurnExecutionStore.HARNESS_RECOVERY_BLOCKED, turn.turnId());
+
+        var claimed = store.claimTurn(TENANT, sessionId, turn.turnId(), OWNER, Duration.ofMinutes(1));
+
+        assertThat(claimed.orElseThrow().errorCode()).isEqualTo(TurnExecutionStore.HARNESS_RECOVERY_BLOCKED);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"certificate", "prompt", "approval", "action", "decision", "lease", "cancelling",
+        "owner", "expired", "head", "phase", "until", "missing", "revision"})
+    void anActionParkRefusesEveryBrokenPrecondition(String broken) {
+        Admission turn = actionParkableTurn();
+        String owner = OWNER;
+        switch (broken) {
+            case "certificate" -> jdbc.update("UPDATE ma_session_head SET wake_seal_revision = NULL");
+            case "prompt" -> jdbc.update("UPDATE ma_session_head SET wake_seal_parked_prompt_id = 'other'");
+            case "approval" -> jdbc.update("UPDATE ma_session_head SET wake_seal_parked_approval_revision = 1");
+            case "action" -> jdbc.update("UPDATE ma_session_record SET state = 'decided'");
+            case "decision" -> openActionResponse();
+            case "lease" -> store.releaseTurnLease(TENANT, sessionId, turn.turnId(), OWNER);
+            case "cancelling" -> jdbc.update("UPDATE ma_turn SET status = 'CANCELLING' WHERE turn_id = ?",
+                    turn.turnId());
+            case "owner" -> owner = "another-owner";
+            case "expired" -> jdbc.update("UPDATE ma_turn SET dispatch_lease_until = ? WHERE turn_id = ?",
+                    now.get() - 1, turn.turnId());
+            case "head" -> jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE'");
+            case "phase" -> jdbc.update("UPDATE ma_session_head SET activation_phase = 'active'");
+            case "until" -> jdbc.update("UPDATE ma_session_head SET wake_seal_parked_until = NULL");
+            case "missing" -> jdbc.update("DELETE FROM ma_session_head WHERE session_id = ?", sessionId);
+            case "revision" -> jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 2");
+            default -> throw new IllegalArgumentException(broken);
+        }
+
+        assertThat(store.parkTurnForAction(TENANT, sessionId, turn.turnId(), owner)).isFalse();
+        assertThat(store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow().errorCode())
+                .isNotEqualTo(TurnExecutionStore.HARNESS_ACTION_PARKED);
+    }
+
+    @Test
+    void aCancelUnparksTheTurnAndKeepsItImmediatelyDispatchable() {
+        Admission turn = actionParkableTurn();
+        assertThat(store.parkTurnForAction(TENANT, sessionId, turn.turnId(), OWNER)).isTrue();
+
+        cancel("cancel-parked", "digest-parked", turn);
+
+        var cancelled = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
+        assertThat(cancelled.status()).isEqualTo("CANCELLING");
+        assertThat(cancelled.errorCode()).isNull();
+        assertThat(cancelled.retryAfter()).isNull();
+        assertThat(store.findDispatchable(now.get(), 10)).anyMatch(row -> row.turnId().equals(turn.turnId()));
+    }
+
+    protected final Admission actionParkableTurn() {
+        return actionParkableTurn("action-park");
+    }
+
+    protected final Admission actionParkableTurn(String key) {
+        Admission admitted = submit(key, "digest-" + key);
+        claim(admitted);
+        store.recordAdmission(TENANT, sessionId, admitted.turnId(), OWNER, "epoch-" + key, 0);
+        String prompt = store.findTurn(TENANT, sessionId, admitted.turnId()).orElseThrow().promptId();
+        managedHead("SEALED", 0);
+        jdbc.update("UPDATE ma_session_head SET activation_phase = 'released', wake_seal_revision = 1,"
+                        + " wake_seal_parked_prompt_id = ?, wake_seal_parked_until = ?,"
+                        + " wake_seal_parked_approval_revision = 0 WHERE session_id = ?",
+                prompt, now.get() + 1000, sessionId);
+        // Only the columns JdbcManagedActionStore.apply writes for an Action.
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
+                        + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,"
+                        + "options_json,prompt_id) VALUES (?,?,'action','action',1,1,"
+                        + "'ACTION','requested','action',1,'{}',?)",
+                TENANT, sessionId, prompt);
+        return admitted;
+    }
+
+    private void openActionResponse() {
+        jdbc.update("INSERT INTO ma_operation (operation_ref,scope_kind,scope_id,target_kind,target_id,tenant_id,"
+                        + "session_id,operation_id,operation_kind,request_digest,request_json,phase,state,"
+                        + "gmt_create,gmt_modified) VALUES (?,'SESSION',?,'SESSION',?,?,?,?,'ACTION_RESPONSE',"
+                        + "'digest','{}','PENDING','PENDING',0,0)",
+                ManagedIdentityRefs.operationRef("ACTION_RESPONSE", TENANT, "SESSION", sessionId, sessionId,
+                        "op-action-response"),
+                sessionId, sessionId, TENANT, sessionId, "op-action-response");
     }
 
     private Admission parkCancel(Admission turn, String key) {
@@ -718,12 +833,12 @@ class ManagedTurnCommandOperationTest {
                 + " FROM ma_session_journal_tx", Long.class);
         jdbc.update("UPDATE ma_session_head SET workspace_id = 'ws', journal_revision = ?", revision);
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash, transaction_id, operation, command_id,"
+                        + " journal_revision, command_ref, transaction_id, operation, command_id,"
                         + " content_digest, first_sequence, last_sequence, event_count, writer_generation,"
                         + " writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes,"
                         + " byte_length, record_digest, gmt_create) VALUES (?, 'ws', ?, ?, ?, ?, ?, ?, ?,"
                         + " 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, 0)",
-                TENANT, sessionId, revision, DigestUtils.sha256Hex(operation + "\u0000" + commandId),
+                TENANT, sessionId, revision, ManagedIdentityRefs.commandRef(operation, commandId),
                 commandId, operation, commandId, DigestUtils.sha256Hex(bytes), "0".repeat(64),
                 bytes, bytes.length, DigestUtils.sha256Hex(bytes));
     }
@@ -766,15 +881,13 @@ class ManagedTurnCommandOperationTest {
     }
 
     void managedHead(String state, long compactedThrough) {
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key,"
+        jdbc.update("INSERT INTO ma_session_head ("
                         + " tenant_id, session_id, harness_session_id, head_kind,"
                         + " state, writer_generation,"
                         + " journal_revision, committed_sequence, activation_epoch,"
                         + " compacted_through_revision, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, 'MANAGED_SESSION', ?, 1, 1, 1, 0,"
-                        + " ?, 0, 0)",
-                RuntimeAdmissionFences.harnessDrainKey(TENANT),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId), TENANT,
+                        + " VALUES (?, ?, ?, 'MANAGED_SESSION', ?, 1, 1, 1, 0,"
+                        + " ?, 0, 0)", TENANT,
                 sessionId, sessionId, state, compactedThrough);
     }
 
@@ -784,7 +897,7 @@ class ManagedTurnCommandOperationTest {
         String promptId = store.findTurn(TENANT, sessionId, turn.turnId())
                 .orElseThrow().promptId();
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id,"
-                        + " session_id, journal_revision, command_key_hash,"
+                        + " session_id, journal_revision, command_ref,"
                         + " transaction_id, operation, command_id, content_digest,"
                         + " first_sequence, last_sequence, event_count,"
                         + " writer_generation, writer_id, writer_token_hash,"
@@ -793,7 +906,7 @@ class ManagedTurnCommandOperationTest {
                         + " ?, 1, ?, 'tx-1', 'submitInput', ?, ?, 1, 1, 1, 1, 'writer',"
                         + " ?, 0, 'identity', ?, 0, ?, 0)",
                 TENANT, sessionId,
-                DigestUtils.sha256Hex("submitInput\u0000" + promptId),
+                ManagedIdentityRefs.commandRef("submitInput", promptId),
                 promptId, contentDigest, "0".repeat(64), new byte[0],
                 "0".repeat(64));
     }

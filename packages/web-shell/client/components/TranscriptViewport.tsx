@@ -28,7 +28,7 @@ import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
-import { ModReplyRowsProvider } from './messages/ModAssistantMessage';
+import { ModRowsProvider } from './messages/ModAssistantMessage';
 
 interface ReadingAnchor {
   source: string;
@@ -545,7 +545,7 @@ export const TranscriptViewport = forwardRef<
           <TurnCallsProvider
             onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
           >
-            <ModReplyRowsProvider messages={viewport.messages}>
+            <ModRowsProvider messages={viewport.messages}>
               <MessageList
                 {...props}
                 key={viewport.viewKey}
@@ -602,7 +602,7 @@ export const TranscriptViewport = forwardRef<
                     }
                   : {})}
               />
-            </ModReplyRowsProvider>
+            </ModRowsProvider>
           </TurnCallsProvider>
           {deletion && !historical && (
             <MessageDeletionToolbar controls={deletion} />

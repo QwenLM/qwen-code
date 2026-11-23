@@ -46,7 +46,7 @@ class ReplayFloorRetractionTest {
 
     @Test
     void retractionInvalidatesMessageCursorsAndPreservesStreamBoundaries() throws Exception {
-        String tenant = "retraction-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = session(tenant);
         var turn =
                 store.insertTurnCommand(
@@ -117,7 +117,7 @@ class ReplayFloorRetractionTest {
 
     @Test
     void emptyRetainedEventRowsDoNotEraseAnExpiredCursorBoundary() throws Exception {
-        String tenant = "empty-events-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = session(tenant);
         for (int i = 0; i < 5; i++) {
             store.appendPublicEventIfAbsent(
@@ -173,7 +173,7 @@ class ReplayFloorRetractionTest {
 
     @Test
     void itemsAfterWithdrawnSequenceIncludesReissuedMessageAndRejectsOldCursor() throws Exception {
-        String tenant = "reissued-items-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = session(tenant);
         String turn =
                 store.insertTurnCommand(
@@ -262,7 +262,7 @@ class ReplayFloorRetractionTest {
 
     @Test
     void floorAdvanceAfterMessageReadResynchronizesThroughTheLiveTranscript() throws Exception {
-        String tenant = "message-replay-race-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = session(tenant);
         for (int index = 0; index < 3; index++) {
             store.appendPublicEventIfAbsent(tenant, session, "turn",
