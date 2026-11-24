@@ -9,7 +9,9 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { MOD_MAX_BYTES } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { MAX_SNAPSHOTS } from '@qwen-code/qwen-code-core/services/file-history-limits.js';
 import { splitInsightSegments } from '@qwen-code/qwen-code-core/utils/insight-segments.js';
+import type { ModRowAuthorization } from '../../services/mod-rows.js';
 
 // Match the Web Shell's default live transcript window for non-recorded chats.
 const liveRowLimit = 50_000;
@@ -38,15 +40,17 @@ export class AcpDisplayTranslationRows {
   private sessionId?: string;
   private recorder?: ChatRecordingService;
   private branch?: number;
-  private generation = 0;
+  private generation = new AbortController();
   private pending?: {
     attempt: WeakRef<object>;
     component: ModRenderSite;
     text: string;
     oversized: boolean;
   };
-  private readonly live = new Set<string>();
-  private readonly rootToolIds = new Set<string>();
+  private sequence = 0;
+  private readonly live = new Map<string, number>();
+  private readonly rootToolIds = new Map<string, number>();
+  private readonly checkpoints = new Map<string, number>();
   private persisted?: { cursor: string; rows: Promise<Set<string>> };
 
   constructor(private readonly config: Config) {}
@@ -63,13 +67,40 @@ export class AcpDisplayTranslationRows {
       this.sessionId = sessionId;
       this.recorder = recorder;
       this.branch = branch;
-      this.generation++;
-      this.pending = undefined;
+      this.sequence = 0;
       this.live.clear();
       this.rootToolIds.clear();
-      this.persisted = undefined;
+      this.checkpoints.clear();
+      this.invalidateGeneration();
     }
     return recorder;
+  }
+
+  private invalidateGeneration(): void {
+    const previous = this.generation;
+    this.generation = new AbortController();
+    this.pending = undefined;
+    this.persisted = undefined;
+    previous.abort();
+  }
+
+  recordLiveCheckpoint(promptId: string): void {
+    this.currentRecorder();
+    this.checkpoints.set(promptId, ++this.sequence);
+    if (this.checkpoints.size > MAX_SNAPSHOTS)
+      this.checkpoints.delete(this.checkpoints.keys().next().value!);
+  }
+
+  rewindLiveRows(promptId: string): void {
+    this.currentRecorder();
+    // Without a checkpoint there is no reliable retained prefix.
+    const cutoff = this.checkpoints.get(promptId) ?? 0;
+    for (const entries of [this.live, this.rootToolIds, this.checkpoints]) {
+      for (const [key, position] of entries) {
+        if (position >= cutoff) entries.delete(key);
+      }
+    }
+    this.invalidateGeneration();
   }
 
   observe(text: string, component: ModRenderSite, attempt: object): void {
@@ -108,9 +139,9 @@ export class AcpDisplayTranslationRows {
     this.currentRecorder();
     const id = createHash('sha256').update(toolCallId, 'utf16le').digest('hex');
     if (this.rootToolIds.has(id)) return;
-    this.rootToolIds.add(id);
+    this.rootToolIds.set(id, ++this.sequence);
     if (this.rootToolIds.size > liveRowLimit)
-      this.rootToolIds.delete(this.rootToolIds.values().next().value!);
+      this.rootToolIds.delete(this.rootToolIds.keys().next().value!);
     if (!preparing) return;
 
     const attempt = this.pending?.attempt.deref();
@@ -121,9 +152,11 @@ export class AcpDisplayTranslationRows {
     this.currentRecorder();
     if (!text.trim() || Buffer.byteLength(text) > rowTextLimit) return;
     for (const row of displayedRows(component, text)) {
-      this.live.add(rowKey(component, row));
+      const key = rowKey(component, row);
+      if (this.live.has(key)) continue;
+      this.live.set(key, ++this.sequence);
       if (this.live.size > liveRowLimit)
-        this.live.delete(this.live.values().next().value!);
+        this.live.delete(this.live.keys().next().value!);
     }
   }
 
@@ -139,17 +172,19 @@ export class AcpDisplayTranslationRows {
   async authorize(
     component: ModRenderSite,
     text: string,
-  ): Promise<(() => boolean) | undefined> {
+  ): Promise<ModRowAuthorization | undefined> {
     if (!text.trim() || Buffer.byteLength(text) > rowTextLimit)
       return undefined;
     const recorder = this.currentRecorder();
-    const generation = this.generation;
+    const generation = this.generation.signal;
     const stillCurrent = () => {
       this.currentRecorder();
-      return this.generation === generation;
+      return !generation.aborted;
     };
+    const signal = recorder?.getBranchAbortSignal() ?? generation;
+    const liveAuthorization = { isCurrent: stillCurrent, signal };
     const key = rowKey(component, text);
-    if (this.live.has(key)) return stillCurrent;
+    if (this.live.has(key)) return liveAuthorization;
     // MAX_TOKENS recovery can persist a prefix before its display row ends.
     const canReadPersisted = () =>
       stillCurrent() && !this.isPendingPrefix(component, text);
@@ -159,18 +194,19 @@ export class AcpDisplayTranslationRows {
 
     const rows = await this.readPersisted(recorder, cursor);
     if (!stillCurrent()) return undefined;
-    if (this.live.has(key)) return stillCurrent;
+    if (this.live.has(key)) return liveAuthorization;
     if (!canReadPersisted()) return undefined;
-    if (rows?.has(key)) return canReadPersisted;
+    const persistedAuthorization = { isCurrent: canReadPersisted, signal };
+    if (rows?.has(key)) return persistedAuthorization;
     const nextCursor = recorder.getTranscriptCursor().recordId;
     if (!nextCursor || nextCursor === cursor) return undefined;
 
     // An assistant record may have committed while the first snapshot loaded.
     const latest = await this.readPersisted(recorder, nextCursor);
     if (!stillCurrent()) return undefined;
-    if (this.live.has(key)) return stillCurrent;
+    if (this.live.has(key)) return liveAuthorization;
     return canReadPersisted() && latest?.has(key)
-      ? canReadPersisted
+      ? persistedAuthorization
       : undefined;
   }
 

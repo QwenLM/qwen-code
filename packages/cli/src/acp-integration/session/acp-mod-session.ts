@@ -214,10 +214,18 @@ export class AcpModSession {
     const signal = AbortSignal.timeout(ROW_ASK_TIMEOUT_MS);
     if (!(await settled(this.loading, signal))) return { status: 'unanswered' };
     if (this.failure !== undefined) return { status: 'unhooked' };
-    const isAuthorized = this.session.canTranslateRow(row.component)
+    const authorization = this.session.canTranslateRow(row.component)
       ? await this.translationRows?.authorize(row.component, row.props.text)
       : undefined;
-    return this.session.askRow(row.component, row.props, signal, isAuthorized);
+    return this.session.askRow(row.component, row.props, signal, authorization);
+  }
+
+  recordLiveTranslationCheckpoint(promptId: string): void {
+    this.translationRows?.recordLiveCheckpoint(promptId);
+  }
+
+  rewindLiveTranslationRows(promptId: string): void {
+    this.translationRows?.rewindLiveRows(promptId);
   }
 
   observeModelText(text: string, thought: boolean, attempt: object): void {

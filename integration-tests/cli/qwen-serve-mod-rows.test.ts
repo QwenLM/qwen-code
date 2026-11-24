@@ -677,4 +677,109 @@ describe('Mod rows through the daemon', () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 240_000);
+
+  it('revokes removed translation rows when rewinding without chat recording', async ({
+    skip,
+  }) => {
+    skip(process.platform === 'win32', 'requires the POSIX daemon harness');
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-mod-row-rewind-'));
+    const workspace = path.join(root, 'workspace');
+    const home = path.join(root, 'home');
+    const qwenHome = path.join(home, '.qwen');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(qwenHome, { recursive: true });
+    json(path.join(qwenHome, 'settings.json'), {
+      general: {
+        enableAutoUpdate: false,
+        chatRecording: false,
+        displayLanguage: 'zh-CN',
+      },
+      memory: E2E_MEMORY_SETTINGS_DEFAULTS,
+      model: { skipNextSpeakerCheck: true },
+      ui: { enableFollowupSuggestions: false },
+      telemetry: { enabled: false },
+      security: {
+        folderTrust: { enabled: false },
+        auth: { selectedType: 'openai' },
+      },
+    });
+    let translationCalls = 0;
+    const fakeModel = await startFakeOpenAIServer(async ({ body }) => {
+      const messages = JSON.stringify(body['messages'] ?? []);
+      if (messages.includes('into Simplified Chinese')) {
+        translationCalls++;
+        return { content: '译文。\n[QWEN_DISPLAY_END]' };
+      }
+      if (body['stream'] !== true) return { content: '{}' };
+      return {
+        content: messages.includes('Second question.')
+          ? 'Removed reply.'
+          : 'Retained reply.',
+      };
+    });
+    let daemon: SpawnedDaemon | undefined;
+    try {
+      daemon = await spawnDaemon({
+        workspaceCwd: workspace,
+        env: {
+          HOME: home,
+          USERPROFILE: home,
+          QWEN_HOME: qwenHome,
+          QWEN_SANDBOX: 'false',
+          QWEN_CODE_NO_RELAUNCH: 'true',
+          OPENAI_API_KEY: 'fake-key',
+          OPENAI_BASE_URL: fakeModel.baseUrl,
+          OPENAI_MODEL: 'fake-model',
+          QWEN_MODEL: 'fake-model',
+          NO_PROXY: '127.0.0.1,localhost',
+          no_proxy: '127.0.0.1,localhost',
+        },
+      });
+      const { client } = daemon;
+      const { sessionId, clientId } = await client.createOrAttachSession({
+        workspaceCwd: workspace,
+        sessionScope: 'thread',
+      });
+      for (const text of ['First question.', 'Second question.']) {
+        const result = await client.prompt(
+          sessionId,
+          { prompt: [{ type: 'text', text }] },
+          AbortSignal.timeout(30_000),
+          clientId,
+        );
+        expect(result.stopReason).toBe('end_turn');
+      }
+      const { snapshots } = await client.getRewindSnapshots(sessionId);
+      expect(snapshots).toHaveLength(2);
+      await expect(
+        client.rewindSession(sessionId, snapshots[1].promptId, {
+          clientId,
+          rewindFiles: false,
+        }),
+      ).resolves.toMatchObject({ rewound: true });
+
+      const ask = (text: string) =>
+        client.askSessionModRow(
+          sessionId,
+          {
+            component: 'AssistantMessage',
+            props: { text, isFirstOfReply: true },
+          },
+          { clientId },
+        );
+      await expect(ask('Removed reply.')).resolves.toEqual({
+        status: 'unanswered',
+      });
+      expect(translationCalls).toBe(0);
+      await expect(ask('Retained reply.')).resolves.toMatchObject({
+        status: 'answered',
+        props: { text: '译文。' },
+      });
+      expect(translationCalls).toBe(1);
+    } finally {
+      await daemon?.dispose();
+      await fakeModel.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

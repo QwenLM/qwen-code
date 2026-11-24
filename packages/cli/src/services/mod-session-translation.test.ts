@@ -15,6 +15,7 @@ import type {
   ModRenderSite,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { AcpDisplayTranslationRows } from '../acp-integration/session/acp-display-translation-rows.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 import type { translateDisplayText } from './display-translation-mod.js';
@@ -46,7 +47,11 @@ const reply: ModAssistantMessageInput = {
 };
 
 const translatedReply = { ...reply.props, text: '译文' };
-const authorize = () => true;
+function authorizeWhen(isCurrent: () => boolean) {
+  return { isCurrent, signal: new AbortController().signal };
+}
+
+const authorize = authorizeWhen(() => true);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -368,7 +373,7 @@ describe('Mod session display translation', () => {
     mocks.translate.mockImplementation(translateWithFakeModel);
     const signal = new AbortController().signal;
     let branch = 1;
-    const authorizeFirstBranch = () => branch === 1;
+    const authorizeFirstBranch = authorizeWhen(() => branch === 1);
     const secondReply = { ...reply.props, text: 'Another reply' };
     await session!.initialize(signal);
     const pending = session!.askRow(
@@ -413,7 +418,7 @@ describe('Mod session display translation', () => {
       'AssistantMessage',
       reply.props,
       signal,
-      () => authorized,
+      authorizeWhen(() => authorized),
     );
     try {
       await vi.waitFor(() => expect(mocks.translate).toHaveBeenCalledOnce());
@@ -442,61 +447,79 @@ describe('Mod session display translation', () => {
         'AssistantMessage',
         reply.props,
         signal,
-        () => authorized,
+        authorizeWhen(() => authorized),
       ),
     ).resolves.toEqual({ status: 'unanswered' });
     expect(config.getAllConfiguredModels).toHaveBeenCalled();
     expect(generateText).not.toHaveBeenCalled();
   });
 
-  it('cancels the provider request if the recorded branch changes during routing', async () => {
-    const { config, session, generateText } = setup();
-    const recorder = new ChatRecordingService(config as unknown as Config);
-    config.getChatRecordingService.mockReturnValue(recorder);
-    mocks.translate.mockImplementation(translateWithFakeModel);
-    const routingStarted = deferred<void>();
-    const finishRouting = deferred<void>();
-    const generateContent = vi.fn(async () => ({
-      candidates: [{ content: { parts: [{ text: '译文' }] } }],
-    }));
-    const client = {
-      config,
-      async resolveForModel() {
-        routingStarted.resolve();
-        await finishRouting.promise;
-        return {
-          contentGenerator: { generateContent },
-          contentGeneratorConfig: {},
-          model: 'model',
-        };
-      },
-    };
-    generateText.mockImplementation((options: GenerateTextOptions) =>
-      BaseLlmClient.prototype.generateText.call(client, options),
-    );
-    const signal = new AbortController().signal;
-    const branch = recorder.getBranchGeneration();
-    await session!.initialize(signal);
-    const pending = session!.askRow(
-      'AssistantMessage',
-      reply.props,
-      signal,
-      () => recorder.getBranchGeneration() === branch,
-    );
-    await routingStarted.promise;
-    recorder.rebuildTurnBoundaries([]);
-    finishRouting.resolve();
-    await expect(pending).resolves.toEqual({ status: 'unanswered' });
-    await expect(generateText.mock.results[0].value).rejects.toMatchObject({
-      name: 'AbortError',
-    });
-    expect(generateContent).not.toHaveBeenCalled();
+  it.each([true, false])(
+    'cancels provider dispatch after a rewind with recording=%s',
+    async (recorded) => {
+      const { config, session, generateText } = setup();
+      const recorder = recorded
+        ? new ChatRecordingService(config as unknown as Config)
+        : undefined;
+      config.getChatRecordingService.mockReturnValue(recorder);
+      const rows = new AcpDisplayTranslationRows(config as unknown as Config);
+      rows.recordLiveCheckpoint('removed-prompt');
+      rows.rememberCompleted('AssistantMessage', reply.props.text);
+      mocks.translate.mockImplementation(translateWithFakeModel);
+      const routingStarted = deferred<void>();
+      const finishRouting = deferred<void>();
+      const generateContent = vi.fn(async () => ({
+        candidates: [{ content: { parts: [{ text: '译文' }] } }],
+      }));
+      const client = {
+        config,
+        async resolveForModel() {
+          routingStarted.resolve();
+          await finishRouting.promise;
+          return {
+            contentGenerator: { generateContent },
+            contentGeneratorConfig: {},
+            model: 'model',
+          };
+        },
+      };
+      generateText.mockImplementation((options: GenerateTextOptions) =>
+        BaseLlmClient.prototype.generateText.call(client, options),
+      );
+      const signal = new AbortController().signal;
+      await session!.initialize(signal);
+      const authorization = await rows.authorize(
+        'AssistantMessage',
+        reply.props.text,
+      );
+      expect(authorization?.isCurrent()).toBe(true);
+      const pending = session!.askRow(
+        'AssistantMessage',
+        reply.props,
+        signal,
+        authorization,
+      );
+      await routingStarted.promise;
+      if (recorder) recorder.rebuildTurnBoundaries([]);
+      else rows.rewindLiveRows('removed-prompt');
+      finishRouting.resolve();
+      await expect(pending).resolves.toEqual({ status: 'unanswered' });
+      await expect(generateText.mock.results[0].value).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      expect(generateContent).not.toHaveBeenCalled();
 
-    await expect(
-      session!.askRow('AssistantMessage', reply.props, signal, authorize),
-    ).resolves.toEqual({ status: 'answered', props: translatedReply });
-    expect(generateContent).toHaveBeenCalledOnce();
-  });
+      rows.rememberCompleted('AssistantMessage', reply.props.text);
+      const replacement = await rows.authorize(
+        'AssistantMessage',
+        reply.props.text,
+      );
+      await expect(
+        session!.askRow('AssistantMessage', reply.props, signal, replacement),
+      ).resolves.toEqual({ status: 'answered', props: translatedReply });
+      expect(generateContent).toHaveBeenCalledOnce();
+    },
+  );
 
   it('does not return a cached translation after authorization expires', async () => {
     const { session } = setup();
@@ -514,7 +537,7 @@ describe('Mod session display translation', () => {
         'AssistantMessage',
         reply.props,
         signal,
-        expiringAuthorization,
+        authorizeWhen(expiringAuthorization),
       ),
     ).resolves.toEqual({ status: 'unanswered' });
     expect(mocks.translate).toHaveBeenCalledOnce();

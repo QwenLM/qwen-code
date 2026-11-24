@@ -17,8 +17,13 @@ export type ModRowRender = (
 ) => Promise<ModRenderInput['props'] | undefined | null>;
 
 /** Remote authorization from the host, never part of the Mod render event. */
+export interface ModRowAuthorization {
+  isCurrent(): boolean;
+  signal: AbortSignal;
+}
+
 export type ModRowInput = ModRenderInput & {
-  translationAuthorization?: false | (() => boolean);
+  translationAuthorization?: false | ModRowAuthorization;
 };
 
 interface Row {

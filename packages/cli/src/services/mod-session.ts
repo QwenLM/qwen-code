@@ -77,7 +77,11 @@ import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
 import { completeModModel, modModelUsage } from './mod-model.js';
-import { ModRows, type ModRowInput } from './mod-rows.js';
+import {
+  ModRows,
+  type ModRowAuthorization,
+  type ModRowInput,
+} from './mod-rows.js';
 import {
   displayTranslationTarget,
   drawsTranslatedRows,
@@ -842,7 +846,7 @@ export class ModSession implements ICommandLoader {
     component: ModRenderSite,
     props: ModRenderInput['props'],
     signal: AbortSignal,
-    isTranslationAuthorized?: () => boolean,
+    authorization?: ModRowAuthorization,
   ): Promise<ModRowAnswer> {
     const surface = this.host?.surface;
     const hasHooks = this.runtime?.renderHooksFor(component).length;
@@ -855,7 +859,7 @@ export class ModSession implements ICommandLoader {
       return { status: 'unhooked' };
     if (this.closing) return { status: 'unanswered' };
     const translationAuthorization =
-      target && isTranslationAuthorized?.() ? isTranslationAuthorized : false;
+      target && authorization?.isCurrent() ? authorization : false;
     if (!hasHooks && !translationAuthorization) return { status: 'unanswered' };
     const input = {
       surface,
@@ -873,7 +877,7 @@ export class ModSession implements ICommandLoader {
       { ...input, translationAuthorization },
       signal,
     );
-    if (translationAuthorization && !translationAuthorization())
+    if (translationAuthorization && !translationAuthorization.isCurrent())
       return { status: 'unanswered' };
     return !answer
       ? { status: 'unanswered' }
@@ -957,14 +961,9 @@ export class ModSession implements ICommandLoader {
     if (target && 'text' in props) {
       const canTranslate = () =>
         canRender() &&
-        (typeof translationAuthorization !== 'function' ||
-          translationAuthorization());
+        (!translationAuthorization || translationAuthorization.isCurrent());
       if (!wanted() || !canTranslate()) return null;
       const rowSignal = (signal ??= startRender());
-      const branchSignal =
-        typeof translationAuthorization === 'function'
-          ? this.config.getChatRecordingService()?.getBranchAbortSignal()
-          : undefined;
       const text = await translateDisplayText(
         props.text,
         target,
@@ -977,7 +976,9 @@ export class ModSession implements ICommandLoader {
               canTranslate,
             ),
           ),
-        branchSignal ? AbortSignal.any([rowSignal, branchSignal]) : rowSignal,
+        translationAuthorization
+          ? AbortSignal.any([rowSignal, translationAuthorization.signal])
+          : rowSignal,
         input.surface,
       );
       if (!canTranslate()) return null;

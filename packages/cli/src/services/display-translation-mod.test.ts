@@ -191,6 +191,34 @@ describe('translateDisplayText', () => {
     ).resolves.toBe(translated);
   });
 
+  it.each([
+    [
+      'See <https://example.test/releases_>.',
+      '详见 https://example.test/releases_。',
+    ],
+    [
+      '| Release |\n| --- |\n| <https://example.test/releases_> |',
+      '| 发布 |\n| --- |\n| https://example.test/releases_。 |',
+    ],
+    [
+      '| A | B | C |\n| --- | --- | --- |\n| **First | <https://example.test/releases_> | Third** |',
+      '| 甲 | 乙 | 丙 |\n| --- | --- | --- |\n| **第一 | https://example.test/releases_。 | 第三** |',
+    ],
+  ])(
+    'rejects a translation whose clickable terminal URL changes: %s',
+    async (original, translated) => {
+      await expect(
+        translateDisplayText(
+          original,
+          'zh-CN',
+          answer(translated),
+          signal,
+          'terminal',
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+
   it('translates Traditional Chinese when the target is Simplified Chinese', async () => {
     const complete = answer('请先确认这个文件是否存在。');
     await expect(

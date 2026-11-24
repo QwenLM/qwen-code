@@ -66,7 +66,7 @@ it('settles a row only when a preparing tool creates a card', async () => {
     'AssistantMessage',
     'Before the tool.',
   );
-  expect(completed?.()).toBe(true);
+  expect(completed?.isCurrent()).toBe(true);
 
   const nextAttempt = {};
   rows.observe('During the next attempt.', 'AssistantMessage', nextAttempt);
@@ -79,7 +79,7 @@ it('settles a row only when a preparing tool creates a card', async () => {
   rows.observe('A different session.', 'AssistantMessage', nextAttempt);
   rows.observeRootToolCall('read-report', true);
   const next = await rows.authorize('AssistantMessage', 'A different session.');
-  expect(next?.()).toBe(true);
+  expect(next?.isCurrent()).toBe(true);
 });
 
 it('keeps earlier live rows eligible in non-recorded sessions', async () => {
@@ -91,7 +91,7 @@ it('keeps earlier live rows eligible in non-recorded sessions', async () => {
     rows.rememberCompleted('AssistantMessage', `Model reply ${index}.`);
   }
   const earliest = await rows.authorize('AssistantMessage', 'Model reply 0.');
-  expect(earliest?.()).toBe(true);
+  expect(earliest?.isCurrent()).toBe(true);
 });
 
 it('drops live translation rows when a session clears without a recorder', async () => {
@@ -107,12 +107,51 @@ it('drops live translation rows when a session clears without a recorder', async
     'AssistantMessage',
     'A completed model reply.',
   );
-  expect(isAuthorized?.()).toBe(true);
+  expect(isAuthorized?.isCurrent()).toBe(true);
 
   sessionId = 'after-clear';
-  expect(isAuthorized?.()).toBe(false);
+  expect(isAuthorized?.isCurrent()).toBe(false);
+  expect(isAuthorized?.signal.aborted).toBe(true);
   await expect(
     rows.authorize('AssistantMessage', 'A completed model reply.'),
+  ).resolves.toBeUndefined();
+});
+
+it('rewinds live row authorization to a checkpoint and aborts the old generation', async () => {
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => 'session',
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  rows.recordLiveCheckpoint('first');
+  rows.rememberCompleted('AssistantMessage', 'Retained reply.');
+  rows.recordLiveCheckpoint('second');
+  rows.rememberCompleted('AssistantMessage', 'Retained reply.');
+  rows.rememberCompleted('Thinking', 'Removed thought.');
+  rows.observeRootToolCall('reused-tool', true);
+  const removed = await rows.authorize('Thinking', 'Removed thought.');
+  expect(removed?.isCurrent()).toBe(true);
+
+  rows.rewindLiveRows('second');
+  expect(removed?.isCurrent()).toBe(false);
+  expect(removed?.signal.aborted).toBe(true);
+  await expect(
+    rows.authorize('Thinking', 'Removed thought.'),
+  ).resolves.toBeUndefined();
+  const retained = await rows.authorize('AssistantMessage', 'Retained reply.');
+  expect(retained?.signal.aborted).toBe(false);
+
+  const newAttempt = {};
+  rows.observe('New branch reply.', 'AssistantMessage', newAttempt);
+  rows.observeRootToolCall('reused-tool', true);
+  const replacement = await rows.authorize(
+    'AssistantMessage',
+    'New branch reply.',
+  );
+  expect(replacement?.isCurrent()).toBe(true);
+
+  rows.rewindLiveRows('first');
+  await expect(
+    rows.authorize('AssistantMessage', 'Retained reply.'),
   ).resolves.toBeUndefined();
 });
 
@@ -137,6 +176,7 @@ it('keeps persisted prefixes untranslated until the full live continuation ends'
   ]);
   const recorder = {
     getBranchGeneration: () => 1,
+    getBranchAbortSignal: () => new AbortController().signal,
     getTranscriptCursor: () => ({ recordId: 'prefix' }),
     readActiveTranscriptChain,
   };
@@ -152,7 +192,7 @@ it('keeps persisted prefixes untranslated until the full live continuation ends'
   expect(readActiveTranscriptChain).not.toHaveBeenCalled();
 
   const earlier = await rows.authorize('AssistantMessage', 'An earlier reply.');
-  expect(earlier?.()).toBe(true);
+  expect(earlier?.isCurrent()).toBe(true);
   rows.observe(' and remainder.', 'AssistantMessage', attempt);
   await expect(
     rows.authorize('AssistantMessage', 'First half'),
@@ -162,7 +202,7 @@ it('keeps persisted prefixes untranslated until the full live continuation ends'
     'AssistantMessage',
     'First half and remainder.',
   );
-  expect(completed?.()).toBe(true);
+  expect(completed?.isCurrent()).toBe(true);
 });
 
 describe('AcpModSession', () => {

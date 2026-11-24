@@ -6003,6 +6003,7 @@ export class Session implements SessionContext {
     const daemonPromptId = this.getRewindDaemonPromptId(promptId);
 
     llmClient.truncateHistory(apiTruncateIndex);
+    if (!recorder) this.mods?.rewindLiveTranslationRows(promptId);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
     // Rewinding discards the timeline the active-todo reminder described:
@@ -8263,9 +8264,11 @@ export class Session implements SessionContext {
                     .getSnapshots()
                     .at(-1);
                   if (latestSnapshot) {
-                    this.config
-                      .getChatRecordingService()
-                      ?.recordFileHistorySnapshot(latestSnapshot);
+                    const recorder = this.config.getChatRecordingService();
+                    if (recorder)
+                      recorder.recordFileHistorySnapshot(latestSnapshot);
+                    else if (latestSnapshot.promptId === promptId)
+                      this.mods?.recordLiveTranslationCheckpoint(promptId);
                   }
                 } catch (e) {
                   debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
