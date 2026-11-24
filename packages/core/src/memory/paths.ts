@@ -5,7 +5,6 @@
  */
 
 import * as fs from 'node:fs';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
@@ -93,33 +92,6 @@ export interface ProjectMemoryOwner {
   memoryBaseDir: string;
 }
 
-const projectMemoryOwner = new AsyncLocalStorage<() => ProjectMemoryOwner>();
-let standaloneProjectMemoryOwner:
-  | ((projectRoot?: string) => ProjectMemoryOwner | undefined)
-  | undefined;
-
-export function setStandaloneProjectMemoryOwner(
-  getOwner: typeof standaloneProjectMemoryOwner,
-): void {
-  standaloneProjectMemoryOwner = getOwner;
-}
-
-export function getBoundProjectMemoryOwner(
-  projectRoot?: string,
-): ProjectMemoryOwner | undefined {
-  return (
-    projectMemoryOwner.getStore()?.() ??
-    standaloneProjectMemoryOwner?.(projectRoot)
-  );
-}
-
-export function runWithProjectMemoryOwner<T>(
-  owner: () => ProjectMemoryOwner,
-  run: () => T,
-): T {
-  return projectMemoryOwner.run(owner, run);
-}
-
 export function getWorkspaceProjectMemoryRoot(
   projectRoot: string,
   memoryBaseDir: string,
@@ -132,11 +104,13 @@ export function getWorkspaceProjectMemoryRoot(
   );
 }
 
-export function getAutoMemoryRoot(projectRoot: string): string {
+export function getAutoMemoryRoot(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
   if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
     return path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   }
-  const owner = getBoundProjectMemoryOwner(projectRoot);
   return getWorkspaceProjectMemoryRoot(
     owner?.cwd ?? projectRoot,
     owner?.memoryBaseDir ?? getMemoryBaseDir(),
@@ -163,18 +137,21 @@ export function clearAutoMemoryRootCache(): void {
  * repo-tracked `.qwen -> /outside`) can't silently relocate the allowed root
  * out of the trusted anchor.
  */
-export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
+export function getAutoMemoryTrustedAnchor(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
   return process.env['QWEN_CODE_MEMORY_LOCAL'] === '1'
     ? projectRoot
-    : (getBoundProjectMemoryOwner(projectRoot)?.memoryBaseDir ??
-        getMemoryBaseDir());
+    : (owner?.memoryBaseDir ?? getMemoryBaseDir());
 }
 
 export function getProjectAutoMemoryRoots(
   projectRoot: string,
   trustedProject: boolean,
+  owner?: ProjectMemoryOwner,
 ): string[] {
-  const configuredRoot = getAutoMemoryRoot(projectRoot);
+  const configuredRoot = getAutoMemoryRoot(projectRoot, owner);
   const localRoot = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   const roots =
     path.resolve(configuredRoot) === path.resolve(localRoot)
@@ -211,9 +188,11 @@ export function getProjectAutoMemoryRoots(
   return roots;
 }
 
-export function getMemoryRootTrustedAnchor(root: string): string {
+export function getMemoryRootTrustedAnchor(
+  root: string,
+  owner?: ProjectMemoryOwner,
+): string {
   const resolvedRoot = path.resolve(root);
-  const owner = getBoundProjectMemoryOwner();
   const baseDir = path.resolve(getMemoryBaseDir());
   if (resolvedRoot === path.join(baseDir, USER_AUTO_MEMORY_DIRNAME)) {
     return baseDir;
@@ -231,8 +210,11 @@ export function getMemoryRootTrustedAnchor(root: string): string {
  * This is the parent of getAutoMemoryRoot(), so memory/ stays clean:
  * only MEMORY.md and topic files live inside it.
  */
-export function getAutoMemoryProjectStateDir(projectRoot: string): string {
-  return path.dirname(getAutoMemoryRoot(projectRoot));
+export function getAutoMemoryProjectStateDir(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
+  return path.dirname(getAutoMemoryRoot(projectRoot, owner));
 }
 
 /**
@@ -246,17 +228,24 @@ export function getAutoMemoryProjectStateDir(projectRoot: string): string {
 export function isAutoMemPath(
   absolutePath: string,
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   const normalizedPath = path.normalize(absolutePath);
-  const memRoot = path.normalize(getAutoMemoryRoot(projectRoot));
+  const memRoot = path.normalize(getAutoMemoryRoot(projectRoot, owner));
   const rel = path.relative(memRoot, normalizedPath);
   // rel === '' means absolutePath IS memRoot itself.
   // !rel.startsWith('..') && !path.isAbsolute(rel) means it's strictly inside.
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-export function getAutoMemoryIndexPath(projectRoot: string): string {
-  return path.join(getAutoMemoryRoot(projectRoot), AUTO_MEMORY_INDEX_FILENAME);
+export function getAutoMemoryIndexPath(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
+  return path.join(
+    getAutoMemoryRoot(projectRoot, owner),
+    AUTO_MEMORY_INDEX_FILENAME,
+  );
 }
 
 export function getAutoMemoryMetadataPath(projectRoot: string): string {
@@ -275,9 +264,10 @@ export function getAutoMemoryExtractCursorPath(projectRoot: string): string {
 
 export function getAutoMemoryConsolidationLockPath(
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): string {
   return path.join(
-    getAutoMemoryProjectStateDir(projectRoot),
+    getAutoMemoryProjectStateDir(projectRoot, owner),
     AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME,
   );
 }
@@ -394,11 +384,12 @@ export function isManagedMemoryPath(
   filePath: string,
   projectRoot: string,
   baseDir: string = projectRoot,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   const absolutePath = path.resolve(baseDir, filePath);
   const resolvedPath = path.normalize(realpathNearestExisting(absolutePath));
   const roots = [
-    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryRoot(projectRoot, owner),
     getUserAutoMemoryRoot(),
     getTeamAutoMemoryRoot(projectRoot),
   ];
@@ -421,8 +412,10 @@ export function isManagedMemoryPath(
 export function isAnyAutoMemPath(
   absolutePath: string,
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   return (
-    isAutoMemPath(absolutePath, projectRoot) || isUserAutoMemPath(absolutePath)
+    isAutoMemPath(absolutePath, projectRoot, owner) ||
+    isUserAutoMemPath(absolutePath)
   );
 }

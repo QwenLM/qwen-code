@@ -19,7 +19,10 @@ import {
 } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
-import { clearAutoMemoryRootCache } from '../memory/paths.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+} from '../memory/paths.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { getFileReadDefaultPermission } from './file-read-permission.js';
 
@@ -135,6 +138,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe('getFileReadDefaultPermission', () => {
@@ -149,6 +153,27 @@ describe('getFileReadDefaultPermission', () => {
       const file = path.join(layout.projectTempDir, 'scratch.txt');
       fs.writeFileSync(file, 'x', 'utf8');
       expect(permissionFor(file)).toBe('allow');
+    });
+
+    it('allows project memory through the bound owner after a worktree move', () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', undefined);
+      const config = makeConfig();
+      const owner = {
+        cwd: path.join(layout.base, 'launch'),
+        memoryBaseDir: path.join(layout.base, 'launch-memory'),
+      };
+      config.getProjectMemoryOwner = () => owner;
+      const owned = path.join(
+        getAutoMemoryRoot(layout.workspace, owner),
+        'topic.md',
+      );
+      const unrelated = path.join(
+        getAutoMemoryRoot(layout.workspace),
+        'topic.md',
+      );
+
+      expect(getFileReadDefaultPermission(config, owned)).toBe('allow');
+      expect(getFileReadDefaultPermission(config, unrelated)).toBe('ask');
     });
 
     it('allows a not-yet-created file under a real allow-listed root', () => {

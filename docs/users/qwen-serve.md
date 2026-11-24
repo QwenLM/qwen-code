@@ -625,8 +625,8 @@ Qwen Live runs through the Web Shell on every platform: the browser tab is the m
 > share project memory keyed by the registered directory. The directory
 > encoding replaces non-alphanumeric characters with `-`, so paths such
 > as `/repo/apps/api` and `/repo/apps-api` produce the same key. The daemon
-> refuses a registration that would reuse another workspace's encoded
-> runtime or project memory directory. Configure separate
+> refuses a registration that would reuse an encoded runtime or project
+> memory directory of another registered workspace. Configure separate
 > `advanced.runtimeOutputDir` values or choose distinct workspace paths.
 > The runtime binds its memory base when it starts. Restart it to apply a
 > change to `QWEN_CODE_MEMORY_BASE_DIR`.

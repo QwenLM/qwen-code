@@ -82,7 +82,10 @@ export interface OpenTuiConfirmationBridge {
   ): Promise<ShellConfirmationResolution>;
   presentAction(
     prompt: ReactNode,
-    options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent' | 'reviewText'>,
+    options?: Pick<
+      ConfirmationRequest,
+      'signal' | 'isCurrent' | 'allowHistoryScroll'
+    >,
   ): Promise<boolean>;
 }
 
@@ -447,7 +450,10 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
 
   presentActionConfirmation(
     prompt: ReactNode,
-    options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent' | 'reviewText'>,
+    options?: Pick<
+      ConfirmationRequest,
+      'signal' | 'isCurrent' | 'allowHistoryScroll'
+    >,
   ): Promise<boolean> {
     return options
       ? this.deps.confirmations.presentAction(prompt, options)

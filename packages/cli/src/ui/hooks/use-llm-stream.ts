@@ -1525,6 +1525,7 @@ export const useLlmStream = (
     const group = mapTrackedToolCallsToDisplay(
       toolCalls,
       config.getProjectRoot(),
+      config.getProjectMemoryOwner?.(),
     );
     group.batchId = getToolBatchId(toolCalls[0].request.callId);
     return group;
@@ -7543,6 +7544,7 @@ export const useLlmStream = (
       const toolGroupDisplay = mapTrackedToolCallsToDisplay(
         calls as TrackedToolCall[],
         config.getProjectRoot(),
+        config.getProjectMemoryOwner?.(),
       );
       toolGroupDisplay.batchId = batchId;
       addItem(toolGroupDisplay, Date.now());

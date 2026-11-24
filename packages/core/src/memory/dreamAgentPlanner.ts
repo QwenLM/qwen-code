@@ -16,6 +16,7 @@ import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
@@ -97,7 +98,7 @@ export function buildConsolidationTaskPrompt(
     : [
         '## Phase 4 — Finish topic updates',
         '',
-        '- Write only topic files. The runtime generates the project index.',
+        '- Use write_file or edit for topic updates. The runtime generates the project index.',
         '- Leave deletions to the runtime-managed Dream operation.',
       ];
 
@@ -162,16 +163,25 @@ export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
   abortSignal?: AbortSignal,
-  options: { suppressChatRecording?: boolean } = {},
+  options: {
+    suppressChatRecording?: boolean;
+    projectMemoryOwner?: ProjectMemoryOwner;
+  } = {},
 ): Promise<ForkedAgentResult> {
-  const memoryRoot = getAutoMemoryRoot(projectRoot);
+  const owner = options.projectMemoryOwner ?? config.getProjectMemoryOwner?.();
+  const memoryRoot = getAutoMemoryRoot(projectRoot, owner);
   const transcriptDir = getTranscriptDir(projectRoot);
-  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
-    allowShell: true,
-    includeUserMemory: false,
-    protectPinnedMemory: true,
-  });
+  const docs = await scanAutoMemoryTopicDocuments(projectRoot, owner);
+  const scopedConfig = createMemoryScopedAgentConfig(
+    config,
+    projectRoot,
+    {
+      allowShell: true,
+      includeUserMemory: false,
+      protectPinnedMemory: true,
+    },
+    owner,
+  );
   const result = await runForkedAgent({
     name: 'managed-auto-memory-dreamer',
     config: scopedConfig,

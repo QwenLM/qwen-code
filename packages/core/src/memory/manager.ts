@@ -57,7 +57,7 @@ import {
   isAnyAutoMemPath,
   isTeamAutoMemPath,
   isUserAutoMemPath,
-  runWithProjectMemoryOwner,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import { getAutoMemoryConsolidationLockPath } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
@@ -103,7 +103,6 @@ import {
   rejectPendingSkill,
   type PendingSkill,
 } from './pending-skills.js';
-import type { AutoMemoryMetadata } from './types.js';
 import type { AutoMemoryDocumentCache } from './scan.js';
 import type { MemoryBodyCoverage } from './search-memory.js';
 import {
@@ -165,6 +164,7 @@ export interface MemoryTaskRecord {
 
 export interface ScheduleExtractParams {
   projectRoot: string;
+  projectMemoryOwner?: ProjectMemoryOwner;
   sessionId: string;
   history: Content[];
   now?: Date;
@@ -447,6 +447,7 @@ function memoryWritePath(part: Part): string | undefined {
 function historyWritesToMemory(
   history: Content[],
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   const successfulCallIds = successfulFunctionCallIds(history);
   return history.some((msg) =>
@@ -481,7 +482,7 @@ function historyWritesToMemory(
       }
       return (
         filePath !== undefined &&
-        (isAnyAutoMemPath(filePath, projectRoot) ||
+        (isAnyAutoMemPath(filePath, projectRoot, owner) ||
           isTeamAutoMemPath(filePath, projectRoot))
       );
     }),
@@ -547,12 +548,6 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
-async function readDreamMetadata(
-  projectRoot: string,
-): Promise<AutoMemoryMetadata> {
-  return readProjectMemoryMetadata(projectRoot);
-}
-
 function hoursSince(lastDreamAt: string | undefined, now: Date): number | null {
   if (!lastDreamAt) return null;
   const timestamp = Date.parse(lastDreamAt);
@@ -615,22 +610,12 @@ async function dreamLockExistsAt(lockPath: string): Promise<boolean> {
   return false;
 }
 
-async function dreamLockExists(projectRoot: string): Promise<boolean> {
-  return dreamLockExistsAt(getAutoMemoryConsolidationLockPath(projectRoot));
+async function acquireDreamLock(lockPath: string): Promise<void> {
+  await fs.writeFile(lockPath, String(process.pid), { flag: 'wx' });
 }
 
-async function acquireDreamLock(projectRoot: string): Promise<void> {
-  await fs.writeFile(
-    getAutoMemoryConsolidationLockPath(projectRoot),
-    String(process.pid),
-    { flag: 'wx' },
-  );
-}
-
-async function releaseDreamLock(projectRoot: string): Promise<void> {
-  await fs.rm(getAutoMemoryConsolidationLockPath(projectRoot), {
-    force: true,
-  });
+async function releaseDreamLock(lockPath: string): Promise<void> {
+  await fs.rm(lockPath, { force: true });
 }
 
 async function acquireUserDreamLock(): Promise<void> {
@@ -646,14 +631,6 @@ async function releaseUserDreamLock(): Promise<void> {
 }
 
 // ─── MemoryManager ────────────────────────────────────────────────────────────
-
-function withPinnedProjectMemoryOwner<T>(
-  config: Config | undefined,
-  run: () => T,
-): T {
-  const owner = config?.getProjectMemoryOwner?.();
-  return owner ? runWithProjectMemoryOwner(() => owner, run) : run();
-}
 
 /**
  * MemoryManager owns all runtime state for the memory subsystem and exposes a
@@ -923,15 +900,7 @@ export class MemoryManager {
     return promise;
   }
 
-  scheduleMetadataMigration(
-    params: ScheduleMetadataMigrationParams,
-  ): Promise<MetadataMigrationScheduleResult> {
-    return withPinnedProjectMemoryOwner(params.config, () =>
-      this.scheduleMetadataMigrationForOwner(params),
-    );
-  }
-
-  private async scheduleMetadataMigrationForOwner(
+  async scheduleMetadataMigration(
     params: ScheduleMetadataMigrationParams,
   ): Promise<MetadataMigrationScheduleResult> {
     // The migration's only consumer is the structured recall protocol, so an
@@ -944,9 +913,10 @@ export class MemoryManager {
     if (this.isUnderMemoryPressure(params.config)) {
       return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
+    const owner = params.config.getProjectMemoryOwner?.();
     const root =
       params.scope === 'project'
-        ? getAutoMemoryRoot(params.projectRoot)
+        ? getAutoMemoryRoot(params.projectRoot, owner)
         : params.scope === 'user'
           ? getUserAutoMemoryRoot()
           : getTeamAutoMemoryRoot(params.projectRoot);
@@ -955,6 +925,7 @@ export class MemoryManager {
         ? getProjectMetadataMigrationRoots(
             params.projectRoot,
             params.config.isTrustedFolder(),
+            owner,
           )
         : [root];
     const domain = `${params.scope}:${root}`;
@@ -998,6 +969,7 @@ export class MemoryManager {
               candidateRoot,
               params.scope,
               abortController.signal,
+              owner,
             ),
           ),
         ).then((scans) => scans.some((candidates) => candidates.length > 0)),
@@ -1035,6 +1007,7 @@ export class MemoryManager {
         roots,
         params,
         abortController.signal,
+        owner,
       ),
     );
     return { status: 'scheduled', taskId: record.id, promise };
@@ -1046,12 +1019,14 @@ export class MemoryManager {
     roots: readonly string[],
     params: ScheduleMetadataMigrationParams,
     abortSignal: AbortSignal,
+    owner?: ProjectMemoryOwner,
   ): Promise<MemoryTaskRecord> {
     const startedAt = Date.now();
     try {
       const result = await runMemoryMetadataMigration({
         config: params.config,
         projectRoot: params.projectRoot,
+        projectMemoryOwner: owner,
         roots,
         scope: params.scope,
         abortSignal,
@@ -1197,26 +1172,21 @@ export class MemoryManager {
    * The trailing request starts automatically when the active extraction
    * completes.
    */
-  scheduleExtract(
-    params: ScheduleExtractParams,
-    options: { bypassCadence?: boolean } = {},
-  ): Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>> {
-    return withPinnedProjectMemoryOwner(params.config, () =>
-      this.scheduleExtractForOwner(params, options),
-    );
-  }
-
-  private async scheduleExtractForOwner(
+  async scheduleExtract(
     params: ScheduleExtractParams,
     options: { bypassCadence?: boolean } = {},
   ): Promise<
     ReturnType<typeof runAutoMemoryExtract> extends Promise<infer T> ? T : never
   > {
+    const owner =
+      params.projectMemoryOwner ?? params.config?.getProjectMemoryOwner?.();
+    if (owner) params = { ...params, projectMemoryOwner: owner };
     const wroteUserMemory = latestHistoryWritesToUserMemory(params.history);
     if (
       historyWritesToMemory(
         latestTurnHistory(params.history) ?? params.history,
         params.projectRoot,
+        owner,
       )
     ) {
       const record = makeTaskRecord(
@@ -1335,7 +1305,7 @@ export class MemoryManager {
     params = this.stampExtractSeq(params);
 
     const memoryRoot = getProjectMemoryQueueKey(
-      getAutoMemoryRoot(params.projectRoot),
+      getAutoMemoryRoot(params.projectRoot, params.projectMemoryOwner),
     );
     const currentTaskId = MemoryManager.activeExtracts.get(memoryRoot)?.taskId;
     if (currentTaskId) {
@@ -1609,9 +1579,7 @@ export class MemoryManager {
     let entry = this.extractFlushRuns.get(sessionId);
     if (!entry || entry.pending !== pending) {
       const deadline = Date.now() + timeoutMs;
-      const run = withPinnedProjectMemoryOwner(pending.config, () =>
-        this.runPendingExtractFlush(sessionId, pending, deadline),
-      );
+      const run = this.runPendingExtractFlush(sessionId, pending, deadline);
       entry = { pending, run };
       this.extractFlushRuns.set(sessionId, entry);
       const started = entry;
@@ -1709,7 +1677,7 @@ export class MemoryManager {
       // memory root/taskId rather than by session. Wait for it and for any
       // trailing request it starts.
       const memoryRoot = getProjectMemoryQueueKey(
-        getAutoMemoryRoot(pending.projectRoot),
+        getAutoMemoryRoot(pending.projectRoot, pending.projectMemoryOwner),
       );
       for (;;) {
         const running = MemoryManager.activeExtracts.get(memoryRoot);
@@ -1859,10 +1827,13 @@ export class MemoryManager {
    * gate that ignores the stall would suppress consolidation forever. Shared
    * so the scheduled and manual paths cannot disagree on the key or the limit.
    */
-  private isProjectMigrationStalled(projectRoot: string): boolean {
+  private isProjectMigrationStalled(
+    projectRoot: string,
+    owner?: ProjectMemoryOwner,
+  ): boolean {
     return (
       (this.migrationStallCountByDomain.get(
-        `project:${getAutoMemoryRoot(projectRoot)}`,
+        `project:${getAutoMemoryRoot(projectRoot, owner)}`,
       ) ?? 0) >= MIGRATION_STALL_LIMIT
     );
   }
@@ -1894,7 +1865,7 @@ export class MemoryManager {
     }
 
     const memoryRoot = getProjectMemoryQueueKey(
-      getAutoMemoryRoot(params.projectRoot),
+      getAutoMemoryRoot(params.projectRoot, params.projectMemoryOwner),
     );
     MemoryManager.activeExtracts.set(memoryRoot, { taskId, owner: this });
     this.update(record, {
@@ -2161,13 +2132,7 @@ export class MemoryManager {
    * Returns immediately if preconditions aren't met (time gate, session count,
    * lock, or duplicate).
    */
-  scheduleDream(params: ScheduleDreamParams): Promise<DreamScheduleResult> {
-    return withPinnedProjectMemoryOwner(params.config, () =>
-      this.scheduleDreamForOwner(params),
-    );
-  }
-
-  private async scheduleDreamForOwner(
+  async scheduleDream(
     params: ScheduleDreamParams,
   ): Promise<DreamScheduleResult> {
     // `params.config` is optional only because some test paths omit it;
@@ -2178,6 +2143,7 @@ export class MemoryManager {
     if (!params.config || !params.config.getManagedAutoDreamEnabled()) {
       return { status: 'skipped', skippedReason: 'disabled' };
     }
+    const owner = params.config.getProjectMemoryOwner?.();
 
     // Also skip dream under memory pressure — dream does its own
     // structuredClone of full history, and shouldn't add extra pressure
@@ -2194,6 +2160,7 @@ export class MemoryManager {
     // even pay for the candidate scan.
     const projectMigrationStalled = this.isProjectMigrationStalled(
       params.projectRoot,
+      owner,
     );
     if (
       params.config.getStructuredMemoryRecallEnabled() &&
@@ -2204,8 +2171,14 @@ export class MemoryManager {
           getProjectMetadataMigrationRoots(
             params.projectRoot,
             params.config.isTrustedFolder(),
+            owner,
           ).map((root) =>
-            scanMemoryMetadataMigrationCandidates(root, 'project'),
+            scanMemoryMetadataMigrationCandidates(
+              root,
+              'project',
+              undefined,
+              owner,
+            ),
           ),
         ).catch((error: unknown) => {
           // A root that cannot be scanned (a symlinked or unreadable
@@ -2231,8 +2204,8 @@ export class MemoryManager {
     const minSessions =
       params.minSessionsBetweenDreams ?? DEFAULT_AUTO_DREAM_MIN_SESSIONS;
 
-    await ensureAutoMemoryScaffold(params.projectRoot, now);
-    const metadata = await readDreamMetadata(params.projectRoot);
+    await ensureAutoMemoryScaffold(params.projectRoot, now, owner);
+    const metadata = await readProjectMemoryMetadata(params.projectRoot, owner);
 
     if (metadata.lastDreamSessionId === params.sessionId) {
       return { status: 'skipped', skippedReason: 'same_session' };
@@ -2269,9 +2242,13 @@ export class MemoryManager {
     // on the dialog), the lock file is still on disk and dreamLockExists()
     // would silently suppress every subsequent dream until next process
     // start. Force-clean it here so the same session recovers.
+    const lockPath = getAutoMemoryConsolidationLockPath(
+      params.projectRoot,
+      owner,
+    );
     if (this.dreamLockReleaseFailed) {
       await fs
-        .rm(getAutoMemoryConsolidationLockPath(params.projectRoot), {
+        .rm(lockPath, {
           force: true,
         })
         .catch(() => {
@@ -2281,12 +2258,12 @@ export class MemoryManager {
         });
       this.dreamLockReleaseFailed = false;
     }
-    if (await dreamLockExists(params.projectRoot)) {
+    if (await dreamLockExistsAt(lockPath)) {
       return { status: 'skipped', skippedReason: 'locked' };
     }
 
     // Deduplication — only one dream per projectRoot at a time
-    const dedupeKey = `${DREAM_TASK_TYPE}:${params.projectRoot}`;
+    const dedupeKey = `${DREAM_TASK_TYPE}:${lockPath}`;
     const existingId = this.dreamInFlightByKey.get(dedupeKey);
     if (existingId) {
       return {
@@ -2323,7 +2300,15 @@ export class MemoryManager {
 
     const promise = this.track(
       record.id,
-      this.runDream(record, dedupeKey, params, now, abortController.signal),
+      this.runDream(
+        record,
+        dedupeKey,
+        params,
+        now,
+        abortController.signal,
+        lockPath,
+        owner,
+      ),
     );
 
     return { status: 'scheduled', taskId: record.id, promise };
@@ -2556,11 +2541,13 @@ export class MemoryManager {
     params: ScheduleDreamParams,
     now: Date,
     abortSignal: AbortSignal,
+    lockPath: string,
+    owner?: ProjectMemoryOwner,
   ): Promise<MemoryTaskRecord> {
     const dreamStartMs = Date.now();
     try {
       try {
-        await acquireDreamLock(params.projectRoot);
+        await acquireDreamLock(lockPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
           this.update(record, {
@@ -2580,6 +2567,7 @@ export class MemoryManager {
           now,
           params.config,
           abortSignal,
+          { projectMemoryOwner: owner },
         );
         // Defense-in-depth: runForkedAgent maps cancelled fork-agents
         // to a resolved `{status: 'cancelled'}` rather than a rejection.
@@ -2668,6 +2656,7 @@ export class MemoryManager {
                 result.touchedTopics.length > 0 ? 'updated' : 'noop';
               metadata.recentSessionIdsSinceDream = [];
             },
+            owner,
           );
         } catch (metaError) {
           const message =
@@ -2689,7 +2678,7 @@ export class MemoryManager {
         // session start via the staleness sweep, so swallowing the
         // error here doesn't risk a permanently-stuck lock.
         try {
-          await releaseDreamLock(params.projectRoot);
+          await releaseDreamLock(lockPath);
         } catch (lockError) {
           const message =
             lockError instanceof Error ? lockError.message : String(lockError);
@@ -3019,9 +3008,7 @@ export class MemoryManager {
       scope?: AutoMemoryStorageScope;
     } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
-    return withPinnedProjectMemoryOwner(options.config, () =>
-      selectManagedAutoMemoryForgetCandidates(projectRoot, query, options),
-    );
+    return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
   }
 
   /** Remove the selected memory entries (step 2 of forget). */
@@ -3031,8 +3018,15 @@ export class MemoryManager {
     now?: Date,
     options: { config?: Config; abortSignal?: AbortSignal } = {},
   ): Promise<AutoMemoryForgetResult> {
-    const result = await withPinnedProjectMemoryOwner(options.config, () =>
-      forgetManagedAutoMemoryMatches(projectRoot, matches, now, options),
+    const result = await forgetManagedAutoMemoryMatches(
+      projectRoot,
+      matches,
+      now,
+      {
+        abortSignal: options.abortSignal,
+        projectMemoryOwner: options.config?.getProjectMemoryOwner?.(),
+        trustedProject: options.config?.isTrustedFolder?.(),
+      },
     );
     if (result.touchedScopes.includes('user') && options.config) {
       await this.recordUserMutation(
@@ -3055,8 +3049,11 @@ export class MemoryManager {
     } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
-    const result = await withPinnedProjectMemoryOwner(options.config, () =>
-      forgetManagedAutoMemoryEntries(projectRoot, query, options, now),
+    const result = await forgetManagedAutoMemoryEntries(
+      projectRoot,
+      query,
+      options,
+      now,
     );
     if (result.touchedScopes.includes('user') && options.config) {
       await this.recordUserMutation(
@@ -3071,8 +3068,8 @@ export class MemoryManager {
   // ─── Status ───────────────────────────────────────────────────────────────────
 
   /** Return a full status snapshot for the given project's memory. */
-  getStatus(projectRoot: string) {
-    return getManagedAutoMemoryStatus(projectRoot, this);
+  getStatus(projectRoot: string, owner?: ProjectMemoryOwner) {
+    return getManagedAutoMemoryStatus(projectRoot, this, owner);
   }
 
   // ─── Dream utilities ──────────────────────────────────────────────────────────
@@ -3085,8 +3082,9 @@ export class MemoryManager {
     projectRoot: string,
     sessionId: string,
     now?: Date,
+    owner?: ProjectMemoryOwner,
   ): Promise<void> {
-    return writeDreamManualRunToMetadata(projectRoot, sessionId, now);
+    return writeDreamManualRunToMetadata(projectRoot, sessionId, now, owner);
   }
 
   /**
@@ -3098,25 +3096,7 @@ export class MemoryManager {
    * Takes the same consolidation lock the scheduled path does so a manual
    * run never writes concurrently with a background dream.
    */
-  runManualDream(
-    projectRoot: string,
-    config: Config,
-    sessionId: string,
-    now = new Date(),
-    abortSignal?: AbortSignal,
-  ): Promise<AutoMemoryDreamResult> {
-    return withPinnedProjectMemoryOwner(config, () =>
-      this.runManualDreamForOwner(
-        projectRoot,
-        config,
-        sessionId,
-        now,
-        abortSignal,
-      ),
-    );
-  }
-
-  private async runManualDreamForOwner(
+  async runManualDream(
     projectRoot: string,
     config: Config,
     sessionId: string,
@@ -3124,7 +3104,9 @@ export class MemoryManager {
     abortSignal?: AbortSignal,
   ): Promise<AutoMemoryDreamResult> {
     abortSignal?.throwIfAborted();
-    await ensureAutoMemoryScaffold(projectRoot, now);
+    const owner = config.getProjectMemoryOwner?.();
+    const lockPath = getAutoMemoryConsolidationLockPath(projectRoot, owner);
+    await ensureAutoMemoryScaffold(projectRoot, now, owner);
     const alreadyRunning: AutoMemoryDreamResult = {
       touchedTopics: [],
       createdEntries: 0,
@@ -3144,22 +3126,20 @@ export class MemoryManager {
     // scheduleDream: best-effort, and only when the leak is ours, so a lock
     // held by a genuinely running dream still reports 'already running'.
     if (this.dreamLockReleaseFailed) {
-      await fs
-        .rm(getAutoMemoryConsolidationLockPath(projectRoot), { force: true })
-        .catch(() => {
-          // Best-effort recovery — fall through to the existence check.
-        });
+      await fs.rm(lockPath, { force: true }).catch(() => {
+        // Best-effort recovery — fall through to the existence check.
+      });
       this.dreamLockReleaseFailed = false;
     }
     // Mirror scheduleDream's sweep: acquireDreamLock creates with 'wx', so
     // it fails on ANY existing lock — including one orphaned by a crashed
     // CLI. Sweep by holder liveness first or that lock blocks /dream for
     // the whole session; the EEXIST branch below stays as the race backstop.
-    if (await dreamLockExists(projectRoot)) {
+    if (await dreamLockExistsAt(lockPath)) {
       return alreadyRunning;
     }
     try {
-      await acquireDreamLock(projectRoot);
+      await acquireDreamLock(lockPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
         return alreadyRunning;
@@ -3176,11 +3156,12 @@ export class MemoryManager {
           trigger: 'manual',
           recordMetadata: true,
           sessionId,
+          projectMemoryOwner: owner,
           // The manual gate in dream.ts cannot read the stall counter itself;
           // without this it would keep refusing /dream for the life of the
           // process once the migration gave up, while telling the user a
           // migration is pending.
-          migrationStalled: this.isProjectMigrationStalled(projectRoot),
+          migrationStalled: this.isProjectMigrationStalled(projectRoot, owner),
         },
       );
     } finally {
@@ -3189,7 +3170,7 @@ export class MemoryManager {
       // next scheduleDream force-clean the leaked lock instead of reporting
       // 'locked' until the staleness window expires.
       try {
-        await releaseDreamLock(projectRoot);
+        await releaseDreamLock(lockPath);
       } catch (error) {
         this.dreamLockReleaseFailed = true;
         const message = error instanceof Error ? error.message : String(error);

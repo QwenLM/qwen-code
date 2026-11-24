@@ -10038,13 +10038,16 @@ describe('Server Config (config.ts)', () => {
     skipArtifactMigration: true,
   };
 
-  it('keeps worktree memory and transcript ownership during entry and a nested cd', async () => {
-    const config = makeConfig({ experimentalZedIntegration: true });
-    const owner = config.getProjectMemoryOwner();
+  it('keeps startup-worktree memory anchored through a nested cd', async () => {
+    const config = makeConfig({ targetDir: NEW_DIR, cwd: NEW_DIR });
+    const owner = {
+      ...config.getProjectMemoryOwner(),
+      cwd: path.resolve('/launch/workspace'),
+    };
     const originalStorage = config.storage;
     const nested = path.join(NEW_DIR, 'nested');
 
-    await config.enterProjectWorktree(NEW_DIR);
+    config.bindProjectMemoryToWorktree(NEW_DIR, owner);
     expect(config.getWorkingDir()).toBe(NEW_DIR);
     expect(config.getProjectMemoryOwner()).toEqual(owner);
     expect(config.storage).toBe(originalStorage);
@@ -10060,13 +10063,6 @@ describe('Server Config (config.ts)', () => {
       nested,
       SKIP_MOVE_SIDE_EFFECTS,
     );
-    expect(config.getWorkingDir()).toBe(nested);
-    expect(config.getProjectMemoryOwner()).toEqual(owner);
-
-    const derivedWorktree = path.join(NEW_DIR, '.qwen', 'worktrees', 'child');
-    await config.enterProjectWorktree(derivedWorktree);
-    expect(config.getProjectMemoryOwner()).toEqual(owner);
-    await config.exitProjectWorktree(derivedWorktree);
     expect(config.getWorkingDir()).toBe(nested);
     expect(config.getProjectMemoryOwner()).toEqual(owner);
 

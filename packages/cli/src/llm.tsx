@@ -11,10 +11,7 @@ import {
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
-import {
-  getMemoryBaseDir,
-  setStandaloneProjectMemoryOwner,
-} from '@qwen-code/qwen-code-core/memory/paths.js';
+import { getMemoryBaseDir } from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   AuthType,
   type ChatRecord,
@@ -1157,14 +1154,6 @@ export async function main() {
         startupWorktreeMemoryOwner,
       );
     }
-    if (!isAcpMode) {
-      // Input events may be dispatched outside the renderer's async context.
-      setStandaloneProjectMemoryOwner((projectRoot) =>
-        projectRoot === undefined || projectRoot === config.getProjectRoot()
-          ? config.getProjectMemoryOwner()
-          : undefined,
-      );
-    }
 
     // The interactive UI segments text through Intl.Segmenter; on an ICU-less
     // Node the first segmentation segfaults the process (#11747). Probe here,
@@ -1318,9 +1307,6 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
-    if (!isAcpMode) {
-      registerCleanup(() => setStandaloneProjectMemoryOwner(undefined));
-    }
 
     // Install the uncaughtException handler once the session ID is known.
     // Before this point VP mode is not active, so Node's default stderr

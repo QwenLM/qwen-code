@@ -187,6 +187,7 @@ describe('memoryCommand', () => {
             Object.assign(new Error('stale'), { code: 'ESTALE' }),
           ),
       });
+      const confirmAction = vi.fn(async () => true);
       const context = createMockCommandContext({
         executionMode,
         services: {
@@ -198,7 +199,7 @@ describe('memoryCommand', () => {
           },
         },
         abortSignal: new AbortController().signal,
-        confirmAction: async () => true,
+        confirmAction,
       });
       expect(
         await memoryCommand.action?.(context, 'migrate-worktree /old'),
@@ -207,6 +208,18 @@ describe('memoryCommand', () => {
         messageType,
         content: expect.stringContaining('Project memory conflict'),
       });
+      const addItem = vi.mocked(context.ui.addItem);
+      if (executionMode === 'interactive') {
+        expect(addItem).toHaveBeenCalledWith(
+          { type: 'info', text: expect.stringContaining('Update checks.md') },
+          expect.any(Number),
+        );
+        expect(addItem.mock.invocationCallOrder[0]).toBeLessThan(
+          confirmAction.mock.invocationCallOrder[0]!,
+        );
+      } else {
+        expect(addItem).not.toHaveBeenCalled();
+      }
     },
   );
 

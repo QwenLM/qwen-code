@@ -94,6 +94,7 @@ describe('managed memory refresh helper', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (originalMemoryBase === undefined) {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     } else {
@@ -171,8 +172,17 @@ describe('managed memory refresh helper', () => {
   });
 
   it('rebuilds touched indexes before refreshing the live instruction', async () => {
+    vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', undefined);
     const config = createConfig(projectRoot);
-    const projectFile = memoryPath('project.md');
+    const owner = {
+      cwd: path.join(tempDir, 'launch'),
+      memoryBaseDir: path.join(tempDir, 'launch-memory'),
+    };
+    config.getProjectMemoryOwner = () => owner;
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot, owner),
+      'project.md',
+    );
     const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');
 
     await expect(
@@ -182,7 +192,10 @@ describe('managed memory refresh helper', () => {
       ]),
     ).resolves.toBe(true);
 
-    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+      projectRoot,
+      owner,
+    );
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
     expectRefreshedOnce(config);
     expect(

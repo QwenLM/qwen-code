@@ -2831,7 +2831,7 @@ async function resolvePreferredMemoryFile(
 
 async function resolveQwenMemoryPaths(params: {
   cwd: string;
-  projectRoot: string;
+  autoMemoryDir: string;
 }): Promise<QwenMemoryPaths> {
   const fallbackFilename = getAllMemoryFilenames()[0] ?? 'QWEN.md';
   const userMemoryFile = await resolvePreferredMemoryFile(
@@ -2842,8 +2842,6 @@ async function resolveQwenMemoryPaths(params: {
     params.cwd,
     fallbackFilename,
   );
-  const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
-
   // Resolve-only: `getMemoryPaths` is a read query, so it must not create
   // files or directories as a side effect (the old code ran ensureMemoryFile
   // + fs.mkdir on every call, including against a client-controlled
@@ -2852,7 +2850,7 @@ async function resolveQwenMemoryPaths(params: {
   return {
     userMemoryFile,
     projectMemoryFile,
-    autoMemoryDir,
+    autoMemoryDir: params.autoMemoryDir,
   };
 }
 
@@ -7097,18 +7095,7 @@ class QwenAgent implements Agent {
         sessionPath,
         (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
         config.getSessionId(),
-        this.isTrustedManagedParent() ? undefined : config.getTargetDir(),
       );
-      if (
-        restored.session &&
-        restored.canonicalWorktree &&
-        !this.isTrustedManagedParent()
-      ) {
-        await config.enterProjectWorktree(
-          restored.session.worktreePath,
-          restored.canonicalWorktree,
-        );
-      }
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
       }
@@ -10616,16 +10603,15 @@ class QwenAgent implements Agent {
         return {
           paths: await this.runWithPinnedRuntimeBaseDirForRequest(
             settingsCwd,
-            () => {
-              const readPaths = () =>
-                resolveQwenMemoryPaths({
-                  cwd: settingsCwd,
-                  projectRoot: memoryConfig?.getProjectRoot() ?? projectRoot,
-                });
-              return memoryConfig?.runWithProjectMemoryOwner
-                ? memoryConfig.runWithProjectMemoryOwner(readPaths)
-                : readPaths();
-            },
+            () =>
+              resolveQwenMemoryPaths({
+                cwd: settingsCwd,
+                autoMemoryDir:
+                  memoryConfig?.getProjectAutoMemoryRoot?.() ??
+                  getAutoMemoryRoot(
+                    memoryConfig?.getProjectRoot() ?? projectRoot,
+                  ),
+              }),
           ),
         };
       }

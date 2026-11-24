@@ -316,7 +316,7 @@ interface ActionModal {
   kind: 'action';
   id: number;
   prompt: ReactNode;
-  reviewText?: string;
+  allowHistoryScroll?: boolean;
   resolve: (confirmed: boolean) => void;
 }
 
@@ -688,7 +688,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         prompt: ReactNode,
         options?: Pick<
           ConfirmationRequest,
-          'signal' | 'isCurrent' | 'reviewText'
+          'signal' | 'isCurrent' | 'allowHistoryScroll'
         >,
       ) =>
         new Promise<boolean>((resolve) => {
@@ -724,7 +724,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               kind: 'action',
               id,
               prompt,
-              reviewText: options?.reviewText,
+              allowHistoryScroll: options?.allowHistoryScroll,
               resolve: (confirmed) => finish(confirmed),
             },
           ]);
@@ -893,13 +893,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // whether Tab was already spent on a completion.
   useKeyboard((key: KeyEvent) => {
     const historyScroll = historyScrollRef.current;
+    const reviewingHistory =
+      activeModal?.kind === 'action' && activeModal.allowHistoryScroll;
     if (
-      props.screenReader &&
+      (props.screenReader || reviewingHistory) &&
       historyScroll &&
       key.eventType !== 'release' &&
       !shellFocused &&
       !dialog &&
-      !activeModal &&
+      (!activeModal || reviewingHistory) &&
       !activeToolCall &&
       !mcpApproval.isMcpApprovalDialogOpen &&
       !hooksApproval.isProjectHooksApprovalDialogOpen
@@ -1959,8 +1961,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               <OpenTuiActionConfirmation
                 key={`action-${activeModal.id}`}
                 prompt={activeModal.prompt}
-                reviewText={activeModal.reviewText}
-                availableTerminalHeight={dialogRegionHeight}
                 onResolve={(confirmed) =>
                   closeActionModal(activeModal, confirmed)
                 }

@@ -4,11 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
-import { lstatSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { setTimeout } from 'node:timers/promises';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { openNoFollow } from '../utils/no-follow-open.js';
@@ -18,23 +15,18 @@ import {
   AUTO_MEMORY_METADATA_FILENAME,
   getAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import type { AutoMemoryExtractCursor, AutoMemoryMetadata } from './types.js';
 
 const pending = new Map<string, Promise<unknown>>();
-const activeCommit = new AsyncLocalStorage<() => void>();
-
-export function assertProjectMemoryCommit(): void {
-  const assertOwned = activeCommit.getStore();
-  if (!assertOwned) throw new Error('Project memory commit lock is not held.');
-  assertOwned();
-}
 
 async function trustedStateDirectory(
   root: string,
   create: boolean,
+  owner?: ProjectMemoryOwner,
 ): Promise<string> {
-  const anchor = getMemoryRootTrustedAnchor(root);
+  const anchor = getMemoryRootTrustedAnchor(root, owner);
   if (create) await fs.mkdir(anchor, { recursive: true });
   let directory = await fs.realpath(anchor);
   const parent = path.dirname(root);
@@ -62,8 +54,12 @@ async function trustedStateDirectory(
   return directory;
 }
 
-async function readState<T>(root: string, filename: string): Promise<T> {
-  const directory = await trustedStateDirectory(root, false);
+async function readState<T>(
+  root: string,
+  filename: string,
+  owner?: ProjectMemoryOwner,
+): Promise<T> {
+  const directory = await trustedStateDirectory(root, false, owner);
   const file = path.join(directory, filename);
   if (!(await fs.lstat(file)).isFile()) {
     throw new Error(`Project memory state requires a regular file: ${file}`);
@@ -79,89 +75,28 @@ async function readState<T>(root: string, filename: string): Promise<T> {
   }
 }
 
-export async function withProjectMemoryExtraction<T>(
-  memoryRoot: string,
-  signal: AbortSignal | undefined,
-  operation: () => Promise<T>,
-): Promise<T> {
-  signal?.throwIfAborted();
-  const target = path.join(
-    await trustedStateDirectory(memoryRoot, true),
-    `.${path.basename(memoryRoot)}-extraction`,
-  );
-  while (true) {
-    signal?.throwIfAborted();
-    let release: () => Promise<void>;
-    try {
-      release = await lockfile.lock(target, { realpath: false });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ELOCKED') throw error;
-      await setTimeout(100, undefined, { signal });
-      continue;
-    }
-    try {
-      signal?.throwIfAborted();
-      return await operation();
-    } finally {
-      await release();
-    }
-  }
-}
-
 export async function withProjectMemoryCommit<T>(
   memoryRoot: string,
   operation: () => Promise<T>,
+  owner?: ProjectMemoryOwner,
 ): Promise<T> {
-  if (activeCommit.getStore()) {
-    throw new Error('Project memory commit locks cannot be nested.');
-  }
   const queueKey = getProjectMemoryQueueKey(memoryRoot);
   const previous = pending.get(queueKey) ?? Promise.resolve();
   const next = previous
     .catch(() => undefined)
     .then(async () => {
       const target = path.join(
-        await trustedStateDirectory(memoryRoot, true),
+        await trustedStateDirectory(memoryRoot, true, owner),
         `.${path.basename(memoryRoot)}-commit`,
       );
-      let lost: Error | undefined;
       const release = await lockfile.lock(target, {
         realpath: false,
         retries: { retries: 120, minTimeout: 10, maxTimeout: 100 },
-        onCompromised: (error) => {
-          lost = error;
-        },
       });
-      const lockPath = `${target}.lock`;
-      const original = lstatSync(lockPath, { bigint: true });
-      const assertOwned = () => {
-        if (lost) throw lost;
-        const current = lstatSync(lockPath, {
-          bigint: true,
-          throwIfNoEntry: false,
-        });
-        if (
-          !current?.isDirectory() ||
-          current.dev !== original.dev ||
-          current.ino !== original.ino ||
-          current.birthtimeNs !== original.birthtimeNs
-        ) {
-          lost = new Error(
-            'Project memory commit lock changed before publication.',
-          );
-          throw lost;
-        }
-      };
       try {
-        return await activeCommit.run(assertOwned, operation);
+        return await operation();
       } finally {
-        // A stale holder must not try to remove the successor's lock directory.
-        try {
-          assertOwned();
-        } catch (error) {
-          lost = error as Error;
-        }
-        if (!lost) await release();
+        await release();
       }
     });
   pending.set(queueKey, next);
@@ -178,11 +113,13 @@ export function getProjectMemoryQueueKey(memoryRoot: string): string {
 
 export async function readProjectMemoryCursor(
   memoryRoot: string,
+  owner?: ProjectMemoryOwner,
 ): Promise<AutoMemoryExtractCursor | undefined> {
   try {
     return await readState<AutoMemoryExtractCursor>(
       memoryRoot,
       AUTO_MEMORY_EXTRACT_CURSOR_FILENAME,
+      owner,
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -200,17 +137,15 @@ export function writeProjectMemoryCursorLocked(
     {
       encoding: 'utf-8',
       noFollow: true,
-      requireAtomic: true,
-      assertCanCommit: assertProjectMemoryCommit,
     },
   );
 }
 
 export async function markProjectMemoryIndexPendingLocked(
   memoryRoot: string,
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
-  assertProjectMemoryCommit();
-  const cursor = (await readProjectMemoryCursor(memoryRoot)) ?? {
+  const cursor = (await readProjectMemoryCursor(memoryRoot, owner)) ?? {
     updatedAt: new Date(0).toISOString(),
   };
   if (!cursor.projectIndexRebuildPending) {
@@ -225,34 +160,44 @@ export async function updateProjectMemoryMetadata(
   projectRoot: string,
   now: Date,
   update: (metadata: AutoMemoryMetadata) => void,
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
-  const root = getAutoMemoryRoot(projectRoot);
-  await withProjectMemoryCommit(root, async () => {
-    const filePath = path.join(
-      path.dirname(root),
-      AUTO_MEMORY_METADATA_FILENAME,
-    );
-    const metadata = await readState<AutoMemoryMetadata>(
-      root,
-      AUTO_MEMORY_METADATA_FILENAME,
-    );
-    update(metadata);
-    const updatedAt = now.toISOString();
-    if (updatedAt > metadata.updatedAt) metadata.updatedAt = updatedAt;
-    await atomicWriteFile(filePath, `${JSON.stringify(metadata, null, 2)}\n`, {
-      encoding: 'utf-8',
-      noFollow: true,
-      requireAtomic: true,
-      assertCanCommit: assertProjectMemoryCommit,
-    });
-  });
+  const root = getAutoMemoryRoot(projectRoot, owner);
+  await withProjectMemoryCommit(
+    root,
+    async () => {
+      const filePath = path.join(
+        path.dirname(root),
+        AUTO_MEMORY_METADATA_FILENAME,
+      );
+      const metadata = await readState<AutoMemoryMetadata>(
+        root,
+        AUTO_MEMORY_METADATA_FILENAME,
+        owner,
+      );
+      update(metadata);
+      const updatedAt = now.toISOString();
+      if (updatedAt > metadata.updatedAt) metadata.updatedAt = updatedAt;
+      await atomicWriteFile(
+        filePath,
+        `${JSON.stringify(metadata, null, 2)}\n`,
+        {
+          encoding: 'utf-8',
+          noFollow: true,
+        },
+      );
+    },
+    owner,
+  );
 }
 
 export function readProjectMemoryMetadata(
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): Promise<AutoMemoryMetadata> {
   return readState<AutoMemoryMetadata>(
-    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryRoot(projectRoot, owner),
     AUTO_MEMORY_METADATA_FILENAME,
+    owner,
   );
 }

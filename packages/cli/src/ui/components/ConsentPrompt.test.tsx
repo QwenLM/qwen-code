@@ -5,7 +5,6 @@
  */
 
 import { Text } from 'ink';
-import { act } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { ConsentPrompt } from './ConsentPrompt.js';
@@ -173,36 +172,6 @@ describe('ConsentPrompt', () => {
 
     expect(MockedMarkdownDisplay).not.toHaveBeenCalled();
     expect(lastFrame()).toContain('Are you sure?');
-  });
-
-  it('pages through a long review without truncating the final changes', async () => {
-    const review = Array.from(
-      { length: 28 },
-      (_, index) => `Topic ${index + 1}`,
-    ).join('\n');
-    const { lastFrame } = render(
-      <ConsentPrompt
-        prompt="Apply these changes?"
-        reviewText={review}
-        onConfirm={onConfirm}
-        terminalWidth={80}
-        availableTerminalHeight={19}
-      />,
-    );
-    expect(lastFrame()).toContain('Page 1/3');
-    expect(lastFrame()).not.toContain('Topic 28');
-
-    const press = async (name: string) => {
-      const [handleKeypress] = vi.mocked(useKeypress).mock.lastCall!;
-      await act(async () => handleKeypress({ name } as Key));
-    };
-    await press('pagedown');
-    await press('pagedown');
-    expect(lastFrame()).toContain('Topic 28');
-    expect(lastFrame()).toContain('Page 3/3');
-    expect(onConfirm).not.toHaveBeenCalled();
-    await press('pageup');
-    expect(lastFrame()).toContain('Page 2/3');
   });
 
   it('calls onConfirm with true when "Yes" is selected', () => {

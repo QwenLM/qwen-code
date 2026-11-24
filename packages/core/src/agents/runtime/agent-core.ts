@@ -36,11 +36,6 @@ import {
 } from '../../utils/subagentNameContext.js';
 import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
-import {
-  getBoundProjectMemoryOwner,
-  runWithProjectMemoryOwner,
-  type ProjectMemoryOwner,
-} from '../../memory/paths.js';
 import { logAgentLoopEntry } from '../../config/agent-loop-rollout.js';
 import {
   getCurrentAgentDepth,
@@ -532,7 +527,6 @@ export class AgentCore {
   private promptOrdinal = 0;
   readonly subagentId: string;
   private readonly hookExecutionOwner: HookExecutionOwner | undefined;
-  private readonly projectMemoryOwner?: ProjectMemoryOwner;
   readonly name: string;
   /** Business/task name used for local per-invocation usage labels. */
   readonly taskName?: string;
@@ -626,9 +620,6 @@ export class AgentCore {
       runtimeContext,
       subagentId,
     );
-    this.projectMemoryOwner =
-      getBoundProjectMemoryOwner(runtimeContext.getProjectRoot?.()) ??
-      runtimeContext.getProjectMemoryOwner?.();
     this.name = name;
     this.taskName = taskName;
     this.runtimeContext = runtimeContext;
@@ -1011,9 +1002,7 @@ export class AgentCore {
   }
 
   runInHookFrame<T>(fn: () => T): T {
-    const owner = this.projectMemoryOwner;
-    const run = () => runWithHookExecutionOwner(this.hookExecutionOwner, fn);
-    return owner ? runWithProjectMemoryOwner(() => owner, run) : run();
+    return runWithHookExecutionOwner(this.hookExecutionOwner, fn);
   }
 
   /**

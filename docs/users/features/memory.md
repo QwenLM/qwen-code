@@ -109,7 +109,7 @@ The project budget includes its trailing notices. User and team indexes can disp
 
 #### Bringing in memory from an older worktree
 
-Run `/memory migrate-worktree <old path>` in an interactive session to review useful topics from a single older library. Use the former checkout path or its memory directory under the active memory base. Qwen shows the source, destination, proposed changes and conflicts before asking for confirmation. Approval applies the changes to the current workspace's project memory. The original library stays available.
+Run `/memory migrate-worktree <old path>` in an interactive session to review useful topics from a single older library. Use the former checkout path or its memory directory under the active memory base. Qwen shows the source, destination, proposed changes and conflicts before asking for confirmation. Approval applies the changes to the current workspace's project memory. The original library stays available. Both libraries must fit within the model's context window and the 512 KiB migration input limit. The model can return up to 8,192 output tokens per proposal.
 
 #### Pinned memory
 

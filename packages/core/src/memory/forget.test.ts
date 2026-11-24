@@ -172,7 +172,7 @@ it('preserves a project topic edited after /forget selected it', async () => {
 
     const result = await forgetManagedAutoMemoryMatches(
       projectRoot,
-      selection.matches,
+      selection.matches.map((match) => ({ ...match })),
     );
 
     expect(result.removedEntries).toEqual([]);
@@ -500,6 +500,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       '/tmp/project',
       undefined,
       false,
+      undefined,
+      undefined,
     );
   });
 
@@ -916,10 +918,20 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       }
       scans([]);
 
+      const projectDocument = parseAutoMemoryTopicDocument(
+        projectFile,
+        await fs.readFile(projectFile, 'utf-8'),
+        0,
+        relativePath,
+        'project',
+      );
       const result = await forgetManagedAutoMemoryMatches(
         projectRoot,
         [
-          match('project', 'Forget this project memory', projectFile),
+          {
+            ...match('project', 'Forget this project memory', projectFile),
+            sourceHash: projectDocument?.sourceHash,
+          },
           match('user', 'Forget this user memory', userFile),
         ],
         NOW,

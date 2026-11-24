@@ -25,11 +25,15 @@ import {
   captureRuntimeFileVersion,
   writeRuntimeFile,
 } from '../sandbox/runtime-file.js';
-import type { SandboxFileVersion } from '../sandbox/file-version.js';
+import {
+  getSandboxFileVersion,
+  type SandboxFileVersion,
+} from '../sandbox/file-version.js';
 import {
   getAutoMemoryRoot,
   isAnyAutoMemPath,
   isTeamAutoMemPath,
+  type ProjectMemoryOwner,
 } from '../memory/paths.js';
 import {
   commitProjectMemoryWrite,
@@ -45,6 +49,7 @@ import {
   needsUtf8Bom,
   detectLineEnding,
   ensureCrlfLineEndings,
+  encodeTextFileContentAsync,
 } from '../services/fileSystemService.js';
 import type {
   LineEnding,
@@ -175,6 +180,7 @@ export interface EditToolParams {
 interface CalculatedEdit {
   sandboxFileVersion?: SandboxFileVersion | null;
   projectMemoryRoot?: string;
+  owner?: ProjectMemoryOwner;
   currentContent: string | null;
   newContent: string;
   occurrences: number;
@@ -193,8 +199,6 @@ interface CalculatedEdit {
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   private confirmationCompleted = false;
   private confirmedStaleSnapshot?: StaleFileSnapshot;
-  private confirmedProjectRoot?: string;
-  private confirmedProjectVersion?: SandboxFileVersion | null;
 
   constructor(
     private readonly config: Config,
@@ -248,29 +252,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     params: EditToolParams,
     original?: TextFileObservation,
     signal?: AbortSignal,
-    projectVersion?: SandboxFileVersion | null,
   ): Promise<CalculatedEdit> {
-    const projectMemoryRoot = getProjectMemoryWriteRoot(
-      getAutoMemoryRoot(this.config.getProjectRoot()),
-      params.file_path,
-      !this.config.getFileSystemService().textFileIo,
-    );
-    if (
-      this.confirmedProjectRoot &&
-      this.confirmedProjectRoot !== projectMemoryRoot
-    ) {
-      throw new Error(
-        'Project memory location changed after edit confirmation.',
-      );
-    }
-    const sandboxFileVersion =
-      projectVersion !== undefined
-        ? projectVersion
-        : captureRuntimeFileVersion(
-            this.config,
+    const owner = this.config.getProjectMemoryOwner?.();
+    const projectMemoryRoot =
+      this.config.getFileSystemService().textFileIo ||
+      this.config.getShellExecutionSandbox?.()
+        ? undefined
+        : getProjectMemoryWriteRoot(
+            getAutoMemoryRoot(this.config.getProjectRoot(), owner),
             params.file_path,
-            projectMemoryRoot !== undefined,
           );
+    const sandboxFileVersion = projectMemoryRoot
+      ? getSandboxFileVersion(params.file_path)
+      : captureRuntimeFileVersion(this.config, params.file_path);
     const observation =
       original ??
       (await this.config
@@ -592,6 +586,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       newContent,
       sandboxFileVersion,
       projectMemoryRoot,
+      owner,
       occurrences,
       error,
       isNewFile,
@@ -631,7 +626,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (isTeamAutoMemPath(filePath, projectRoot)) {
       return 'ask';
     }
-    if (isAnyAutoMemPath(filePath, projectRoot)) {
+    if (
+      isAnyAutoMemPath(
+        filePath,
+        projectRoot,
+        this.config.getProjectMemoryOwner?.(),
+      )
+    ) {
       return 'allow';
     }
     return 'ask';
@@ -669,10 +670,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
     this.confirmationCompleted = true;
     this.confirmedStaleSnapshot = editData.staleSnapshot;
-    this.confirmedProjectRoot = editData.projectMemoryRoot;
-    this.confirmedProjectVersion = editData.projectMemoryRoot
-      ? editData.sandboxFileVersion
-      : undefined;
 
     const fileName = path.basename(this.params.file_path);
     const fileDiff = createPatchSmart(
@@ -729,26 +726,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
       const io = this.config.getFileSystemService().textFileIo;
-      if (!io) {
-        return await this.executeObserved(
-          signal,
-          undefined,
-          this.confirmedProjectVersion,
-        );
-      }
-      const file = this.params.file_path;
-      if (
-        getProjectMemoryWriteRoot(
-          getAutoMemoryRoot(this.config.getProjectRoot()),
-          file,
-          false,
-        )
-      ) {
-        throw new Error('Project memory requires an atomic file writer.');
-      }
-      return await io.withMutation(file, signal, (mutation) =>
-        this.executeObserved(signal, mutation, this.confirmedProjectVersion),
-      );
+      return io
+        ? await io.withMutation(this.params.file_path, signal, (mutation) =>
+            this.executeObserved(signal, mutation),
+          )
+        : await this.executeObserved(signal);
     } catch (error) {
       if (signal.aborted) throw error;
       return this.writeFailure(error);
@@ -758,7 +740,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   private async executeObserved(
     signal: AbortSignal,
     mutation?: TextFileMutation,
-    projectVersion?: SandboxFileVersion | null,
   ): Promise<ToolResult> {
     let editData: CalculatedEdit;
     try {
@@ -766,7 +747,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         this.params,
         mutation?.original,
         signal,
-        projectVersion,
       );
     } catch (error) {
       if (signal.aborted) {
@@ -887,31 +867,40 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // directories on the failure path — a real (if minor) FS
       // litter that the previous order created on every rejected
       // edit.
+      if (
+        !mutation &&
+        !editData.projectMemoryRoot &&
+        !this.config.getShellExecutionSandbox?.()
+      ) {
+        this.ensureParentDirectoriesExist(this.params.file_path);
+      }
+
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
       let committedStats: Stats | undefined;
       const write = async (params: Parameters<typeof writeRuntimeFile>[1]) => {
-        await commitProjectMemoryWrite(
-          editData.projectMemoryRoot,
-          params.path,
-          editData.sandboxFileVersion,
-          async (assertCanCommit) => {
-            if (!mutation && !this.config.getShellExecutionSandbox?.()) {
-              this.ensureParentDirectoriesExist(this.params.file_path);
-            }
-            const request = assertCanCommit
-              ? { ...params, assertCanCommit }
-              : params;
-            if (mutation) committedStats = await mutation.write(request);
-            else
-              await writeRuntimeFile(
-                this.config,
-                request,
-                editData.sandboxFileVersion,
-                signal,
-              );
-          },
-        );
+        if (mutation) {
+          committedStats = await mutation.write(params);
+        } else if (editData.projectMemoryRoot) {
+          await commitProjectMemoryWrite(
+            editData.projectMemoryRoot,
+            params.path,
+            editData.sandboxFileVersion,
+            await encodeTextFileContentAsync(
+              params.path,
+              params.content,
+              params._meta,
+            ),
+            editData.owner,
+          );
+        } else {
+          await writeRuntimeFile(
+            this.config,
+            params,
+            editData.sandboxFileVersion,
+            signal,
+          );
+        }
       };
       if (editData.isNewFile) {
         const userEncoding = this.config.getDefaultFileEncoding();
@@ -1204,7 +1193,10 @@ Expectation for required parameters:
       return `File path must be absolute: ${params.file_path}`;
     }
     const indexError = projectMemoryIndexWriteError(
-      getAutoMemoryRoot(this.config.getProjectRoot()),
+      getAutoMemoryRoot(
+        this.config.getProjectRoot(),
+        this.config.getProjectMemoryOwner?.(),
+      ),
       params.file_path,
       !this.config.getFileSystemService().textFileIo,
     );

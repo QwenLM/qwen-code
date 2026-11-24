@@ -1342,35 +1342,6 @@ describe('restoreWorktreeContext', () => {
     expect(warnings).toHaveLength(1);
   });
 
-  it('refuses a saved worktree that has become a symlink outside its workspace', async () => {
-    const checkout = path.join(tmpDir, 'checkout');
-    const worktree = path.join(checkout, '.qwen', 'worktrees', 'task');
-    const outside = path.join(tmpDir, 'outside');
-    await fs.mkdir(path.dirname(worktree), { recursive: true });
-    await fs.mkdir(outside);
-    await fs.symlink(outside, worktree, 'junction');
-    await writeWorktreeSession(filePath, {
-      ...sample,
-      originalCwd: checkout,
-      worktreePath: worktree,
-    });
-
-    const onWarn = vi.fn();
-    const result = await restoreWorktreeContext(
-      filePath,
-      onWarn,
-      'session-owner',
-      checkout,
-    );
-    expect(result.session).toBeNull();
-    expect(onWarn).toHaveBeenCalledWith(
-      expect.any(WorktreeRestoreRefusedError),
-    );
-    await expect(
-      fs.stat(path.join(outside, '.qwen-session')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
   it('cleans up stale sidecar when worktree dir is gone', async () => {
     // sample.worktreePath points at /repo/.qwen/... which does not exist.
     await writeWorktreeSession(filePath, sample);

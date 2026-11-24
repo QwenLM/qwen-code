@@ -157,7 +157,10 @@ describe('remember memory helper', () => {
   // rebuilt; user `undefined`: unchecked.
   const expectRebuilt = (managed: boolean, user?: boolean) => {
     if (managed) {
-      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+        projectRoot,
+        undefined,
+      );
     } else {
       expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
     }

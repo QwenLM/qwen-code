@@ -16,7 +16,6 @@ import {
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
   getAutoMemoryTopicPath,
-  runWithProjectMemoryOwner,
   clearAutoMemoryRootCache,
 } from './paths.js';
 import {
@@ -152,24 +151,19 @@ describe('auto-memory storage scaffold', () => {
     },
   );
 
-  it('applies the scoped owner and its runtime base only to managed memory', () => {
+  it('applies the explicit owner and its runtime base to managed memory', () => {
     useRuntimeDir();
     const owner = {
       cwd: path.join(tempDir, 'owner'),
       memoryBaseDir: path.join(tempDir, 'owner-runtime'),
     };
     const worktree = path.join(tempDir, 'worktree');
-    runWithProjectMemoryOwner(
-      () => owner,
-      () => {
-        expect(getAutoMemoryRoot(worktree)).toBe(
-          managedRoot(owner.memoryBaseDir, owner.cwd),
-        );
-        process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-        expect(getAutoMemoryRoot(worktree)).toBe(
-          path.join(worktree, '.qwen', 'memory'),
-        );
-      },
+    expect(getAutoMemoryRoot(worktree, owner)).toBe(
+      managedRoot(owner.memoryBaseDir, owner.cwd),
+    );
+    vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+    expect(getAutoMemoryRoot(worktree, owner)).toBe(
+      path.join(worktree, '.qwen', 'memory'),
     );
   });
 

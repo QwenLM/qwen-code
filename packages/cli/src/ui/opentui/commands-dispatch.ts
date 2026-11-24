@@ -29,6 +29,7 @@
 
 import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { PartListUnion } from '@google/genai';
+import { createElement } from 'react';
 import {
   createDebugLogger,
   logSlashCommand,
@@ -950,12 +951,15 @@ export class OpenTuiSlashDispatcher {
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
-            confirmAction: (title, content) =>
-              this.host.presentActionConfirmation(title, {
-                signal: abortController.signal,
-                isCurrent: () => this.activeCommand === activeCommand,
-                reviewText: content,
-              }),
+            confirmAction: (title) =>
+              this.host.presentActionConfirmation(
+                createElement('text', null, title),
+                {
+                  signal: abortController.signal,
+                  isCurrent: () => this.activeCommand === activeCommand,
+                  allowHistoryScroll: true,
+                },
+              ),
             beginCommit: () => {
               if (
                 this.activeCommand !== activeCommand ||

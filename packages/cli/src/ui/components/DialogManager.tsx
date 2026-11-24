@@ -181,14 +181,13 @@ export const DialogManager = ({
     return (
       <ConsentPrompt
         prompt={uiState.confirmationRequest.prompt}
-        reviewText={uiState.confirmationRequest.reviewText}
         onConfirm={uiState.confirmationRequest.onConfirm}
         dismissOnEscape
         terminalWidth={terminalWidth}
         availableTerminalHeight={
-          uiState.confirmationRequest.reviewText === undefined
-            ? constrainedDialogHeight
-            : dialogMaxHeight
+          uiState.confirmationRequest.allowHistoryScroll
+            ? undefined
+            : constrainedDialogHeight
         }
       />
     );

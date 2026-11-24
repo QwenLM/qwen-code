@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
+import { getAutoMemoryRoot, Storage } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
@@ -26,19 +28,55 @@ export const dreamCommand: SlashCommand = {
     }
 
     try {
-      const result = await config
+      const projectRoot = config.getProjectRoot();
+      const owner = config.getProjectMemoryOwner?.();
+      const sessionId = config.getSessionId();
+
+      // Structured recall mode forbids the main model from touching
+      // managed-memory paths with general file tools, which the prompt-
+      // submission consolidation flow requires — run the runtime-managed
+      // dream (forked agent + operations apply + index rebuild) instead.
+      if (config.getMemoryRecallMode?.() === 'structured') {
+        const result = await config
+          .getMemoryManager()
+          .runManualDream(
+            projectRoot,
+            config,
+            sessionId,
+            undefined,
+            context.abortSignal,
+          );
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: result.systemMessage ?? t('Dream completed.'),
+        };
+      }
+
+      const memoryRoot = getAutoMemoryRoot(projectRoot, owner);
+      const transcriptDir = path.join(
+        new Storage(projectRoot).getProjectDir(),
+        'chats',
+      );
+
+      const prompt = config
         .getMemoryManager()
-        .runManualDream(
-          config.getProjectRoot(),
-          config,
-          config.getSessionId(),
-          undefined,
-          context.abortSignal,
-        );
+        .buildConsolidationPrompt(memoryRoot, transcriptDir);
+
+      const recordDream = async () =>
+        config
+          .getMemoryManager()
+          .writeDreamManualRun(projectRoot, sessionId, undefined, owner);
+
+      if (context.executionMode === 'acp') {
+        recordDream().catch(() => {});
+        return { type: 'submit_prompt', content: prompt };
+      }
+
       return {
-        type: 'message',
-        messageType: 'info',
-        content: result.systemMessage ?? t('Dream completed.'),
+        type: 'submit_prompt',
+        content: prompt,
+        onComplete: recordDream,
       };
     } catch (error) {
       return {

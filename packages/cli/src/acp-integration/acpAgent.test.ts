@@ -22590,6 +22590,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // still resolves the admission worktree root — that stable root, not the
     // live cwd, is what the handlers must load settings for.
     const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
+    const autoMemoryDir = '/runtime/projects/launch/memory';
     (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
       'worktree-session',
       {
@@ -22600,6 +22601,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .fn()
             .mockReturnValue(`${worktreeRoot}/packages/core`),
           getProjectRoot: () => `${worktreeRoot}/packages/core`,
+          getProjectAutoMemoryRoot: () => autoMemoryDir,
           storage: { getProjectRoot: () => worktreeRoot },
         }),
       },
@@ -22676,10 +22678,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // than the daemon's boot directory.
     const memoryPaths = (await agent.extMethod('qwen/settings/getMemoryPaths', {
       sessionId: 'worktree-session',
-    })) as { paths: { projectMemoryFile: string } };
+    })) as { paths: { projectMemoryFile: string; autoMemoryDir: string } };
     expect(memoryPaths.paths.projectMemoryFile).toBe(
       path.join(worktreeRoot, 'QWEN.md'),
     );
+    expect(memoryPaths.paths.autoMemoryDir).toBe(autoMemoryDir);
 
     // An explicit cwd still wins over the session target dir.
     await agent.extMethod('qwen/settings/getCore', { cwd: '/explicit' });

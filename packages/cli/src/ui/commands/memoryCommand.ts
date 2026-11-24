@@ -11,6 +11,7 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { MessageType } from '../types.js';
 import { sanitizeTerminalLine } from '../utils/textUtils.js';
 
 const MIGRATE_WORKTREE = 'migrate-worktree';
@@ -92,8 +93,15 @@ async function migrateWorktree(
       ),
       ...conflicts,
     ].join('\n');
+    const title = t('Apply these project memory changes?');
+    const interactive = context.executionMode === 'interactive';
+    if (interactive) {
+      context.ui.addItem({ type: MessageType.INFO, text: preview }, Date.now());
+    }
     const confirmed = await context.confirmAction(
-      t('Apply these project memory changes?'),
+      interactive
+        ? `${title}\n\n${t('Use Page Up or Page Down to review the preview above.')}`
+        : title,
       preview,
     );
     if (!confirmed || signal.aborted || context.beginCommit?.() === false) {

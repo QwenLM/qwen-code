@@ -161,7 +161,7 @@ export async function applyDreamOperations(
   memoryRoot: string,
   beforeSnapshot: ReadonlyMap<string, { readonly content: string }>,
   abortSignal?: AbortSignal,
-  projectCommit?: { beforeDelete: () => Promise<void>; assert: () => void },
+  beforeDelete?: () => Promise<void>,
 ): Promise<AppliedDreamOperations> {
   const manifestPath = path.join(memoryRoot, DREAM_OPERATIONS_FILENAME);
   let raw: string;
@@ -261,10 +261,9 @@ export async function applyDreamOperations(
       }
     }
 
-    if (resolvedDeletes.length > 0) await projectCommit?.beforeDelete();
+    if (resolvedDeletes.length > 0) await beforeDelete?.();
     for (const { filePath } of resolvedDeletes) {
       abortSignal?.throwIfAborted();
-      projectCommit?.assert();
       await fs.unlink(filePath);
     }
 

@@ -205,6 +205,7 @@ describe('auto-memory extraction', () => {
       projectRoot,
       skippedHistory,
       undefined,
+      undefined,
     );
     const cursor = JSON.parse(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
@@ -257,6 +258,7 @@ describe('auto-memory extraction', () => {
       mockConfig,
       projectRoot,
       skippedHistory,
+      undefined,
       undefined,
     );
     const cursor = JSON.parse(
@@ -532,7 +534,10 @@ describe('auto-memory extraction', () => {
         }),
       ).rejects.toBe(error);
 
-      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+        projectRoot,
+        undefined,
+      );
       expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
       expect(refreshMemoryInstruction).toHaveBeenCalledOnce();
       expect(await readCursor()).toEqual(cursorBefore);
@@ -559,7 +564,10 @@ describe('auto-memory extraction', () => {
         }),
       ).rejects.toBe(error);
 
-      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+        projectRoot,
+        undefined,
+      );
       expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledOnce();
       expect(await readCursor()).toEqual({
         ...cursorBefore,

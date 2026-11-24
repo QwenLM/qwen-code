@@ -1178,40 +1178,6 @@ export const AppContainer = (props: AppContainerProps) => {
     (async () => {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
-      const resumedSessionData = config.getResumedSessionData();
-      let worktreeNotice = config.consumePendingStartupWorktreeNotice();
-      let worktreeWarning: string | undefined;
-      if (
-        resumedSessionData &&
-        !worktreeNotice &&
-        !config.getShellExecutionSandbox?.()
-      ) {
-        try {
-          const sessionId = config.getSessionId();
-          const restored = await restoreWorktreeContext(
-            config.getSessionService().getWorktreeSessionPath(sessionId),
-            (error) => {
-              if (error instanceof WorktreeRestoreRefusedError) {
-                worktreeWarning = error.message;
-              } else {
-                debugLogger.debug('worktree session restore warning:', error);
-              }
-            },
-            sessionId,
-            config.getTargetDir(),
-          );
-          if (restored.session && restored.canonicalWorktree) {
-            await config.enterProjectWorktree(
-              restored.session.worktreePath,
-              restored.canonicalWorktree,
-            );
-          }
-          worktreeNotice = restored.contextMessage;
-        } catch (error) {
-          debugLogger.debug('worktree session restore failed:', error);
-        }
-      }
-      pendingWorktreeNoticeRef.current = worktreeNotice;
       // Bound the goal-runtime gate: under session-writer lease contention
       // (a crashed/sibling process holding the lease) getGoalRuntimeReady()
       // never settles, which used to hang startup here and leave the command
@@ -1269,6 +1235,22 @@ export const AppContainer = (props: AppContainerProps) => {
       // the profile captures the full MCP timeline without holding back
       // the user-facing TTI.
 
+      // Phase D-1: when launched with --worktree, llm.tsx stashes a
+      // one-shot notice on Config. Consume it here so it surfaces in the
+      // transcript AND gets injected into the next user prompt. This
+      // wins over the Phase C resume-restore path below — startup beats
+      // resume on the same prompt.
+      const startupWorktreeNotice =
+        config.consumePendingStartupWorktreeNotice();
+      if (startupWorktreeNotice) {
+        historyManager.addItem(
+          { type: MessageType.INFO, text: startupWorktreeNotice },
+          Date.now(),
+        );
+        pendingWorktreeNoticeRef.current = startupWorktreeNotice;
+      }
+
+      const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
         const rawItems = buildResumedHistoryItems(resumedSessionData, config);
         const collapseOnResume =
@@ -1290,18 +1272,6 @@ export const AppContainer = (props: AppContainerProps) => {
             config.getSessionId(),
           ),
           computeResumedUserTurnCount(resumedSessionData.conversation.messages),
-        );
-      }
-      if (worktreeWarning) {
-        historyManager.addItem(
-          { type: MessageType.WARNING, text: worktreeWarning },
-          Date.now(),
-        );
-      }
-      if (worktreeNotice) {
-        historyManager.addItem(
-          { type: MessageType.INFO, text: worktreeNotice },
-          Date.now(),
         );
       }
 
@@ -1340,6 +1310,56 @@ export const AppContainer = (props: AppContainerProps) => {
           .getSessionTitle(config.getSessionId());
         if (title) {
           setSessionName(title);
+        }
+
+        // Restore worktree context (shared logic — headless and ACP use
+        // the same helper). Stale sidecars get cleaned up; live ones
+        // produce an INFO message the model sees on the next turn.
+        // Skipped when Phase D-1 already injected a --worktree startup
+        // notice above (startup wins over resume on the same prompt).
+        if (!startupWorktreeNotice && !config.getShellExecutionSandbox?.()) {
+          try {
+            const sessionPath = config
+              .getSessionService()
+              .getWorktreeSessionPath(config.getSessionId());
+            const restored = await restoreWorktreeContext(
+              sessionPath,
+              (err) => {
+                // An ownership refusal means the session loads WITHOUT its
+                // worktree binding — the model is never told the worktree
+                // exists, so later edits land in the original checkout.
+                // That must be visible, not a debug line.
+                if (err instanceof WorktreeRestoreRefusedError) {
+                  historyManager.addItem(
+                    { type: MessageType.WARNING, text: err.message },
+                    Date.now(),
+                  );
+                  return;
+                }
+                // eslint-disable-next-line no-console
+                console.debug('worktree session restore warning:', err);
+              },
+              config.getSessionId(),
+            );
+            if (restored.contextMessage) {
+              // UI: show the notice in the transcript so the user knows.
+              historyManager.addItem(
+                { type: MessageType.INFO, text: restored.contextMessage },
+                Date.now(),
+              );
+              // Model: queue the notice for one-shot injection into the
+              // next user prompt (consumed by handleFinalSubmit). The INFO
+              // history item alone is UI-only — the model never sees it,
+              // so without this it could resume editing the parent
+              // checkout despite the user seeing the worktree path.
+              pendingWorktreeNoticeRef.current = restored.contextMessage;
+            }
+          } catch (error) {
+            // Best-effort: failures here only affect UI hint visibility,
+            // not the resumed conversation itself.
+            // eslint-disable-next-line no-console
+            console.debug('worktree session restore failed:', error);
+          }
         }
       }
 

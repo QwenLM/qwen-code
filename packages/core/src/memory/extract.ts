@@ -8,7 +8,7 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
-import { getAutoMemoryRoot } from './paths.js';
+import { getAutoMemoryRoot, type ProjectMemoryOwner } from './paths.js';
 import {
   ensureAutoMemoryScaffold,
   ensureUserAutoMemoryScaffold,
@@ -25,7 +25,6 @@ import {
   readProjectMemoryCursor,
   updateProjectMemoryMetadata,
   withProjectMemoryCommit,
-  withProjectMemoryExtraction,
   writeProjectMemoryCursorLocked,
 } from './project-commit.js';
 import { type AutoMemoryExtractCursor, type AutoMemoryType } from './types.js';
@@ -77,37 +76,42 @@ async function writeExtractCursor(
   root: string,
   cursor: AutoMemoryExtractCursor,
   flushReplay = false,
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
-  await withProjectMemoryCommit(root, async () => {
-    const latest = (await readProjectMemoryCursor(root)) ?? {
-      updatedAt: cursor.updatedAt,
-    };
-    const sessions = new Map(Object.entries(latest.sessions ?? {}));
-    if (latest.sessionId && !sessions.has(latest.sessionId)) {
-      sessions.set(latest.sessionId, {
-        processedOffset: latest.processedOffset,
-        updatedAt: latest.updatedAt,
+  await withProjectMemoryCommit(
+    root,
+    async () => {
+      const latest = (await readProjectMemoryCursor(root, owner)) ?? {
+        updatedAt: cursor.updatedAt,
+      };
+      const sessions = new Map(Object.entries(latest.sessions ?? {}));
+      if (latest.sessionId && !sessions.has(latest.sessionId)) {
+        sessions.set(latest.sessionId, {
+          processedOffset: latest.processedOffset,
+          updatedAt: latest.updatedAt,
+        });
+      }
+      const sessionId = cursor.sessionId!;
+      const previous = sessions.get(sessionId);
+      if (flushReplay && previous) {
+        cursor.processedOffset = Math.max(
+          cursor.processedOffset ?? 0,
+          previous.processedOffset ?? 0,
+        );
+      }
+      sessions.delete(sessionId);
+      sessions.set(sessionId, {
+        processedOffset: cursor.processedOffset,
+        updatedAt: cursor.updatedAt,
       });
-    }
-    const sessionId = cursor.sessionId!;
-    const previous = sessions.get(sessionId);
-    if (flushReplay && previous) {
-      cursor.processedOffset = Math.max(
-        cursor.processedOffset ?? 0,
-        previous.processedOffset ?? 0,
-      );
-    }
-    sessions.delete(sessionId);
-    sessions.set(sessionId, {
-      processedOffset: cursor.processedOffset,
-      updatedAt: cursor.updatedAt,
-    });
-    await writeProjectMemoryCursorLocked(root, {
-      ...cursor,
-      sessions: Object.fromEntries([...sessions].slice(-64)),
-      projectIndexRebuildPending: latest.projectIndexRebuildPending,
-    });
-  });
+      await writeProjectMemoryCursorLocked(root, {
+        ...cursor,
+        sessions: Object.fromEntries([...sessions].slice(-64)),
+        projectIndexRebuildPending: latest.projectIndexRebuildPending,
+      });
+    },
+    owner,
+  );
 }
 
 async function bumpMetadata(
@@ -115,17 +119,24 @@ async function bumpMetadata(
   now: Date,
   sessionId: string,
   touchedTopics: AutoMemoryType[],
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
   try {
-    await updateProjectMemoryMetadata(projectRoot, now, (metadata) => {
-      const iso = now.toISOString();
-      if (metadata.lastExtractionAt && metadata.lastExtractionAt > iso) return;
-      metadata.lastExtractionAt = iso;
-      metadata.lastExtractionSessionId = sessionId;
-      metadata.lastExtractionTouchedTopics = touchedTopics;
-      metadata.lastExtractionStatus =
-        touchedTopics.length > 0 ? 'updated' : 'noop';
-    });
+    await updateProjectMemoryMetadata(
+      projectRoot,
+      now,
+      (metadata) => {
+        const iso = now.toISOString();
+        if (metadata.lastExtractionAt && metadata.lastExtractionAt > iso)
+          return;
+        metadata.lastExtractionAt = iso;
+        metadata.lastExtractionSessionId = sessionId;
+        metadata.lastExtractionTouchedTopics = touchedTopics;
+        metadata.lastExtractionStatus =
+          touchedTopics.length > 0 ? 'updated' : 'noop';
+      },
+      owner,
+    );
   } catch {
     // Scaffold creation already writes metadata; ignore non-critical update errors.
   }
@@ -133,6 +144,7 @@ async function bumpMetadata(
 
 interface ExtractParameters {
   projectRoot: string;
+  projectMemoryOwner?: ProjectMemoryOwner;
   sessionId: string;
   history: Content[];
   now?: Date;
@@ -161,23 +173,13 @@ export async function runAutoMemoryExtract(
   const earlyMismatch = getSessionMismatchResult(params.sessionId, config, now);
   if (earlyMismatch) return earlyMismatch;
 
-  const memoryRoot = getAutoMemoryRoot(params.projectRoot);
-  return withProjectMemoryExtraction(memoryRoot, params.abortSignal, () =>
-    extract(params, config, memoryRoot, now),
-  );
-}
-
-async function extract(
-  params: ExtractParameters,
-  config: Config,
-  memoryRoot: string,
-  now: Date,
-): Promise<AutoMemoryExtractResult> {
+  const owner = params.projectMemoryOwner ?? config.getProjectMemoryOwner?.();
+  const memoryRoot = getAutoMemoryRoot(params.projectRoot, owner);
   // Per-project scaffold is required (extraction cursor + metadata live
   // there). User-level scaffold is optional — a brand-new user without
   // write access to `~/.qwen/memories/` should still be able to use
   // project-level memory, so swallow the failure and continue.
-  await ensureAutoMemoryScaffold(params.projectRoot, now);
+  await ensureAutoMemoryScaffold(params.projectRoot, now, owner);
   try {
     await ensureUserAutoMemoryScaffold();
   } catch (error) {
@@ -191,17 +193,22 @@ async function extract(
   // text was never read — fork agent context comes from the session-scoped
   // cache-safe params lookup.
   const { projectIndexRebuildPending, ...currentCursor } =
-    (await readProjectMemoryCursor(memoryRoot)) ?? {
+    (await readProjectMemoryCursor(memoryRoot, owner)) ?? {
       updatedAt: now.toISOString(),
     };
   if (projectIndexRebuildPending) {
-    await withProjectMemoryCommit(memoryRoot, async () => {
-      if (
-        (await readProjectMemoryCursor(memoryRoot))?.projectIndexRebuildPending
-      ) {
-        await rebuildProjectMemoryIndexLocked(memoryRoot);
-      }
-    });
+    await withProjectMemoryCommit(
+      memoryRoot,
+      async () => {
+        if (
+          (await readProjectMemoryCursor(memoryRoot, owner))
+            ?.projectIndexRebuildPending
+        ) {
+          await rebuildProjectMemoryIndexLocked(memoryRoot, owner);
+        }
+      },
+      owner,
+    );
     await refreshMemoryInstruction(config, {
       logContext: 'managed auto-memory index repair',
     });
@@ -237,7 +244,7 @@ async function extract(
       processedOffset: params.history.length,
       updatedAt: now.toISOString(),
     };
-    await writeExtractCursor(memoryRoot, cursor, params.flushReplay);
+    await writeExtractCursor(memoryRoot, cursor, params.flushReplay, owner);
     return { touchedTopics: [], cursor };
   }
 
@@ -249,6 +256,7 @@ async function extract(
     params.projectRoot,
     params.skippedHistory,
     params.abortSignal,
+    owner,
   );
 
   const { failure, touchedTopics, touchedProjectScope, touchedUserScope } =
@@ -261,7 +269,7 @@ async function extract(
   if (rebuildProject || rebuildUser) {
     const [projectResult] = await Promise.allSettled([
       rebuildProject
-        ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+        ? rebuildManagedAutoMemoryIndex(params.projectRoot, owner)
         : Promise.resolve(),
       rebuildUser
         ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
@@ -288,6 +296,7 @@ async function extract(
       now,
       params.sessionId,
       touchedTopics,
+      owner,
     );
   }
 
@@ -307,7 +316,7 @@ async function extract(
     ),
     updatedAt: now.toISOString(),
   };
-  await writeExtractCursor(memoryRoot, cursor, params.flushReplay);
+  await writeExtractCursor(memoryRoot, cursor, params.flushReplay, owner);
 
   debugLogger.debug(
     `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,

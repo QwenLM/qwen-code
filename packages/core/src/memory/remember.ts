@@ -13,7 +13,11 @@ import {
   type ForkedAgentResult,
 } from '../agents/forkedAgent.js';
 import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
-import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
+import {
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+  type ProjectMemoryOwner,
+} from './paths.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
 import {
   readAutoMemoryIndex,
@@ -53,10 +57,13 @@ export function buildManagedRememberPrompt(
   options: {
     wrapUserContent?: boolean;
     scope?: WorkspaceRememberTargetScope;
+    projectMemoryOwner?: ProjectMemoryOwner;
   } = {},
 ): string {
   const trimmed = fact.trim();
-  const projectDir = projectRoot ? getAutoMemoryRoot(projectRoot) : undefined;
+  const projectDir = projectRoot
+    ? getAutoMemoryRoot(projectRoot, options.projectMemoryOwner)
+    : undefined;
   const userDir = getUserAutoMemoryRoot();
   const dirHint =
     projectDir === undefined
@@ -80,6 +87,7 @@ async function buildCleanMemorySystemPrompt(
   projectRoot: string,
   contextWindowSize: number,
   scope?: WorkspaceRememberTargetScope,
+  owner?: ProjectMemoryOwner,
 ): Promise<string> {
   if (scope === 'user') {
     await ensureUserAutoMemoryScaffold();
@@ -107,7 +115,7 @@ async function buildCleanMemorySystemPrompt(
     );
   }
 
-  await ensureAutoMemoryScaffold(projectRoot);
+  await ensureAutoMemoryScaffold(projectRoot, undefined, owner);
   let userMemory:
     | { memoryDir: string; indexContent: string | null }
     | undefined;
@@ -123,10 +131,10 @@ async function buildCleanMemorySystemPrompt(
     };
   }
   const [projectIndex, projectDocs, userDocs] = await Promise.all([
-    readAutoMemoryIndex(projectRoot),
+    readAutoMemoryIndex(projectRoot, owner),
     // The vocabulary is advisory prompt context on the project side too:
     // an unreadable project memory root must not fail the run either.
-    scanAutoMemoryTopicDocuments(projectRoot).catch((error) => {
+    scanAutoMemoryTopicDocuments(projectRoot, owner).catch((error) => {
       debugLogger.error('Project memory vocabulary scan failed:', error);
       return [];
     }),
@@ -139,7 +147,7 @@ async function buildCleanMemorySystemPrompt(
   ]);
 
   return buildManagedAutoMemoryPrompt(
-    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryRoot(projectRoot, owner),
     projectIndex,
     userMemory,
     /* teamSection */ undefined,
@@ -197,17 +205,23 @@ function uniqueSortedScopes(scopes: Iterable<WorkspaceRememberScope>) {
 function classifyTouchedScopes(
   filesTouched: string[],
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): WorkspaceRememberScope[] {
   const scopes: WorkspaceRememberScope[] = [];
   for (const filePath of filesTouched) {
-    if (!isAllowedMemoryPath(filePath, projectRoot)) {
+    if (!isAllowedMemoryPath(filePath, projectRoot, {}, owner)) {
       throw Object.assign(
         new Error(`Remember agent touched a non-memory path: ${filePath}`),
         { code: 'remember_path_escape' },
       );
     }
     if (
-      isAllowedMemoryPath(filePath, projectRoot, { includeUserMemory: false })
+      isAllowedMemoryPath(
+        filePath,
+        projectRoot,
+        { includeUserMemory: false },
+        owner,
+      )
     ) {
       scopes.push('project');
     } else {
@@ -231,10 +245,12 @@ export async function runManagedRememberByAgent(params: {
     });
   }
 
+  const owner = params.config.getProjectMemoryOwner?.();
   const memoryPrompt = await buildCleanMemorySystemPrompt(
     params.projectRoot,
     params.config.getModelContextWindowSize(),
     params.scope,
+    owner,
   );
   // The remember agent's system prompt already embeds the full managed
   // auto-memory protocol and MEMORY.md indexes (buildCleanMemorySystemPrompt;
@@ -267,6 +283,7 @@ export async function runManagedRememberByAgent(params: {
       // `completeAfterFirstSuccessfulWrite` would report success over it.
       protectPinnedMemory: true,
     },
+    owner,
   );
   let result: ForkedAgentResult;
   try {
@@ -279,6 +296,7 @@ export async function runManagedRememberByAgent(params: {
         {
           wrapUserContent: true,
           ...(params.scope ? { scope: params.scope } : {}),
+          projectMemoryOwner: owner,
         },
       ),
       systemPrompt: buildRememberSystemPrompt(memoryPrompt),
@@ -304,7 +322,7 @@ export async function runManagedRememberByAgent(params: {
     // the agent could write to before surfacing the error.
     await Promise.all([
       ...(params.scope !== 'user'
-        ? [rebuildManagedAutoMemoryIndex(params.projectRoot)]
+        ? [rebuildManagedAutoMemoryIndex(params.projectRoot, owner)]
         : []),
       ...(params.scope !== 'project' ? [rebuildUserAutoMemoryIndex()] : []),
     ]).catch((rebuildErr: unknown) => {
@@ -332,7 +350,9 @@ export async function runManagedRememberByAgent(params: {
     let firstEscape: unknown;
     for (const filePath of filesWritten) {
       try {
-        scopes.push(...classifyTouchedScopes([filePath], params.projectRoot));
+        scopes.push(
+          ...classifyTouchedScopes([filePath], params.projectRoot, owner),
+        );
       } catch (err) {
         firstEscape ??= err;
       }
@@ -345,7 +365,7 @@ export async function runManagedRememberByAgent(params: {
   const rebuildWrittenScopes = () =>
     Promise.all([
       writtenScopes.includes('project')
-        ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+        ? rebuildManagedAutoMemoryIndex(params.projectRoot, owner)
         : Promise.resolve(),
       writtenScopes.includes('user')
         ? params.scope === 'user'
@@ -403,6 +423,7 @@ export async function runManagedRememberByAgent(params: {
   const touchedScopes = classifyTouchedScopes(
     entryFilesWritten,
     params.projectRoot,
+    owner,
   );
   if (params.scope && touchedScopes.some((scope) => scope !== params.scope)) {
     // Same reason as the no-update guard: `remember_scope_mismatch` is the

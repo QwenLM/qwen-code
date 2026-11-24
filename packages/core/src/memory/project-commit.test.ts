@@ -15,10 +15,8 @@ import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
-  runWithProjectMemoryOwner,
 } from './paths.js';
 import {
-  assertProjectMemoryCommit,
   markProjectMemoryIndexPendingLocked,
   readProjectMemoryCursor,
   updateProjectMemoryMetadata,
@@ -58,9 +56,7 @@ it('publishes both topic writes into a shared index', async () => {
   await Promise.all(
     ['first', 'second'].map((name) => {
       const file = path.join(memory, `${name}.md`);
-      return commitProjectMemoryWrite(memory, file, null, () =>
-        atomicWriteFile(file, topic(name)),
-      );
+      return commitProjectMemoryWrite(memory, file, null, topic(name));
     }),
   );
   const index = await readAutoMemoryIndex(project);
@@ -79,21 +75,18 @@ it('commits project topics and their index in the current checkout in local mode
   expect(await readAutoMemoryIndex(project)).toContain('[local](local.md)');
 });
 
-it('keeps scaffold state on the selected owner if the session moves while waiting', async () => {
+it('writes scaffold state to the explicit owner instead of the active checkout', async () => {
   const selected = path.join(fixture, 'selected');
-  const next = path.join(fixture, 'next');
-  let owner = selected;
-  const creation = runWithProjectMemoryOwner(
-    () => ({ cwd: owner, memoryBaseDir: path.join(fixture, 'runtime') }),
-    () => ensureAutoMemoryScaffold(project),
-  );
-  owner = next;
-  await creation;
+  const checkout = path.join(fixture, 'checkout');
+  await ensureAutoMemoryScaffold(checkout, undefined, {
+    cwd: selected,
+    memoryBaseDir: path.join(fixture, 'runtime'),
+  });
   expect(
     await readProjectMemoryCursor(getAutoMemoryRoot(selected)),
   ).toBeDefined();
   expect(
-    await readProjectMemoryCursor(getAutoMemoryRoot(next)),
+    await readProjectMemoryCursor(getAutoMemoryRoot(checkout)),
   ).toBeUndefined();
 });
 
@@ -121,11 +114,17 @@ it.each([false, true])(
     const file = path.join(memory, 'same.md');
     if (exists) await fs.writeFile(file, topic('original'));
     const version = getSandboxFileVersion(file);
-    const earlier = commitProjectMemoryWrite(memory, file, version, () =>
-      atomicWriteFile(file, topic('first')),
+    const earlier = commitProjectMemoryWrite(
+      memory,
+      file,
+      version,
+      topic('first'),
     );
-    const later = commitProjectMemoryWrite(memory, file, version, () =>
-      atomicWriteFile(file, topic('second')),
+    const later = commitProjectMemoryWrite(
+      memory,
+      file,
+      version,
+      topic('second'),
     );
     const results = await Promise.allSettled([earlier, later]);
     expect(
@@ -142,30 +141,30 @@ it.each([false, true])(
 
 it('refuses to overwrite the generated index', async () => {
   const file = path.join(memory, 'MEMORY.md');
-  const write = vi.fn();
   expect(projectMemoryIndexWriteError(memory, file)).toContain('topic file');
   await expect(
-    commitProjectMemoryWrite(memory, file, getSandboxFileVersion(file), write),
+    commitProjectMemoryWrite(
+      memory,
+      file,
+      getSandboxFileVersion(file),
+      'unapproved',
+    ),
   ).rejects.toThrow('generated automatically');
-  expect(write).not.toHaveBeenCalled();
+  expect(await fs.readFile(file, 'utf-8')).toBe('');
 });
 
-it('persists a repair marker before topic publication and repairs on load', async () => {
+it('repairs a topic write when the generated index could not be published', async () => {
   const file = path.join(memory, 'interrupted.md');
-  await expect(
-    commitProjectMemoryWrite(memory, file, null, async (assertCanCommit) => {
-      expect(await readProjectMemoryCursor(memory)).toMatchObject({
-        projectIndexRebuildPending: true,
-      });
-      await atomicWriteFile(file, topic('interrupted'), { assertCanCommit });
-      throw new Error('interrupted before index publication');
-    }),
-  ).rejects.toThrow('interrupted before index publication');
-  expect(await fs.readFile(path.join(memory, 'MEMORY.md'), 'utf-8')).toBe('');
+  const index = path.join(memory, 'MEMORY.md');
+  await fs.unlink(index);
+  await fs.mkdir(index);
+  await commitProjectMemoryWrite(memory, file, null, topic('interrupted'));
+  expect(await fs.readFile(file, 'utf-8')).toBe(topic('interrupted'));
   expect(await readProjectMemoryCursor(memory)).toMatchObject({
     projectIndexRebuildPending: true,
   });
 
+  await fs.rmdir(index);
   expect(await readAutoMemoryIndex(project)).toContain(
     '[interrupted](interrupted.md)',
   );
@@ -174,31 +173,43 @@ it('persists a repair marker before topic publication and repairs on load', asyn
   );
 });
 
-it('reopens an index if its repair marker appears during the first read', async () => {
-  const open = noFollowOpen.openNoFollow;
-  let injected = false;
-  const spy = vi
-    .spyOn(noFollowOpen, 'openNoFollow')
-    .mockImplementation(async (file, options) => {
-      const handle = await open(file, options);
-      if (!injected && path.basename(file) === 'MEMORY.md') {
-        injected = true;
-        await withProjectMemoryCommit(memory, async () => {
-          await markProjectMemoryIndexPendingLocked(memory);
-          await fs.writeFile(path.join(memory, 'raced.md'), topic('raced'));
-        });
+it.each([false, true])(
+  'bounds index recovery when the store becomes dirty during read (repeat: %s)',
+  async (repeat) => {
+    const open = noFollowOpen.openNoFollow;
+    let writes = 0;
+    const spy = vi
+      .spyOn(noFollowOpen, 'openNoFollow')
+      .mockImplementation(async (file, options) => {
+        const handle = await open(file, options);
+        if (writes < (repeat ? 2 : 1) && path.basename(file) === 'MEMORY.md') {
+          writes++;
+          await withProjectMemoryCommit(memory, async () => {
+            await markProjectMemoryIndexPendingLocked(memory);
+            await fs.writeFile(
+              path.join(memory, `raced-${writes}.md`),
+              topic('raced'),
+            );
+          });
+        }
+        return handle;
+      });
+    try {
+      const result = await readAutoMemoryIndex(project);
+      const pending = (await readProjectMemoryCursor(memory))
+        ?.projectIndexRebuildPending;
+      if (repeat) {
+        expect(result).toBeNull();
+        expect(pending).toBe(true);
+      } else {
+        expect(result).toContain('[raced](raced-1.md)');
+        expect(pending).toBeUndefined();
       }
-      return handle;
-    });
-  try {
-    expect(await readAutoMemoryIndex(project)).toContain('[raced](raced.md)');
-    expect(await readProjectMemoryCursor(memory)).not.toHaveProperty(
-      'projectIndexRebuildPending',
-    );
-  } finally {
-    spy.mockRestore();
-  }
-});
+    } finally {
+      spy.mockRestore();
+    }
+  },
+);
 
 it('validates the entire approved batch before publishing any topic', async () => {
   const existing = path.join(memory, 'existing.md');
@@ -255,22 +266,6 @@ it('merges independent metadata updates without rewinding updatedAt', async () =
     lastDreamSessionId: 'dream',
     updatedAt: newer.toISOString(),
   });
-});
-
-it('refuses publication after a different holder replaces the commit lock', async () => {
-  const lock = path.join(path.dirname(memory), '.memory-commit.lock');
-  const topicPath = path.join(memory, 'fenced.md');
-  await expect(
-    withProjectMemoryCommit(memory, async () => {
-      await fs.rename(lock, path.join(fixture, 'former-lock'));
-      await fs.mkdir(lock);
-      await atomicWriteFile(topicPath, topic('must not publish'), {
-        assertCanCommit: assertProjectMemoryCommit,
-      });
-    }),
-  ).rejects.toThrow('commit lock changed before publication');
-  await expect(fs.stat(topicPath)).rejects.toMatchObject({ code: 'ENOENT' });
-  expect((await fs.stat(lock)).isDirectory()).toBe(true);
 });
 
 it.skipIf(process.platform === 'win32')(

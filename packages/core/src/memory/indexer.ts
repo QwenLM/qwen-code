@@ -18,6 +18,7 @@ import {
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
   TEAM_AUTO_MEMORY_DIRNAME,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
@@ -42,7 +43,6 @@ import {
   trimIndexToBudgetDetailed,
 } from './index-budget.js';
 import {
-  assertProjectMemoryCommit,
   markProjectMemoryIndexPendingLocked,
   readProjectMemoryCursor,
   withProjectMemoryCommit,
@@ -413,26 +413,34 @@ export function buildTeamAutoMemoryIndex(
 
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): Promise<string> {
-  const root = getAutoMemoryRoot(projectRoot);
-  return withProjectMemoryCommit(root, () =>
-    rebuildProjectMemoryIndexLocked(root),
+  const root = getAutoMemoryRoot(projectRoot, owner);
+  return withProjectMemoryCommit(
+    root,
+    () => rebuildProjectMemoryIndexLocked(root, owner),
+    owner,
   );
 }
 
 /** Call inside the project commit lock, after publishing any topic changes. */
 export async function rebuildProjectMemoryIndexLocked(
   root: string,
+  owner?: ProjectMemoryOwner,
 ): Promise<string> {
-  assertProjectMemoryCommit();
-  const cursor = await readProjectMemoryCursor(root);
+  const cursor = await readProjectMemoryCursor(root, owner);
   let content: string;
   try {
     await fs.mkdir(root, { recursive: true });
-    await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
+    await resolveTrustedMemoryRoot(
+      root,
+      getMemoryRootTrustedAnchor(root, owner),
+    );
     const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
       root,
       'project',
+      false,
+      owner,
     );
     content = buildManagedAutoMemoryIndex(docs, undefined, omitted, true);
     await atomicWriteFile(
@@ -441,13 +449,11 @@ export async function rebuildProjectMemoryIndexLocked(
       {
         encoding: 'utf-8',
         noFollow: true,
-        requireAtomic: true,
-        assertCanCommit: assertProjectMemoryCommit,
       },
     );
   } catch (error) {
     if (!cursor?.projectIndexRebuildPending)
-      await markProjectMemoryIndexPendingLocked(root);
+      await markProjectMemoryIndexPendingLocked(root, owner);
     throw error;
   }
   if (cursor?.projectIndexRebuildPending) {
@@ -457,27 +463,39 @@ export async function rebuildProjectMemoryIndexLocked(
   return content;
 }
 
-export async function recoverProjectMemoryIndex(root: string): Promise<void> {
-  if (!(await readProjectMemoryCursor(root))?.projectIndexRebuildPending)
-    return;
-  await withProjectMemoryCommit(root, async () => {
-    if ((await readProjectMemoryCursor(root))?.projectIndexRebuildPending) {
-      await rebuildProjectMemoryIndexLocked(root);
-    }
-  });
+export async function recoverProjectMemoryIndex(
+  root: string,
+  owner?: ProjectMemoryOwner,
+): Promise<boolean> {
+  if (!(await readProjectMemoryCursor(root, owner))?.projectIndexRebuildPending)
+    return false;
+  await withProjectMemoryCommit(
+    root,
+    async () => {
+      if (
+        (await readProjectMemoryCursor(root, owner))?.projectIndexRebuildPending
+      ) {
+        await rebuildProjectMemoryIndexLocked(root, owner);
+      }
+    },
+    owner,
+  );
+  return true;
 }
 
 export async function rebuildAutoMemoryIndexAtRoot(
   root: string,
   scope: AutoMemoryScope,
+  owner?: ProjectMemoryOwner,
 ): Promise<string> {
   if (!existsSync(root)) return '';
-  await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
+  await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root, owner));
   // Preserve this compatibility entry point's mtime order, even for team roots.
   const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
     root,
     scope,
     false,
+    owner,
   );
   const content = buildManagedAutoMemoryIndex(docs, undefined, omitted);
   await atomicWriteFile(path.join(root, AUTO_MEMORY_INDEX_FILENAME), content, {

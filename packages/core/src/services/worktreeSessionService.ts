@@ -12,7 +12,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
-import { isSubpath } from '../utils/paths.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
@@ -815,7 +814,6 @@ export interface WorktreeRestoreResult {
   contextMessage: string | null;
   /** Active worktree session, or null when no sidecar / sidecar was stale. */
   session: WorktreeSession | null;
-  canonicalWorktree?: string;
 }
 
 /**
@@ -854,7 +852,6 @@ export async function restoreWorktreeContext(
   sidecarPath: string,
   onWarn?: (error: unknown) => void,
   expectedSessionId?: string,
-  expectedWorkspaceCwd?: string,
 ): Promise<WorktreeRestoreResult> {
   let session: WorktreeSession | null = null;
   try {
@@ -932,37 +929,15 @@ export async function restoreWorktreeContext(
     return { contextMessage: null, session: null };
   }
 
-  let canonicalWorktree: string | undefined;
+  let worktreeAlive = false;
   try {
-    const canonicalOriginal = await fs.realpath(session.originalCwd);
-    const canonicalParent = path.join(canonicalOriginal, '.qwen', 'worktrees');
-    const expectedWorktree = path.join(
-      canonicalParent,
-      path.relative(expectedParent, resolvedWorktree),
-    );
-    const actualWorktree = await fs.realpath(resolvedWorktree);
-    const stat = await fs.lstat(resolvedWorktree);
-    const workspaceMatches =
-      expectedWorkspaceCwd === undefined ||
-      isSubpath(canonicalOriginal, await fs.realpath(expectedWorkspaceCwd));
-    if (
-      stat.isDirectory() &&
-      actualWorktree === expectedWorktree &&
-      workspaceMatches
-    ) {
-      canonicalWorktree = actualWorktree;
-    } else {
-      onWarn?.(
-        new WorktreeRestoreRefusedError(
-          'Worktree path did not resolve to a checkout owned by this workspace.',
-        ),
-      );
-    }
+    const stat = await fs.stat(session.worktreePath);
+    worktreeAlive = stat.isDirectory();
   } catch {
-    // A deleted checkout leaves the session in its original workspace.
+    worktreeAlive = false;
   }
 
-  if (!canonicalWorktree) {
+  if (!worktreeAlive) {
     try {
       await clearWorktreeSession(sidecarPath);
     } catch (error) {
@@ -1020,7 +995,6 @@ export async function restoreWorktreeContext(
     : '(detached HEAD)';
   return {
     session,
-    canonicalWorktree,
     contextMessage:
       `[Resumed] Active worktree: "${session.slug}" at ${session.worktreePath} ` +
       `${branchFragment}. Continue using this path for all file operations.`,

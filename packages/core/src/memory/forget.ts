@@ -26,11 +26,10 @@ import {
 import {
   getMemoryRootTrustedAnchor,
   getProjectAutoMemoryRoots,
-  isAutoMemPath,
   isUserAutoMemPath,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import {
-  getScannedProjectMemorySourceHash,
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
@@ -38,7 +37,6 @@ import {
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryType } from './types.js';
 import {
-  assertProjectMemoryCommit,
   markProjectMemoryIndexPendingLocked,
   updateProjectMemoryMetadata,
   withProjectMemoryCommit,
@@ -87,6 +85,7 @@ export interface AutoMemoryForgetMatch {
   summary: string;
   filePath: string;
   entryIndex?: number;
+  sourceHash?: string;
 }
 
 export interface AutoMemoryForgetResult {
@@ -110,10 +109,7 @@ interface IndexedForgetCandidate extends AutoMemoryForgetMatch {
   why?: string;
   howToApply?: string;
   mtimeMs: number;
-  sourceHash?: string;
 }
-
-const selectedFileHashes = new WeakMap<AutoMemoryForgetMatch, string>();
 
 function hashFileContent(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -126,9 +122,13 @@ function toForgetMatch({
   entryIndex,
   sourceHash,
 }: IndexedForgetCandidate): AutoMemoryForgetMatch {
-  const match = { topic, summary, filePath, entryIndex };
-  if (sourceHash) selectedFileHashes.set(match, sourceHash);
-  return match;
+  return {
+    topic,
+    summary,
+    filePath,
+    entryIndex,
+    ...(sourceHash && { sourceHash }),
+  };
 }
 
 export type AutoMemoryStorageScope = 'user' | 'project';
@@ -161,6 +161,7 @@ async function listIndexedForgetCandidates(
   abortSignal?: AbortSignal,
   scope?: AutoMemoryStorageScope,
   trustedProject = true,
+  owner?: ProjectMemoryOwner,
 ): Promise<IndexedForgetCandidate[]> {
   abortSignal?.throwIfAborted();
   // Uncapped, to match the recall universe (recall.ts scans uncapped): an
@@ -173,7 +174,13 @@ async function listIndexedForgetCandidates(
   const [projectDocs, userDocs] = await Promise.all([
     scope === 'user'
       ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
-      : scanAllAutoMemoryTopicDocuments(projectRoot, undefined, trustedProject),
+      : scanAllAutoMemoryTopicDocuments(
+          projectRoot,
+          undefined,
+          trustedProject,
+          undefined,
+          owner,
+        ),
     scope === 'project'
       ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
       : scanAllUserAutoMemoryTopicDocuments(),
@@ -189,7 +196,6 @@ async function listIndexedForgetCandidates(
     abortSignal?.throwIfAborted();
     for (const doc of docs) {
       abortSignal?.throwIfAborted();
-      const sourceHash = getScannedProjectMemorySourceHash(doc);
       const entries = parseAutoMemoryEntries(doc.body);
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
@@ -207,7 +213,7 @@ async function listIndexedForgetCandidates(
           why: entry.why,
           howToApply: entry.howToApply,
           mtimeMs: doc.mtimeMs,
-          sourceHash,
+          sourceHash: doc.sourceHash,
         });
       }
     }
@@ -445,6 +451,7 @@ export async function selectManagedAutoMemoryForgetCandidates(
     limit?: number;
     abortSignal?: AbortSignal;
     scope?: AutoMemoryStorageScope;
+    projectMemoryOwner?: ProjectMemoryOwner;
   } = {},
 ): Promise<AutoMemoryForgetSelectionResult> {
   options.abortSignal?.throwIfAborted();
@@ -456,6 +463,7 @@ export async function selectManagedAutoMemoryForgetCandidates(
     // Default to the trusted universe: forgetting a document recall never
     // injected is harmless, while missing one recall does inject strands it.
     options.config?.isTrustedFolder?.() ?? true,
+    options.projectMemoryOwner ?? options.config?.getProjectMemoryOwner?.(),
   );
   if (candidates.length === 0) {
     return { matches: [], strategy: 'none' };
@@ -483,9 +491,13 @@ export async function selectManagedAutoMemoryForgetCandidates(
   return selectByHeuristic(candidates, query, limit);
 }
 
-async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
+async function bumpMetadata(
+  projectRoot: string,
+  now: Date,
+  owner?: ProjectMemoryOwner,
+): Promise<void> {
   try {
-    await updateProjectMemoryMetadata(projectRoot, now, () => {});
+    await updateProjectMemoryMetadata(projectRoot, now, () => {}, owner);
   } catch {
     // Best-effort metadata bump.
   }
@@ -495,8 +507,13 @@ export async function forgetManagedAutoMemoryMatches(
   projectRoot: string,
   matches: AutoMemoryForgetMatch[],
   now = new Date(),
-  options: { abortSignal?: AbortSignal } = {},
+  options: {
+    abortSignal?: AbortSignal;
+    projectMemoryOwner?: ProjectMemoryOwner;
+    trustedProject?: boolean;
+  } = {},
 ): Promise<AutoMemoryForgetResult> {
+  const owner = options.projectMemoryOwner;
   options.abortSignal?.throwIfAborted();
   if (matches.length === 0) {
     return {
@@ -508,11 +525,9 @@ export async function forgetManagedAutoMemoryMatches(
     };
   }
   if (
-    matches.some(
-      (match) => classifyMemoryScope(match.filePath, projectRoot) === 'project',
-    )
+    matches.some((match) => classifyMemoryScope(match.filePath) === 'project')
   ) {
-    await ensureAutoMemoryScaffold(projectRoot, now);
+    await ensureAutoMemoryScaffold(projectRoot, now, owner);
   }
   options.abortSignal?.throwIfAborted();
 
@@ -531,11 +546,15 @@ export async function forgetManagedAutoMemoryMatches(
     matchesByFile.set(match.filePath, existing);
   }
 
-  const projectRoots = getProjectAutoMemoryRoots(projectRoot, true);
+  const projectRoots = getProjectAutoMemoryRoots(
+    projectRoot,
+    options.trustedProject ?? true,
+    owner,
+  );
   for (const [filePath, fileMatches] of matchesByFile) {
     try {
       options.abortSignal?.throwIfAborted();
-      const scope = classifyMemoryScope(filePath, projectRoot);
+      const scope = classifyMemoryScope(filePath);
       const ownerRoot =
         scope === 'project'
           ? projectRoots.find((root) => isSubpath(root, filePath))
@@ -544,7 +563,7 @@ export async function forgetManagedAutoMemoryMatches(
         const trusted = ownerRoot
           ? await resolveTrustedMemoryFile(
               ownerRoot,
-              getMemoryRootTrustedAnchor(ownerRoot),
+              getMemoryRootTrustedAnchor(ownerRoot, owner),
               path.relative(ownerRoot, filePath),
             )
           : filePath;
@@ -573,12 +592,12 @@ export async function forgetManagedAutoMemoryMatches(
         const prepareCommit = async () => {
           options.abortSignal?.throwIfAborted();
           if (ownerRoot) {
-            await markProjectMemoryIndexPendingLocked(ownerRoot);
-            assertProjectMemoryCommit();
+            await markProjectMemoryIndexPendingLocked(ownerRoot, owner);
           }
         };
         const rebuildIndex = async () => {
-          if (ownerRoot) await rebuildProjectMemoryIndexLocked(ownerRoot);
+          if (ownerRoot)
+            await rebuildProjectMemoryIndexLocked(ownerRoot, owner);
         };
         options.abortSignal?.throwIfAborted();
         const fmMatch = rawContent.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
@@ -652,10 +671,6 @@ export async function forgetManagedAutoMemoryMatches(
             {
               encoding: 'utf-8',
               noFollow: scope === 'project',
-              ...(ownerRoot && {
-                requireAtomic: true,
-                assertCanCommit: assertProjectMemoryCommit,
-              }),
             },
           );
         }
@@ -668,13 +683,18 @@ export async function forgetManagedAutoMemoryMatches(
         await rebuildIndex();
       };
       if (scope === 'project') {
-        const selectedHash = selectedFileHashes.get(fileMatches[0]);
-        if (ownerRoot) {
-          const hash =
-            selectedHash ??
-            hashFileContent(await fs.readFile(filePath, 'utf-8'));
-          await withProjectMemoryCommit(ownerRoot, () => apply(hash));
-        } else if (selectedHash) {
+        const selectedHash = fileMatches[0].sourceHash;
+        if (
+          ownerRoot &&
+          selectedHash &&
+          fileMatches.every((match) => match.sourceHash === selectedHash)
+        ) {
+          await withProjectMemoryCommit(
+            ownerRoot,
+            () => apply(selectedHash),
+            owner,
+          );
+        } else if (ownerRoot || selectedHash) {
           conflicts.add(filePath);
         } else {
           await apply();
@@ -694,7 +714,7 @@ export async function forgetManagedAutoMemoryMatches(
 
   if (touchedScopes.has('project')) {
     options.abortSignal?.throwIfAborted();
-    await bumpMetadata(projectRoot, now);
+    await bumpMetadata(projectRoot, now, owner);
   }
   if (touchedScopes.has('user')) {
     try {
@@ -738,6 +758,7 @@ export async function forgetManagedAutoMemoryEntries(
   now = new Date(),
 ): Promise<AutoMemoryForgetResult> {
   options.abortSignal?.throwIfAborted();
+  const owner = options.config?.getProjectMemoryOwner?.();
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
     return {
@@ -756,30 +777,27 @@ export async function forgetManagedAutoMemoryEntries(
     // short query matches nearly everything. The capped scanners this replaced
     // held the same failure to one scan's worth of candidates; keep that
     // ceiling rather than letting an uncapped scan widen it.
-    { ...options, limit: MAX_UNCONFIRMED_FORGET_DELETIONS },
+    {
+      ...options,
+      limit: MAX_UNCONFIRMED_FORGET_DELETIONS,
+      projectMemoryOwner: owner,
+    },
   );
   const result = await forgetManagedAutoMemoryMatches(
     projectRoot,
     selection.matches,
     now,
-    { abortSignal: options.abortSignal },
+    {
+      abortSignal: options.abortSignal,
+      projectMemoryOwner: owner,
+      trustedProject: options.config?.isTrustedFolder?.(),
+    },
   );
   return { ...result, query: trimmedQuery };
 }
 
-function classifyMemoryScope(
-  filePath: string,
-  projectRoot: string,
-): AutoMemoryStorageScope {
-  if (isUserAutoMemPath(filePath)) {
-    return 'user';
-  }
-  if (isAutoMemPath(filePath, projectRoot)) {
-    return 'project';
-  }
-  // Direct callers historically supplied project-memory matches without going
-  // through the scanner. Preserve that behavior for compatibility.
-  return 'project';
+function classifyMemoryScope(filePath: string): AutoMemoryStorageScope {
+  return isUserAutoMemPath(filePath) ? 'user' : 'project';
 }
 
 function sortTouchedScopes(

@@ -1170,7 +1170,7 @@ export const useSlashCommandProcessor = (
           if (commandToExecute.action) {
             const requestConfirmation = (
               prompt: React.ReactNode,
-              reviewText?: string,
+              allowHistoryScroll = false,
             ) =>
               new Promise<boolean>((resolve) => {
                 const signal = abortController.signal;
@@ -1181,7 +1181,7 @@ export const useSlashCommandProcessor = (
                 const onAbort = () => request.onConfirm(false);
                 const request: ConfirmationRequest = {
                   prompt,
-                  reviewText,
+                  allowHistoryScroll,
                   onConfirm: (confirmed) => {
                     signal.removeEventListener('abort', onAbort);
                     setConfirmationRequest((current) =>
@@ -1232,7 +1232,7 @@ export const useSlashCommandProcessor = (
               },
               overwriteConfirmed,
               abortSignal: abortController.signal,
-              confirmAction: requestConfirmation,
+              confirmAction: (title) => requestConfirmation(title, true),
               beginCommit() {
                 if (
                   activeCommandRef.current !== activeCommand ||

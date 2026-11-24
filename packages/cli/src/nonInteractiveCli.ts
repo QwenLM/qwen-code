@@ -1264,41 +1264,6 @@ export async function runNonInteractive(
         onTeamManagerChangeHandler(existingManager);
       }
 
-      const resumedSessionData = config.getResumedSessionData();
-      const startupNotice = options.continueInterrupted
-        ? null
-        : config.consumePendingStartupWorktreeNotice();
-      let restoredWorktree:
-        | Awaited<ReturnType<typeof restoreWorktreeContext>>
-        | undefined;
-      if (
-        !startupNotice &&
-        !options.continueInterrupted &&
-        resumedSessionData &&
-        !config.getShellExecutionSandbox?.()
-      ) {
-        try {
-          const sessionPath = config
-            .getSessionService()
-            .getWorktreeSessionPath(sessionId);
-          restoredWorktree = await restoreWorktreeContext(
-            sessionPath,
-            (error) => debugLogger.warn('worktree restore warning:', error),
-            sessionId,
-            config.getTargetDir(),
-          );
-          if (restoredWorktree.session && restoredWorktree.canonicalWorktree) {
-            await config.enterProjectWorktree(
-              restoredWorktree.session.worktreePath,
-              restoredWorktree.canonicalWorktree,
-            );
-          }
-        } catch (error) {
-          restoredWorktree = undefined;
-          debugLogger.warn(`worktree restore failed (non-fatal):`, error);
-        }
-      }
-
       // Emit systemMessage first (always the first message in JSON mode)
       const systemMessage = await buildSystemMessage(
         config,
@@ -1310,6 +1275,7 @@ export async function runNonInteractive(
       adapter.emitMessage(systemMessage);
       modSession?.flushLogs();
 
+      const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
         const restoredSessions =
           restoredBackgroundAgentSessions.get(config) ?? new Set<string>();
@@ -1686,18 +1652,37 @@ export async function runNonInteractive(
         if (commandReplied) deferredReminder = text;
         else initialPartList = withReminder(initialPartList ?? [], text);
       };
+      const startupNotice = options.continueInterrupted
+        ? null
+        : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
         remind(startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (restoredWorktree?.contextMessage) {
-        remind(restoredWorktree.contextMessage);
-        adapter.emitSystemMessage('worktree_restored', {
-          slug: restoredWorktree.session?.slug,
-          path: restoredWorktree.session?.worktreePath,
-          branch: restoredWorktree.session?.worktreeBranch,
-        });
+      } else if (!options.continueInterrupted && resumedSessionData) {
+        try {
+          const sessionPath = config
+            .getSessionService()
+            .getWorktreeSessionPath(sessionId);
+          const restored = await restoreWorktreeContext(
+            sessionPath,
+            (error) => debugLogger.warn('worktree restore warning:', error),
+            sessionId,
+          );
+          if (restored.contextMessage) {
+            remind(restored.contextMessage);
+            // Surface the notice in the JSON stream so SDK consumers
+            // can react to it (logging, UI hints, etc.).
+            adapter.emitSystemMessage('worktree_restored', {
+              slug: restored.session?.slug,
+              path: restored.session?.worktreePath,
+              branch: restored.session?.worktreeBranch,
+            });
+          }
+        } catch (error) {
+          debugLogger.warn(`worktree restore failed (non-fatal):`, error);
+        }
       }
 
       const recoveredAgentsNotice =

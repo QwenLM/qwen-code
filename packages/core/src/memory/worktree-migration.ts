@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { lstatSync, realpathSync } from 'node:fs';
-import * as fs from 'node:fs/promises';
+import { lstatSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -15,12 +14,12 @@ import {
   type SandboxFileVersion,
 } from '../sandbox/file-version.js';
 import { estimateContextTextTokens } from '../services/tokenEstimation.js';
-import { openNoFollow } from '../utils/no-follow-open.js';
 import {
   isSubpath,
   realpathNearestExisting,
   resolvePath,
 } from '../utils/paths.js';
+import { readTextRange } from '../utils/read-text-range.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -34,8 +33,14 @@ import {
   TYPES_SECTION_INDIVIDUAL,
   WHAT_NOT_TO_SAVE_SECTION,
 } from './prompt.js';
+import {
+  listTrustedMemoryMarkdownFiles,
+  resolveTrustedMemoryRoot,
+} from './trusted-memory-filesystem.js';
 
 const MAX_CONTEXT_BYTES = 512 * 1024;
+const LIBRARY_TOO_LARGE =
+  'The memory libraries are too large for a single request with the current model.';
 
 interface Proposal {
   topics: Array<{ filename: string; summary: string; content: string }>;
@@ -84,12 +89,13 @@ interface LibraryTopic {
   version: SandboxFileVersion;
 }
 
-function assertLibraryPath(
+function resolveLibraryPath(
   base: string,
+  realBase: string,
   directory: string,
-  allowMissing: boolean,
-): void {
-  const segments = path.relative(base, directory).split(path.sep);
+): string {
+  const relative = path.relative(base, directory);
+  const segments = relative.split(path.sep);
   if (
     segments.length !== 3 ||
     segments[0] !== 'projects' ||
@@ -98,94 +104,48 @@ function assertLibraryPath(
   ) {
     throw new Error('Select a single project memory directory.');
   }
-  let current = base;
-  for (const segment of segments) {
-    current = path.join(current, segment);
-    const stat = lstatSync(current, { throwIfNoEntry: false });
-    if (!stat && allowMissing) return;
-    if (!stat?.isDirectory()) {
-      throw new Error(
-        `Missing or symlinked project memory directory: ${current}`,
-      );
-    }
+  const resolved = path.join(realBase, relative);
+  if (realpathNearestExisting(directory) !== resolved) {
+    throw new Error(
+      `Cannot use a symlinked project memory directory: ${directory}`,
+    );
   }
+  return resolved;
 }
 
 async function readLibrary(
+  base: string,
   directory: string,
   signal: AbortSignal,
-  chargeBytes: (bytes: number) => void,
-  allowMissing = false,
+  budget: { remaining: number },
 ): Promise<LibraryTopic[]> {
   const topics: LibraryTopic[] = [];
-  async function visit(dir: string, optional = false): Promise<void> {
+  const files = await listTrustedMemoryMarkdownFiles(directory, base, '', {
+    onUnreadableDir: () => {
+      throw new Error(`A subdirectory of ${directory} could not be read.`);
+    },
+  });
+  for (const { relativePath: filename, resolvedPath } of files) {
     signal.throwIfAborted();
-    const entries = await fs
-      .readdir(dir, { withFileTypes: true })
-      .catch((error: unknown) => {
-        if (optional && (error as NodeJS.ErrnoException).code === 'ENOENT')
-          return [];
-        throw error;
-      });
-    for (const entry of entries) {
-      signal.throwIfAborted();
-      const file = path.join(dir, entry.name);
-      if (entry.isSymbolicLink() || realpathNearestExisting(file) !== file) {
-        throw new Error(`Memory migration cannot read symlinks: ${file}`);
-      }
-      if (entry.isDirectory()) {
-        await visit(file);
-      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
-        const filename = path
-          .relative(directory, file)
-          .split(path.sep)
-          .join('/');
-        const version = getSandboxFileVersion(file);
-        if (!version)
-          throw new Error(`Memory topic changed while reading: ${file}`);
-        const handle = await openNoFollow(file, { nonBlocking: true });
-        try {
-          const stat = await handle.stat({ bigint: true });
-          if (
-            !stat.isFile() ||
-            stat.nlink !== 1n ||
-            stat.ino.toString() !== version.ino ||
-            stat.dev.toString() !== version.dev
-          ) {
-            throw new Error(
-              `Memory topic changed while opening or is linked: ${file}`,
-            );
-          }
-          const size = Number(stat.size);
-          chargeBytes(size + Buffer.byteLength(filename));
-          const buffer = Buffer.alloc(size + 1);
-          let length = 0;
-          while (length < buffer.length) {
-            const { bytesRead } = await handle.read(
-              buffer,
-              length,
-              buffer.length - length,
-              length,
-            );
-            if (bytesRead === 0) break;
-            length += bytesRead;
-          }
-          if (length !== size || realpathNearestExisting(file) !== file) {
-            throw new Error(`Memory topic changed while reading: ${file}`);
-          }
-          assertSandboxFileVersion(file, version);
-          topics.push({
-            filename,
-            version,
-            content: buffer.subarray(0, size).toString('utf8'),
-          });
-        } finally {
-          await handle.close();
-        }
-      }
+    const version = getSandboxFileVersion(resolvedPath);
+    if (!version) throw new Error(`Memory topic disappeared: ${filename}`);
+    budget.remaining -= Buffer.byteLength(filename);
+    if (budget.remaining <= 0 || Number(version.size) > budget.remaining) {
+      throw new Error(LIBRARY_TOO_LARGE);
     }
+    const { content, truncatedByBytes } = await readTextRange({
+      path: resolvedPath,
+      signal,
+      maxOutputBytes: budget.remaining,
+      maxScanBytes: budget.remaining,
+    });
+    assertSandboxFileVersion(resolvedPath, version);
+    budget.remaining -= Buffer.byteLength(content);
+    if (truncatedByBytes || budget.remaining < 0) {
+      throw new Error(LIBRARY_TOO_LARGE);
+    }
+    topics.push({ filename, content, version });
   }
-  await visit(directory, allowMissing);
   return topics;
 }
 
@@ -223,30 +183,19 @@ export async function prepareWorktreeMemoryMigration(
     }
     source = getWorkspaceProjectMemoryRoot(provided, base);
   }
-  assertLibraryPath(base, source, false);
-  assertLibraryPath(base, target, true);
-  const realSource = path.join(realBase, path.relative(base, source));
-  const realTarget = path.join(realBase, path.relative(base, target));
-  if (
-    path.relative(realSource, realTarget) === '' ||
-    realpathNearestExisting(target) === realSource
-  ) {
+  const realSource = resolveLibraryPath(base, realBase, source);
+  const realTarget = resolveLibraryPath(base, realBase, target);
+  if (path.relative(realSource, realTarget) === '') {
     throw new Error(
       'Source and target project memory directories must be different.',
     );
   }
-
-  let contextBytes = 0;
-  const chargeBytes = (bytes: number) => {
-    contextBytes += bytes;
-    if (contextBytes > MAX_CONTEXT_BYTES) {
-      throw new Error(
-        'The memory libraries are too large for a single migration request.',
-      );
-    }
-  };
-  const sourceTopics = await readLibrary(realSource, signal, chargeBytes);
-  const targetTopics = await readLibrary(realTarget, signal, chargeBytes, true);
+  if (!(await resolveTrustedMemoryRoot(realSource, realBase))) {
+    throw new Error(`Project memory directory was not found: ${source}`);
+  }
+  const budget = { remaining: MAX_CONTEXT_BYTES };
+  const sourceTopics = await readLibrary(realBase, realSource, signal, budget);
+  const targetTopics = await readLibrary(realBase, realTarget, signal, budget);
   const documents = (topics: LibraryTopic[]) =>
     topics.map(({ filename, content }) => ({ filename, content }));
   const input = JSON.stringify({
@@ -268,9 +217,7 @@ export async function prepareWorktreeMemoryMigration(
     Buffer.byteLength(input) > MAX_CONTEXT_BYTES ||
     promptTokens + outputTokens + 1024 > window
   ) {
-    throw new Error(
-      'The memory libraries are too large for a single request with the current model.',
-    );
+    throw new Error(LIBRARY_TOO_LARGE);
   }
   signal.throwIfAborted();
   const proposal = await runSideQuery<Proposal>(config, {
@@ -291,19 +238,13 @@ export async function prepareWorktreeMemoryMigration(
   );
   const proposed = new Set<string>();
   const changes = proposal.topics.map(({ filename, content, summary }) => {
-    const segments = filename.split('/');
     const key = filename.normalize('NFC').toLowerCase();
     if (
       !filename.endsWith('.md') ||
-      segments.some(
-        (segment) =>
-          !/^[\p{L}\p{N}][\p{L}\p{N}\p{M}_. -]*$/u.test(segment) ||
-          /[. ]$/.test(segment) ||
-          /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?: *\.|$)/i.test(
-            segment,
-          ) ||
-          Buffer.byteLength(segment) > 255,
-      ) ||
+      path.posix.normalize(filename) !== filename ||
+      path.posix.isAbsolute(filename) ||
+      filename.startsWith('../') ||
+      /[<>:"\\|?*\p{Cc}]/u.test(filename) ||
       key.startsWith(`${AUTO_MEMORY_PINNED_DIRNAME}/`) ||
       path.posix.basename(key) === AUTO_MEMORY_INDEX_FILENAME.toLowerCase() ||
       proposed.has(key) ||
@@ -319,7 +260,7 @@ export async function prepareWorktreeMemoryMigration(
     return {
       filename,
       summary,
-      path: path.join(target, ...segments),
+      path: path.join(target, filename),
       expected: versions.get(filename) ?? null,
       content,
     };
@@ -335,6 +276,7 @@ export async function prepareWorktreeMemoryMigration(
     conflicts: proposal.conflicts,
     apply: () =>
       commitProjectMemoryWrites(target, changes, {
+        owner,
         signal,
         assertTarget: () => {
           signal.throwIfAborted();
@@ -343,14 +285,13 @@ export async function prepareWorktreeMemoryMigration(
             current.cwd !== owner.cwd ||
             current.memoryBaseDir !== owner.memoryBaseDir ||
             config.getProjectAutoMemoryRoot() !== target ||
-            !config.isTrustedFolder() ||
-            realpathSync(base) !== realBase
+            !config.isTrustedFolder()
           ) {
             throw new Error(
               'The project memory target changed. Prepare the migration again.',
             );
           }
-          assertLibraryPath(base, target, true);
+          resolveLibraryPath(base, realBase, target);
         },
       }),
   };

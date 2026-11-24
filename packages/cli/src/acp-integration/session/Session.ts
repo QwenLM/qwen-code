@@ -7539,7 +7539,7 @@ export class Session implements SessionContext {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
-      this.#bindProjectMemoryOwner(async (): Promise<PromptResponse> => {
+      async (): Promise<PromptResponse> => {
         await this.assertCanStartTurn();
         await this.mods?.admit(pendingSend.signal);
         if (pendingSend.signal.aborted) {
@@ -9371,7 +9371,7 @@ export class Session implements SessionContext {
           (result: { stopReason: PromptResponse['stopReason'] }) =>
             result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
         );
-      }),
+      },
     ).finally(() => {
       if (
         !retryHistoryReplaced &&
@@ -13425,18 +13425,11 @@ export class Session implements SessionContext {
     await record({ sessionId });
   }
 
-  #bindProjectMemoryOwner<T>(run: () => T): () => T {
-    return () =>
-      this.config.runWithProjectMemoryOwner
-        ? this.config.runWithProjectMemoryOwner(run)
-        : run();
-  }
-
   #startCronSchedulerInRuntime(): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
-      this.#bindProjectMemoryOwner(() => this.#startCronSchedulerIfNeeded()),
+      () => this.#startCronSchedulerIfNeeded(),
     );
   }
 
@@ -13645,7 +13638,7 @@ export class Session implements SessionContext {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
-      this.#bindProjectMemoryOwner(async () => {
+      async () => {
         const ac = new AbortController();
         this.cronAbortController = ac;
         const continuesCurrentWorkChain =
@@ -14164,7 +14157,7 @@ export class Session implements SessionContext {
             firedAt: item.firedAt,
           });
         }
-      }),
+      },
     );
   }
 
@@ -15151,7 +15144,7 @@ export class Session implements SessionContext {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
-      this.#bindProjectMemoryOwner(async () => {
+      async () => {
         const ac = new AbortController();
         const promptId = turn.turnId;
         let responseSegmentEmitted = false;
@@ -15624,7 +15617,7 @@ export class Session implements SessionContext {
             this.notificationAbortController = null;
           }
         }
-      }),
+      },
     );
   }
 

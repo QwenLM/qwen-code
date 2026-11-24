@@ -91,7 +91,10 @@ export interface OpenTuiCommandHost {
   /** Presents a yes/no confirmation; resolves like ink's dialog. */
   presentActionConfirmation(
     prompt: ReactNode,
-    options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent' | 'reviewText'>,
+    options?: Pick<
+      ConfirmationRequest,
+      'signal' | 'isCurrent' | 'allowHistoryScroll'
+    >,
   ): Promise<boolean>;
   /** Parity of `actions.handleResume` — awaited like the ink processor. */
   handleResume(sessionId: string): Promise<void>;

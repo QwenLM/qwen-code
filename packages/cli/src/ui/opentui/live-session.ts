@@ -1386,7 +1386,11 @@ export async function* livePromptEvents(
       return {
         type: 'tool-history',
         item: {
-          ...mapToDisplay(calls, config.getProjectRoot()),
+          ...mapToDisplay(
+            calls,
+            config.getProjectRoot(),
+            config.getProjectMemoryOwner?.(),
+          ),
           id: groupId,
           batchId,
         },

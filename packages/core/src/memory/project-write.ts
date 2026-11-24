@@ -18,9 +18,9 @@ import { rebuildProjectMemoryIndexLocked } from './indexer.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getMemoryRootTrustedAnchor,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import {
-  assertProjectMemoryCommit,
   markProjectMemoryIndexPendingLocked,
   withProjectMemoryCommit,
 } from './project-commit.js';
@@ -80,12 +80,12 @@ function isIndex(
   );
 }
 
-function prepareTopicCommit(
+function assertTopicVersion(
   root: string,
   resolvedRoot: string,
   filePath: string,
   expected: SandboxFileVersion | null,
-): () => void {
+): void {
   const resolvedFile = realpathNearestExisting(filePath);
   if (resolvedFile === resolvedRoot || !isSubpath(resolvedRoot, resolvedFile)) {
     throw new Error(
@@ -95,58 +95,55 @@ function prepareTopicCommit(
   if (isIndex(path.join(root, AUTO_MEMORY_INDEX_FILENAME), filePath)) {
     throw new Error(INDEX_WRITE_ERROR);
   }
-  return () => {
-    assertProjectMemoryCommit();
-    if (
-      lstatSync(filePath, { throwIfNoEntry: false })?.isSymbolicLink() ||
-      realpathNearestExisting(filePath) !== resolvedFile
-    ) {
-      throw new Error(
-        'Project memory topic path changed or is a symbolic link.',
-      );
-    }
-    assertSandboxFileVersion(filePath, expected);
-  };
+  if (lstatSync(filePath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error('Project memory topic is a symbolic link.');
+  }
+  assertSandboxFileVersion(filePath, expected);
 }
 
-async function resolveWriteRoot(root: string): Promise<string> {
+async function resolveWriteRoot(
+  root: string,
+  owner?: ProjectMemoryOwner,
+): Promise<string> {
   return (
-    (await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root))) ??
-    realpathNearestExisting(root)
+    (await resolveTrustedMemoryRoot(
+      root,
+      getMemoryRootTrustedAnchor(root, owner),
+    )) ?? realpathNearestExisting(root)
   );
 }
 
-export async function commitProjectMemoryWrite<T>(
-  root: string | undefined,
+export async function commitProjectMemoryWrite(
+  root: string,
   filePath: string,
   expected: SandboxFileVersion | null | undefined,
-  write: (assertCanCommit?: () => void) => Promise<T>,
-): Promise<T> {
-  if (!root) return write();
+  content: string | Buffer,
+  owner?: ProjectMemoryOwner,
+): Promise<void> {
   if (expected === undefined)
     throw new Error('Missing project memory topic version.');
-  return withProjectMemoryCommit(root, async () => {
-    const assertCanCommit = prepareTopicCommit(
-      root,
-      await resolveWriteRoot(root),
-      filePath,
-      expected,
-    );
-    assertCanCommit();
-    const isTopic = path.extname(filePath) === '.md';
-    if (isTopic) await markProjectMemoryIndexPendingLocked(root);
-    const result = await write(assertCanCommit);
-    if (!isTopic) return result;
-    try {
-      await rebuildProjectMemoryIndexLocked(root);
-    } catch (error) {
-      debugLogger.warn(
-        'Project memory topic saved, but index rebuild failed:',
-        error,
-      );
-    }
-    return result;
-  });
+  await withProjectMemoryCommit(
+    root,
+    async () => {
+      const resolvedRoot = await resolveWriteRoot(root, owner);
+      assertTopicVersion(root, resolvedRoot, filePath, expected);
+      const isTopic = path.extname(filePath) === '.md';
+      if (isTopic) await markProjectMemoryIndexPendingLocked(root, owner);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      assertTopicVersion(root, resolvedRoot, filePath, expected);
+      await atomicWriteFile(filePath, content, { noFollow: true });
+      if (!isTopic) return;
+      try {
+        await rebuildProjectMemoryIndexLocked(root, owner);
+      } catch (error) {
+        debugLogger.warn(
+          'Project memory topic saved, but index rebuild failed:',
+          error,
+        );
+      }
+    },
+    owner,
+  );
 }
 
 export async function commitProjectMemoryWrites(
@@ -156,7 +153,11 @@ export async function commitProjectMemoryWrites(
     expected: SandboxFileVersion | null;
     content: string;
   }>,
-  options: { assertTarget?: () => void; signal?: AbortSignal } = {},
+  options: {
+    owner?: ProjectMemoryOwner;
+    assertTarget?: () => void;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<void> {
   if (changes.length === 0) return;
   const assertTarget = () => {
@@ -164,46 +165,43 @@ export async function commitProjectMemoryWrites(
     options.assertTarget?.();
   };
   assertTarget();
-  await withProjectMemoryCommit(root, async () => {
-    assertTarget();
-    const resolvedRoot = await resolveWriteRoot(root);
-    const seen = new Set<string>();
-    const prepared = changes.map((change) => {
-      const resolved = realpathNearestExisting(change.path);
-      const key = resolved.toLowerCase();
-      if (
-        path.extname(change.path) !== '.md' ||
-        !path.isAbsolute(change.path) ||
-        resolved !==
-          path.join(resolvedRoot, path.relative(root, change.path)) ||
-        seen.has(key)
-      ) {
-        throw new Error(`Invalid project memory topic path: ${change.path}`);
+  await withProjectMemoryCommit(
+    root,
+    async () => {
+      assertTarget();
+      const resolvedRoot = await resolveWriteRoot(root, options.owner);
+      const validate = (change: (typeof changes)[number]) => {
+        const resolved = realpathNearestExisting(change.path);
+        if (
+          path.extname(change.path) !== '.md' ||
+          !path.isAbsolute(change.path) ||
+          resolved !== path.join(resolvedRoot, path.relative(root, change.path))
+        ) {
+          throw new Error(`Invalid project memory topic path: ${change.path}`);
+        }
+        assertTopicVersion(root, resolvedRoot, change.path, change.expected);
+        return resolved.toLowerCase();
+      };
+      const seen = new Set<string>();
+      for (const change of changes) {
+        const key = validate(change);
+        if (seen.has(key)) {
+          throw new Error(
+            `Duplicate project memory topic path: ${change.path}`,
+          );
+        }
+        seen.add(key);
       }
-      seen.add(key);
-      const assertVersion = prepareTopicCommit(
-        root,
-        resolvedRoot,
-        change.path,
-        change.expected,
-      );
-      assertVersion();
-      return { ...change, assertVersion };
-    });
-    assertTarget();
-    await markProjectMemoryIndexPendingLocked(root);
-    for (const change of prepared) {
-      await fs.mkdir(path.dirname(change.path), { recursive: true });
-      await atomicWriteFile(change.path, change.content, {
-        encoding: 'utf-8',
-        noFollow: true,
-        requireAtomic: true,
-        assertCanCommit: () => {
-          assertTarget();
-          change.assertVersion();
-        },
-      });
-    }
-    await rebuildProjectMemoryIndexLocked(root);
-  });
+      assertTarget();
+      await markProjectMemoryIndexPendingLocked(root, options.owner);
+      for (const change of changes) {
+        await fs.mkdir(path.dirname(change.path), { recursive: true });
+        assertTarget();
+        validate(change);
+        await atomicWriteFile(change.path, change.content, { noFollow: true });
+      }
+      await rebuildProjectMemoryIndexLocked(root, options.owner);
+    },
+    options.owner,
+  );
 }

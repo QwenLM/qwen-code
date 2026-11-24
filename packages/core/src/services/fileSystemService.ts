@@ -70,7 +70,6 @@ export type CoreWriteTextFileRequest = Omit<
    * of any tool schema and is serialized only at the ACP boundary.
    */
   toolWriteOrigin?: ToolWriteOrigin;
-  assertCanCommit?: () => void;
 };
 
 /**
@@ -544,14 +543,13 @@ export class StandardFileSystemService implements FileSystemService {
       params.content,
       _meta,
     );
-    await atomicWriteFile(filePath, prepared.data, {
-      encoding: prepared.encoding ?? 'utf-8',
-      ...(params.assertCanCommit && {
-        assertCanCommit: params.assertCanCommit,
-        noFollow: true,
-        requireAtomic: true,
-      }),
-    });
+    if (Buffer.isBuffer(prepared.data)) {
+      await atomicWriteFile(filePath, prepared.data);
+    } else {
+      await atomicWriteFile(filePath, prepared.data, {
+        encoding: prepared.encoding ?? 'utf-8',
+      });
+    }
     return { _meta };
   }
 

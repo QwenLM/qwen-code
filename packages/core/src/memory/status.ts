@@ -5,7 +5,11 @@
  */
 
 import { type MemoryManager, type MemoryTaskRecord } from './manager.js';
-import { getAutoMemoryIndexPath, getAutoMemoryRoot } from './paths.js';
+import {
+  getAutoMemoryIndexPath,
+  getAutoMemoryRoot,
+  type ProjectMemoryOwner,
+} from './paths.js';
 import {
   readProjectMemoryCursor,
   readProjectMemoryMetadata,
@@ -42,15 +46,18 @@ export interface ManagedAutoMemoryStatus {
 export async function getManagedAutoMemoryStatus(
   projectRoot: string,
   manager: MemoryManager,
+  owner?: ProjectMemoryOwner,
 ): Promise<ManagedAutoMemoryStatus> {
-  const root = getAutoMemoryRoot(projectRoot);
-  const indexPath = getAutoMemoryIndexPath(projectRoot);
+  const root = getAutoMemoryRoot(projectRoot, owner);
+  const indexPath = getAutoMemoryIndexPath(projectRoot, owner);
 
-  const indexContent = await readAutoMemoryIndex(projectRoot).catch(() => '');
+  const indexContent = await readAutoMemoryIndex(projectRoot, owner).catch(
+    () => '',
+  );
   const [cursor, metadata, docs] = await Promise.all([
-    readProjectMemoryCursor(root).catch(() => undefined),
-    readProjectMemoryMetadata(projectRoot).catch(() => undefined),
-    scanAutoMemoryTopicDocuments(projectRoot),
+    readProjectMemoryCursor(root, owner).catch(() => undefined),
+    readProjectMemoryMetadata(projectRoot, owner).catch(() => undefined),
+    scanAutoMemoryTopicDocuments(projectRoot, owner),
   ]);
 
   // Aggregate per-entry files by topic

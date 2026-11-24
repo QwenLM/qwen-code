@@ -9,10 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import {
-  getWorkspaceProjectMemoryRoot,
-  runWithProjectMemoryOwner,
-} from './paths.js';
+import { getWorkspaceProjectMemoryRoot } from './paths.js';
 import { prepareWorktreeMemoryMigration } from './worktree-migration.js';
 
 const original =
@@ -49,8 +46,6 @@ describe('worktree memory migration', () => {
       getModel: () => 'test-model',
       getModelContextWindowSize: () => 128 * 1024,
       getBaseLlmClient: () => ({ generateJson }),
-      runWithProjectMemoryOwner: <T>(run: () => T) =>
-        runWithProjectMemoryOwner(() => ({ cwd, memoryBaseDir: base }), run),
     } as unknown as Config;
     await fs.mkdir(source, { recursive: true });
     await fs.writeFile(path.join(source, 'old.md'), original);
@@ -95,7 +90,7 @@ describe('worktree memory migration', () => {
     });
     await expect(fs.access(target)).rejects.toMatchObject({ code: 'ENOENT' });
 
-    await config.runWithProjectMemoryOwner(() => plan.apply());
+    await plan.apply();
 
     expect(await fs.readFile(path.join(target, topic.filename), 'utf8')).toBe(
       topic.content,
@@ -121,9 +116,7 @@ describe('worktree memory migration', () => {
     });
     const plan = await prepareWorktreeMemoryMigration(config, source, signal);
 
-    await expect(
-      config.runWithProjectMemoryOwner(() => plan.apply()),
-    ).rejects.toMatchObject({ code: 'ESTALE' });
+    await expect(plan.apply()).rejects.toMatchObject({ code: 'ESTALE' });
     expect(await fs.readFile(file, 'utf8')).toBe('Concurrent update');
     await expect(
       fs.access(path.join(target, 'second.md')),
@@ -144,7 +137,7 @@ describe('worktree memory migration', () => {
     expect(plan.topics).toMatchObject([{ filename, update: true }]);
     expect(await fs.readFile(file, 'utf8')).toBe('Before');
 
-    await config.runWithProjectMemoryOwner(() => plan.apply());
+    await plan.apply();
 
     expect(await fs.readFile(file, 'utf8')).toBe(topic.content);
     expect(await fs.readFile(path.join(target, 'MEMORY.md'), 'utf8')).toContain(
