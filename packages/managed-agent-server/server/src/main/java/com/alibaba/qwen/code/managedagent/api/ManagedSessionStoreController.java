@@ -54,6 +54,8 @@ public class ManagedSessionStoreController {
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
     @org.springframework.beans.factory.annotation.Value("${qwen.managed-agent.wake-dispatch.enabled:false}")
     private boolean wakeDispatch;
+    @org.springframework.beans.factory.annotation.Value("${qwen.managed-agent.action-parking.enabled:false}")
+    private boolean actionParking;
 
     @org.springframework.beans.factory.annotation.Value(
             "${qwen.managed-agent.runtime-observation.enabled:false}")
@@ -172,7 +174,8 @@ public class ManagedSessionStoreController {
             return null;
         }
         WriterGrant advertised = wakeDispatch ? grant.withWakeDispatch() : grant;
-        return runtimeObservation ? advertised.withRuntimeObservation() : advertised;
+        advertised = runtimeObservation ? advertised.withRuntimeObservation() : advertised;
+        return actionParking ? advertised.withActionParking() : advertised;
     }
 
     @PostMapping("/writers:seal")

@@ -118,6 +118,11 @@ export class LocalManagedSessionResourceStore
     immutable: boolean,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertPathSegment(kind, 'kind');
+    // A client-chosen resourceId (worker delivery republish) must be a single
+    // path segment too: assertManagedSessionStableId upstream allows '/' and
+    // '..', so without this the id escapes the kind directory in the join
+    // below while read() would later refuse the same ref.
+    const safeResourceId = assertPathSegment(resourceId, 'resourceId');
     if (bytes.byteLength > MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes) {
       throw new ManagedSessionRecordError(
         `${safeKind} is ${bytes.byteLength} bytes where ${MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes} is the maximum.`,
@@ -127,22 +132,22 @@ export class LocalManagedSessionResourceStore
     const pending = path.join(
       directory,
       immutable
-        ? `.${resourceId}.${randomUUID()}.pending`
-        : `.${resourceId}.pending`,
+        ? `.${safeResourceId}.${randomUUID()}.pending`
+        : `.${safeResourceId}.pending`,
     );
 
-    const target = path.join(directory, resourceId);
+    const target = path.join(directory, safeResourceId);
     await ensurePrivateDirectory(path.dirname(this.root));
     await ensurePrivateDirectory(this.root);
     const checkedDirectory = await ensurePrivateDirectory(directory);
 
     const resourceRef: ManagedSessionDurableRef = {
-      resourceId,
+      resourceId: safeResourceId,
       kind: safeKind,
       schemaVersion: 1,
       byteLength: bytes.byteLength,
       digest: immutable
-        ? resourceId
+        ? safeResourceId
         : createHash('sha256').update(bytes).digest('hex'),
     };
     if (immutable && (await lstatOrUndefined(target))) {

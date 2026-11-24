@@ -22,7 +22,7 @@ Non-goals:
 - Thinking rows, which [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md) adds, the band above the prompt, and trees drawn in place of a row.
 - Redrawing rows that a page already holds on `$.ui.invalidate('ui.render')`.
 - Mod rows over the ACP-over-HTTP transport or in other ACP clients (Zed, the VS Code companion).
-- Removing `MessageRewriteMiddleware`, which [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md) leaves as a decision of its own.
+- Removing `MessageRewriteMiddleware`, which [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md) leaves as a decision of its own; see [Removing MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.md).
 
 ## Compatibility contract
 

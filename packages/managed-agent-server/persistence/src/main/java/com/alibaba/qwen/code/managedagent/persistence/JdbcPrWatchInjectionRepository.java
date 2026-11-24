@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
@@ -20,7 +22,7 @@ import java.util.Optional;
 public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRepository {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String SELECT = "SELECT " + ManagedSchemaProjection.OPERATION.columns("o") + " FROM ma_request_receipt r JOIN ma_operation o"
-            + " ON o.operation_key = r.result_operation_key AND o.operation_kind = 'PR_WATCH_INJECT'"
+            + " ON o.operation_ref = r.result_operation_ref AND o.operation_kind = 'PR_WATCH_INJECT'"
             + " WHERE r.namespace = 'PR_WATCH_INJECT'";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -38,9 +40,8 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         requireCandidate(candidate);
         transactions.executeWithoutResult(status -> {
             long now = databaseNow();
-            String scope = ManagedSchemaKeys.key("CHANNEL", candidate.tenantId(), candidate.channelInstanceId());
-            String target = ManagedSchemaKeys.key(candidate.sessionId());
-            String operation = ManagedSchemaKeys.operationKey(OperationKind.PR_WATCH_INJECT, scope, target, candidate.inputId());
+            String operation = ManagedIdentityRefs.operationRef(OperationKind.PR_WATCH_INJECT.name(),
+                    candidate.tenantId(), "CHANNEL", candidate.channelInstanceId(), candidate.sessionId(), candidate.inputId());
             String receipt = ManagedSchemaKeys.receiptKey(ReceiptNamespace.PR_WATCH_INJECT, candidate.tenantId(),
                     ReceiptScope.CHANNEL, candidate.channelInstanceId(), candidate.inputId());
             String request = JSON.createObjectNode().put("version", 1).put("channelInstanceId", candidate.channelInstanceId())
@@ -50,19 +51,20 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
                     .put("evidence", candidate.evidence()).put("text", candidate.text())
                     .toString();
             String digest = ManagedSchemaKeys.key(candidate.inputId());
-            int admitted = jdbc.update("INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
-                            + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
-                            + " channel_id, session_id, state, result_operation_key, gmt_create, gmt_modified)"
-                            + " VALUES (?, 'PR_WATCH_INJECT', ?, ?, 'CHANNEL', ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)",
-                    receipt, ManagedSchemaKeys.key(candidate.tenantId()), candidate.tenantId(), scope,
-                    candidate.channelInstanceId(), candidate.inputId(), digest, digest,
-                    candidate.channelInstanceId(), candidate.sessionId(), operation, now, now);
+            int admitted = jdbc.update("INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_id,"
+                            + " scope_kind, scope_ref, scope_id, idempotency_key, idempotency_digest, request_digest,"
+                            + " channel_id, session_id, state, result_operation_ref, gmt_create, gmt_modified)"
+                            + " VALUES (?, 'PR_WATCH_INJECT', ?, 'CHANNEL', ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)",
+                    receipt, candidate.tenantId(),
+                    ManagedSchemaKeys.identity(ManagedIdentityRefs.receiptScopeRef(candidate.tenantId(), candidate.channelInstanceId())),
+                    ManagedSchemaKeys.identity(candidate.channelInstanceId()), candidate.inputId(), digest, digest,
+                    candidate.channelInstanceId(), candidate.sessionId(), ManagedSchemaKeys.identity(operation), now, now);
             if (admitted == 1) {
-                jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id,"
-                                + " session_id, target_kind, target_key, request_digest, request_json, phase, state,"
-                                + " gmt_create, gmt_modified) VALUES (?, ?, 'PR_WATCH_INJECT', ?, ?, ?, 'SESSION', ?, ?, ?, 'STAGING', 'staged', ?, ?)",
-                        operation, scope,
-                        candidate.inputId(), candidate.tenantId(), candidate.sessionId(), target, digest, request, now, now);
+                jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id,"
+                                + " session_id, target_kind, target_id, request_digest, request_json, phase, state,"
+                                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'PR_WATCH_INJECT', ?, ?, ?, 'SESSION', ?, ?, ?, 'STAGING', 'staged', ?, ?)",
+                        ManagedSchemaKeys.identity(operation), "CHANNEL", ManagedSchemaKeys.identity(candidate.channelInstanceId()),
+                        candidate.inputId(), candidate.tenantId(), candidate.sessionId(), ManagedSchemaKeys.identity(candidate.sessionId()), digest, request, now, now);
             }
         });
         PrWatchInjection saved = find(candidate.tenantId(), candidate.inputId()).orElseThrow(() ->
@@ -83,9 +85,9 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
     public Optional<PrWatchInjection> find(String tenantId, String inputId) {
         ChannelStoreSupport.requireId(tenantId, "tenantId");
         ChannelStoreSupport.requireId(inputId, "inputId");
-        List<PrWatchInjection> rows = jdbc.query(SELECT + " AND r.tenant_key = ? AND r.idempotency_digest = ?"
+        List<PrWatchInjection> rows = jdbc.query(SELECT + " AND r.idempotency_digest = ?"
                         + " AND r.tenant_id = ? AND r.idempotency_key = ?", this::row,
-                ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(inputId), tenantId, inputId);
+                ManagedSchemaKeys.key(inputId), tenantId, inputId);
         if (rows.size() > 1) {
             throw new IllegalStateException("pr-watch injection key collision");
         }
@@ -100,15 +102,14 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         if (old == null) {
             return null;
         }
-        String scope = ManagedSchemaKeys.key("CHANNEL", tenantId, old.channelInstanceId());
-        String operation = ManagedSchemaKeys.operationKey(OperationKind.PR_WATCH_INJECT, scope,
-                ManagedSchemaKeys.key(sessionId), inputId);
+        String operation = ManagedIdentityRefs.operationRef(OperationKind.PR_WATCH_INJECT.name(),
+                tenantId, "CHANNEL", old.channelInstanceId(), sessionId, inputId);
         // The identity predicate keeps a concurrent rebind from being
         // admitted under the caller's identity: if the staged row was
         // released and re-staged for another Session, no row matches.
         int updated = jdbc.update("UPDATE ma_operation SET state = 'admitted', phase = 'ADMITTED', result_json = ?,"
-                        + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'PR_WATCH_INJECT' AND state = 'staged' AND session_id = ?",
-                JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), operation, sessionId);
+                        + " gmt_modified = ? WHERE operation_ref = ? AND operation_kind = 'PR_WATCH_INJECT' AND state = 'staged' AND session_id = ?",
+                JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), ManagedSchemaKeys.identity(operation), sessionId);
         if (updated == 0) {
             return null;
         }
@@ -123,16 +124,15 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         if (old == null || !"staged".equals(old.state())) {
             return false;
         }
-        String scope = ManagedSchemaKeys.key("CHANNEL", tenantId, old.channelInstanceId());
-        String operation = ManagedSchemaKeys.operationKey(OperationKind.PR_WATCH_INJECT, scope,
-                ManagedSchemaKeys.key(old.sessionId()), inputId);
+        String operation = ManagedIdentityRefs.operationRef(OperationKind.PR_WATCH_INJECT.name(),
+                tenantId, "CHANNEL", old.channelInstanceId(), old.sessionId(), inputId);
         String receipt = ManagedSchemaKeys.receiptKey(ReceiptNamespace.PR_WATCH_INJECT, tenantId,
                 ReceiptScope.CHANNEL, old.channelInstanceId(), inputId);
         Boolean released = transactions.execute(status -> {
             // The state guard keeps a concurrent admission from being released:
             // if the row slipped to admitted, leave both rows untouched.
-            int ops = jdbc.update("DELETE FROM ma_operation WHERE operation_key = ?"
-                    + " AND operation_kind = 'PR_WATCH_INJECT' AND state = 'staged'", operation);
+            int ops = jdbc.update("DELETE FROM ma_operation WHERE operation_ref = ?"
+                    + " AND operation_kind = 'PR_WATCH_INJECT' AND state = 'staged'", ManagedSchemaKeys.identity(operation));
             if (ops != 1) {
                 return false;
             }
@@ -164,7 +164,7 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         }
         ChannelStoreSupport.requireId(candidate.tenantId(), "tenantId");
         ChannelStoreSupport.requireId(candidate.channelInstanceId(), "channelInstanceId");
-        ChannelStoreSupport.requireId(candidate.inputId(), "inputId");
+        BrokerValues.requireOperationId(candidate.inputId(), "inputId");
         ChannelStoreSupport.requireId(candidate.bindingId(), "bindingId");
         ChannelStoreSupport.requireId(candidate.sessionId(), "sessionId");
         ChannelStoreSupport.requireId(candidate.owner(), "owner");
