@@ -636,6 +636,7 @@ export type ServerLlmCitationEvent = {
 export type ServerLlmHookSystemMessageEvent = {
   type: LlmEventType.HookSystemMessage;
   value: string;
+  isStopReason?: true;
 };
 
 export type ServerLlmGoalSettlementFailedEvent = {
