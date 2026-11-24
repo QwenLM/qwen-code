@@ -5174,5 +5174,118 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         { contextProvided: true, contextDigestVerified: true },
       ).join('\n'),
     ).toMatch(/boundary\.json is missing or empty/);
+
+    // 8t. Parent-level symlink inside <clone>/tmp (<clone>/tmp/sub-link/pr*),
+    // evidence-symlink/.. alias, and <clone>/tmp/pr* -> plain-dir all fail closed.
+    const r7Clone = join(base, 'r7-clone');
+    mkdirSync(join(r7Clone, 'tmp'), { recursive: true });
+    symlinkSync(dirname(deepRealRound), join(r7Clone, 'tmp', 'sub-link'));
+    const r7CloneCtx = join(r7Clone, 'forged-ctx.json');
+    writeFileSync(r7CloneCtx, ctxText);
+    const r7SubLinkRes = run([
+      '--context',
+      r7CloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      join(r7Clone, 'tmp', 'sub-link', basename(deepRealRound)),
+    ]);
+    expect(r7SubLinkRes.status).toBe(1);
+    expect(r7SubLinkRes.stderr).toMatch(/must not point inside/);
+
+    const evAlias = join(base, 'pr99-verify-ev-fake');
+    symlinkSync(join(deepRealRound, 'evidence'), evAlias);
+    const r7EvAliasRes = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${evAlias}/..`,
+    ]);
+    expect(r7EvAliasRes.status).toBe(1);
+    expect(r7EvAliasRes.stdout).toMatch(/must be a real directory/);
+
+    const plainTarget = join(base, 'plain-round-target');
+    mkdirSync(join(plainTarget, 'evidence'), { recursive: true });
+    writeFileSync(join(plainTarget, 'report.md'), validFiles().report);
+    writeFileSync(join(plainTarget, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(plainTarget, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(plainTarget, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(plainTarget, 'evidence', '01-ab-cells.png'), 'png');
+    const toPlainLink = join(r7Clone, 'tmp', 'pr17185-verify-20261124-035500');
+    symlinkSync(plainTarget, toPlainLink);
+    const r7NoCoordCtx = join(r7Clone, 'head-only.json');
+    writeFileSync(r7NoCoordCtx, JSON.stringify({ headRefOid: HEAD }));
+    const r7ToPlainRes = run(['--context', r7NoCoordCtx, toPlainLink]);
+    expect(r7ToPlainRes.status).toBe(1);
+    expect(r7ToPlainRes.stderr).toMatch(/must not point inside/);
+
+    // 8u. Outer ancestor directories named "tmp" (e.g. .qwen/tmp/<worktree>/tmp/pr*)
+    // do not poison trust roots for host snapshots outside the inner worktree.
+    const outerWrap = join(base, 'outer-qwen');
+    const nestedWtRound = join(
+      outerWrap,
+      'tmp',
+      'wt',
+      'tmp',
+      'pr17185-verify-20261124-035600',
+    );
+    mkdirSync(join(nestedWtRound, 'evidence'), { recursive: true });
+    writeFileSync(join(nestedWtRound, 'report.md'), validFiles().report);
+    writeFileSync(join(nestedWtRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(nestedWtRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(nestedWtRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(nestedWtRound, 'evidence', '01-ab-cells.png'), 'png');
+    const outerHostCtx = join(outerWrap, 'host-ctx.json');
+    writeFileSync(outerHostCtx, ctxText);
+    const outerHostRes = run([
+      '--context',
+      outerHostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      nestedWtRound,
+    ]);
+    expect(outerHostRes.status, outerHostRes.stdout + outerHostRes.stderr).toBe(
+      0,
+    );
+
+    // 8v. Even with publisherOwnsBoundary ($QWEN_VERIFY_CONTEXT), supplying a
+    // host --execution-record does not excuse a missing boundary.json.
+    const missingBoundaryWithExec = checkArtifacts({
+      files: validFiles({ boundary: null, boundaryGate: null }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      publisherOwnsBoundary: true,
+      executionRecordText: boundRecText,
+      executionRecordSha256: boundRecSha,
+      expectedContextSha256: ctxSha,
+    });
+    expect(missingBoundaryWithExec.errors.join('\n')).toMatch(
+      /boundary\.json is missing/,
+    );
   });
 });

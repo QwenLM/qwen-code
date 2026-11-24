@@ -1147,13 +1147,21 @@ export function checkBoundary(
 export function executionApprovalErrors(
   boundaryText,
   snapshot,
-  { contextProvided = false, contextDigestVerified = false } = {},
+  {
+    contextProvided = false,
+    contextDigestVerified = false,
+    boundaryUnreadable = false,
+  } = {},
 ) {
   const hasSnapshotApproval =
     snapshot?.executionApproval &&
     typeof snapshot.executionApproval === 'object' &&
     !Array.isArray(snapshot.executionApproval);
-  if (hasSnapshotApproval && (!boundaryText || !boundaryText.trim())) {
+  if (
+    hasSnapshotApproval &&
+    !boundaryUnreadable &&
+    (!boundaryText || !boundaryText.trim())
+  ) {
     return [
       `host --context carries a preflight executionApproval for mode ${JSON.stringify(snapshot.executionApproval.mode)}, but artifact boundary.json is missing or empty`,
     ];
@@ -1714,7 +1722,7 @@ export function checkArtifacts({
     files.boundary.trim() === '';
   if (unreadableKeys.has('boundary')) {
     // The declaration itself is unreadable; already reported.
-  } else if (publisherOwnsBoundary && boundaryAbsent) {
+  } else if (publisherOwnsBoundary && boundaryAbsent && !executionRecord) {
     warnings.push(
       'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job (CI lane) or the host check step (container recipe) writes the declaration before the verdict is trusted',
     );
@@ -1978,23 +1986,15 @@ function main(argv) {
     try {
       const roots = new Set([canonicalDir]);
       const canonicalParent = dirname(canonicalDir);
-      const normCanonicalDir = normalizeFsPath(canonicalDir);
       const normCanonicalParent = normalizeFsPath(canonicalParent);
       const isTmpName = (p) => normalizeFsPath(basename(p)) === 'tmp';
+      const isSystemTmpDir = (p) => {
+        const norm = normalizeFsPath(p);
+        if (norm === '/tmp' || norm === '/private/tmp') return true;
+        return isTmpName(p) && isFilesystemRoot(dirname(p));
+      };
       let leafSymlink = false;
-
-      if (dirPrNumber) {
-        let ancestor = canonicalParent;
-        while (ancestor && !isFilesystemRoot(ancestor)) {
-          if (isTmpName(ancestor)) {
-            roots.add(dirname(ancestor));
-            roots.add(ancestor);
-          }
-          const next = dirname(ancestor);
-          if (next === ancestor) break;
-          ancestor = next;
-        }
-      }
+      let sawVerifyRoundSegment = Boolean(dirPrNumber);
 
       const splitSegments = (p) => {
         const parsed = parse(p);
@@ -2029,6 +2029,9 @@ function main(argv) {
         } else {
           cur = /[\\/]$/.test(cur) ? `${cur}${part}` : `${cur}${sep}${part}`;
         }
+        if (/^pr(\d+)-verify-/.test(basename(cur))) {
+          sawVerifyRoundSegment = true;
+        }
         if (isTmpName(cur)) {
           tmpCandidates.push(cur);
         }
@@ -2041,13 +2044,9 @@ function main(argv) {
             };
           }
           try {
-            if (normalizeFsPath(realPath(cur)) === normCanonicalDir) {
+            const linkTargetReal = realPath(cur);
+            if (withinRoot(canonicalDir, linkTargetReal)) {
               leafSymlink = true;
-              if (dirPrNumber && isTmpName(dirname(cur))) {
-                const parentDir = dirname(cur);
-                roots.add(realPath(dirname(parentDir)));
-                roots.add(realPath(parentDir));
-              }
             }
           } catch {
             // Broken intermediate link will fail below when traversed.
@@ -2064,7 +2063,35 @@ function main(argv) {
           }
         }
       }
-      if (dirPrNumber) {
+
+      if (sawVerifyRoundSegment) {
+        // 1. Canonical path: take only the innermost non-system "tmp" ancestor
+        // (never climb into system /tmp, macOS /private/tmp, or outer .qwen/tmp).
+        let ancestor = canonicalParent;
+        while (ancestor && !isFilesystemRoot(ancestor)) {
+          if (isTmpName(ancestor)) {
+            if (isSystemTmpDir(ancestor)) {
+              if (normalizeFsPath(ancestor) === normCanonicalParent) {
+                roots.add(dirname(ancestor));
+                roots.add(ancestor);
+              }
+            } else {
+              roots.add(dirname(ancestor));
+              roots.add(ancestor);
+            }
+            break;
+          }
+          const next = dirname(ancestor);
+          if (next === ancestor) break;
+          ancestor = next;
+        }
+
+        // 2. Traversed path candidates: enclose root-level /tmp only when it
+        // directly hosts canonicalDir, and enclose the innermost non-system
+        // "tmp" container encountered along the path (covering symlinked tmp,
+        // <clone>/tmp/sub-link/pr42-*, <clone>/tmp/pr42-* -> <outside>/plain,
+        // and <clone>/tmp/link/../pr42-*).
+        let innermostNonSystemTmp = null;
         for (const candidate of tmpCandidates) {
           let resolvedCandidate;
           let cloneCandidate;
@@ -2074,22 +2101,18 @@ function main(argv) {
           } catch {
             continue;
           }
-          if (isFilesystemRoot(cloneCandidate)) {
-            // Only root-level /tmp directly hosting the round dir turns the
-            // derived root into '/'. Do not treat an unrelated /tmp/link/..
-            // prefix whose final target is outside /tmp as root-level.
+          if (isSystemTmpDir(candidate) || isSystemTmpDir(resolvedCandidate)) {
             if (normalizeFsPath(resolvedCandidate) === normCanonicalParent) {
               roots.add(cloneCandidate);
               roots.add(resolvedCandidate);
             }
-          } else if (
-            normalizeFsPath(resolvedCandidate) === normCanonicalParent ||
-            withinRoot(cloneCandidate, canonicalDir) ||
-            withinRoot(resolvedCandidate, canonicalDir)
-          ) {
-            roots.add(cloneCandidate);
-            roots.add(resolvedCandidate);
+            continue;
           }
+          innermostNonSystemTmp = { cloneCandidate, resolvedCandidate };
+        }
+        if (innermostNonSystemTmp) {
+          roots.add(innermostNonSystemTmp.cloneCandidate);
+          roots.add(innermostNonSystemTmp.resolvedCandidate);
         }
       }
       return { roots: [...roots], leafSymlink };
@@ -2601,6 +2624,7 @@ function main(argv) {
     ...executionApprovalErrors(files.boundary, trustedSnapshot, {
       contextProvided: !!contextPath,
       contextDigestVerified,
+      boundaryUnreadable: unreadableKeys.has('boundary'),
     }),
   );
   // The container nonce corroboration (R16-1) needs the round dir to scan the

@@ -2429,6 +2429,10 @@ describe.skipIf(process.platform === 'win32')(
           (line) => `<x-note a=1\u00a02>\n\`\`\`\n\n\`\`\`\n${line}\n\`\`\``,
         ],
         [
+          'GFM display math block ($$) cannot wrap an approval marker',
+          (line) => `$$\n${line}\n$$`,
+        ],
+        [
           'tilde-fenced marker with a longer close is only an example',
           (line) => `~~~text\n${line}\nDo not approve this example.\n~~~~`,
         ],

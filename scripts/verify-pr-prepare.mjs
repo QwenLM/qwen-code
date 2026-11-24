@@ -1241,6 +1241,7 @@ function directApprovalMarkers(body) {
     }
     if (
       /`{3,}|~{3,}/.test(line) ||
+      /^[ \t>*+-]*\$\$/.test(line) ||
       /^(?:[ \t>*+-]|\d+[.)])*<(?:!|\?|[A-Za-z/])/.test(line)
     ) {
       break;
@@ -1823,6 +1824,7 @@ function main(argv) {
     // authority files untouched or restore them exactly.
     let reportedContextPath = contextPath;
     let outPath = null;
+    let outParentCanonical = null;
     if (options.contextOut) {
       outPath = resolve(options.contextOut);
       const realRoot = realPath(root);
@@ -1855,6 +1857,7 @@ function main(argv) {
             `refusing to write the host snapshot inside the PR clone: ${outPath}`,
           );
         }
+        outParentCanonical = realParent;
         if (executionApproval?.source === 'comment') {
           const statePath = watchStatePath(options.stateRoot, context.pr);
           const protectedPaths = [statePath, `${statePath}.lock`];
@@ -1979,6 +1982,7 @@ function main(argv) {
       planned.unshift({
         path: outPath,
         label: 'host snapshot',
+        expectedParent: outParentCanonical,
         next: contextBytes,
       });
     }
