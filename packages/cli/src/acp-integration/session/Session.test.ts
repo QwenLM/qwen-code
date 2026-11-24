@@ -6782,6 +6782,34 @@ describe('Session', () => {
       ]);
     });
 
+    it('emits a shared Stop hook reason outside the assistant reply', async () => {
+      const answer = '{"ok":true}';
+      const stopReason = 'Build is red.';
+      const send = useSharedRounds([
+        text(answer),
+        finished(),
+        {
+          type: core.LlmEventType.HookSystemMessage,
+          value: stopReason,
+          isStopReason: true,
+        },
+      ]);
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(agentText()).toEqual([answer]);
+      expect(updates()).toContainEqual({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'stop_hook_notice',
+          qwenDiscreteMessage: true,
+          stopReason,
+        },
+      });
+    });
+
     it.each([false, true])(
       'runs completion memory work when the client ends at the Stop hook cap (channel turn: %s)',
       async (channel) => {
@@ -51130,6 +51158,56 @@ describe('Session', () => {
           expect(textParts(continuation.message)).toEqual([
             'External stop hook feedback',
           ]);
+        });
+
+        it('ends the turn and emits stopReason separately from the assistant reply', async () => {
+          const answer = '{"ok":true}';
+          const stopReason = 'Build is red.';
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { continue: false, stopReason },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([{ role: 'model', parts: [{ text: answer }] }]);
+          mockChat.getLastModelMessageText = vi.fn().mockReturnValue(answer);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: answer }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(agentMessageChunks().filter(Boolean)).toEqual([answer]);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                source: 'stop_hook_notice',
+                qwenDiscreteMessage: true,
+                stopReason,
+              },
+            },
+          });
         });
 
         it('ends Stop hook continuation when the blocking cap is reached', async () => {

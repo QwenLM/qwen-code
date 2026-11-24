@@ -9663,7 +9663,11 @@ export class Session implements SessionContext {
                 break;
               case LlmEventType.HookSystemMessage:
                 await emitResponseUsage();
-                await this.messageEmitter.emitAgentMessage(event.value);
+                if (event.isStopReason) {
+                  await this.messageEmitter.emitStopHookNotice(event.value);
+                } else {
+                  await this.messageEmitter.emitAgentMessage(event.value);
+                }
                 break;
               case LlmEventType.StopHookLoop:
                 await emitResponseUsage();
@@ -10401,15 +10405,15 @@ export class Session implements SessionContext {
           await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
         }
 
-        if (
-          stopOutput?.isBlockingDecision() ||
-          stopOutput?.shouldStopExecution()
-        ) {
+        if (stopOutput?.isBlockingDecision()) {
           externalReason = stopOutput.getEffectiveReason();
           stopHookIterationCount++;
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
         } else {
+          if (stopOutput?.shouldStopExecution() && stopOutput.stopReason) {
+            await this.messageEmitter.emitStopHookNotice(stopOutput.stopReason);
+          }
           // Bounded: the guard's TODO_STOP_GUARD_MAX_ATTEMPTS caps total guard
           // continuations, and after exhaustion a non-blocking allow exits the
           // loop (!externalReason && !guardContinuation), so the reset cannot
