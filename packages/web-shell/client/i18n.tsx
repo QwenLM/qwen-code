@@ -2887,7 +2887,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.sendNow': 'Send now',
   'queue.sendNowTip':
-    'Send queued messages now. Interrupts the model if it is responding or calling tools',
+    'Send queued messages now. May interrupt the current response or tools. Eligible shell commands continue in the background.',
   'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',

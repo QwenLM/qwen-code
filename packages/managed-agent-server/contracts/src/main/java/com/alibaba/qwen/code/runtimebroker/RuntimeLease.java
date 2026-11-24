@@ -12,11 +12,11 @@ public final class RuntimeLease {
 
     public RuntimeLease(String runtimeInstanceId, URI endpoint, String token,
             String leaseId, long epoch) {
-        this.runtimeInstanceId = BrokerValues.requireId(runtimeInstanceId,
+        this.runtimeInstanceId = BrokerValues.requireRuntimeIdentity(runtimeInstanceId,
                 "runtimeInstanceId");
         this.endpoint = BrokerValues.requireOrigin(endpoint, "endpoint");
         this.token = BrokerValues.requireId(token, "token");
-        this.leaseId = BrokerValues.requireId(leaseId, "leaseId");
+        this.leaseId = BrokerValues.requireRuntimeIdentity(leaseId, "leaseId");
         if (epoch < 0) {
             throw new IllegalArgumentException("epoch must be non-negative");
         }

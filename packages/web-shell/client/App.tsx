@@ -9358,6 +9358,7 @@ export function App({
       : null
     : null;
   const pendingAskUserApprovalRef = useRef(pendingAskUserApproval);
+  const askUserOverlayRef = useRef<HTMLDivElement>(null);
   pendingAskUserApprovalRef.current = pendingAskUserApproval;
   const pendingToolApproval =
     pendingApproval && !isAskUserPermission(pendingApproval)
@@ -12886,21 +12887,32 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const workflowTaskDialogTargetRef = useRef<{
+    id: string;
+    toolUseId?: string;
+    hadToolMessage: boolean;
+  } | null>(null);
+  const tasksPanelRequestIdRef = useRef(0);
+  const closeTasksPanel = useCallback(() => {
+    tasksPanelRequestIdRef.current += 1;
+    workflowTaskDialogTargetRef.current = null;
+    setTasksDialogMessage(null);
+  }, []);
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openMonitorPanel(task);
     },
-    [openMonitorPanel],
+    [closeTasksPanel, openMonitorPanel],
   );
   const handleOpenShellDetails = useCallback(
     (task: DaemonSessionShellTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openShellPanel(task);
     },
-    [openShellPanel],
+    [closeTasksPanel, openShellPanel],
   );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
@@ -15183,9 +15195,9 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     lastRecapBlockCountRef.current = 0;
-  }, [connection.sessionId, connection.workspaceCwd]);
+  }, [closeTasksPanel, connection.sessionId, connection.workspaceCwd]);
 
   useEffect(() => {
     const scope = {
@@ -19547,39 +19559,67 @@ export function App({
     tryFireBoundRun,
   ]);
 
-  const openTasksPanel = useCallback(() => {
-    if (!requireActiveSessionForLocalCommand()) return;
-    const owner = sessionOwnerGuard.capture();
-    const request = workflowsEnabled
-      ? sessionActions.getWorkflowTasks()
-      : sessionActions.getTasks();
-    request
-      .then((snapshot) => {
-        if (!owner.isCurrent()) return;
-        setTasksDialogMessage({ snapshot });
-      })
-      .catch((error: unknown) => {
-        if (!owner.isCurrent()) return;
-        if (isSessionDisconnectedError(error)) return;
-        reportError(error, 'Failed to load tasks');
-      });
-  }, [
-    reportError,
-    requireActiveSessionForLocalCommand,
-    sessionActions,
-    sessionOwnerGuard,
-    workflowsEnabled,
-  ]);
+  const openTasksPanel = useCallback(
+    (
+      workflowTaskId?: string,
+      workflowToolUseId?: string,
+      hadToolMessage = false,
+    ) => {
+      if (!requireActiveSessionForLocalCommand()) return;
+      const owner = sessionOwnerGuard.capture();
+      const requestId = ++tasksPanelRequestIdRef.current;
+      workflowTaskDialogTargetRef.current =
+        workflowTaskId === undefined
+          ? null
+          : {
+              id: workflowTaskId,
+              toolUseId: workflowToolUseId,
+              hadToolMessage,
+            };
+      const request = workflowsEnabled
+        ? sessionActions.getWorkflowTasks()
+        : sessionActions.getTasks();
+      request
+        .then((snapshot) => {
+          if (
+            !owner.isCurrent() ||
+            tasksPanelRequestIdRef.current !== requestId
+          ) {
+            return;
+          }
+          setTasksDialogMessage({ snapshot });
+        })
+        .catch((error: unknown) => {
+          if (
+            !owner.isCurrent() ||
+            tasksPanelRequestIdRef.current !== requestId
+          ) {
+            return;
+          }
+          workflowTaskDialogTargetRef.current = null;
+          if (isSessionDisconnectedError(error)) return;
+          reportError(error, 'Failed to load tasks');
+        });
+    },
+    [
+      reportError,
+      requireActiveSessionForLocalCommand,
+      sessionActions,
+      sessionOwnerGuard,
+      workflowsEnabled,
+    ],
+  );
   const openCockpit = useCallback((): boolean => {
     if (!sessionWorkflowEnabled || approvalOverlayActive) return false;
     if (!requireActiveSessionForLocalCommand()) return false;
     if (!cockpitViewRequested()) updateCockpitLocation(true);
     setActivePanel(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     setMainView('cockpit');
     return true;
   }, [
     approvalOverlayActive,
+    closeTasksPanel,
     requireActiveSessionForLocalCommand,
     sessionWorkflowEnabled,
   ]);
@@ -19748,6 +19788,53 @@ export function App({
     },
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
+  function findComposerTaskTab(
+    tabs: readonly ArtifactPanelTab[],
+    task: ComposerChipTask,
+    sourceSessionId?: string,
+    activeTabId?: string | null,
+  ): ArtifactPanelTab | undefined {
+    if (!sourceSessionId) return undefined;
+    let ids: string[];
+    switch (task.kind) {
+      case 'workflow':
+        return undefined;
+      case 'session':
+        ids = [`session:${task.sessionId}`];
+        break;
+      case 'shell':
+        ids = [`shell:${task.id}`, `background:${sourceSessionId}:${task.id}`];
+        break;
+      case 'monitor':
+        ids = [
+          `monitor:${task.id}`,
+          `background:${sourceSessionId}:${task.id}`,
+        ];
+        break;
+      case 'agent': {
+        ids = [
+          `subagent:${sourceSessionId}:${task.id}`,
+          `background:${sourceSessionId}:${task.id}`,
+        ];
+        if (task.toolUseId) {
+          ids.push(
+            `subagent:${sourceSessionId}:${task.toolUseId}`,
+            `background:${sourceSessionId}:${task.toolUseId}`,
+          );
+        }
+        break;
+      }
+    }
+    const taskTabKind = task.kind === 'agent' ? 'subagent' : task.kind;
+    return tabs.find(
+      (tab) =>
+        (activeTabId === undefined || tab.id === activeTabId) &&
+        (tab.kind === taskTabKind ||
+          (tab.kind === 'pending' && tab.targetKind === taskTabKind)) &&
+        ids.includes(tab.id),
+    );
+  }
+
   // A workflow chip scrolls the transcript to the call that started the run
   // and opens its inline view. A run with no row in this transcript (started
   // from the runs page, a rerun, or history that is not loaded) opens in the
@@ -19763,18 +19850,69 @@ export function App({
         if (messageListRef.current?.scrollToMessage(messageId, callId)) return;
         toolRevealStore.cancel(callId);
       }
-      openTasksPanel();
+      openTasksPanel(task.id, task.toolUseId, messageId !== undefined);
     },
     [messages, openTasksPanel, toolRevealStore],
   );
+  const isComposerTaskOpen = useCallback(
+    (task: ComposerChipTask): boolean => {
+      if (task.kind === 'workflow') {
+        const target = workflowTaskDialogTargetRef.current;
+        if (target?.id !== task.id || target.toolUseId !== task.toolUseId) {
+          return false;
+        }
+        return (
+          target.hadToolMessage ||
+          !task.toolUseId ||
+          findToolMessageId(messages, task.toolUseId) === undefined
+        );
+      }
+      if (!artifactPanelOpen) return false;
+      const tab = findComposerTaskTab(
+        artifactPanelTabs,
+        task,
+        connection.sessionId,
+        activeArtifactPanelTabId,
+      );
+      return tab !== undefined && tab.id === activeArtifactPanelTabId;
+    },
+    [
+      activeArtifactPanelTabId,
+      artifactPanelOpen,
+      artifactPanelTabs,
+      connection.sessionId,
+      messages,
+    ],
+  );
+
   const openComposerTask = useCallback(
-    (task: ComposerChipTask) => {
+    (task: ComposerChipTask, toggle = false) => {
+      const isOpen = isComposerTaskOpen(task);
+      if (toggle && isOpen) {
+        closeTasksPanel();
+        if (task.kind === 'workflow') return;
+        closeArtifactPanel();
+        return;
+      }
+      if (!toggle && isOpen && task.kind === 'workflow') return;
+      closeTasksPanel();
+      if (task.kind === 'workflow') {
+        locateWorkflowTask(task);
+        return;
+      }
+      const existingTab = findComposerTaskTab(
+        artifactPanelTabs,
+        task,
+        connection.sessionId,
+      );
+      if (existingTab) {
+        selectArtifactPanelTab(existingTab.id);
+        setArtifactPanelOpen(true);
+        return;
+      }
       switch (task.kind) {
         case 'session':
           openSessionPanel(task);
-          return;
-        case 'workflow':
-          locateWorkflowTask(task);
           return;
         case 'shell':
           handleOpenShellDetails(task);
@@ -19797,14 +19935,19 @@ export function App({
       }
     },
     [
+      artifactPanelTabs,
+      closeArtifactPanel,
+      closeTasksPanel,
       connection.sessionId,
       connection.workspaceCwd,
       handleOpenMonitorDetails,
       handleOpenShellDetails,
+      isComposerTaskOpen,
       locateWorkflowTask,
       messages,
       openSessionPanel,
       openSubagentPanelForSession,
+      selectArtifactPanelTab,
     ],
   );
 
@@ -23993,6 +24136,43 @@ export function App({
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
+  const reserveQuestionSpaceForEnvironmentPanel =
+    environmentPanelVisible &&
+    !environmentPanelFits &&
+    !artifactPanelFullscreen &&
+    pendingAskUserApproval !== null;
+  // The floating panel and the question are in separate stacking contexts.
+  // Give the panel a real scroll boundary above the question, not a z-index
+  // that makes either surface cover the other.
+  useLayoutEffect(() => {
+    if (!reserveQuestionSpaceForEnvironmentPanel) return;
+    const body = contextBodyRef.current;
+    const footer = footerRef.current;
+    const question = askUserOverlayRef.current;
+    if (!body || !footer || !question) return;
+
+    const property = '--web-shell-environment-panel-bottom-inset';
+    const updateInset = () => {
+      const bounds = body.getBoundingClientRect();
+      if (!bounds.height) return;
+      // Convert viewport coordinates back to the panel's CSS pixels if an
+      // embedding host scaled the shell.
+      const inset =
+        ((bounds.bottom - question.getBoundingClientRect().top) *
+          body.offsetHeight) /
+        bounds.height;
+      body.style.setProperty(property, `${Math.max(0, Math.ceil(inset))}px`);
+    };
+    updateInset();
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(body);
+    observer.observe(footer);
+    observer.observe(question);
+    return () => {
+      observer.disconnect();
+      body.style.removeProperty(property);
+    };
+  }, [reserveQuestionSpaceForEnvironmentPanel]);
   const workspaceGitStatusEnabled =
     !managedMode &&
     !activePanel &&
@@ -24841,7 +25021,7 @@ export function App({
                   : t('tasks.title')
               }
               size="auto"
-              onClose={() => setTasksDialogMessage(null)}
+              onClose={closeTasksPanel}
             >
               <TasksStatusMessage
                 message={tasksDialogMessage}
@@ -24851,13 +25031,13 @@ export function App({
                 onWorkflowRunStarted={() =>
                   setBackgroundTasksRefreshTrigger((value) => value + 1)
                 }
-                onClose={() => setTasksDialogMessage(null)}
+                onClose={closeTasksPanel}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
                 agentTools={
                   sessionWorkflowEnabled ? tasksDialogAgentTools : []
                 }
                 onOpenSubagent={(tool, parentSessionId) => {
-                  setTasksDialogMessage(null);
+                  closeTasksPanel();
                   openSubagentPanel(tool, parentSessionId);
                 }}
                 onOpenMonitor={handleOpenMonitorDetails}
@@ -27339,6 +27519,7 @@ export function App({
                         )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
+                          ref={askUserOverlayRef}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -27645,6 +27826,7 @@ export function App({
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            isTaskOpen={isComposerTaskOpen}
                             onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />

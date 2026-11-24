@@ -22,7 +22,7 @@ Mod 能在 ACP 会话中运行之后，Web Shell 会话会加载工作区的 Mod
 - 思考行（由 [Web Shell 中的 Mod 思考行](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md) 加入）、prompt 上方的横条，以及代替整行绘制的树。
 - 在 `$.ui.invalidate('ui.render')` 时重绘页面已经持有的行。
 - ACP-over-HTTP 传输上的 Mod 行，以及其他 ACP 客户端（Zed、VS Code companion）中的 Mod 行。
-- 移除 `MessageRewriteMiddleware`，[Web Shell 中的 Mod 思考行](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md) 将其作为一项单独的决定。
+- 移除 `MessageRewriteMiddleware`，[Web Shell 中的 Mod 思考行](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md) 将其作为一项单独的决定；见 [移除 MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.zh-CN.md)。
 
 ## 兼容契约
 

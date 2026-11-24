@@ -991,7 +991,13 @@ const {
         | null,
       latestTaskChipsIncludeAgents: null as boolean | null,
       latestTaskChipsOnSelectTask: null as
-        | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
+        | ((
+            task: DaemonSessionTaskWithWorkflowStatus,
+            toggle?: boolean,
+          ) => void)
+        | null,
+      latestTaskChipsIsTaskOpen: null as
+        | ((task: DaemonSessionTaskWithWorkflowStatus) => boolean)
         | null,
       latestTaskChipsOnExplainTask: null as
         | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
@@ -2522,12 +2528,17 @@ vi.doMock('./components/ComposerTaskChips', async () => {
     ComposerTaskChips: React.forwardRef(function ComposerTaskChips(props: {
       tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
       includeAgents: boolean;
-      onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+      onSelectTask: (
+        task: DaemonSessionTaskWithWorkflowStatus,
+        toggle?: boolean,
+      ) => void;
+      isTaskOpen?: (task: DaemonSessionTaskWithWorkflowStatus) => boolean;
       onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
     }) {
       testState.latestTaskChipsTasks = props.tasks;
       testState.latestTaskChipsIncludeAgents = props.includeAgents;
       testState.latestTaskChipsOnSelectTask = props.onSelectTask;
+      testState.latestTaskChipsIsTaskOpen = props.isTaskOpen ?? null;
       testState.latestTaskChipsOnExplainTask = props.onExplainTask ?? null;
       return React.createElement('div', {
         'data-testid': 'composer-task-chips',
@@ -13931,6 +13942,7 @@ beforeEach(() => {
   testState.latestTaskChipsTasks = null;
   testState.latestTaskChipsIncludeAgents = null;
   testState.latestTaskChipsOnSelectTask = null;
+  testState.latestTaskChipsIsTaskOpen = null;
   testState.latestTaskChipsOnExplainTask = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
@@ -15150,7 +15162,7 @@ describe('App plan todos', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
 
@@ -15984,7 +15996,7 @@ describe('App session workflow', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();
@@ -22204,13 +22216,957 @@ describe('App session callbacks', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();
 
     expect(testState.latestTasksStatusProps).not.toBeNull();
   });
+
+  it('collapses a shell or monitor right-panel tab when its chip is clicked again, and switches when another chip is clicked', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-toggle',
+      label: 'npm run dev',
+      description: 'npm run dev',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'npm run dev',
+      cwd: '/tmp/project',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-toggle',
+      label: 'Watch server log',
+      description: 'Watch server log',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    const { container } = renderApp();
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+
+    // First direct activation opens the shell tab.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    // Clicking a different chip switches to its tab without closing the panel.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelectorAll('button[title="Close"]')).toHaveLength(2);
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(true);
+
+    // Clicking the currently active monitor chip collapses the right panel.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    // Direct activation reopens the shell and a repeat activation closes it.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+  });
+
+  it('closes whichever alias is active when standard and background tabs share one task', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-two-alias-tabs',
+      command: 'sleep 900',
+      label: 'Keep validation shell alive',
+      description: 'Keep validation shell alive',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+    };
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [shell],
+    });
+    const transcript =
+      deferred<
+        Awaited<
+          ReturnType<typeof mockWorkspace.client.getSessionTranscriptPage>
+        >
+      >();
+    mockWorkspace.client.getSessionTranscriptPage.mockReturnValueOnce(
+      transcript.promise,
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.backgroundDetails?.({
+        id: 'background-two-alias-tabs',
+        turnId: 'background-two-alias-tabs',
+        taskId: shell.id,
+        kind: 'shell',
+        label: shell.label,
+        startedAt: 1,
+      });
+    });
+    await flush();
+    const backgroundId = `background:session-1:${shell.id}`;
+    expect(
+      testState.latestArtifactPanelProps?.tabs.map((tab) => tab.id),
+    ).toEqual([`shell:${shell.id}`, backgroundId]);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(backgroundId);
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    await act(async () => {
+      transcript.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        events: [],
+        hasMore: false,
+      });
+      await Promise.resolve();
+    });
+  });
+
+  it('toggles an unlinked workflow tasks dialog closed on repeat chip click and drops stale in-flight responses', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    type WorkflowTasksSnapshot = Awaited<
+      ReturnType<typeof mockSessionActions.getWorkflowTasks>
+    >;
+    const first = deferred<WorkflowTasksSnapshot>();
+    const second = deferred<WorkflowTasksSnapshot>();
+    mockSessionActions.getWorkflowTasks
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    // A fresh activation after cancelling the first fetch can still open it.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      second.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 2,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      true,
+    );
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+
+    // Clicking the workflow chip again closes the tasks dialog without refetching.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(2);
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    // Resolving the earlier in-flight request must not re-open the closed dialog.
+    await act(async () => {
+      first.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it('closes a transcript-background shell tab on its chip instead of duplicating it', async () => {
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [
+        {
+          kind: 'shell',
+          id: 'cli-bg-shell-success',
+          command: 'echo ok',
+          label: 'echo ok',
+          description: 'echo ok',
+          status: 'completed',
+          startTime: 1,
+          runtimeMs: 10,
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      await testState.backgroundDetails?.({
+        id: 'background-shell',
+        turnId: 'successful-shell',
+        taskId: 'cli-bg-shell-success',
+        kind: 'shell',
+        name: 'background_task',
+        status: 'completed',
+        message: 'Command completed.',
+        timestamp: '2026-10-25T08:00:00.000Z',
+        rawOutput: {
+          task: {
+            id: 'cli-bg-shell-success',
+            kind: 'shell',
+            command: 'echo ok',
+            label: 'echo ok',
+            description: 'echo ok',
+          },
+        },
+      });
+    });
+    await flush();
+    expect(container.querySelector('button[title="echo"]')).not.toBeNull();
+
+    const task = (await mockWorkspace.client.sessionTasks()).tasks[0]!;
+    expect(task.kind).toBe('shell');
+    expect(testState.latestTaskChipsIsTaskOpen?.(task)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(task, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('does not let a pending tasks dialog cover a newer agent detail selection', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.({
+        kind: 'agent',
+        id: 'agent-new-detail',
+        toolUseId: 'agent-call',
+        label: 'Research the API',
+        description: 'Research the API',
+        status: 'running',
+        startTime: 3,
+        runtimeMs: 30,
+        isBackgrounded: true,
+        subagentType: 'general-purpose',
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(container.textContent).toContain('Agent: Research the API');
+  });
+
+  it('cancels an old tasks request when closing the already-open chip panel', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-close-cancel',
+      label: 'npm run test',
+      description: 'npm run test',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'npm run test',
+    };
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('closes a background agent tab on its chip while hydration is still pending', async () => {
+    const transcript =
+      deferred<
+        Awaited<
+          ReturnType<typeof mockWorkspace.client.getSessionTranscriptPage>
+        >
+      >();
+    mockWorkspace.client.getSessionTranscriptPage.mockReturnValueOnce(
+      transcript.promise,
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      await testState.backgroundDetails?.({
+        id: 'background-agent',
+        turnId: 'background-agent-call',
+        taskId: 'agent-call',
+        kind: 'agent',
+        name: 'background_task',
+        status: 'running',
+        message: 'Agent is working.',
+        timestamp: '2026-10-25T08:00:00.000Z',
+        rawOutput: {
+          task: {
+            id: 'agent-call',
+            kind: 'agent',
+            label: 'Research the API',
+            description: 'Research the API',
+          },
+        },
+      });
+    });
+    await flush();
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalled();
+
+    expect(
+      testState.latestTaskChipsIsTaskOpen?.({
+        kind: 'agent',
+        id: 'agent-call',
+        toolUseId: 'agent-call',
+        label: 'Research the API',
+        description: 'Research the API',
+        status: 'running',
+        startTime: 3,
+        runtimeMs: 30,
+        isBackgrounded: true,
+        subagentType: 'general-purpose',
+      }),
+    ).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(
+        {
+          kind: 'agent',
+          id: 'agent-call',
+          toolUseId: 'agent-call',
+          label: 'Research the API',
+          description: 'Research the API',
+          status: 'running',
+          startTime: 3,
+          runtimeMs: 30,
+          isBackgrounded: true,
+          subagentType: 'general-purpose',
+        },
+        true,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+
+    await act(async () => {
+      transcript.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        events: [],
+        hasMore: false,
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('does not let a pending tasks dialog cover a newly located workflow row', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    testState.messages = [
+      {
+        id: 'workflow-message',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'Workflow',
+            status: 'completed',
+            args: {},
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+    messageListScrollToMessage.mockClear();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+    });
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(
+        {
+          ...unlinkedWorkflowTask,
+          toolUseId: 'workflow-call',
+        },
+        true,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(messageListScrollToMessage).toHaveBeenCalledWith(
+      'workflow-message',
+      'workflow-call',
+    );
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it.each([false, true])(
+    'uses a newly available Workflow transcript instead of cancelling its fallback (available=%s)',
+    async (transcriptAvailable) => {
+      mockConnection.supportedCommands = { workflowsEnabled: true };
+      testState.messages = [];
+      const { container, rerender } = renderApp();
+      await flush();
+      const task: DaemonSessionWorkflowTaskStatus = {
+        ...unlinkedWorkflowTask,
+        toolUseId: 'workflow-call',
+      };
+      const pending =
+        deferred<
+          Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+        >();
+      mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+      messageListScrollToMessage.mockClear();
+
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(task, true);
+      });
+      expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+      if (transcriptAvailable) {
+        testState.messages = [
+          {
+            id: 'workflow-message',
+            role: 'tool_group',
+            tools: [
+              {
+                callId: 'workflow-call',
+                toolName: 'Workflow',
+                status: 'completed',
+                args: {},
+              },
+            ],
+          },
+        ];
+        rerender();
+      }
+
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(task, true);
+        await Promise.resolve();
+      });
+      if (transcriptAvailable) {
+        expect(messageListScrollToMessage).toHaveBeenCalledWith(
+          'workflow-message',
+          'workflow-call',
+        );
+      } else {
+        expect(messageListScrollToMessage).not.toHaveBeenCalled();
+      }
+      expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        pending.resolve({
+          v: 1,
+          sessionId: 'session-1',
+          now: 1,
+          tasks: [],
+        });
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('cancels a pending Workflow fallback when its transcript row is unchanged', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    testState.messages = [
+      {
+        id: 'workflow-message',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'Workflow',
+            status: 'completed',
+            args: {},
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+    messageListScrollToMessage.mockClear();
+    messageListScrollToMessage.mockReturnValue(false);
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+    const task: DaemonSessionWorkflowTaskStatus = {
+      ...unlinkedWorkflowTask,
+      toolUseId: 'workflow-call',
+    };
+
+    for (let index = 0; index < 2; index += 1) {
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(task, true);
+        await Promise.resolve();
+      });
+    }
+    expect(messageListScrollToMessage).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it('cancels an unopened Workflow dialog when clicking its chip again', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    for (let index = 0; index < 2; index += 1) {
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
+        await Promise.resolve();
+      });
+    }
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+  });
+
+  it('does not cancel a pending Workflow dialog through a repeated row selection', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+    const pending =
+      deferred<
+        Awaited<ReturnType<typeof mockSessionActions.getWorkflowTasks>>
+      >();
+    mockSessionActions.getWorkflowTasks.mockReturnValueOnce(pending.promise);
+
+    for (let index = 0; index < 2; index += 1) {
+      await act(async () => {
+        testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, false);
+        await Promise.resolve();
+      });
+    }
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      true,
+    );
+  });
+
+  it('only toggles direct chip activation and preserves row selection or switching', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-row-intent',
+      label: 'npm run dev',
+      description: 'npm run dev',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'npm run dev',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-row-intent',
+      label: 'Watch server log',
+      description: 'Watch server log',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, false);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, false);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, false);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+  });
+
+  it('reuses an existing background tab after it is hidden instead of multiplying tabs', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'cli-bg-shell-success',
+      command: 'echo ok',
+      label: 'echo ok',
+      description: 'echo ok',
+      status: 'completed',
+      startTime: 1,
+      runtimeMs: 10,
+    };
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [shell],
+    });
+    renderApp();
+    await flush();
+    await act(async () => {
+      await testState.backgroundDetails?.({
+        id: 'background-shell-reopen',
+        turnId: 'successful-shell',
+        taskId: shell.id,
+        kind: 'shell',
+        name: 'background_task',
+        status: 'completed',
+        message: 'Command completed.',
+        timestamp: '2026-10-25T08:00:00.000Z',
+        rawOutput: { task: shell },
+      });
+    });
+    await flush();
+    const originalId = testState.latestArtifactPanelProps?.tabs[0]?.id;
+    expect(originalId).toBe(`background:session-1:${shell.id}`);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(1);
+    expect(testState.latestArtifactPanelProps?.tabs[0]?.id).toBe(originalId);
+
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-background-reopen',
+      label: 'Watch another task',
+      description: 'Watch another task',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell, true);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      testState.latestArtifactPanelProps?.tabs.map((tab) => tab.id),
+    ).toEqual([originalId, 'monitor:monitor-background-reopen']);
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    act(() => testState.latestArtifactPanelProps?.onSelectTab(originalId!));
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+  });
+
+  it.each([false, true])(
+    'retries a failed background tab on reactivation (chip=%s)',
+    async (fromChip) => {
+      mockWorkspace.client.getSessionTranscriptPage
+        .mockRejectedValueOnce(new Error('temporary transcript failure'))
+        .mockResolvedValue({
+          v: 1,
+          sessionId: 'session-1',
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'retry-agent-call',
+                title: 'Recovered agent',
+                status: 'completed',
+                rawInput: {
+                  description: 'Recovered agent details',
+                  subagent_type: 'Explore',
+                },
+                rawOutput: { result: 'Recovered agent details' },
+                _meta: { toolName: 'Task' },
+              },
+            },
+          ],
+          hasMore: false,
+        });
+      renderApp();
+      await flush();
+      await flush();
+      const task: DaemonSessionAgentTaskStatus = {
+        kind: 'agent',
+        id: 'retry-agent-task',
+        toolUseId: 'retry-agent-call',
+        label: 'Retry background agent',
+        description: 'Retry background agent',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 10,
+        isBackgrounded: true,
+        subagentType: 'Explore',
+      };
+      await act(async () => {
+        testState.backgroundDetails?.({
+          turnId: 'retry-agent-turn',
+          taskId: task.id,
+          kind: 'agent',
+          toolUseId: task.toolUseId,
+          label: task.label,
+          startedAt: 1,
+        });
+      });
+      await vi.waitFor(async () => {
+        await flush();
+        const tab = testState.latestArtifactPanelProps?.tabs[0];
+        expect(tab?.kind).toBe('pending');
+        expect(tab?.kind === 'pending' && tab.loadError).toContain(
+          'temporary transcript failure',
+        );
+      });
+      const originalId = testState.latestArtifactPanelProps!.tabs[0]!.id;
+      expect(testState.latestTaskChipsIsTaskOpen?.(task)).toBe(true);
+      expect(
+        mockWorkspace.client.getSessionTranscriptPage,
+      ).toHaveBeenCalledTimes(1);
+
+      if (fromChip) {
+        await act(async () => {
+          testState.latestTaskChipsOnSelectTask?.(task, true);
+          await Promise.resolve();
+        });
+        await flush();
+        expect(testState.latestTaskChipsIsTaskOpen?.(task)).toBe(false);
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          testState.latestTaskChipsOnSelectTask?.(task, true);
+          await Promise.resolve();
+        });
+      } else {
+        act(() => testState.latestArtifactPanelProps?.onSelectTab(originalId));
+      }
+      await vi.waitFor(async () => {
+        await flush();
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).toHaveBeenCalledTimes(2);
+        expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(1);
+        expect(testState.latestArtifactPanelProps?.tabs[0]?.id).toBe(
+          originalId,
+        );
+        expect(testState.latestArtifactPanelProps?.tabs[0]?.kind).toBe(
+          'subagent',
+        );
+      });
+    },
+  );
 
   it('passes agent tasks to a host-provided footer', () => {
     const agent: DaemonSessionAgentTaskStatus = {
@@ -56421,7 +57377,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();
@@ -56435,7 +57391,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask, true);
       await Promise.resolve();
     });
     await flush();

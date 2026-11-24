@@ -235,7 +235,7 @@ A suspended Session keeps its placement. If its pool member leaves the pool, the
 
 ### Observability
 
-- Harness: clean suspensions, reversible aborts, gated failed/uncertain teardown and its age/reason, predicate rejections, cold opens split into store restore and MCP reinstallation, and `hosted_session_open_busy` refusals. Failed teardown is not counted as a clean suspension.
+- Harness: clean suspensions, reversible aborts, gated failed/uncertain teardown and its age/reason, predicate rejections, cold opens split into store restore and MCP reinstallation, and `hosted_session_open_busy` refusals. Failed teardown is not counted as a clean suspension. The counts accumulate from process start and are reported under `suspension` on the instance's `/internal/hosted-harness/v1/metrics` route.
 - Control plane: admission re-attachments, heartbeat retirements, preserved recovery snapshots, pool reselections, wake activations that evicted a stale attachment, and waits that reached their ageing bound.
 
 ### Failure modes

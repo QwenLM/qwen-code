@@ -315,7 +315,7 @@ class MessageProjectionGapHealTest {
     private long covered(String sessionId) {
         return jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " ma_event_stream WHERE tenant_id = ? AND session_id"
-                        + " = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                        + " = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 Long.class, TENANT, sessionId);
     }
 
@@ -371,7 +371,7 @@ class MessageProjectionGapHealTest {
                 EventIdentity.PROJECTION_VERSION, null, null);
         jdbc.update("UPDATE ma_event_stream SET last_sequence = ?"
                         + " WHERE tenant_id = ? AND session_id = ? AND"
-                        + " stream_kind = 'SESSION' AND stream_id = X''",
+                        + " stream_kind = 'SESSION' AND stream_id = ''",
                 sequence, TENANT, sessionId);
     }
 
