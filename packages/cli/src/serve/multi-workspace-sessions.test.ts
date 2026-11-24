@@ -16,7 +16,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import {
-  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
   SessionTranscriptChangedError,
   Storage,
@@ -26,6 +25,7 @@ import {
   setDebugLogSession,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES } from './server/session-export.js';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
   setSessionTranscriptIndexBuildCompleteHookForTest,
@@ -7372,7 +7372,10 @@ describe('multi-workspace session dispatch', () => {
         'archive',
         `${sessionId}.jsonl`,
       );
-      await fsp.truncate(archivedPath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+      await fsp.truncate(
+        archivedPath,
+        ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES + 1,
+      );
       const { app } = makeHarness({ secondarySummaries: [] });
 
       const response = await request(app)
@@ -7383,8 +7386,8 @@ describe('multi-workspace session dispatch', () => {
       expect(response.body).toMatchObject({
         code: 'transcript_too_large',
         sessionId,
-        snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
-        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        snapshotSize: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES + 1,
+        maxBytes: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES,
       });
     });
   });
