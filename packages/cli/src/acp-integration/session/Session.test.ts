@@ -51718,6 +51718,29 @@ describe('Session', () => {
           });
 
           describe('from a PermissionRequest hook', () => {
+            const replacementInput = { path: '/tmp/c.txt' };
+
+            function mockHookPermissionUpdates(
+              updatedInput?: Record<string, unknown>,
+            ) {
+              const persistRule = vi.fn().mockResolvedValue(undefined);
+              mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+              vi.mocked(core.firePermissionRequestHook).mockResolvedValue({
+                hasDecision: true,
+                shouldAllow: true,
+                updatedInput,
+                updatedPermissions: [
+                  {
+                    type: 'addRules',
+                    rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+                    behavior: 'allow',
+                    destination: 'userSettings',
+                  },
+                ],
+              });
+              return persistRule;
+            }
+
             beforeEach(() => {
               vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
                 shouldProceed: true,
@@ -51725,11 +51748,12 @@ describe('Session', () => {
               vi.spyOn(core, 'firePermissionRequestHook').mockResolvedValue({
                 hasDecision: true,
                 shouldAllow: true,
-                updatedInput: { path: '/tmp/c.txt' },
+                updatedInput: replacementInput,
               });
             });
 
             it('runs a valid replacement with its own confirmation', async () => {
+              const persistRule = mockHookPermissionUpdates(replacementInput);
               const { tool, executed, confirmed } = writeTool();
               await promptWith({ path: '/tmp/a.txt' });
 
@@ -51738,9 +51762,78 @@ describe('Session', () => {
                 ['/tmp/c.txt', core.ToolConfirmationOutcome.ProceedOnce],
               ]);
               expect(executed).toEqual(['/tmp/c.txt']);
+              expect(persistRule).toHaveBeenCalledExactlyOnceWith(
+                'user',
+                'allow',
+                'Bash(npm test)',
+              );
               expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
               expect(mockClient.requestPermission).not.toHaveBeenCalled();
             });
+
+            it.each(['tool policy', 'YOLO'])(
+              'skips rule updates when %s allows the replacement',
+              async (allowedBy) => {
+                const persistRule = mockHookPermissionUpdates(replacementInput);
+                const { executed, confirmed } = writeTool((params) => ({
+                  getDefaultPermission: async () => {
+                    if (params['path'] !== replacementInput.path) return 'ask';
+                    if (allowedBy === 'YOLO') {
+                      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+                        ApprovalMode.YOLO,
+                      );
+                      return 'ask';
+                    }
+                    return 'allow';
+                  },
+                }));
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual([replacementInput.path]);
+                expect(confirmed).toEqual([
+                  [
+                    replacementInput.path,
+                    core.ToolConfirmationOutcome.ProceedOnce,
+                  ],
+                ]);
+                expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+                expect(mockClient.requestPermission).not.toHaveBeenCalled();
+                expect(persistRule).not.toHaveBeenCalled();
+              },
+            );
+
+            it.each([false, true])(
+              'skips rule updates when AUTO_EDIT allows the final input (replacement: %s)',
+              async (replaceInput) => {
+                const originalInput = { path: '/tmp/a.txt' };
+                const persistRule = mockHookPermissionUpdates(
+                  replaceInput ? replacementInput : undefined,
+                );
+                if (replaceInput) {
+                  mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+                    isToolEnabled: vi.fn().mockResolvedValue(true),
+                    hasRelevantRules: () => true,
+                    hasMatchingAskRule: (ctx: { filePath?: string }) =>
+                      ctx.filePath === originalInput.path,
+                    evaluate: async (ctx: { filePath?: string }) =>
+                      ctx.filePath === originalInput.path ? 'ask' : 'default',
+                  });
+                }
+                const { executed, confirmed } = writeTool();
+                const finalInput = replaceInput
+                  ? replacementInput
+                  : originalInput;
+                await promptWith(originalInput, ApprovalMode.AUTO_EDIT);
+
+                expect(executed).toEqual([finalInput.path]);
+                expect(confirmed).toEqual([
+                  [finalInput.path, core.ToolConfirmationOutcome.ProceedOnce],
+                ]);
+                expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+                expect(mockClient.requestPermission).not.toHaveBeenCalled();
+                expect(persistRule).not.toHaveBeenCalled();
+              },
+            );
 
             it('denies a replacement that a permission rule denies', async () => {
               mockConfig.getPermissionManager = vi.fn().mockReturnValue({
@@ -51772,20 +51865,23 @@ describe('Session', () => {
             });
 
             it.each([
-              ['blocked', { shouldBlock: true, unavailable: false }, []],
+              ['blocked', { shouldBlock: true, unavailable: false }, [], 0],
               [
                 'approved',
                 { shouldBlock: false, unavailable: false },
                 ['/tmp/c.txt'],
+                0,
               ],
               [
                 'unavailable',
                 { shouldBlock: true, unavailable: true },
                 ['/tmp/c.txt'],
+                1,
               ],
             ])(
               'classifies a replacement in AUTO mode (%s) before its one-time allow',
-              async (_label, verdict, expectedExecuted) => {
+              async (_label, verdict, expectedExecuted, expectedWrites) => {
+                const persistRule = mockHookPermissionUpdates(replacementInput);
                 let denialState: core.AutoModeDenialState = {
                   consecutiveBlock: 0,
                   consecutiveUnavailable: 0,
@@ -51828,6 +51924,7 @@ describe('Session', () => {
                 expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
                 expect(core.firePreToolUseHook).toHaveBeenCalledOnce();
                 expect(executed).toEqual(expectedExecuted);
+                expect(persistRule).toHaveBeenCalledTimes(expectedWrites);
                 if (expectedExecuted.length === 0) {
                   recordedError('test decision');
                 }

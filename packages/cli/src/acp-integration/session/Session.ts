@@ -357,6 +357,7 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { applyPermissionRequestHookUpdates } from '@qwen-code/qwen-code-core/core/permission-helpers.js';
+import { isAutoEditApproved } from '@qwen-code/qwen-code-core/core/permissionFlow.js';
 import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -19240,6 +19241,9 @@ export class Session implements SessionContext {
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
+                  let hookSuppliedApproval =
+                    pmForcedAsk ||
+                    !isAutoEditApproved(approvalMode, confirmationDetails);
                   if (planShellDecision.classification !== 'not-applicable') {
                     const approval = await validatePlanModeShellApproval({
                       config: this.config,
@@ -19417,6 +19421,18 @@ export class Session implements SessionContext {
                             this.config,
                           )
                         );
+                      hookSuppliedApproval =
+                        !replacementAllowed &&
+                        needsConfirmation(
+                          'ask',
+                          replacementApprovalMode,
+                          policyToolName,
+                        ) &&
+                        (replacementFlow.pmForcedAsk ||
+                          !isAutoEditApproved(
+                            replacementApprovalMode,
+                            replacementDetails,
+                          ));
                       if (
                         replacementAllowed &&
                         replacementApprovalMode === ApprovalMode.AUTO
@@ -19440,6 +19456,9 @@ export class Session implements SessionContext {
                         }
                         if (classified.outcome.kind === 'blocked') {
                           return reject(classified.outcome.errorMessage);
+                        }
+                        if (classified.outcome.kind === 'approved') {
+                          hookSuppliedApproval = false;
                         }
                         updateAutoModeFallback(
                           classified.outcome,
@@ -19509,7 +19528,7 @@ export class Session implements SessionContext {
                       );
                     }
                   }
-                  if (hookHandled) {
+                  if (hookHandled && hookSuppliedApproval) {
                     approvedHookPermissionUpdates =
                       hookResult.updatedPermissions;
                   }
@@ -19536,9 +19555,7 @@ export class Session implements SessionContext {
             if (
               !requiresUserInteraction &&
               !pmForcedAsk &&
-              approvalMode === ApprovalMode.AUTO_EDIT &&
-              (confirmationDetails.type === 'edit' ||
-                confirmationDetails.type === 'info')
+              isAutoEditApproved(approvalMode, confirmationDetails)
             ) {
               // Auto-approve, skip requestPermission.
             } else if (!hookHandled) {
