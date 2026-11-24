@@ -2,9 +2,6 @@ name: 'Qwen PR Safety Precheck'
 
 on:
   workflow_call:
-    secrets:
-      CI_BOT_PAT:
-        required: false
     outputs:
       decision:
         description: 'allow_triage or manual_required'
@@ -33,13 +30,18 @@ jobs:
       - name: 'Check PR author permission'
         id: 'author_permission'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          GH_TOKEN: '${{ github.token }}'
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
         run: |-
           set -euo pipefail
           permission="$(
-            gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" \
-              --jq '.permission' 2>/dev/null || true
+            gh api graphql \
+              -f owner="${GITHUB_REPOSITORY%%/*}" \
+              -f name="${GITHUB_REPOSITORY##*/}" \
+              -f login="$PR_AUTHOR" \
+              -f query='query($owner: String!, $name: String!, $login: String!) { repository(owner: $owner, name: $name) { collaborators(query: $login, first: 1) { nodes { login } edges { permission } } } }' \
+              --jq '.data.repository.collaborators as $c | if ($c.nodes | length) == 1 and $c.nodes[0].login == $login then ($c.edges[0].permission | ascii_downcase) else error("exact collaborator permission not found") end' \
+              --arg login "$PR_AUTHOR" 2>/dev/null || true
           )"
           echo "Author '${PR_AUTHOR}' permission='${permission:-<empty>}'"
           case "$permission" in
@@ -96,7 +98,7 @@ jobs:
       - name: 'Upsert manual approval comment'
         if: "steps.assess.outputs.decision == 'manual_required'"
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
@@ -125,7 +127,7 @@ jobs:
       - name: 'Clear manual approval comment'
         if: "steps.assess.outputs.decision == 'allow_triage'"
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail

@@ -7,19 +7,20 @@ name: 'Assign issue owner'
 # or comments, so untrusted issue text cannot select an assignee. Push access is
 # re-verified against the collaborator API before every write.
 #
-# Trigger note: label events only fire for label writes made with a PAT.
-# The triage agent labels with QWEN_CODE_BOT_TOKEN/CI_BOT_PAT (see
-# qwen-triage.yml), so this chains correctly. If triage ever falls back to the
-# default GITHUB_TOKEN for labelling, this workflow stops firing and must be
-# rehung on `workflow_run` instead — GITHUB_TOKEN writes do not trigger
-# downstream workflow runs.
+# GITHUB_TOKEN-authored labels do not emit `labeled`, so triage invokes this
+# workflow explicitly through the trusted workflow_call interface below.
 #
-# Each label change fires once, so a triage run that applies five labels
-# queues five runs. Every run after the first sees an assignee and no-ops.
+# A labeled event and its explicit triage call may overlap; every run after
+# the first sees an assignee and no-ops.
 
 on:
   issues:
     types: ['labeled', 'unlabeled']
+  workflow_call:
+    inputs:
+      number:
+        required: true
+        type: 'string'
   workflow_dispatch:
     inputs:
       number:
@@ -42,9 +43,9 @@ concurrency:
 jobs:
   assign:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    # Runs only the trusted base-ref script, and label events fire only for
-    # PAT-authored label writes, so the persistent ECS pool is safe and skips
-    # the saturated hosted queue. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    # Runs only the trusted base-ref script, so the persistent ECS pool is safe
+    # and skips the saturated hosted queue. Kill-switch:
+    # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:

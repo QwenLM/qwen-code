@@ -170,13 +170,19 @@ function record(lines) {
 // over one stale entry.
 function canWrite(repository, login) {
   try {
-    return WRITE_PERMISSIONS.has(
+    const result = JSON.parse(
       gh([
         'api',
-        `repos/${repository}/collaborators/${login}/permission`,
-        '--jq',
-        '.permission',
+        'graphql',
+        '-f',
+        `query=query { repository(owner: "${repository.split('/')[0]}", name: "${repository.split('/')[1]}") { collaborators(query: "${login}", first: 1) { nodes { login } edges { permission } } } }`,
       ]),
+    );
+    const collaborators = result.data?.repository?.collaborators;
+    return (
+      collaborators?.nodes?.length === 1 &&
+      collaborators.nodes[0].login === login &&
+      WRITE_PERMISSIONS.has(collaborators.edges?.[0]?.permission?.toLowerCase())
     );
   } catch (error) {
     console.warn(

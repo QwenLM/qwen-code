@@ -153,12 +153,25 @@ function fakeGh(opts = {}) {
         o.repoLabels.map((name) => JSON.stringify({ name })).join('\n'),
       );
     }
-    if (args[0] === 'api' && args[1]?.includes('/collaborators/')) {
-      const login = args[1].split('/')[4];
+    if (args[0] === 'api' && args[1] === 'graphql') {
+      const login = args
+        .find((arg) => arg.startsWith('query='))
+        .match(/collaborators\(query: "([^"]+)"/)[1];
       const permission =
         typeof o.permission === 'function' ? o.permission(login) : o.permission;
       if (permission === null) return fail('404');
-      return ok(permission);
+      return ok(
+        JSON.stringify({
+          data: {
+            repository: {
+              collaborators: {
+                nodes: [{ login }],
+                edges: [{ permission: permission.toUpperCase() }],
+              },
+            },
+          },
+        }),
+      );
     }
     if (args[0] === 'pr' && args[1] === 'view') {
       if (args.includes('headRefOid')) return ok(o.head);
@@ -413,46 +426,6 @@ describe('preflight fail-closed', () => {
     expect(writes).toHaveLength(0);
   });
 
-  it('rejects APPROVE without commit_id', () => {
-    const dir = makeDraft(
-      [{ action: 'review', event: 'APPROVE', body: 'bodies/r.md' }],
-      { 'r.md': 'LGTM' },
-    );
-    const gh = fakeGh();
-    const { code, writes } = runPublish(dir, gh);
-    expect(code).toBe(2);
-    expect(writes).toHaveLength(0);
-  });
-
-  it('rejects APPROVE with a malformed commit_id', () => {
-    const dir = makeDraft(
-      [
-        {
-          action: 'review',
-          event: 'APPROVE',
-          commit_id: 'a'.repeat(39),
-          body: 'bodies/r.md',
-        },
-      ],
-      { 'r.md': 'LGTM' },
-    );
-    const gh = fakeGh();
-    const { code, writes } = runPublish(dir, gh);
-    expect(code).toBe(2);
-    expect(writes).toHaveLength(0);
-  });
-
-  it('rejects the COMMENT review event', () => {
-    const dir = makeDraft(
-      [{ action: 'review', event: 'COMMENT', body: 'bodies/r.md' }],
-      { 'r.md': 'notes' },
-    );
-    const gh = fakeGh();
-    const { code, writes } = runPublish(dir, gh);
-    expect(code).toBe(2);
-    expect(writes).toHaveLength(0);
-  });
-
   it('rejects a malformed JSONL line', () => {
     const dir = makeDraft(['{"action":"close-pr"', { action: 'close-pr' }]);
     const gh = fakeGh();
@@ -505,7 +478,7 @@ describe('preflight fail-closed', () => {
     expect(writes).toHaveLength(0);
   });
 
-  it('rejects review and close-pr when the target is an issue', () => {
+  it('rejects review drafts and close-pr when the target is an issue', () => {
     for (const action of [
       { action: 'review', event: 'REQUEST_CHANGES', body: 'bodies/r.md' },
       { action: 'close-pr' },
@@ -643,119 +616,15 @@ describe('upsert-comment', () => {
   });
 });
 
-describe('review', () => {
-  function reviewDraft(event, commitId) {
-    const action = { action: 'review', event, body: 'bodies/r.md' };
-    if (commitId !== undefined) action.commit_id = commitId;
-    return makeDraft([action], { 'r.md': 'review body' });
-  }
-
-  it('skips APPROVE when the bot already approved at commit_id', () => {
-    const gh = fakeGh({
-      reviews: [{ user: { login: BOT }, state: 'APPROVED', commit_id: HEAD }],
-    });
-    const { code, results, writes } = runPublish(
-      reviewDraft('APPROVE', HEAD),
-      gh,
-    );
-    expect(code).toBe(0);
-    expect(results[0].status).toBe('skipped');
-    expect(writes).toHaveLength(0);
-  });
-
-  it('does not suppress APPROVE on a human approval at the same commit', () => {
-    const gh = fakeGh({
-      reviews: [
-        { user: { login: 'human' }, state: 'APPROVED', commit_id: HEAD },
-      ],
-    });
-    const { code, results } = runPublish(reviewDraft('APPROVE', HEAD), gh);
-    expect(code).toBe(0);
-    expect(results[0].status).toBe('published');
-  });
-
-  it('approves again when the prior bot approval was on another commit', () => {
-    const gh = fakeGh({
-      reviews: [
-        { user: { login: BOT }, state: 'APPROVED', commit_id: OTHER_COMMIT },
-      ],
-    });
-    const { results } = runPublish(reviewDraft('APPROVE', HEAD), gh);
-    expect(results[0].status).toBe('published');
-  });
-
-  it('skips APPROVE as stale when the head moved past commit_id', () => {
-    const gh = fakeGh({ head: OTHER_COMMIT });
-    const { code, results, writes } = runPublish(
-      reviewDraft('APPROVE', HEAD),
-      gh,
-    );
-    expect(code).toBe(0);
-    expect(results[0]).toMatchObject({ status: 'skipped', detail: 'stale' });
-    expect(writes).toHaveLength(0);
-  });
-
-  it('publishes APPROVE pinned to commit_id', () => {
-    const gh = fakeGh();
-    const { code } = runPublish(reviewDraft('APPROVE', HEAD), gh);
-    expect(code).toBe(0);
-    const post = gh.calls.find(
-      (args) =>
-        args[0] === 'api' &&
-        args[1] === `repos/${REPO}/pulls/${NUMBER}/reviews` &&
-        args.includes('-F'),
-    );
-    expect(post).toContain(`event=APPROVE`);
-    expect(post).toContain(`commit_id=${HEAD}`);
-    expect(post.some((a) => a.startsWith('body=@'))).toBe(true);
-  });
-
-  it('skips REQUEST_CHANGES when the bot already has CHANGES_REQUESTED on any commit', () => {
-    const gh = fakeGh({
-      reviews: [
-        {
-          user: { login: BOT },
-          state: 'CHANGES_REQUESTED',
-          commit_id: OTHER_COMMIT,
-        },
-      ],
-    });
-    const { results, writes } = runPublish(reviewDraft('REQUEST_CHANGES'), gh);
-    expect(results[0].status).toBe('skipped');
-    expect(writes).toHaveLength(0);
-  });
-
-  it('publishes REQUEST_CHANGES without SHA binding', () => {
-    const gh = fakeGh();
-    const { code } = runPublish(reviewDraft('REQUEST_CHANGES'), gh);
-    expect(code).toBe(0);
-    const post = gh.calls.find(
-      (args) =>
-        args[0] === 'api' &&
-        args[1] === `repos/${REPO}/pulls/${NUMBER}/reviews` &&
-        args.includes('-F'),
-    );
-    expect(post).toContain('event=REQUEST_CHANGES');
-    expect(post.some((a) => a.startsWith('commit_id='))).toBe(false);
-  });
-});
-
 describe('close-pr / close-issue', () => {
-  it('closes an open PR', () => {
+  it('rejects closing a PR with zero writes', () => {
     const gh = fakeGh({ state: 'open' });
     const { code, results } = runPublish(
       makeDraft([{ action: 'close-pr' }]),
       gh,
     );
-    expect(code).toBe(0);
-    expect(results[0].status).toBe('published');
-    expect(gh.calls).toContainEqual([
-      'pr',
-      'close',
-      String(NUMBER),
-      '--repo',
-      REPO,
-    ]);
+    expect(code).toBe(2);
+    expect(gh.calls.some((args) => isWriteCall(args))).toBe(false);
   });
 
   it('skips closing an already-closed PR', () => {
@@ -764,7 +633,7 @@ describe('close-pr / close-issue', () => {
       makeDraft([{ action: 'close-pr' }]),
       gh,
     );
-    expect(results[0].status).toBe('skipped');
+    expect(results).toHaveLength(0);
     expect(writes).toHaveLength(0);
   });
 
@@ -826,10 +695,13 @@ describe('labels', () => {
   });
 
   it('fails the action on a nonexistent label, never creates it, and continues', () => {
-    const dir = makeDraft([
-      { action: 'labels', add: ['no-such-label'] },
-      { action: 'close-pr' },
-    ]);
+    const dir = makeDraft(
+      [
+        { action: 'labels', add: ['no-such-label'] },
+        { action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s1.md' },
+      ],
+      { 's1.md': stageBody('stage=1') },
+    );
     const gh = fakeGh();
     const { code, results, writes } = runPublish(dir, gh);
     expect(code).toBe(1);
@@ -858,7 +730,7 @@ describe('defer', () => {
     });
   }
 
-  it('QWEN_MAINTAINER_HANDLE wins; mention + blank line + agent body; assignee added', () => {
+  it('QWEN_MAINTAINER_HANDLE wins; mention + blank line + agent body', () => {
     const gh = fakeGh();
     const { code, results, postedBodies } = runPublish(deferDraft(), gh, {
       env: { QWEN_MAINTAINER_HANDLE: 'boss-human' },
@@ -871,15 +743,9 @@ describe('defer', () => {
     expect(postedBodies[0]).toBe(
       '⏸️ Deferring to @boss-human — needs a human call on this one.\n\nthe reason this needs a human\n',
     );
-    expect(gh.calls).toContainEqual([
-      'pr',
-      'edit',
-      String(NUMBER),
-      '--repo',
-      REPO,
-      '--add-assignee',
-      'boss-human',
-    ]);
+    expect(gh.calls.some((args) => args.includes('--add-assignee'))).toBe(
+      false,
+    );
     // The override must not consult the owner map or reviewers at all.
     expect(
       gh.calls.some((args) => args[0] === 'pr' && args[1] === 'view'),
@@ -937,16 +803,16 @@ describe('defer', () => {
     );
   });
 
-  it('a failed assignee add warns but keeps the defer published', () => {
-    const gh = fakeGh({
-      failOn: (args) => args[0] === 'pr' && args[1] === 'edit',
-    });
-    const { code, results, err } = runPublish(deferDraft(), gh, {
+  it('never tries to mutate assignees through the read-only PR credential', () => {
+    const gh = fakeGh();
+    const { code, results } = runPublish(deferDraft(), gh, {
       env: { QWEN_MAINTAINER_HANDLE: 'boss-human' },
     });
     expect(code).toBe(0);
     expect(results[0].status).toBe('published');
-    expect(err.text()).toContain('could not assign @boss-human');
+    expect(
+      gh.calls.some((args) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toBe(false);
   });
 });
 
@@ -975,7 +841,8 @@ describe('resolveMaintainer', () => {
       gh.calls.some(
         (args) =>
           args[0] === 'api' &&
-          args[1] === `repos/${REPO}/collaborators/alice/permission`,
+          args[1] === 'graphql' &&
+          args.join(' ').includes('query: "alice"'),
       ),
     ).toBe(false);
   });
@@ -1104,9 +971,9 @@ describe('execution ordering and reporting', () => {
     const dir = makeDraft(
       [
         { action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s1.md' },
-        { action: 'close-pr' },
+        { action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' },
       ],
-      { 's1.md': stageBody('stage=1') },
+      { 's1.md': stageBody('stage=1'), 's2.md': stageBody('stage=2') },
     );
     const gh = fakeGh();
     const { code, results } = runPublish(dir, gh);
@@ -1135,9 +1002,9 @@ describe('execution ordering and reporting', () => {
     const dir = makeDraft(
       [
         { action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s1.md' },
-        { action: 'close-pr' },
+        { action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' },
       ],
-      { 's1.md': stageBody('stage=1') },
+      { 's1.md': stageBody('stage=1'), 's2.md': stageBody('stage=2') },
     );
     const gh = fakeGh();
     const { code, results, writes } = runPublish(dir, gh, {
@@ -1147,7 +1014,7 @@ describe('execution ordering and reporting', () => {
     expect(writes).toHaveLength(0);
     expect(results).toEqual([
       { action: 'upsert-comment', status: 'skipped', detail: 'dry-run' },
-      { action: 'close-pr', status: 'skipped', detail: 'dry-run' },
+      { action: 'upsert-comment', status: 'skipped', detail: 'dry-run' },
     ]);
   });
 

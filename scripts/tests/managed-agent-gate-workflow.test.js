@@ -627,9 +627,7 @@ describe('Managed Agent gate tier selection', () => {
       EVENT_NAME: 'pull_request_review',
       REVIEW_STATE: 'approved',
     };
-    // qwen-triage-finalize.yml watches this workflow and posts a deferred
-    // APPROVE once a PR's checks land green; without this gate the fast tier
-    // would buy the full suite with no human involved.
+    // Automatic approvals must never buy the full suite with no human involved.
     for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
       expect(tier({ ...approve, REVIEW_AUTHOR_ASSOCIATION: association })).toBe(
         'tier=full',

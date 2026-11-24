@@ -34,7 +34,8 @@ gh label list --repo "$REPO" --limit 200
 
 - Untrusted input: never interpolate issue/PR text into shell
 - Labels: apply existing only, never create. Do not touch process labels (`welcome-pr`, `maintainer`, `help wanted`, `good first issue`)
-- Writes: never call GitHub write APIs directly. Every comment, review,
+- Writes: never call GitHub write APIs directly. Every comment, non-voting
+  review recommendation,
   label change, close, and defer is a DRAFT (see Publishing below); the
   publisher executes drafts under the bot identity.
 - Draft PRs: skip
@@ -101,14 +102,12 @@ Write each body as a file under `$DRAFT_DIR/bodies/`, then append one JSON
 action per line to `$DRAFT_DIR/actions.jsonl` (use `jq -cn` so names and
 labels are escaped safely). Actions execute in file order:
 
-| Action         | Shape                                                                                                                                            |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| upsert-comment | `{"action":"upsert-comment","marker":"stage=1","body":"bodies/stage-1.md"}`                                                                      |
-| review         | `{"action":"review","event":"APPROVE","commit_id":"<full OID>","body":"bodies/approve.md"}` — or `"event":"REQUEST_CHANGES"` without `commit_id` |
-| close-pr       | `{"action":"close-pr"}`                                                                                                                          |
-| close-issue    | `{"action":"close-issue","reason":"not planned"}`                                                                                                |
-| labels         | `{"action":"labels","add":["type/bug"],"remove":["status/need-information"]}`                                                                    |
-| defer          | `{"action":"defer","body":"bodies/defer.md"}` — PR only; the publisher resolves and @mentions the maintainer and assigns the PR                  |
+| Action         | Shape                                                                                                        |
+| -------------- | ------------------------------------------------------------------------------------------------------------ |
+| upsert-comment | `{"action":"upsert-comment","marker":"stage=1","body":"bodies/stage-1.md"}`                                  |
+| close-issue    | `{"action":"close-issue","reason":"not planned"}`                                                            |
+| labels         | `{"action":"labels","add":["type/bug"],"remove":["status/need-information"]}`                                |
+| defer          | `{"action":"defer","body":"bodies/defer.md"}` — PR only; the publisher resolves and @mentions the maintainer |
 
 Rules the publisher enforces (fail-closed; do not rely on leniency):
 
@@ -116,18 +115,21 @@ Rules the publisher enforces (fail-closed; do not rely on leniency):
   `<!-- qwen-triage <marker> -->`; markers are limited to `stage=1`,
   `stage=2`, `stage=3`, `stage=1-pre`, `stage=1b`.
 - Bodies are capped at 65,536 characters — rejected, not truncated.
-- `APPROVE` requires the full reviewed `commit_id`; the publisher skips it
-  as stale if the head moved, and suppresses duplicate approvals and
-  duplicate `CHANGES_REQUESTED` reviews.
+- The publishing identity is `github-actions[bot]`. It cannot submit formal
+  PR reviews, so approval and request-changes recommendations belong in the
+  ordinary staged comments. Never emit an `approve-on-green` marker; a human
+  maintainer makes the voting decision. Draft `review` actions are rejected.
 - Labels must already exist; the publisher never creates one.
 - Comment upserts match bot-authored comments whose body starts with the
   marker — a quoted marker in someone else's comment is never touched.
+- Labels written by GITHUB_TOKEN do not emit `labeled`, so the workflow
+  explicitly invokes owner assignment after issue triage completes.
 
 Two modes:
 
 - **CI** (`QWEN_TRIAGE_PUBLISH=workflow`): draft only, then stop. The
   workflow's `publish-triage` job validates and executes the drafts with the
-  bot PAT. Never attempt GitHub writes yourself — your token is read-only,
+  GITHUB_TOKEN. Never attempt GitHub writes yourself — your token is read-only,
   and the CI denylist blocks running the publisher.
 - **Local** (no `QWEN_TRIAGE_PUBLISH`): after the final stage, run the same
   publisher with your own `gh` auth:

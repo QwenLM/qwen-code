@@ -35,12 +35,9 @@ const PROCESS_LABELS = new Set([
   'good first issue',
 ]);
 const WRITE_PERMISSIONS = new Set(['admin', 'maintain', 'write']);
-const COMMIT_ID = /^[0-9a-fA-F]{40}$/;
 
 const ACTION_FIELDS = {
   'upsert-comment': ['marker', 'body'],
-  review: ['event', 'commit_id', 'body'],
-  'close-pr': [],
   'close-issue': ['reason'],
   labels: ['add', 'remove'],
   defer: ['body'],
@@ -98,7 +95,7 @@ function readBodyFile(draftDir, bodiesDir, rel, where) {
   }
   const text = readFileSync(resolved, 'utf8');
   // Reject, never truncate: cutting the tail could drop the CI-region or
-  // approve-on-green markers the finalize workflow consumes.
+  // machine-readable CI markers.
   if (text.length > MAX_BODY_LENGTH) {
     throw new Error(
       `${where}: body exceeds ${MAX_BODY_LENGTH} characters (${text.length})`,
@@ -152,17 +149,6 @@ export function validateDrafts({ dir, targetKind }) {
         throw new Error(`${where}: marker not in allowlist: ${action.marker}`);
       }
     }
-    if (action.action === 'review') {
-      if (!['APPROVE', 'REQUEST_CHANGES'].includes(action.event)) {
-        throw new Error(`${where}: unsupported review event: ${action.event}`);
-      }
-      if (action.commit_id !== undefined && !COMMIT_ID.test(action.commit_id)) {
-        throw new Error(`${where}: commit_id must be 40 hex characters`);
-      }
-      if (action.event === 'APPROVE' && action.commit_id === undefined) {
-        throw new Error(`${where}: APPROVE requires commit_id`);
-      }
-    }
     if (action.action === 'close-issue' && action.reason !== 'not planned') {
       throw new Error(`${where}: close-issue reason must be "not planned"`);
     }
@@ -183,18 +169,10 @@ export function validateDrafts({ dir, targetKind }) {
     if (action.action === 'defer' && targetKind !== 'pr') {
       throw new Error(`${where}: defer is only valid for pull requests`);
     }
-    if (
-      (action.action === 'review' || action.action === 'close-pr') &&
-      targetKind !== 'pr'
-    ) {
-      throw new Error(
-        `${where}: ${action.action} is only valid for pull requests`,
-      );
-    }
     if (action.action === 'close-issue' && targetKind !== 'issue') {
       throw new Error(`${where}: close-issue is only valid for issues`);
     }
-    if (['upsert-comment', 'review', 'defer'].includes(action.action)) {
+    if (['upsert-comment', 'defer'].includes(action.action)) {
       if (typeof action.body !== 'string') {
         throw new Error(`${where}: ${action.action} requires a body path`);
       }
@@ -219,13 +197,20 @@ export function validateDrafts({ dir, targetKind }) {
 
 function canWrite(exec, repo, login) {
   try {
-    return WRITE_PERMISSIONS.has(
+    const [owner, name] = repo.split('/');
+    const result = JSON.parse(
       ghCall(exec, [
         'api',
-        `repos/${repo}/collaborators/${login}/permission`,
-        '--jq',
-        '.permission',
+        'graphql',
+        '-f',
+        `query=query { repository(owner: "${owner}", name: "${name}") { collaborators(query: "${login}", first: 1) { nodes { login } edges { permission } } } }`,
       ]),
+    );
+    const collaborators = result.data?.repository?.collaborators;
+    return (
+      collaborators?.nodes?.length === 1 &&
+      collaborators.nodes[0].login === login &&
+      WRITE_PERMISSIONS.has(collaborators.edges?.[0]?.permission?.toLowerCase())
     );
   } catch {
     // A stale map entry (renamed/deleted account, lost access) must drop the
@@ -372,56 +357,6 @@ function upsertComment(action, { repo, number, botLogin, exec }) {
   };
 }
 
-function submitReview(action, { repo, number, botLogin, exec }) {
-  const reviews = ghJsonLines(exec, [
-    'api',
-    `repos/${repo}/pulls/${number}/reviews`,
-  ]);
-  const head = ghCall(exec, [
-    'pr',
-    'view',
-    String(number),
-    '--repo',
-    repo,
-    '--json',
-    'headRefOid',
-    '--jq',
-    '.headRefOid',
-  ]);
-  const own = botLogin
-    ? reviews.filter((review) => review.user?.login === botLogin)
-    : [];
-  if (action.event === 'APPROVE') {
-    if (
-      own.some(
-        (review) =>
-          review.state === 'APPROVED' && review.commit_id === action.commit_id,
-      )
-    ) {
-      return { status: 'skipped', detail: 'already approved at this commit' };
-    }
-    // Attesting a commit that is no longer head would approve code nobody
-    // reviewed; the finalize workflow applies the same stale check.
-    if (head !== action.commit_id) {
-      return { status: 'skipped', detail: 'stale' };
-    }
-  } else if (own.some((review) => review.state === 'CHANGES_REQUESTED')) {
-    return { status: 'skipped', detail: 'changes already requested' };
-  }
-  const args = [
-    'api',
-    `repos/${repo}/pulls/${number}/reviews`,
-    '-f',
-    `event=${action.event}`,
-  ];
-  if (action.commit_id !== undefined) {
-    args.push('-f', `commit_id=${action.commit_id}`);
-  }
-  args.push('-F', `body=@${action.bodyFile}`);
-  ghCall(exec, args);
-  return { status: 'published', detail: `${action.event} review` };
-}
-
 function closeTarget(action, { repo, number, exec }) {
   const state = ghCall(exec, [
     'api',
@@ -432,19 +367,15 @@ function closeTarget(action, { repo, number, exec }) {
   if (state !== 'open') {
     return { status: 'skipped', detail: `already ${state}` };
   }
-  if (action.action === 'close-pr') {
-    ghCall(exec, ['pr', 'close', String(number), '--repo', repo]);
-  } else {
-    ghCall(exec, [
-      'issue',
-      'close',
-      String(number),
-      '--repo',
-      repo,
-      '--reason',
-      'not planned',
-    ]);
-  }
+  ghCall(exec, [
+    'issue',
+    'close',
+    String(number),
+    '--repo',
+    repo,
+    '--reason',
+    'not planned',
+  ]);
   return { status: 'published', detail: 'closed' };
 }
 
@@ -492,23 +423,6 @@ function deferToMaintainer(action, context) {
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
-  if (login) {
-    try {
-      ghCall(exec, [
-        'pr',
-        'edit',
-        String(number),
-        '--repo',
-        repo,
-        '--add-assignee',
-        login,
-      ]);
-    } catch (error) {
-      // The mention is the load-bearing signal; a failed assign must never
-      // turn a published defer into a failed action.
-      err.write(`warning: could not assign @${login}: ${error.message}\n`);
-    }
-  }
   return {
     status: 'published',
     detail: login ? `deferred to @${login}` : 'deferred without mention',
@@ -519,9 +433,6 @@ function runAction(action, context) {
   switch (action.action) {
     case 'upsert-comment':
       return upsertComment(action, context);
-    case 'review':
-      return submitReview(action, context);
-    case 'close-pr':
     case 'close-issue':
       return closeTarget(action, context);
     case 'labels':

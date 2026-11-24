@@ -25,8 +25,8 @@ on:
 
 permissions:
   contents: 'read'
-  issues: 'write'
-  pull-requests: 'write'
+  issues: 'read'
+  pull-requests: 'read'
 
 jobs:
   precheck-pr:
@@ -38,8 +38,6 @@ jobs:
       pull-requests: 'read'
       issues: 'write'
     uses: './.github/workflows/qwen-pr-safety-precheck.yml'
-    secrets:
-      CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
 
   authorize:
     needs: ['precheck-pr']
@@ -74,8 +72,8 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /verify '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
-    # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
-    # but runs no agent, checks out nothing, and processes no untrusted PR
+    # Runner routing for the write-permission gate. This job runs no agent,
+    # checks out nothing, and processes no untrusted PR
     # content — its steps only read event metadata and call read/receipt APIs,
     # and each gh step pins GH_HOST plus a private GH_CONFIG_DIR (below) — so
     # it is safe on the persistent ECS pool whenever the trigger cannot carry
@@ -95,6 +93,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: 'read'
+      issues: 'write'
     outputs:
       should_run: '${{ steps.perm.outputs.should_run }}'
       # /verify trust level: 'trusted' when the PR author has write,
@@ -180,12 +179,7 @@ jobs:
       - name: 'Check principal write permission'
         id: 'perm'
         env:
-          # CI_BOT_PAT (not GITHUB_TOKEN): reading a user's collaborator
-          # permission requires write/maintain/admin access, which the
-          # GITHUB_TOKEN with contents:read does not have. Safe here — this job
-          # runs no agent, checks out nothing, and processes no untrusted PR
-          # content; it only reads event metadata and calls one read API.
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           EVENT_NAME: '${{ github.event_name }}'
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
@@ -202,7 +196,7 @@ jobs:
           # Harden gh against the pool's shared, writable HOME config (this
           # gate now runs on ecs-qwen for comment/dispatch triggers): a
           # planted ~/.config/gh (http_unix_socket) would otherwise receive
-          # CI_BOT_PAT and could forge the permission response downstream
+          # GITHUB_TOKEN and could forge the permission response downstream
           # consumes. Same pins as qwen-autofix.yml's route/review-scan; no
           # `unset GH_TOKEN` — it is this step's only credential. A failed
           # mktemp exits 1 (fail closed), never falling back to the shared
@@ -244,7 +238,7 @@ jobs:
               # workspace wipe.
               # The residual ECS risk for untrusted code is PERSISTENCE —
               # the pool is network-isolated, but machines are reused, and
-              # the next run arrives carrying credentials (CI_BOT_PAT, the
+              # the next run arrives carrying credentials (GITHUB_TOKEN, the
               # model key) that artifacts planted now could harvest. The
               # wipe is what answers it, and unlike the vector-by-vector
               # sweep below it is deny-by-default.
@@ -315,7 +309,13 @@ jobs:
             case "$checked" in *" $principal "*) continue ;; esac
             checked="${checked}${principal} "
             api_error_file="$(mktemp)"
-            if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+            if ! permission="$(gh api graphql \
+              -f owner="${GITHUB_REPOSITORY%%/*}" \
+              -f name="${GITHUB_REPOSITORY##*/}" \
+              -f login="$principal" \
+              -f query='query($owner: String!, $name: String!, $login: String!) { repository(owner: $owner, name: $name) { collaborators(query: $login, first: 1) { nodes { login } edges { permission } } } }' \
+              --jq '.data.repository.collaborators as $c | if ($c.nodes | length) == 1 and $c.nodes[0].login == $login then ($c.edges[0].permission | ascii_downcase) else error("exact collaborator permission not found") end' \
+              --arg login "$principal" 2>"$api_error_file")"; then
               api_error="$(cat "$api_error_file")"
               rm -f "$api_error_file"
               api_error="${api_error:-unknown error}"
@@ -363,7 +363,13 @@ jobs:
               exit 0
             }
             if [ -z "$ISSUE_AUTHOR" ] ||
-               ! author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ISSUE_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
+               ! author_perm="$(gh api graphql \
+                 -f owner="${GITHUB_REPOSITORY%%/*}" \
+                 -f name="${GITHUB_REPOSITORY##*/}" \
+                 -f login="$ISSUE_AUTHOR" \
+                 -f query='query($owner: String!, $name: String!, $login: String!) { repository(owner: $owner, name: $name) { collaborators(query: $login, first: 1) { nodes { login } edges { permission } } } }' \
+                 --jq '.data.repository.collaborators as $c | if ($c.nodes | length) == 1 and $c.nodes[0].login == $login then ($c.edges[0].permission | ascii_downcase) else error("exact collaborator permission not found") end' \
+                 --arg login "$ISSUE_AUTHOR" 2>/dev/null)"; then
               deny_verify "Could not resolve the PR author's permission for the verify lane; skipping it."
             fi
             case "$author_perm" in
@@ -404,7 +410,7 @@ jobs:
           (github.event.comment.body == '@qwen-code /verify' ||
            startsWith(github.event.comment.body, '@qwen-code /verify '))
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           # gh config reroute hardening — same pins as the perm step above.
@@ -436,7 +442,7 @@ jobs:
           (github.event.comment.body == '@qwen-code /verify' ||
            startsWith(github.event.comment.body, '@qwen-code /verify '))
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           NUMBER: '${{ github.event.issue.number }}'
         run: |-
           # gh config reroute hardening — same pins as the perm step above.
@@ -513,11 +519,11 @@ jobs:
     # reaches the PR/issue only via the API, and must NEVER execute PR-derived
     # code. The agent no longer carries a write credential: it reads GitHub
     # with the job's read-only GITHUB_TOKEN and expresses every write as a
-    # draft that the separate publish-triage job validates and executes with
-    # the bot PAT (see the long note on the Qwen step). The container below
+    # draft that publish-triage validates and executes with GITHUB_TOKEN.
+    # The container below
     # and the per-run workspace sanitize bound what a steered agent could
     # persist on the reusable pool.
-    # Runner routing: with the write PAT out of the agent environment, every
+    # Runner routing: with the write credential out of the agent environment, every
     # triage trigger — issues, same-repo and fork PRs, comment reruns,
     # dispatch — may use the persistent ECS pool. The pool is
     # maintainer-provided and network-isolated; hosted capacity is the scarce
@@ -526,8 +532,7 @@ jobs:
     # Forks of this repo fall back to ubuntu-latest as before.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Read-only by construction: the agent's GH_TOKEN is this job's
-    # GITHUB_TOKEN. Every write goes through publish-triage's PAT. The
-    # pre-agent reaction step uses the PAT explicitly (reactions need write).
+    # GITHUB_TOKEN. Every write goes through publish-triage.
     permissions:
       contents: 'read'
       issues: 'read'
@@ -545,6 +550,7 @@ jobs:
         shell: 'bash'
     outputs:
       pr_number: '${{ steps.resolve.outputs.number }}'
+      status_body: '${{ steps.finalize_status.outputs.body }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -594,19 +600,6 @@ jobs:
 
           gh --version
           git config --global --add safe.directory '*'
-
-      - name: 'Acknowledge triage request'
-        if: "github.event_name == 'issue_comment'"
-        env:
-          # Reactions need write scope; the job's GITHUB_TOKEN is read-only.
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          COMMENT_ID: '${{ github.event.comment.id }}'
-        run: |-
-          gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
-            -f content='eyes' > /dev/null ||
-            echo "Failed to add triage acknowledgement reaction; continuing." >&2
 
       # Self-hosted runners reuse the workspace; a prior containerised job can
       # leave root-owned, read-only files anywhere in it. Restore ownership and
@@ -699,59 +692,6 @@ jobs:
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # The agent runs as one long step, but its output streams live to the
-      # Actions log. Post a status comment up front carrying that run link so a
-      # maintainer can watch progress instead of waiting silently until the
-      # first stage comment lands. Upsert by marker so a re-run reuses the one
-      # comment (no clutter), and export the comment id: "Finalize triage
-      # status comment" PATCHes exactly that id to flip it to a terminal state,
-      # so the two steps cannot disagree about which comment this run owns.
-      # Best-effort: never fail the job over a status post.
-      - name: 'Post triage status comment'
-        id: 'status'
-        if: "steps.resolve.outputs.number != ''"
-        shell: 'bash'
-        env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ steps.resolve.outputs.number }}'
-          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-        run: |-
-          set -uo pipefail
-          MARKER='<!-- qwen-triage lifecycle -->'
-          LEGACY_MARKER='<!-- qwen-triage stage=status -->'
-          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
-            echo "::warning::Cannot resolve bot identity; skipping status comment upsert."
-          else
-            printf -v BODY '%s\n\n%s\n\n%s' \
-              "$MARKER" \
-              "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
-              "🔄 **Qwen Triage 正在运行** —— [查看实时进度]($RUN_URL)。各阶段结果完成后会更新在本线程。"
-            EXISTING_ID="$(
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
-                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
-            )" || EXISTING_ID=''
-            COMMENT_ID=''
-            if [ -n "$EXISTING_ID" ]; then
-              if gh api --method PATCH \
-                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null; then
-                COMMENT_ID="$EXISTING_ID"
-              else
-                echo "::warning::Failed to update triage status comment; continuing." >&2
-              fi
-            else
-              COMMENT_ID="$(
-                gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                  -f body="$BODY" --jq '.id'
-              )" || COMMENT_ID=''
-              [ -n "$COMMENT_ID" ] ||
-                echo "::warning::Failed to post triage status comment; continuing." >&2
-            fi
-            echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: 'Inject model name into triage signature'
         shell: 'bash'
         env:
@@ -788,32 +728,27 @@ jobs:
           qwen --version
           echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
 
-      # Everything the agent needs that it must NOT fetch with a write
-      # credential: the bot identity for its author filters, the optional
-      # cross-repo direction signal, the draft drop zone, and its settings.
+      # The bot identity, optional cross-repo direction signal, draft drop
+      # zone, and settings shared with the agent.
       - name: 'Prepare agent context'
         id: 'context'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
         run: |-
           set -euo pipefail
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           mkdir -p "$QWEN_HOME"
-          # Under the read-only GITHUB_TOKEN the agent will run with,
-          # `gh api user` returns github-actions[bot]; the skill's duplicate
-          # guard, reopen guard, and review dedup filter on the PAT's bot
-          # login, so resolve it here and pass it in.
+          # Pass the publisher's identity to the skill's author filters.
           BOT_LOGIN="$(gh api user --jq '.login')"
           if [ -z "$BOT_LOGIN" ]; then
             echo "::error::Cannot resolve the bot identity; refusing to run the agent without it."
             exit 1
           fi
           echo "bot_login=$BOT_LOGIN" >> "$GITHUB_OUTPUT"
-          # Stage 1c's optional cross-repo direction signal. GITHUB_TOKEN is
-          # scoped to this repository, so prefetch with the PAT; a missing
-          # file means "signal unavailable", which the skill accepts.
+          # Fetch the public direction signal without credentials. A missing
+          # public CHANGELOG means the signal is unavailable, which is allowed.
           mkdir -p "$RUNNER_TEMP/triage-context"
-          gh api repos/anthropics/claude-code/contents/CHANGELOG.md \
+          GH_TOKEN='' gh api repos/anthropics/claude-code/contents/CHANGELOG.md \
             -H 'Accept: application/vnd.github.raw+json' \
             > "$RUNNER_TEMP/triage-context/claude-code-changelog.md" 2>/dev/null ||
             echo "::warning::CHANGELOG prefetch failed; the skill treats the signal as unavailable."
@@ -846,7 +781,7 @@ jobs:
           #      PR only through the API and the base checkout).
           #   2. Token isolation: the agent's GH_TOKEN is the job's read-only
           #      GITHUB_TOKEN; every write is a draft executed by
-          #      publish-triage with the PAT. There is no write credential in
+          #      publish-triage with GITHUB_TOKEN. There is no write credential in
           #      the agent environment to exfiltrate, and the model key sits
           #      behind the loopback proxy started in the run step.
           #   3. The job container plus the per-run workspace sanitize bound
@@ -862,8 +797,7 @@ jobs:
           # binaries, path execution, and the git/gh subcommands that execute
           # configured commands or materialize PR code. Prefix match is
           # word-boundary ("npm" blocks `npm test`, not `npmx`). It also
-          # blocks `node`, which structurally prevents the agent from running
-          # the publisher itself in CI mode.
+          # blocks `node`. The separate publisher holds the write credential.
           # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort
           # (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
           # renders "", which the CLI ignores — the provider default.
@@ -1002,7 +936,7 @@ jobs:
 
       # Direct CLI launch (the tmux/verify contract), replacing the former
       # qwen-code-action step: the proxy must live and die in the same step as
-      # the agent, and env -i is what keeps the write credential out. The step
+      # the agent, and env -i limits the inherited environment. The step
       # keeps the id `triage` and emits the same `summary` output so 'Check
       # triage response' stays unchanged.
       - name: 'Run Qwen Triage'
@@ -1013,8 +947,8 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
-          # The agent's read credential: this job's read-only GITHUB_TOKEN.
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # The read-only job token is the agent's only GitHub credential.
+          GH_TOKEN: '${{ github.token }}'
           BOT_LOGIN: '${{ steps.context.outputs.bot_login }}'
           NUMBER: '${{ steps.resolve.outputs.number }}'
           REPOSITORY: '${{ github.repository }}'
@@ -1402,37 +1336,27 @@ jobs:
           esac
           echo "Triage response received (${#RESPONSE} chars)."
 
-      # Flip the early status comment to a terminal state so a lingering
-      # "running" line doesn't outlive the run. Neutral wording — the verdict
-      # lives in the stage comments above; this only records that the run ended
-      # and keeps the run link. PATCHes exactly the comment id the claim step
-      # exported. An empty id means this run never ended up owning a comment:
-      # a cancel landing before the claim posted, or a transient failure of the
-      # claim's write (both the fresh-POST and PATCH arms export an empty id on
-      # failure). Either way nothing is flipped and a previous run's terminal
-      # wording stays untouched. A failed claim therefore leaves no lifecycle
-      # breadcrumb even when the comments API recovers during the minutes-long
-      # agent run — accepted: the verdict still lands in the stage comments,
-      # and a list-then-POST recovery here would reintroduce exactly the
-      # selection this coupling removes. Best-effort, on success, failure, AND
-      # cancellation: always() (not success() || failure()) because
-      # cancellation — cancel-in-progress superseding this run on a newer push
-      # or comment, job timeout, or manual cancel — would skip this step and
-      # leave the comment claiming the run is still in progress — the verify
-      # lane has publish-verify to catch that case, this lane only has us.
-      - name: 'Finalize triage status comment'
+      # Prepare a running/terminal lifecycle comment. publish-triage writes it
+      # concurrently with the agent and updates it when the run finishes.
+      - name: 'Prepare triage status comments'
+        id: 'finalize_status'
         if: "always() && steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
           JOB_STATUS: '${{ job.status }}'
         run: |-
           set -uo pipefail
-          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
-            echo "This run claimed no status comment; nothing to finalize." >&2
+          {
+            echo 'running_body<<QWEN_TRIAGE_STATUS'
+            printf '%s\n\n' '<!-- qwen-triage lifecycle -->'
+            printf '🔄 **Qwen Triage is running** — [watch live progress](%s). Stage results will post in this thread as they complete.\n\n' "$RUN_URL"
+            printf '🔄 **Qwen Triage 正在运行** —— [查看实时进度](%s)。各阶段结果完成后会更新在本线程。\n' "$RUN_URL"
+            echo 'QWEN_TRIAGE_STATUS'
+          } >> "$GITHUB_OUTPUT"
+          if [ -z "${TRIAGE_OUTCOME:-}" ]; then
+            echo "Triage has not started; only the running comment is ready." >&2
           else
             # A step success is not a green job: 'Check triage response' exits
             # 1 on an empty summary while steps.triage.outcome stays 'success',
@@ -1448,11 +1372,11 @@ jobs:
               EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
               ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
             fi
-            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
-            gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to finalize triage status comment; continuing." >&2
+            {
+              echo 'body<<QWEN_TRIAGE_STATUS'
+              printf '%s\n\n%s\n\n%s\n' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
+              echo 'QWEN_TRIAGE_STATUS'
+            } >> "$GITHUB_OUTPUT"
           fi
 
       # Drafts are the agent's only output channel to GitHub. Upload on every
@@ -1539,7 +1463,7 @@ jobs:
             echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
 
-  # Publish the triage agent's drafts with the write PAT. Like publish-tmux,
+  # Publish the triage agent's drafts with GITHUB_TOKEN. Like publish-tmux,
   # this job may land on the persistent pool, so it takes the agent jobs'
   # workspace precautions: ownership restore plus a fresh .git before
   # checkout, so git metadata planted by an earlier run cannot execute here.
@@ -1548,8 +1472,7 @@ jobs:
   # node builtins plus one relative helper, leaving no bare-specifier
   # node_modules to hijack in a reused workspace. The agent environment in
   # the triage job holds no write credential; this job is the only path from
-  # the agent's drafts to GitHub. (The triage job's own host steps — the
-  # reaction and the lifecycle comments — also write with the PAT.)
+  # the agent's drafts to GitHub. This is also the only triage writer.
   publish-triage:
     needs: ['triage']
     # Publish even when the agent run failed or timed out: drafts written
@@ -1574,7 +1497,54 @@ jobs:
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
+      issues: 'write'
+      pull-requests: 'read'
+    outputs:
+      pr_number: '${{ needs.triage.outputs.pr_number }}'
     steps:
+      - name: 'Post triage status comment'
+        if: "always() && needs.triage.outputs.status_body != ''"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
+          COMMENT_BODY: '${{ needs.triage.outputs.status_body }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- qwen-triage lifecycle -->'
+          LEGACY_MARKER='<!-- qwen-triage stage=status -->'
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Cannot resolve bot identity; skipping status comment upsert."
+          else
+            EXISTING_ID="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                --method GET --paginate -F per_page=100 |
+                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
+            )" || EXISTING_ID=''
+            if [ -n "$EXISTING_ID" ]; then
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+                -f body="$COMMENT_BODY" >/dev/null ||
+                echo "::warning::Failed to update triage status comment; continuing." >&2
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                -f body="$COMMENT_BODY" >/dev/null ||
+                echo "::warning::Failed to post triage status comment; continuing." >&2
+            fi
+          fi
+
+      - name: 'Acknowledge triage request'
+        if: "github.event_name == 'issue_comment'"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          COMMENT_ID: '${{ github.event.comment.id }}'
+        run: |-
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='eyes' > /dev/null ||
+            echo "Failed to add triage acknowledgement reaction; continuing." >&2
+
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
@@ -1588,7 +1558,7 @@ jobs:
 
       # The pool reuses workspaces: an earlier agent run owned this directory
       # and could have planted .git hooks/config that checkout's git commands
-      # would execute — in the job that then publishes with the write PAT.
+      # would execute — in the job that then publishes with a write credential.
       # Drop the metadata first, exactly as the triage/tmux/verify jobs do
       # before their checkouts (pinned by
       # qwen-runner-checkout-workflow.test.js).
@@ -1619,7 +1589,7 @@ jobs:
 
       - name: 'Publish triage drafts'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIAGE_RESULT: '${{ needs.triage.result }}'
           QWEN_MAINTAINER_HANDLE: '${{ vars.QWEN_MAINTAINER_HANDLE }}'
@@ -1642,9 +1612,36 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --number "$NUMBER"
 
-      # Moved here from the triage job: it inspects the reviews the run
-      # posted, and those now land in the publish step above, so it must run
-      # AFTER publishing. Body unchanged otherwise.
+      - name: 'Finalize triage status comment'
+        if: "always() && needs.triage.outputs.status_body != ''"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
+          COMMENT_BODY: '${{ needs.triage.outputs.status_body }}'
+        run: |-
+          set -uo pipefail
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Cannot resolve bot identity; cannot finalize triage status comment." >&2
+          else
+            STATUS_COMMENT_ID="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                --method GET --paginate -F per_page=100 |
+                jq -rs --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select(.user.login == $bot) | select(.body | startswith("<!-- qwen-triage lifecycle -->") or startswith("<!-- qwen-triage stage=status -->"))] | last | .id // empty'
+            )" || STATUS_COMMENT_ID=''
+            if [ -z "$STATUS_COMMENT_ID" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                -f body="$COMMENT_BODY" >/dev/null ||
+                echo "::warning::Failed to post terminal triage status comment; continuing." >&2
+            else
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
+                -f body="$COMMENT_BODY" >/dev/null ||
+                echo "::warning::Failed to finalize triage status comment; continuing." >&2
+            fi
+          fi
+
+      # Detect a silent re-run from this run's ordinary review comments.
       - name: 'Notify silent triage re-run'
         if: >-
           success() &&
@@ -1653,125 +1650,56 @@ jobs:
           startsWith(github.event.comment.body, '@qwen-code /triage')
         shell: 'bash'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIGGERED_AT: '${{ github.event.comment.created_at }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
-          # A close at/after the trigger is a terminal action of THIS run:
-          # Stage 1-pre closes a duplicate PR without leaving a review, and
-          # the review-list check below cannot tell that apart from a re-run
-          # that did nothing — it would announce on the just-closed PR that
-          # the re-run "did not" review it, and the ::warning would dispatch
-          # a human to a correctly-handled run. Read the PR's own state and
-          # exit quietly; a close BEFORE the trigger keeps the old behaviour,
-          # because this run still owes its summary. A failed `gh pr view`
-          # is not fatal: the review-list check below then decides, as before.
-          if PR_STATE="$(
-               gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt
-             )" &&
-             CLOSED_SINCE_TRIGGER="$(
-               printf '%s' "$PR_STATE" |
-                 jq -r --arg since "$TRIGGERED_AT" \
-                   '.closedAt != null and .closedAt >= $since'
-             )" &&
-             [ "$CLOSED_SINCE_TRIGGER" = true ]; then
-            echo "PR closed at/after the trigger comment; no re-run summary needed."
-            exit 0
-          fi
-          HAS_REVIEW=false
-          HEAD_SHA=''
-          # unknown until both the review list and the head SHA are readable
-          STANDING=unknown
           if BOT_LOGIN="$(gh api user --jq '.login')" &&
-             REVIEWS="$(
-               gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
+             COMMENTS="$(
+               gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
                  --method GET \
                  --paginate \
                  -F per_page=100
              )"; then
-            if ! HAS_REVIEW="$(
-              printf '%s' "$REVIEWS" |
+            if ! HAS_COMMENT="$(
+              printf '%s' "$COMMENTS" |
                 jq -s \
                   --arg bot "$BOT_LOGIN" \
                   --arg since "$TRIGGERED_AT" \
-                  'any(.[][]; .user.login == $bot and .submitted_at != null and .submitted_at >= $since)'
+                  'any(.[][]; .user.login == $bot and .created_at >= $since and (.body | startswith("<!-- qwen-triage stage=3 -->")))'
             )"; then
-              echo "::warning::Failed to inspect triage reviews; posting a summary comment."
-              HAS_REVIEW=false
-            fi
-            # Adding no review is benign only when the bot's OWN verdict already
-            # stands on the current head. Pin the lookup to login, state, AND
-            # commit: another account's approval is a different vote (main needs
-            # two), and `dismiss_stale_reviews` voids the bot's own on every
-            # push. Observed: the agent read a maintainer's approval on the head
-            # commit as its own, skipped approving, and reported success — the
-            # PR sat at 1 of 2 approvals with nothing in the log marked wrong.
-            if HEAD_SHA="$(
-                 gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.head.sha'
-               )" && [ -n "$HEAD_SHA" ]; then
-              # Three outcomes, not two. `deferred` is the one that was
-              # missing: the skill's confidence table sends 3/5 down a defer
-              # path that posts a COMMENTED review and deliberately does not
-              # vote — a fork `refactor` hitting the approval guardrail, or a
-              # core change escalated for maintainer awareness. That is a
-              # correct terminal state, and folding it into `none` reported
-              # the routine outcome and the broken one with the same warning.
-              STANDING="$(
-                printf '%s' "$REVIEWS" |
-                  jq -rs \
-                    --arg bot "$BOT_LOGIN" \
-                    --arg sha "$HEAD_SHA" \
-                    '[.[][] | select(.user.login == $bot and .commit_id == $sha)]
-                     | if any(.[]; .state == "APPROVED" or .state == "CHANGES_REQUESTED")
-                       then "own"
-                       elif any(.[]; .state == "COMMENTED") then "deferred"
-                       else "none" end'
-              )" || STANDING=unknown
+              echo "::warning::Failed to inspect triage comments; posting a summary comment."
+              HAS_COMMENT=false
             fi
           else
-            echo "::warning::Failed to fetch triage reviews; posting a summary comment."
+            HAS_COMMENT=false
+            echo "::warning::Failed to fetch triage comments; posting a summary comment."
           fi
-          if [ "$HAS_REVIEW" = true ]; then
-            echo "Triage re-run posted a review; no summary comment needed."
+          if [ "$HAS_COMMENT" = true ]; then
+            echo "Triage re-run posted a verdict comment; no summary comment needed."
             exit 0
           fi
-          # Say what was measured, in both languages. The old note claimed the
-          # bot had "no review of its own" whenever it had not VOTED — but a
-          # deferring run leaves a visible COMMENTED review, so a reader who
-          # could see it on the page was told it did not exist. State the
-          # review that is there, and say what the missing vote costs (`main`
-          # takes two approvals, so a maintainer's is only the first).
-          case "$STANDING" in
-            own)
-              NOTE_EN="The bot already has a review of its own on \`$HEAD_SHA\`, which still stands."
-              NOTE_ZH="机器人在 \`$HEAD_SHA\` 上已有自己的评审，且仍然有效。"
-              ;;
-            deferred)
-              NOTE_EN="⚠️ The bot's only review on \`$HEAD_SHA\` is a \`COMMENTED\` one, which **carries no vote** — so it has no verdict of its own on this commit, and \`main\` needs two approving reviews: an approval left by another account is a separate vote and does not count as the bot's own. Two different things look like this, and the stage-3 comment above says which: the triage skill **deferring on purpose** at 3/5 — a fork \`refactor\` hitting the approval guardrail, or a core change escalated for maintainer awareness, both normal outcomes — or an earlier approval that a push **dismissed**, leaving only the comment behind, which needs a fresh review."
-              NOTE_ZH="⚠️ 机器人在 \`$HEAD_SHA\` 上唯一的评审是 \`COMMENTED\`，**不带票** —— 因此它在该 commit 上没有自己的裁决，而 \`main\` 需要两个批准（其他账号的批准是另一张票）。有两种情况长这样，上方的 stage-3 评论会说明是哪一种：triage skill 在 3/5 时**有意 defer**（fork \`refactor\` 命中审批护栏，或核心改动被升级交由维护者把关，两者都是正常结果）；或者更早的批准被一次推送**作废**、只剩下这条评论，此时需要重新评审。"
-              echo "::warning title=Triage re-run left no bot review::The bot has only a COMMENTED review on $HEAD_SHA (no vote) and this re-run added none."
-              ;;
-            none)
-              NOTE_EN="⚠️ The bot has **neither a verdict nor a deferral** on \`$HEAD_SHA\` — no \`APPROVED\`, \`CHANGES_REQUESTED\`, or \`COMMENTED\` review of its own. A \`DISMISSED\` one does not count: \`dismiss_stale_reviews\` voids the bot's approval on every push, which is exactly when a fresh one is needed. If this re-run was meant to review or approve, it did not, and an approval left by another account is a separate vote that does not count as the bot's own."
-              NOTE_ZH="⚠️ 机器人在 \`$HEAD_SHA\` 上**既没有裁决也没有 defer** —— 没有属于它自己的 \`APPROVED\`、\`CHANGES_REQUESTED\` 或 \`COMMENTED\` 评审。\`DISMISSED\` 不算：\`dismiss_stale_reviews\` 会在每次推送时作废机器人的批准，而那恰恰是需要一次新批准的时刻。如果这次重跑本应评审或批准，那么它没有做到；而其他账号留下的批准是另一张票，不能算作机器人自己的。"
-              echo "::warning title=Triage re-run left no bot review::The bot has no APPROVED, CHANGES_REQUESTED or COMMENTED review on $HEAD_SHA and this re-run added none."
-              ;;
-            *)
-              NOTE_EN="The bot's review state on the head commit could not be read."
-              NOTE_ZH="无法读取机器人在 head commit 上的评审状态。"
-              ;;
-          esac
           printf -v BODY '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s' \
             '<!-- qwen-triage stage=rerun-summary -->' \
-            'Triage re-run completed without a new review.' \
-            "$NOTE_EN" \
-            "$NOTE_ZH" \
+            'Triage re-run completed without a new verdict comment.' \
+            'No Stage 3 verdict authored by this bot at or after the trigger was found. Check the run log for the incomplete stages.' \
+            '未找到本机器人在触发后发布的 Stage 3 结论评论。请查看运行日志，确认未完成的阶段。' \
             "The stage comments above were updated with the latest result. [View workflow run]($RUN_URL)." \
             "上方各阶段评论已更新为最新结果。[查看工作流运行]($RUN_URL)。"
           gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
             -f body="$BODY" >/dev/null
+
+  assign-issue-owner:
+    if: "always() && needs.publish-triage.result == 'success' && github.event_name == 'issues'"
+    needs: ['publish-triage']
+    permissions:
+      contents: 'read'
+      issues: 'write'
+    uses: './.github/workflows/assign-issue-owner.yml'
+    with:
+      number: '${{ needs.publish-triage.outputs.pr_number }}'
 
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and
@@ -1857,7 +1785,7 @@ jobs:
       - name: 'Resolve PR and check state'
         id: 'pr'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
@@ -2588,7 +2516,7 @@ jobs:
 
       - name: 'Post tmux result comment'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           # Same reason as publish-verify: a tmux job cancelled while
           # pending never evaluates its outputs.
           PR_NUMBER: '${{ needs.tmux-testing.outputs.pr_number || github.event.issue.number }}'
@@ -2920,7 +2848,7 @@ jobs:
       - name: 'Resolve PR and snapshot metadata'
         id: 'pr'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: '${{ github.event.issue.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           VERIFY_TRUST: '${{ needs.authorize.outputs.verify_trust }}'
@@ -3389,7 +3317,7 @@ jobs:
       # files, and clear stale worktrees/results. Never fail the job.
       # An external author's code is about to execute on a machine that is
       # REUSED, and the next run on it starts by handling credentials
-      # (CI_BOT_PAT in the resolve step, the model key in the proxy). The
+      # (GITHUB_TOKEN in the resolve step, the model key in the proxy). The
       # sweep below is an allowlist of vectors we have thought of; an
       # adversarial author gets unlimited attempts to find one we have not.
       # So for external runs, do not sweep the workspace — delete it.
@@ -5961,6 +5889,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
+      issues: 'write'
       pull-requests: 'write'
     steps:
       # Sparse — the uploader, the artifact checker, their helpers, and the
@@ -6047,7 +5976,7 @@ jobs:
 
       - name: 'Post verification report comment'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           # The fallback must live where the value is READ. A verify job
           # cancelled while still pending never reaches a runner, so its
           # `outputs:` block is never evaluated and needs.verify.outputs
