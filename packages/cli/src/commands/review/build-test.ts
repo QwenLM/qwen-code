@@ -55,18 +55,23 @@ import {
   containerCommandEnv,
   containerName,
   containerPathFor,
+  describeExecutionBoundary,
   handOffRefused,
-  killContainer,
-  sandboxPolicy,
   mountRootFor,
+  reapContainer,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
   runtimeClientEnv,
+  sandboxPolicy,
   sandboxVerdict,
+  trustInputFromPlan,
   type CommandKind,
-  type SandboxPolicy,
   type ContainerRuntime,
+  type ReviewExecutionBoundary,
+  type ReviewTeardownStatus,
+  type ReviewTrustInput,
+  type SandboxPolicy,
 } from './lib/sandboxed-exec.js';
 import {
   DEFAULT_COMMAND_TIMEOUT_S,
@@ -154,6 +159,8 @@ export interface CommandResult {
    * a full deadline in the next call.
    */
   clamped?: boolean;
+  /** Verified container teardown status when a boxed run was interrupted or timed out. */
+  teardownStatus?: ReviewTeardownStatus;
 }
 
 export interface BuildTestReport {
@@ -284,6 +291,8 @@ export interface BuildTestReport {
     /** The plan file's mtimeMs, rounded — the per-round discriminator. */
     plan?: number;
   };
+  /** Structured execution boundary metadata (trust class, backend, escalations, teardown). */
+  executionBoundary?: ReviewExecutionBoundary;
 }
 
 /** Output kept per command: the head and tail, which is where a failure names itself. */
@@ -619,13 +628,14 @@ function containerised(
   cwd: string,
   kind: CommandKind,
   heapMb: number | undefined,
+  trustContext?: ReviewTrustInput,
 ): {
   file: string;
   args: string[];
   name: string;
   runtime: ContainerRuntime;
 } | null {
-  const verdict = sandboxVerdict();
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(cwd);
   if (tmpDir === null) return null;
@@ -680,6 +690,7 @@ export function run(
   cwd: string,
   timeoutMs: number,
   kind: CommandKind = 'test',
+  trustContext?: ReviewTrustInput,
 ): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
@@ -696,7 +707,7 @@ export function run(
   // because `npm ci` runs `prepare`, which is the whole-project build on many
   // repos.
   const heapMb = kind === 'test' ? undefined : declaredBuildHeapMb(cwd);
-  const boxed = containerised(command, cwd, kind, heapMb);
+  const boxed = containerised(command, cwd, kind, heapMb, trustContext);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
         cwd,
@@ -740,11 +751,12 @@ export function run(
           env: directRunEnv(cwd, heapMb),
         },
       );
+  let teardownStatus: ReviewTeardownStatus | undefined;
   if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — see the
-    // `--name` comment in `containerCommand`. Reach the daemon instead, then
-    // report the timeout exactly as before.
-    killContainer(boxed.runtime, boxed.name);
+    // `--name` comment in `containerCommand`. Reach the daemon and verify the
+    // container stopped, then record the teardown result.
+    teardownStatus = reapContainer(boxed.runtime, boxed.name).status;
   }
   // `spawnSync` sets `error.code === 'ETIMEDOUT'` when the deadline fired — that is
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
@@ -774,6 +786,7 @@ export function run(
     ...(heapExhausted ? { heapExhausted } : {}),
     ...(signal ? { signal } : {}),
     ...(spawnError ? { spawnError } : {}),
+    ...(teardownStatus !== undefined ? { teardownStatus } : {}),
   };
 }
 
@@ -1110,7 +1123,10 @@ function refusedReport(why: string): BuildTestReport {
  * one at a time in a function with several. There is exactly one place a
  * report can reach a caller, so the conversion belongs there.
  */
-function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
+function runBuildTestUnguarded(
+  args: BuildTestArgs,
+  trustContext: ReviewTrustInput | undefined = trustInputFromPlan(args.plan),
+): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
   // spawnSync as an invalid deadline — ERR_OUT_OF_RANGE with no report.
@@ -1127,6 +1143,10 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
   }
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
+  // `trustContext` is passed in from `runBuildTest`, which read it BEFORE this
+  // function executes anything. The plan lives under the container-visible
+  // temp mount, so re-reading it after the build would let a reviewed command
+  // rewrite its own trust report.
   const runIdentity: {
     sha?: string;
     root: string;
@@ -1234,16 +1254,25 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
     buildOnly: args.buildOnly,
     budget: args.budget,
     previous,
-    exec: args.exec ?? run,
+    exec:
+      args.exec ??
+      ((cmd: string, cwd: string, timeoutMs: number, kind?: CommandKind) =>
+        run(cmd, cwd, timeoutMs, kind, trustContext)),
   };
   // BEFORE anything is executed or handed off. Under `review.sandbox: required`
-  // with no container runtime answering, this phase must produce no build/test
-  // evidence rather than produce it by running the reviewed repository's code
-  // unsandboxed. It sits here and not at the spawn because one route never
-  // reaches a spawn at all: a repo this adapter cannot scope is handed to the
-  // AGENT's own shell (`unsupportedReport`), which would otherwise run the
-  // install and the suite with nothing consulted.
-  const refusal = refuseUnsandboxedPhase(root);
+  // or `tiered` with no eligible runtime answering, this phase must produce no
+  // build/test evidence rather than produce it by running the reviewed
+  // repository's code unsandboxed. It sits here and not at the spawn because
+  // one route never reaches a spawn at all: a repo this adapter cannot scope is
+  // handed to the AGENT's own shell (`unsupportedReport`), which would
+  // otherwise run the install and the suite with nothing consulted.
+  const refusal = refuseUnsandboxedPhase(
+    root,
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
   if (refusal && args.resume) {
     // THROW on a continuation, never return. The handler writes whatever this
     // returns to `--out`, which on a resume is the very report the call was
@@ -1459,13 +1488,34 @@ export function resumeWouldDestroyReport(
   return resume && handOffRefused(report.toolchain, policy);
 }
 
+function aggregateTeardownStatus(
+  report: BuildTestReport,
+): ReviewTeardownStatus {
+  const cmds = [
+    ...(report.install ? [report.install] : []),
+    ...report.build,
+    ...report.test,
+  ];
+  const statuses = cmds
+    .map((c) => c.teardownStatus)
+    .filter((s): s is ReviewTeardownStatus => s !== undefined);
+  if (statuses.includes('failed')) return 'failed';
+  if (statuses.includes('partial')) return 'partial';
+  if (statuses.includes('clean')) return 'clean';
+  return 'not-applicable';
+}
+
 export function applyHandOffPolicy(
   report: BuildTestReport,
   policy: SandboxPolicy = sandboxPolicy(),
 ): BuildTestReport {
+  const trigger =
+    policy === 'required' || policy === 'tiered'
+      ? `review.sandbox is "${policy}"`
+      : 'QWEN_REVIEW_FORCE_HARDWARE=1';
   return handOffRefused(report.toolchain, policy)
     ? refusedReport(
-        `review.sandbox is "required" and no toolchain adapter could scope ` +
+        `${trigger} and no toolchain adapter could scope ` +
           `this repository, so the only remaining route was to hand its ` +
           `install, build and test commands to an agent shell this policy ` +
           `cannot contain`,
@@ -1474,7 +1524,8 @@ export function applyHandOffPolicy(
 }
 
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
-  const report = runBuildTestUnguarded(args);
+  const trustContext = trustInputFromPlan(args.plan);
+  const report = runBuildTestUnguarded(args, trustContext);
   // The THIRD continuation exit, and the one the invariant had not reached.
   // "A continuation must never answer with a FRESH report" is enforced by a
   // throw at the refusal gate and at `!adapter`; this conversion was added
@@ -1491,11 +1542,33 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   if (resumeWouldDestroyReport(report, args.resume === true)) {
     throw new Error(
       `refusing to continue this run: this repository's toolchain cannot be ` +
-        `scoped, and review.sandbox is now "required", so continuing would ` +
+        `scoped, and review.sandbox is now "${sandboxPolicy()}", so continuing would ` +
         `replace the report at ${args.out} with a refusal that records no run ` +
         `identity — killing the resume chain. Re-run without --resume under ` +
         `the new policy.`,
     );
   }
-  return applyHandOffPolicy(report);
+  const finalReport = applyHandOffPolicy(report);
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  const teardownStatus = aggregateTeardownStatus(finalReport);
+  const mountable = mountRootFor(resolve(args.worktree)) !== null;
+  const effectiveBackend =
+    finalReport.toolchain === 'refused'
+      ? 'refused'
+      : verdict.kind === 'container' && mountable
+        ? 'container'
+        : 'direct';
+  const boundaryNote =
+    teardownStatus === 'failed'
+      ? 'container teardown verification failed — a timed-out container may still be running'
+      : verdict.kind === 'container' && !mountable
+        ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
+        : undefined;
+  const executionBoundary = describeExecutionBoundary({
+    backend: effectiveBackend,
+    trustContext,
+    teardownStatus,
+    ...(boundaryNote !== undefined ? { note: boundaryNote } : {}),
+  });
+  return { ...finalReport, executionBoundary };
 }
