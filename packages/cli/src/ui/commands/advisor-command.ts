@@ -14,6 +14,14 @@ import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
 import {
+  persistSubscriptionModel,
+  prepareSubscriptionModelPersistence,
+} from '../../config/subscription-model-persistence.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+} from '@qwen-code/qwen-code-core/utils/modelId.js';
+import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
@@ -173,6 +181,21 @@ async function setAdvisorModel(
     }
   }
 
+  const selected = model
+    ? resolveModelId(model, buildModelIdContext(config))
+    : undefined;
+  const endpoint = model?.indexOf('\0') ?? -1;
+  const persistenceSelector = selected?.authType
+    ? `${selected.authType}:${selected.modelId}${endpoint < 0 ? '' : model!.slice(endpoint)}`
+    : model;
+  if (persistenceSelector)
+    prepareSubscriptionModelPersistence(
+      settings,
+      config,
+      persistenceSelector,
+      SettingScope.User,
+    );
+  const previousModel = config.getAdvisorModel();
   const applied = await config.setAdvisorModel(model);
   if (applied === false) {
     return {
@@ -180,6 +203,18 @@ async function setAdvisorModel(
       messageType: 'error',
       content: t('Advisor configuration is unavailable.'),
     };
+  }
+  try {
+    if (persistenceSelector)
+      persistSubscriptionModel(
+        settings,
+        config,
+        persistenceSelector,
+        SettingScope.User,
+      );
+  } catch (error) {
+    await config.setAdvisorModel(previousModel);
+    throw error;
   }
   settings.setValue(SettingScope.User, 'advisorModel', model ?? '');
   return {

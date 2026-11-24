@@ -93,6 +93,39 @@ describe('workspace-qualified lifecycle routes', () => {
     expect(result.body.error).toContain('generation is no longer active');
   });
 
+  it('forwards explicit model discovery only to the resolved runtime', async () => {
+    const { runtime } = createTestRuntime();
+    const reloadModelProviders = vi
+      .fn()
+      .mockResolvedValue({ status: 'applied' });
+    const app = createTestApp({
+      ...runtime,
+      workspaceService: { ...runtime.workspaceService, reloadModelProviders },
+    });
+    const ordinary = await request(app)
+      .post('/workspaces/workspace-id/models/reload')
+      .send({});
+    const fresh = await request(app)
+      .post('/workspaces/workspace-id/models/reload')
+      .send({ refreshModels: true });
+    expect(ordinary.status).toBe(200);
+    expect(fresh.status).toBe(200);
+    expect(reloadModelProviders.mock.calls[0]?.[1]).toBeUndefined();
+    expect(reloadModelProviders.mock.calls[1]?.[1]).toEqual({
+      refreshModels: true,
+    });
+    const invalid = await request(app)
+      .post('/workspaces/workspace-id/models/reload')
+      .send({ refreshModels: 'true' });
+    const unknown = await request(app)
+      .post('/workspaces/%2Fmissing/models/reload')
+      .send({ refreshModels: true });
+    expect(invalid.status).toBe(400);
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.code).toBe('workspace_mismatch');
+    expect(reloadModelProviders).toHaveBeenCalledTimes(2);
+  });
+
   it('reload succeeds even when trust reconciliation rejects', async () => {
     const { runtime, reload } = createTestRuntime();
     const app = createTestApp(runtime);

@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AvailableModel } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
-import type { SubscriptionModelCatalog } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import type { LoadedSettings } from '../config/settings.js';
@@ -25,25 +24,14 @@ import {
 } from './voice-transcriber.js';
 import {
   listAvailableVoiceModels,
+  createVoiceModelSource,
   validateWorkspaceVoiceConfig,
 } from './voice-service.js';
 
-const { request, catalog } = vi.hoisted(() => ({
-  request: vi.fn(),
-  catalog: vi.fn<() => SubscriptionModelCatalog>(),
-}));
+const { request } = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock('@qwen-code/qwen-code-core/qwen/subscription-request.js', () => ({
   fetchSubscriptionInference: request,
 }));
-vi.mock(
-  '@qwen-code/qwen-code-core/qwen/subscription-models.js',
-  async (importOriginal) => ({
-    ...(await importOriginal<
-      typeof import('@qwen-code/qwen-code-core/qwen/subscription-models.js')
-    >()),
-    readCachedSubscriptionCatalog: catalog,
-  }),
-);
 
 const subscriptionModel: AvailableModel = {
   id: 'server-asr-model',
@@ -67,7 +55,6 @@ describe('subscription voice', () => {
     vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
       true,
     );
-    catalog.mockReturnValue({ models: [] });
     request.mockReset();
     request.mockImplementation(async () =>
       Response.json({
@@ -107,13 +94,18 @@ describe('subscription voice', () => {
   });
 
   it('exposes both same-name routes through Serve and validates the selected account route', () => {
-    catalog.mockReturnValue({
-      models: [],
-      scenes: { voice: [{ id: 'qwen3-asr-flash' }] },
-    });
     const workspaceSettings = {
       merged: {
         modelProviders: {
+          'qwen-subscription': [
+            {
+              id: 'qwen3-asr-flash',
+              baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+              subscriptionScenes: ['voice'],
+              subscriptionChatModel: false,
+              voiceOnly: true,
+            },
+          ],
           openai: [
             { id: 'qwen3-asr-flash', baseUrl: 'https://api.example/v1' },
           ],
@@ -138,6 +130,32 @@ describe('subscription voice', () => {
         'qwen-subscription:qwen3-asr-flash',
       ),
     ).toMatchObject({ id: 'qwen3-asr-flash', transport: 'qwen-asr-chat' });
+  });
+
+  it('keeps saved voice configuration usable when discovery cannot supply candidates', () => {
+    const saved = {
+      merged: {
+        modelProviders: {
+          'qwen-subscription': [
+            {
+              id: 'saved-asr',
+              baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+              subscriptionChatModel: false,
+              subscriptionScenes: ['voice'],
+              voiceOnly: true,
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    expect(
+      listAvailableVoiceModels(saved, createVoiceModelSource(saved, {}, true)),
+    ).toEqual([]);
+    expect(
+      validateWorkspaceVoiceConfig(saved, 'qwen-subscription:saved-asr', {
+        modelSource: createVoiceModelSource(saved, {}),
+      }),
+    ).toMatchObject({ id: 'saved-asr', transport: 'qwen-asr-chat' });
   });
 
   it('resolves qualified and endpoint-pinned selectors without hiding ambiguity', () => {

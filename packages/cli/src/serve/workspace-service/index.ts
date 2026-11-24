@@ -33,6 +33,7 @@ import {
   type ServeWorkspacePreflightStatus,
   type ServeWorkspaceSkillsRefreshResult,
   type ServeWorkspaceSkillsStatus,
+  type ServeWorkspaceProvidersStatus,
 } from '@qwen-code/acp-bridge/status';
 
 import {
@@ -52,6 +53,9 @@ import {
   WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS,
 } from '../workspace-skills-refresh-policy.js';
 
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
+import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { loadSettings } from '../../config/settings.js';
 import {
   getProjectHooksApprovalState,
@@ -293,6 +297,9 @@ export function createDaemonWorkspaceService(
     });
   };
   const assertActiveGeneration = () => assertGenerationOpen?.();
+  let subscriptionModelCatalog:
+    | { identity: string; available: boolean }
+    | undefined;
   const loggedPreheatFailures = new WeakSet<object>();
   const logPreheatFailure = (err: unknown) => {
     if (typeof err === 'object' && err !== null) {
@@ -605,10 +612,44 @@ export function createDaemonWorkspaceService(
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
       if (workspaceProvidersStatusProvider) {
-        return workspaceProvidersStatusProvider(
+        const local = await workspaceProvidersStatusProvider(
           boundWorkspace,
           isChannelLive?.() ?? false,
         );
+        const identity = new QwenSubscriptionSession().getIdentity();
+        if (!identity || subscriptionModelCatalog?.identity !== identity)
+          return local;
+        const providers = local.providers.filter(
+          ({ authType }) => authType !== AuthType.QWEN_SUBSCRIPTION,
+        );
+        if (!subscriptionModelCatalog.available) return { ...local, providers };
+        try {
+          const child =
+            await queryWorkspaceStatus<ServeWorkspaceProvidersStatus>(
+              SERVE_STATUS_EXT_METHODS.workspaceProviders,
+              () => createIdleWorkspaceProvidersStatus(boundWorkspace),
+            );
+          assertActiveGeneration();
+          if (new QwenSubscriptionSession().getIdentity() !== identity)
+            return local;
+          providers.push(
+            ...child.providers
+              .filter(({ authType }) => authType === AuthType.QWEN_SUBSCRIPTION)
+              .map((provider) => ({
+                ...provider,
+                current: local.current?.authType === provider.authType,
+                models: provider.models.map((model) => ({
+                  ...model,
+                  isCurrent:
+                    local.current?.authType === provider.authType &&
+                    local.current.modelId === model.modelId,
+                })),
+              })),
+          );
+        } catch {
+          assertActiveGeneration();
+        }
+        return { ...local, providers };
       }
       return queryWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceProviders,
@@ -1767,8 +1808,21 @@ export function createDaemonWorkspaceService(
 
     async reloadModelProviders(_ctx: WorkspaceRequestContext, options) {
       assertActiveGeneration();
-      if (options?.subscriptionSignedOut) {
-        await deps.preheatAcpChild?.();
+      const refreshIdentity = options?.refreshModels
+        ? new QwenSubscriptionSession().getIdentity()
+        : undefined;
+      let preheatWarning: string | undefined;
+      if (options?.subscriptionSignedOut || refreshIdentity) {
+        subscriptionModelCatalog = refreshIdentity
+          ? { identity: refreshIdentity, available: false }
+          : undefined;
+        try {
+          await deps.preheatAcpChild?.();
+        } catch (error) {
+          assertActiveGeneration();
+          if (options?.subscriptionSignedOut) throw error;
+          preheatWarning = SUBSCRIPTION_MODELS_UNAVAILABLE;
+        }
         assertActiveGeneration();
       }
       let failed = false;
@@ -1794,10 +1848,12 @@ export function createDaemonWorkspaceService(
       try {
         const child = await invokeWorkspaceCommand<{
           configsFailed?: number;
+          modelCatalogWarning?: string;
         }>(
           SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
           {
             cwd: boundWorkspace,
+            ...(options?.refreshModels ? { refreshModels: true } : {}),
             ...(options?.subscriptionSignedOut
               ? { subscriptionSignedOut: true }
               : {}),
@@ -1805,17 +1861,34 @@ export function createDaemonWorkspaceService(
           { timeoutMs: 30_000 },
         );
         if ((child.configsFailed ?? 0) > 0) failed = true;
+        if (
+          refreshIdentity &&
+          !failed &&
+          new QwenSubscriptionSession().getIdentity() === refreshIdentity
+        )
+          subscriptionModelCatalog = {
+            identity: refreshIdentity,
+            available: !child.modelCatalogWarning,
+          };
         if (options?.subscriptionSignedOut) {
           assertActiveGeneration();
         }
-        return { status: failed ? 'failed' : 'applied' };
+        return {
+          status: failed ? 'failed' : 'applied',
+          ...(child.modelCatalogWarning
+            ? { modelCatalogWarning: child.modelCatalogWarning }
+            : {}),
+        };
       } catch (err) {
         assertActiveGeneration();
         if (
           err instanceof SessionNotFoundError ||
           err instanceof BridgeChannelClosedError
         ) {
-          return { status: failed ? 'failed' : 'deferred' };
+          return {
+            status: failed ? 'failed' : 'deferred',
+            ...(preheatWarning ? { modelCatalogWarning: preheatWarning } : {}),
+          };
         }
         writeStderrLine('qwen serve: model-provider ACP child sync failed');
         return { status: 'failed' };

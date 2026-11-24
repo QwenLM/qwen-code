@@ -12,10 +12,9 @@
  * here with plain functions over `Config` / `LoadedSettings`:
  *
  *  - model list entries + the ModelDialog selection pipeline
- *    (`applyModelSelection`): mode-specific validation, the runtime
- *    switch/setter (`Config.switchModel`, setFastModel/setVisionModel/
- *    setCompactionModel/setImageModel), and persistence only after the
- *    runtime change succeeded;
+ *    (`applyModelSelection`): mode-specific validation, persistence, and the
+ *    runtime switch/setter (`Config.switchModel`, setFastModel/setVisionModel/
+ *    setCompactionModel/setImageModel);
  *  - permission rules / workspace directories (+ mutation handlers),
  *  - MCP server inventory,
  *  - extension rows,
@@ -25,7 +24,10 @@
 import { buildModelIdContext } from '@qwen-code/qwen-code-core/utils/modelId.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
-import { readCachedSubscriptionCatalog } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import {
+  persistSubscriptionModel,
+  prepareSubscriptionModelPersistence,
+} from '../../config/subscription-model-persistence.js';
 import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
@@ -146,6 +148,10 @@ export function buildModelEntries(
         ]
       : [];
   for (const model of allModels) {
+    if (model.authType === AuthType.QWEN_SUBSCRIPTION) {
+      const discovered = config?.getSubscriptionModelIds?.(scene);
+      if (discovered && !discovered.includes(model.id)) continue;
+    }
     if (
       model.authType === AuthType.QWEN_SUBSCRIPTION &&
       (scene
@@ -234,9 +240,7 @@ export function buildModelEntries(
     entries,
     subscriptionSignedIn,
   );
-  const sceneIds = scene
-    ? readCachedSubscriptionCatalog().scenes?.[scene]?.map((model) => model.id)
-    : undefined;
+  const sceneIds = scene ? config?.getSubscriptionModelIds?.(scene) : undefined;
   if (sceneIds) {
     const sortedSubscription = visibleEntries
       .filter((entry) => entry.authType === AuthType.QWEN_SUBSCRIPTION)
@@ -471,8 +475,17 @@ export async function applyModelSelection(
     if (selector && !checkAdvisorModelAvailability(config, selector).available)
       return { ok: false, error: t('Selected Advisor model is unavailable.') };
     try {
+      if (selector)
+        prepareSubscriptionModelPersistence(
+          settings,
+          config,
+          selector,
+          SettingScope.User,
+        );
       if ((await config.setAdvisorModel(selector)) === false)
         return { ok: false, error: t('Advisor configuration is unavailable.') };
+      if (selector)
+        persistSubscriptionModel(settings, config, selector, SettingScope.User);
       settings.setValue(SettingScope.User, 'advisorModel', selector ?? '');
       return {
         ok: true,
@@ -498,6 +511,7 @@ export async function applyModelSelection(
     }
     const scope = resolveModelPersistScope(settings, persistScope);
     const persisted = shareableAuxSelector(voiceModel, scope);
+    if (config) persistSubscriptionModel(settings, config, persisted, scope);
     settings.setValue(scope, 'voiceModel', persisted);
     return {
       ok: true,
@@ -512,13 +526,15 @@ export async function applyModelSelection(
   // providers bind the selected provider's credentials.
   if (mode === 'fast') {
     const fastModel = encodeAuxModelSelector(selectionKey);
-    // Sync the runtime Config so forked agents pick up the change immediately.
-    config?.setFastModel?.(fastModel);
     const scope = resolveModelPersistScope(settings, persistScope);
     // The shareable workspace file only ever receives a provably public
     // endpoint; this session's in-memory pin keeps the picked row.
     const persistedFastModel = shareableAuxSelector(fastModel, scope);
+    if (config)
+      persistSubscriptionModel(settings, config, persistedFastModel, scope);
     settings.setValue(scope, 'fastModel', persistedFastModel);
+    // Sync the runtime Config so forked agents pick up the change immediately.
+    config?.setFastModel?.(fastModel);
     return {
       ok: true,
       message: `${t('Fast Model')}: ${persistedFastModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(fastModel, persistedFastModel)}`,
@@ -543,10 +559,11 @@ export async function applyModelSelection(
         ),
       };
     }
+    const scope = resolveModelPersistScope(settings, persistScope);
+    if (config) persistSubscriptionModel(settings, config, visionModel, scope);
+    settings.setValue(scope, 'visionModel', visionModel);
     // Sync runtime Config so the vision bridge picks it up without a restart.
     config?.setVisionModel?.(visionModel);
-    const scope = resolveModelPersistScope(settings, persistScope);
-    settings.setValue(scope, 'visionModel', visionModel);
     // Honor the pin even if the model isn't image-capable, but warn — the
     // bridge will send images to it.
     const visionWarning =
@@ -567,14 +584,21 @@ export async function applyModelSelection(
       };
     }
     const compactionModelId = encodeAuxModelSelector(selectionKey);
-    // Sync runtime Config so the compression service picks it up immediately.
-    config.setCompactionModel(compactionModelId);
     const scope = resolveModelPersistScope(settings, persistScope);
     const persistedCompactionModel = shareableAuxSelector(
       compactionModelId,
       scope,
     );
+    if (config)
+      persistSubscriptionModel(
+        settings,
+        config,
+        persistedCompactionModel,
+        scope,
+      );
     settings.setValue(scope, 'compactionModel', persistedCompactionModel);
+    // Sync the runtime Config so the compression service picks it up immediately.
+    config.setCompactionModel(compactionModelId);
     return {
       ok: true,
       message: `${t('Compaction Model')}: ${persistedCompactionModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(compactionModelId, persistedCompactionModel)}`,
@@ -600,8 +624,10 @@ export async function applyModelSelection(
         ),
       };
     }
-    await config.setImageModel(imageModel);
     const scope = resolveModelPersistScope(settings, persistScope);
+    prepareSubscriptionModelPersistence(settings, config, imageModel, scope);
+    await config.setImageModel(imageModel);
+    if (config) persistSubscriptionModel(settings, config, imageModel, scope);
     settings.setValue(scope, 'imageModel', imageModel);
     return {
       ok: true,
@@ -653,6 +679,12 @@ export async function applyModelSelection(
 
   let after: ContentGeneratorConfig | undefined;
   try {
+    prepareSubscriptionModelPersistence(
+      settings,
+      config,
+      `${selectedAuthType}:${modelId}${selectedBaseUrl ? `\0${selectedBaseUrl}` : ''}`,
+      resolveModelPersistScope(settings, persistScope),
+    );
     await switchPrimaryModel(config, settings, selectedAuthType, modelId, {
       ...(selectedAuthType !== authType &&
       selectedAuthType === AuthType.QWEN_OAUTH
@@ -692,6 +724,13 @@ export async function applyModelSelection(
 
   // Persist only after the runtime switch succeeded.
   const scope = resolveModelPersistScope(settings, persistScope);
+  if (effectiveAuthType)
+    persistSubscriptionModel(
+      settings,
+      config,
+      `${effectiveAuthType}:${effectiveModelId}`,
+      scope,
+    );
   settings.setValue(scope, 'model.name', effectiveModelId);
   settings.setValue(scope, 'model.baseUrl', effectiveBaseUrl ?? '');
   if (effectiveAuthType) {

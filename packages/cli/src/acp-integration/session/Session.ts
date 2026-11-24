@@ -508,6 +508,10 @@ import {
   getPersistScopeForModelSelection,
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
+import {
+  persistSubscriptionModel,
+  prepareSubscriptionModelPersistence,
+} from '../../config/subscription-model-persistence.js';
 import { resolveModelSelectionAuthType } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import {
   deleteNestedPropertySafe,
@@ -15899,6 +15903,10 @@ export class Session implements SessionContext {
     }
     const parsed = resolvedRoute ?? parseAcpModelOption(rawModelId);
     const previousAuthType = this.config.getAuthType?.();
+    const previousModelId =
+      this.config.getActiveRuntimeModelSnapshot?.()?.id ??
+      this.config.getModel();
+    const previousBaseUrl = this.config.getCurrentModelRegistryBaseUrl?.();
     const selectedAuthType = parsed.authType ?? previousAuthType;
 
     if (!selectedAuthType) {
@@ -15919,12 +15927,7 @@ export class Session implements SessionContext {
       );
     }
 
-    if (
-      (this.requiresManagedConversationBinding ||
-        options.persistDefault === false) &&
-      selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
-      !resolvedRoute
-    ) {
+    if (selectedAuthType === AuthType.QWEN_SUBSCRIPTION && !resolvedRoute) {
       await this.config.refreshSubscriptionModels();
     }
 
@@ -15942,6 +15945,12 @@ export class Session implements SessionContext {
               : {}),
           }
         : undefined;
+    prepareSubscriptionModelPersistence(
+      this.settings,
+      this.config,
+      `${selectedAuthType}:${parsed.modelId}`,
+      getPersistScopeForModelSelection(this.settings),
+    );
     try {
       await this.config.switchModel(
         selectedAuthType,
@@ -15969,6 +15978,32 @@ export class Session implements SessionContext {
     const persistDefault =
       !this.requiresManagedConversationBinding &&
       (options.persistDefault ?? true);
+    try {
+      persistSubscriptionModel(
+        this.settings,
+        this.config,
+        `${effectiveAuthType}:${effectiveModelId}`,
+        getPersistScopeForModelSelection(this.settings),
+      );
+    } catch (error) {
+      if (previousAuthType && previousModelId) {
+        try {
+          await this.config.switchModel(
+            previousAuthType,
+            previousModelId,
+            typeof previousBaseUrl === 'string'
+              ? { baseUrl: previousBaseUrl }
+              : undefined,
+          );
+        } catch (rollbackError) {
+          debugLogger.warn(
+            'Model configuration save failed and model rollback failed',
+            rollbackError,
+          );
+        }
+      }
+      throw error;
+    }
     this.reconcileReasoningSelection(effectiveModelId, {
       persist: persistDefault,
     });

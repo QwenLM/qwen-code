@@ -244,7 +244,17 @@ export async function restoreSessionModelThenAuthenticate(
       subscriptionFallbackModel
     ) {
       try {
-        const { models } = await config.refreshSubscriptionModels();
+        const models = config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .filter(
+            (model) =>
+              model.subscriptionChatModel !== false &&
+              !model.imageOnly &&
+              !model.voiceOnly &&
+              !model.fastOnly &&
+              !model.visionOnly,
+          )
+          .map((model) => model.id);
         rollbackModelId = selectSubscriptionModel(
           models,
           models.includes(originalModel)

@@ -28,12 +28,8 @@ import {
 import { fetchWithPolicy } from '../utils/fetch.js';
 import { subscriptionHttpError } from './subscription-errors.js';
 import {
-  subscriptionModelIdsSchema,
-  subscriptionModelMetadataSchema,
   subscriptionModelsResponseSchema,
-  subscriptionScenesSchema,
   subscriptionScenesResponseSchema,
-  synchronizeSubscriptionThinkingStrength,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
   type SubscriptionModelCatalog,
   type SubscriptionModelMetadata,
@@ -53,9 +49,6 @@ const credentialSchema = z.object({
   signInAttempt: z.string().min(1).optional(),
   baseUrl: z.string(),
   clientId: z.string(),
-  models: subscriptionModelIdsSchema.optional(),
-  modelMetadata: subscriptionModelMetadataSchema,
-  scenes: subscriptionScenesSchema.optional().catch(undefined),
   tokens: z
     .object({
       access_token: z.string().min(1),
@@ -360,8 +353,6 @@ export class QwenSubscriptionSession {
       ) {
         if (credentials.signInAttempt) {
           delete credentials.tokens;
-          delete credentials.models;
-          delete credentials.modelMetadata;
           await this.write(credentials, assertCanCommit);
         } else {
           assertCanCommit();
@@ -452,24 +443,6 @@ export class QwenSubscriptionSession {
           ...(modelMetadata.length ? { modelMetadata } : {}),
         };
       },
-      (credentials) =>
-        credentials.models?.length
-          ? {
-              models: credentials.models,
-              ...(credentials.modelMetadata
-                ? { modelMetadata: credentials.modelMetadata }
-                : {}),
-            }
-          : undefined,
-      (credentials, catalog) => {
-        Object.assign(
-          credentials,
-          synchronizeSubscriptionThinkingStrength(
-            { ...catalog, scenes: credentials.scenes },
-            'models',
-          ),
-        );
-      },
       signal,
       cliVersion,
     );
@@ -483,19 +456,6 @@ export class QwenSubscriptionSession {
     const result = await this.getCatalog(
       '/models/scenes',
       (value) => subscriptionScenesResponseSchema.parse(value).data,
-      (credentials) => credentials.scenes,
-      (credentials, scenes) => {
-        const catalog = synchronizeSubscriptionThinkingStrength(
-          {
-            models: credentials.models ?? [],
-            modelMetadata: credentials.modelMetadata,
-            scenes,
-          },
-          'scenes',
-        );
-        credentials.modelMetadata = catalog.modelMetadata;
-        credentials.scenes = catalog.scenes;
-      },
       signal,
       cliVersion,
     );
@@ -505,8 +465,6 @@ export class QwenSubscriptionSession {
   private async getCatalog<T>(
     endpoint: '/models' | '/models/scenes',
     parse: (value: unknown) => T,
-    cachedCatalog: (credentials: Credentials) => T | undefined,
-    saveCatalog: (credentials: Credentials, catalog: T) => void,
     signal?: AbortSignal,
     cliVersion?: string,
   ): Promise<{ catalog: T; cached: boolean }> {
@@ -569,11 +527,7 @@ export class QwenSubscriptionSession {
         throw subscriptionHttpError(response.status, body, response.retryAfter);
       }
       const catalog = parse(JSON.parse(response.body.toString('utf8')));
-      await this.locked(async (assertCanCommit) => {
-        const credentials = await current();
-        saveCatalog(credentials, catalog);
-        await this.write(credentials, assertCanCommit);
-      }, signal);
+      await this.locked(current, signal);
       return { catalog, cached: false };
     } catch (error) {
       signal?.throwIfAborted();
@@ -582,12 +536,10 @@ export class QwenSubscriptionSession {
         (error.stage || !error.status || error.status < 500)
       )
         throw error;
-      const catalog = cachedCatalog(await this.locked(current, signal));
-      if (catalog === undefined)
-        throw error instanceof SubscriptionOAuthError
-          ? error
-          : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
-      return { catalog, cached: true };
+      await this.locked(current, signal);
+      throw error instanceof SubscriptionOAuthError
+        ? error
+        : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
     }
   }
 }

@@ -51,7 +51,10 @@ import {
 } from '../../utils/model-display-order.js';
 import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
 import { refreshSubscriptionCatalog } from '../../utils/refresh-subscription-catalog.js';
-import { readCachedSubscriptionCatalog } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import {
+  persistSubscriptionModel,
+  prepareSubscriptionModelPersistence,
+} from '../../config/subscription-model-persistence.js';
 import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import {
   formatUnsupportedVoiceModelMessage,
@@ -284,6 +287,14 @@ function handleModelSwitchSuccess({
   isRuntime,
   persistScope,
 }: HandleModelSwitchSuccessParams): void {
+  if (effectiveAuthType) {
+    persistSubscriptionModel(
+      settings,
+      config,
+      `${effectiveAuthType}:${effectiveModelId}`,
+      resolvePersistScope(settings, persistScope),
+    );
+  }
   persistModelSelection(
     settings,
     effectiveModelId,
@@ -439,6 +450,8 @@ export function ModelDialog({
         );
     const registryModels = allModels.filter((m) => {
       if (m.authType === AuthType.QWEN_SUBSCRIPTION) {
+        const discovered = config?.getSubscriptionModelIds?.(scene);
+        if (discovered && !discovered.includes(m.id)) return false;
         if (
           scene
             ? !m.subscriptionScenes?.includes(scene)
@@ -478,9 +491,7 @@ export function ModelDialog({
 
     // Group registry models by authType
     const sceneIds = scene
-      ? readCachedSubscriptionCatalog().scenes?.[scene]?.map(
-          (model) => model.id,
-        )
+      ? config?.getSubscriptionModelIds?.(scene)
       : undefined;
     if (sceneIds)
       registryModels.sort((left, right) =>
@@ -1034,6 +1045,12 @@ export function ModelDialog({
           setErrorMessage(t('Selected Advisor model is unavailable.'));
           return;
         }
+        prepareSubscriptionModelPersistence(
+          settings,
+          config,
+          advisorModel,
+          SettingScope.User,
+        );
         selectionInFlightRef.current = true;
         let applied: boolean | undefined;
         try {
@@ -1045,6 +1062,13 @@ export function ModelDialog({
           setErrorMessage(t('Advisor configuration is unavailable.'));
           return;
         }
+        if (config)
+          persistSubscriptionModel(
+            settings,
+            config,
+            advisorModel,
+            SettingScope.User,
+          );
         settings.setValue(SettingScope.User, 'advisorModel', advisorModel);
         reportAuxiliaryModelSelection({
           type: 'success',
@@ -1068,6 +1092,13 @@ export function ModelDialog({
 
         const scope = resolvePersistScope(settings, persistScope);
         const persistedVoiceModel = shareableAuxSelector(voiceModel, scope);
+        if (config)
+          persistSubscriptionModel(
+            settings,
+            config,
+            persistedVoiceModel,
+            scope,
+          );
         settings.setValue(scope, 'voiceModel', persistedVoiceModel);
         const scopeSuffix =
           persistScope === 'workspace'
@@ -1094,6 +1125,8 @@ export function ModelDialog({
         // The shareable workspace file only ever receives a provably public
         // endpoint; this session's in-memory pin keeps the picked row.
         const persistedFastModel = shareableAuxSelector(fastModel, scope);
+        if (config)
+          persistSubscriptionModel(settings, config, persistedFastModel, scope);
         settings.setValue(scope, 'fastModel', persistedFastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
         config?.setFastModel(fastModel);
@@ -1132,6 +1165,8 @@ export function ModelDialog({
           return;
         }
         const scope = resolvePersistScope(settings, persistScope);
+        if (config)
+          persistSubscriptionModel(settings, config, visionModel, scope);
         settings.setValue(scope, 'visionModel', visionModel);
         // Sync runtime Config so the vision bridge picks it up without a restart.
         config?.setVisionModel(visionModel);
@@ -1167,6 +1202,13 @@ export function ModelDialog({
           compactionModelId,
           scope,
         );
+        if (config)
+          persistSubscriptionModel(
+            settings,
+            config,
+            persistedCompactionModel,
+            scope,
+          );
         settings.setValue(scope, 'compactionModel', persistedCompactionModel);
         // Sync runtime Config so the compression service picks it up immediately.
         config.setCompactionModel(compactionModelId);
@@ -1205,6 +1247,8 @@ export function ModelDialog({
           return;
         }
         const scope = resolvePersistScope(settings, persistScope);
+        if (config)
+          persistSubscriptionModel(settings, config, imageModel, scope);
         settings.setValue(scope, 'imageModel', imageModel);
         selectionInFlightRef.current = true;
         try {
@@ -1281,6 +1325,12 @@ export function ModelDialog({
           selectedBaseUrl = parsed.baseUrl;
         }
 
+        prepareSubscriptionModelPersistence(
+          settings,
+          config,
+          `${selectedAuthType}:${modelId}${selectedBaseUrl ? `\0${selectedBaseUrl}` : ''}`,
+          resolvePersistScope(settings, persistScope),
+        );
         selectionInFlightRef.current = true;
         try {
           await switchPrimaryModel(

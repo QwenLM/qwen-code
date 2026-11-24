@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readCachedSubscriptionCatalog } from '../qwen/subscription-models.js';
-
 import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   ModelRegistry,
@@ -1300,90 +1298,161 @@ describe('Qwen Subscription model registry', () => {
     ]);
   });
 
-  it.each([undefined, 'false', 'true'])(
-    'loads cached models when DEV=%s',
-    (dev) => {
-      vi.stubEnv('DEV', false);
-      if (dev === undefined) delete process.env['DEV'];
-      else process.env['DEV'] = dev;
-      const registry = new ModelRegistry({
-        'qwen-subscription': [{ id: QWEN_SUBSCRIPTION_MODEL }],
-      });
-      expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual(
-        [
-          expect.objectContaining({
-            id: QWEN_SUBSCRIPTION_MODEL,
-            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-          }),
-        ],
-      );
-    },
-  );
-
-  it('loads cached models with confirmed modalities and preserves unknown IDs', () => {
-    vi.stubEnv('DEV', false);
-    delete process.env['DEV'];
-    vi.mocked(readCachedSubscriptionCatalog).mockReturnValueOnce({
-      models: ['qwen3.8-max', 'qwen3.8-flash', 'future-model'],
+  it('starts without a discovered directory and restores only configured models', () => {
+    const registry = new ModelRegistry({
+      [AuthType.QWEN_SUBSCRIPTION]: [
+        {
+          id: 'saved-image',
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          name: 'Saved image',
+          imageOnly: true,
+          supportsImageGeneration: true,
+          subscriptionChatModel: false,
+          subscriptionScenes: ['image'],
+          generationConfig: { modalities: {}, contextWindowSize: 12345 },
+          thinkingStrength: [{ level: 'low', budget_tokens: 111 }],
+        },
+      ],
+      openai: [{ id: 'saved-image', envKey: 'KEY', baseUrl: OPENAI_URL }],
     });
-    const registry = new ModelRegistry();
+    expect(registry.getSubscriptionModelIds()).toEqual([]);
+    expect(registry.getSubscriptionModelIds('image')).toEqual([]);
     expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual([
       expect.objectContaining({
-        id: QWEN_SUBSCRIPTION_MODEL,
-        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-        modalities: { image: true, video: true },
-        capabilities: {},
+        id: 'saved-image',
+        label: 'Saved image',
+        imageOnly: true,
+        contextWindowSize: 12345,
+        modalities: {},
+        thinkingStrength: [{ level: 'low', budget_tokens: 111 }],
       }),
-      expect.objectContaining({
-        id: 'qwen3.8-flash',
-        modalities: { image: true, video: true },
-      }),
-      expect.objectContaining({ id: 'future-model', modalities: {} }),
     ]);
     expect(
-      registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION)?.id,
-    ).toBe(QWEN_SUBSCRIPTION_MODEL);
+      new ModelRegistry().getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+    ).toEqual([]);
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION),
+    ).toBeUndefined();
   });
 
-  it('restores gateway metadata from cache without borrowing API provider config', () => {
-    vi.mocked(readCachedSubscriptionCatalog).mockReturnValueOnce({
-      models: ['qwen3.8-max', 'MiniMax-M3'],
-      modelMetadata: [
-        { id: 'qwen3.8-max', contextWindowSize: 262144 },
-        { id: 'MiniMax-M3', modalities: {} },
-      ],
-    });
+  it('keeps discovery in this registry across settings reloads but not new instances', () => {
+    const registry = new ModelRegistry();
+    registry.setSubscriptionModels(
+      ['chat'],
+      [{ id: 'chat', contextWindowSize: 777 }],
+    );
+    registry.setSubscriptionScenes({ image: [{ id: 'new-image' }] });
+    registry.reloadModels({ openai: [{ id: 'api-model' }] });
+    expect(registry.getSubscriptionModelIds()).toEqual(['chat']);
+    expect(registry.getSubscriptionModelIds('image')).toEqual(['new-image']);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'chat')?.generationConfig
+        .contextWindowSize,
+    ).toBe(777);
+    expect(new ModelRegistry().getSubscriptionModelIds('image')).toEqual([]);
+  });
+
+  it('updates fetched metadata without changing unrelated configured routes', () => {
     const registry = new ModelRegistry({
-      openai: [
+      [AuthType.QWEN_SUBSCRIPTION]: [
         {
-          id: 'qwen3.8-max',
-          generationConfig: {
-            modalities: { audio: true },
-            contextWindowSize: 123456,
-          },
+          id: 'chat',
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          subscriptionChatModel: true,
+          generationConfig: { contextWindowSize: 100 },
+        },
+      ],
+      openai: [{ id: 'chat', generationConfig: { contextWindowSize: 200 } }],
+    });
+    registry.setSubscriptionModels(
+      ['chat'],
+      [{ id: 'chat', contextWindowSize: 300 }],
+    );
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'chat')?.generationConfig
+        .contextWindowSize,
+    ).toBe(300);
+    expect(
+      registry.getModel(AuthType.USE_OPENAI, 'chat')?.generationConfig
+        .contextWindowSize,
+    ).toBe(200);
+    registry.setSubscriptionModels([]);
+    expect(registry.getSubscriptionModelIds()).toEqual([]);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'chat')?.generationConfig
+        .contextWindowSize,
+    ).toBe(100);
+  });
+
+  it('preserves a saved primary route when only the scene directory has been fetched', () => {
+    const registry = new ModelRegistry({
+      [AuthType.QWEN_SUBSCRIPTION]: [
+        {
+          id: 'shared',
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          subscriptionChatModel: true,
+          generationConfig: { contextWindowSize: 111 },
         },
       ],
     });
-    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual([
-      expect.objectContaining({
-        id: 'qwen3.8-max',
-        modalities: { image: true, video: true },
-        contextWindowSize: 262144,
-      }),
-      expect.objectContaining({ id: 'MiniMax-M3', modalities: {} }),
-    ]);
-    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([
-      expect.objectContaining({
-        id: 'qwen3.8-max',
-        modalities: { audio: true },
-        contextWindowSize: 123456,
-      }),
-    ]);
+    registry.setSubscriptionScenes({
+      fast: [{ id: 'shared', context_window_tokens: 222 }],
+    });
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION)?.id,
+    ).toBe('shared');
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'shared'),
+    ).toMatchObject({
+      subscriptionChatModel: true,
+      generationConfig: { contextWindowSize: 222 },
+    });
+    expect(registry.getSubscriptionModelIds()).toEqual([]);
+    expect(registry.getSubscriptionModelIds('fast')).toEqual(['shared']);
   });
 
-  it('ignores direct and aliased configured overrides, including after a reload', () => {
-    vi.stubEnv('DEV', true);
-    process.env['DEV'] = 'true';
+  it('retains saved image capability when only the main directory has been fetched', () => {
+    const registry = new ModelRegistry({
+      [AuthType.QWEN_SUBSCRIPTION]: [
+        {
+          id: 'shared',
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          subscriptionChatModel: true,
+          subscriptionScenes: ['image'],
+          supportsImageGeneration: true,
+        },
+      ],
+    });
+    registry.setSubscriptionModels(['shared']);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'shared'),
+    ).toMatchObject({
+      subscriptionScenes: ['image'],
+      supportsImageGeneration: true,
+    });
+    expect(registry.getSubscriptionModelIds('image')).toEqual([]);
+  });
+
+  it('hides failed directories without invalidating already resolved inference routes', () => {
+    const registry = new ModelRegistry();
+    registry.setSubscriptionModels(['chat']);
+    registry.setSubscriptionScenes({ image: [{ id: 'image' }] });
+    registry.invalidateSubscriptionCatalog(true);
+    expect(registry.getSubscriptionModelIds('image')).toEqual([]);
+    expect(registry.getSubscriptionModelIds()).toEqual(['chat']);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'image'),
+    ).toBeDefined();
+    registry.reloadModels({});
+    expect(registry.getSubscriptionModelIds('image')).toEqual([]);
+    registry.setSubscriptionScenes({ image: [{ id: 'new-image' }] });
+    expect(registry.getSubscriptionModelIds('image')).toEqual(['new-image']);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'image'),
+    ).toBeUndefined();
+  });
+
+  it('rejects configured alternate subscription endpoints and aliased routes', () => {
     const malicious = {
       id: QWEN_SUBSCRIPTION_MODEL,
       baseUrl: 'https://other.example/v1',
@@ -1391,32 +1460,26 @@ describe('Qwen Subscription model registry', () => {
     };
     const registry = new ModelRegistry(
       {
-        'qwen-subscription': [malicious],
-        alias: [malicious, { id: 'unsupported-model' }],
+        [AuthType.QWEN_SUBSCRIPTION]: [malicious],
+        alias: [{ ...malicious, baseUrl: QWEN_SUBSCRIPTION_BASE_URL }],
       },
-      { alias: 'qwen-subscription' },
+      { alias: AuthType.QWEN_SUBSCRIPTION },
     );
-    registry.reloadModels({ 'qwen-subscription': [malicious] });
-    expect(
-      registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
-    ).toHaveLength(1);
-    expect(
-      registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL),
-    ).toMatchObject({
-      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-      generationConfig: { modalities: { image: true, video: true } },
+    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual(
+      [],
+    );
+    registry.reloadModels({
+      [AuthType.QWEN_SUBSCRIPTION]: [
+        { ...malicious, baseUrl: QWEN_SUBSCRIPTION_BASE_URL },
+      ],
     });
     expect(
       registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL)
         ?.envKey,
     ).toBeUndefined();
     expect(
-      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'unsupported-model'),
-    ).toBeUndefined();
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL)
+        ?.baseUrl,
+    ).toBe(QWEN_SUBSCRIPTION_BASE_URL);
   });
 });
-
-vi.mock('../qwen/subscription-models.js', async (original) => ({
-  ...(await original<typeof import('../qwen/subscription-models.js')>()),
-  readCachedSubscriptionCatalog: vi.fn(() => ({ models: ['qwen3.8-max'] })),
-}));

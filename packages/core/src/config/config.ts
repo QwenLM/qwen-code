@@ -16,8 +16,8 @@ import { getInvocationContext } from '../utils/invocation-context.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import {
-  SUBSCRIPTION_MODELS_CACHED,
   subscriptionModelUnavailable,
+  type SubscriptionScene,
 } from '../qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
@@ -3053,7 +3053,6 @@ export class Config {
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator?: ContentGenerator;
   private subscriptionPlan?: 'plus' | 'pro';
-  private subscriptionModelIdentity?: string;
   private readonly initialAuthType?: AuthType;
   private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
@@ -6059,7 +6058,6 @@ export class Config {
     this.contentGeneratorConfigSources = {};
     this.initialResolvedAuthType = undefined;
     this.subscriptionPlan = undefined;
-    this.subscriptionModelIdentity = undefined;
     this.modelsConfig.clearAuth();
     this.toolRegistry?.unregisterTool(ToolNames.WEB_SEARCH);
     this.notifyModelChangeListeners();
@@ -6251,20 +6249,43 @@ export class Config {
     return changed;
   }
 
+  invalidateSubscriptionModels(): void {
+    this.modelsConfig.invalidateSubscriptionModels();
+    this.notifyModelChangeListeners();
+  }
+
+  copySubscriptionModelsFrom(source: Config): void {
+    const models = source.getSubscriptionModelIds();
+    const metadata = source
+      .getAllConfiguredModels()
+      .filter(
+        (model) =>
+          !model.isRuntimeModel &&
+          model.authType === AuthType.QWEN_SUBSCRIPTION &&
+          models.includes(model.id),
+      )
+      .map((model) => ({
+        id: model.id,
+        name: model.label,
+        description: model.description,
+        modalities: model.modalities,
+        contextWindowSize: model.contextWindowSize,
+        thinkingStrength: model.thinkingStrength,
+      }));
+    this.modelsConfig.setSubscriptionModels(models, metadata);
+    if (!this.refreshSubscriptionReasoningSnapshot())
+      this.notifyModelChangeListeners();
+  }
+
+  getSubscriptionModelIds(scene?: SubscriptionScene): string[] {
+    return this.modelsConfig.getSubscriptionModelIds(scene);
+  }
+
   async refreshSubscriptionModels(signal?: AbortSignal) {
-    const session = new QwenSubscriptionSession();
-    const identity = session.getIdentity();
-    this.subscriptionModelIdentity = undefined;
     const result = await this.modelsConfig.refreshSubscriptionModels(
       signal,
       this.getCliVersion(),
     );
-    if (identity && session.getIdentity() === identity) {
-      this.subscriptionModelIdentity = identity;
-    }
-    const previous = this.warnings.indexOf(SUBSCRIPTION_MODELS_CACHED);
-    if (previous !== -1) this.warnings.splice(previous, 1);
-    if (result.cached) this.warnings.push(SUBSCRIPTION_MODELS_CACHED);
     if (!this.refreshSubscriptionReasoningSnapshot())
       this.notifyModelChangeListeners();
     return result;
@@ -6292,7 +6313,6 @@ export class Config {
     return this.rebuildContentGenerator(
       authMethod,
       isInitialAuth,
-      true,
       subscriptionFallbackModel,
       allowUnlistedSubscriptionModel,
     );
@@ -6301,7 +6321,6 @@ export class Config {
   private async rebuildContentGenerator(
     authMethod: AuthType,
     isInitialAuth: boolean | undefined,
-    refreshSubscriptionModels: boolean,
     subscriptionFallbackModel?: string,
     allowUnlistedSubscriptionModel?: boolean,
   ) {
@@ -6331,14 +6350,10 @@ export class Config {
 
     let fallbackModel: string | undefined;
     if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
-      const { models } = refreshSubscriptionModels
-        ? await this.refreshSubscriptionModels()
-        : {
-            models: this.modelsConfig
-              .getAvailableModelsForAuthType(authMethod)
-              .filter((model) => model.subscriptionChatModel !== false)
-              .map((model) => model.id),
-          };
+      const models = this.modelsConfig
+        .getAvailableModelsForAuthType(authMethod)
+        .filter((model) => model.subscriptionChatModel !== false)
+        .map((model) => model.id);
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
         if (
@@ -6348,9 +6363,9 @@ export class Config {
         ) {
           fallbackModel = subscriptionFallbackModel;
         } else if (
-          !isInitialAuth ||
-          !allowUnlistedSubscriptionModel ||
-          priorGeneration.authType !== authMethod
+          !isInitialAuth &&
+          (!allowUnlistedSubscriptionModel ||
+            priorGeneration.authType !== authMethod)
         ) {
           throw new Error(subscriptionModelUnavailable(selected));
         }
@@ -8109,17 +8124,7 @@ export class Config {
     // we captured off the still-intact live contentGeneratorConfig above. This is
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
-    const reuseSubscriptionModels =
-      authType === AuthType.QWEN_SUBSCRIPTION &&
-      this.contentGeneratorConfig.authType === authType &&
-      this.subscriptionModelIdentity !== undefined &&
-      new QwenSubscriptionSession().getIdentity() ===
-        this.subscriptionModelIdentity;
-    if (reuseSubscriptionModels) {
-      await this.rebuildContentGenerator(authType, undefined, false);
-    } else {
-      await this.refreshAuth(authType);
-    }
+    await this.refreshAuth(authType);
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }

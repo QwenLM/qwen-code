@@ -7,6 +7,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { promises as fs, writeFileSync } from 'node:fs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { atomicWriteFileSync as realAtomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -2105,6 +2106,153 @@ describe('createDaemonWorkspaceService', () => {
         false,
       );
       expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+
+    it('projects only discovered subscription models after an explicit cold picker refresh', async () => {
+      const identity = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+        .mockReturnValue('account-a');
+      try {
+        const apiProvider = {
+          kind: 'model_provider' as const,
+          status: 'ok' as const,
+          authType: 'openai',
+          current: true,
+          models: [],
+        };
+        const local = {
+          v: 1 as const,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          acpChannelLive: false,
+          current: { authType: 'openai', modelId: 'api(openai)' },
+          providers: [
+            apiProvider,
+            { ...apiProvider, authType: 'qwen-subscription', current: false },
+          ],
+        };
+        const child = {
+          ...local,
+          current: {
+            authType: 'qwen-subscription',
+            modelId: 'remote(qwen-subscription)',
+          },
+          providers: [
+            {
+              ...apiProvider,
+              authType: 'qwen-subscription',
+              current: true,
+              models: [
+                {
+                  modelId: 'remote(qwen-subscription)',
+                  baseModelId: 'remote',
+                  isCurrent: true,
+                  isRuntime: false,
+                },
+              ],
+            },
+            { ...apiProvider, authType: 'anthropic' },
+          ],
+        };
+        const queryWorkspaceStatus = vi.fn().mockResolvedValue(child);
+        const invokeWorkspaceCommand = vi
+          .fn()
+          .mockResolvedValue({ configsFailed: 0 });
+        const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            workspaceProvidersStatusProvider: vi.fn().mockResolvedValue(local),
+            queryWorkspaceStatus,
+            invokeWorkspaceCommand,
+            preheatAcpChild,
+            isChannelLive: () => false,
+          }),
+        );
+        expect(await svc.getWorkspaceProvidersStatus(makeCtx())).toEqual(local);
+        expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+        expect(
+          await svc.reloadModelProviders(makeCtx(), { refreshModels: true }),
+        ).toEqual({ status: 'applied' });
+        expect(preheatAcpChild).toHaveBeenCalledOnce();
+        expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+          'qwen/control/workspace/model-providers/reload',
+          { cwd: '/workspace', refreshModels: true },
+          { timeoutMs: 30_000 },
+        );
+        const status = await svc.getWorkspaceProvidersStatus(makeCtx());
+        expect(status.current).toEqual(local.current);
+        expect(status.providers).toEqual([
+          apiProvider,
+          {
+            ...child.providers[0],
+            current: false,
+            models: [
+              {
+                modelId: 'remote(qwen-subscription)',
+                baseModelId: 'remote',
+                isCurrent: false,
+                isRuntime: false,
+              },
+            ],
+          },
+        ]);
+        expect(queryWorkspaceStatus).toHaveBeenCalledWith(
+          'qwen/status/workspace/providers',
+          expect.any(Function),
+        );
+        identity.mockReturnValue('account-b');
+        expect(await svc.getWorkspaceProvidersStatus(makeCtx())).toEqual(local);
+        expect(queryWorkspaceStatus).toHaveBeenCalledTimes(1);
+      } finally {
+        identity.mockRestore();
+      }
+    });
+
+    it('hides subscription candidates after discovery fails and preserves local API Key providers', async () => {
+      const identity = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+        .mockReturnValue('account-a');
+      try {
+        const apiProvider = {
+          kind: 'model_provider' as const,
+          status: 'ok' as const,
+          authType: 'openai',
+          current: true,
+          models: [],
+        };
+        const local = {
+          v: 1 as const,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          providers: [
+            apiProvider,
+            { ...apiProvider, authType: 'qwen-subscription', current: false },
+          ],
+        };
+        const queryWorkspaceStatus = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            workspaceProvidersStatusProvider: vi.fn().mockResolvedValue(local),
+            queryWorkspaceStatus,
+            invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+              configsFailed: 0,
+              modelCatalogWarning: 'catalog temporarily unavailable',
+            }),
+          }),
+        );
+        expect(
+          await svc.reloadModelProviders(makeCtx(), { refreshModels: true }),
+        ).toEqual({
+          status: 'applied',
+          modelCatalogWarning: 'catalog temporarily unavailable',
+        });
+        expect(
+          (await svc.getWorkspaceProvidersStatus(makeCtx())).providers,
+        ).toEqual([apiProvider]);
+        expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+      } finally {
+        identity.mockRestore();
+      }
     });
 
     it('getWorkspaceProvidersStatus keeps ACP fallback without daemon-local provider', async () => {
@@ -4621,6 +4769,64 @@ describe('createDaemonWorkspaceService', () => {
       );
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
     });
+    it('keeps daemon-local API Key choices available when subscription discovery cannot preheat', async () => {
+      const identity = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+        .mockReturnValue('account');
+      try {
+        const local = {
+          v: 1 as const,
+          initialized: true,
+          workspaceCwd: '/workspace',
+          providers: [],
+        };
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            workspaceProvidersStatusProvider: vi.fn().mockResolvedValue(local),
+            preheatAcpChild: vi
+              .fn()
+              .mockRejectedValue(new Error('child unavailable')),
+            invokeWorkspaceCommand: vi
+              .fn()
+              .mockRejectedValue(new SessionNotFoundError('/workspace')),
+          }),
+        );
+        await expect(
+          svc.reloadModelProviders(makeCtx(), { refreshModels: true }),
+        ).resolves.toMatchObject({
+          status: 'deferred',
+          modelCatalogWarning: expect.any(String),
+        });
+        expect(await svc.getWorkspaceProvidersStatus(makeCtx())).toEqual(local);
+      } finally {
+        identity.mockRestore();
+      }
+    });
+
+    it('keeps an API Key-only picker lazy while forwarding explicit discovery intent', async () => {
+      const identity = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+        .mockReturnValue(undefined);
+      try {
+        const preheatAcpChild = vi.fn();
+        const invokeWorkspaceCommand = vi
+          .fn()
+          .mockResolvedValue({ configsFailed: 0 });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ preheatAcpChild, invokeWorkspaceCommand }),
+        );
+        await svc.reloadModelProviders(makeCtx(), { refreshModels: true });
+        expect(preheatAcpChild).not.toHaveBeenCalled();
+        expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+          'qwen/control/workspace/model-providers/reload',
+          { cwd: '/workspace', refreshModels: true },
+          { timeoutMs: 30_000 },
+        );
+      } finally {
+        identity.mockRestore();
+      }
+    });
+
     it('uses the provider-specific environment refresh when configured', async () => {
       const reloadDaemonEnv = vi.fn();
       const reloadModelProvidersDaemonEnv = vi.fn().mockResolvedValue({

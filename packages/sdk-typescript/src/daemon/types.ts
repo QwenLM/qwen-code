@@ -4823,6 +4823,7 @@ export interface DaemonModelDeleteRequest {
 
 export interface DaemonModelProviderRuntimeSyncResult {
   status: 'applied' | 'deferred' | 'failed';
+  modelCatalogWarning?: string;
 }
 
 export interface DaemonModelDeleteResult {

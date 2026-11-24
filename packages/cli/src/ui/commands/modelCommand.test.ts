@@ -9,6 +9,7 @@ import { modelCommand, isPickerOnlyModelInvocation } from './modelCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SettingScope } from '../../config/settings.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import {
   AuthType,
   type ContentGeneratorConfig,
@@ -29,10 +30,21 @@ function createMockConfig(
 }
 
 function createMockSettings(setValue = vi.fn()): Partial<LoadedSettings> {
+  const user = { settings: {}, originalSettings: {} };
+  const workspace = { settings: {}, originalSettings: {} };
   return {
     merged: {},
-    user: { settings: {} },
-    workspace: { settings: {} },
+    user,
+    workspace,
+    system: { settings: {}, originalSettings: {} },
+    systemDefaults: { settings: {}, originalSettings: {} },
+    forScope: (scope: SettingScope) =>
+      scope === SettingScope.Workspace
+        ? workspace
+        : scope === SettingScope.User
+          ? user
+          : { settings: {}, originalSettings: {} },
+    recomputeMerged: vi.fn(),
     isTrusted: false,
     setValue,
   } as unknown as Partial<LoadedSettings>;
@@ -3764,4 +3776,185 @@ it('reports catalog permission failures when explicitly selecting a subscription
     messageType: 'error',
     content: 'Your account cannot access this model catalog.',
   });
+});
+
+it.each(['image', 'voice'] as const)(
+  'saves the selected subscription %s route alongside its selector',
+  async (scene) => {
+    const setValue = vi.fn();
+    const id =
+      scene === 'image' ? 'qwen-image-3.0' : 'qwen-audio-3.0-asr-flash';
+    const model = {
+      id,
+      label: id,
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+      subscriptionScenes: [scene],
+      subscriptionChatModel: false,
+      ...(scene === 'image'
+        ? { imageOnly: true, supportsImageGeneration: true }
+        : { voiceOnly: true }),
+    };
+    const config = {
+      getAllConfiguredModels: vi.fn().mockReturnValue([model]),
+      getAvailableModelsForAuthType: vi.fn().mockReturnValue([model]),
+      refreshSubscriptionScenes: vi
+        .fn()
+        .mockResolvedValue({ scenes: { [scene]: [{ id }] }, cached: false }),
+      resolveImageGenerationModel: vi.fn().mockReturnValue({
+        model: id,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: 'https://api.qwen.ai/api/v1',
+      }),
+      setImageModel: vi.fn().mockResolvedValue(undefined),
+    };
+    const context = createMockCommandContext({
+      services: { config, settings: createMockSettings(setValue) },
+    });
+    const result = await modelCommand.action!(
+      context,
+      `--${scene} qwen-subscription:${id}`,
+    );
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'modelProviders.qwen-subscription',
+      [
+        expect.objectContaining({
+          id,
+          subscriptionScenes: [scene],
+          subscriptionChatModel: false,
+        }),
+      ],
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      `${scene === 'image' ? 'image' : 'voice'}Model`,
+      `qwen-subscription:${id}`,
+    );
+  },
+);
+
+it.each(['image', 'voice'] as const)(
+  'does not select a saved subscription %s model absent from fresh discovery',
+  async (scene) => {
+    const id =
+      scene === 'image' ? 'qwen-image-3.0' : 'qwen-audio-3.0-asr-flash';
+    const model = {
+      id,
+      label: id,
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      subscriptionScenes: [scene],
+      subscriptionChatModel: false,
+      ...(scene === 'image'
+        ? { imageOnly: true, supportsImageGeneration: true }
+        : { voiceOnly: true }),
+    };
+    const setValue = vi.fn();
+    const setImageModel = vi.fn();
+    const config = {
+      getAllConfiguredModels: vi.fn(() => [model]),
+      getAvailableModelsForAuthType: vi.fn(() => [model]),
+      getSubscriptionModelIds: vi.fn(() => []),
+      setImageModel,
+    };
+    const context = createMockCommandContext({
+      services: { config, settings: createMockSettings(setValue) },
+    });
+    for (let i = 0; i < 2; i++) {
+      expect(
+        await modelCommand.action!(
+          context,
+          `--${scene} qwen-subscription:${id}`,
+        ),
+      ).toMatchObject({ type: 'message', messageType: 'error' });
+    }
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setImageModel).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['fast', 'compaction'] as const)(
+  'stores the current subscription %s definition for a bare ID shared with an API Key provider',
+  async (scene) => {
+    const setValue = vi.fn();
+    const model = {
+      id: 'shared',
+      label: 'Shared',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      subscriptionChatModel: false,
+      subscriptionScenes: [scene],
+    };
+    const models = [model, { ...model, authType: AuthType.USE_OPENAI }];
+    const config = {
+      getContentGeneratorConfig: () => ({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'main',
+      }),
+      getAllConfiguredModels: () => models,
+      getAvailableModelsForAuthType: (auth: AuthType) =>
+        models.filter((m) => m.authType === auth),
+      getSubscriptionModelIds: () => ['shared'],
+      setFastModel: vi.fn(),
+      setCompactionModel: vi.fn(),
+    };
+    const context = createMockCommandContext({
+      services: { config, settings: createMockSettings(setValue) },
+    });
+    expect(
+      await modelCommand.action!(context, `--${scene} shared`),
+    ).toMatchObject({ messageType: 'info' });
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'modelProviders.qwen-subscription',
+      [expect.objectContaining({ id: 'shared', subscriptionScenes: [scene] })],
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      `${scene}Model`,
+      'shared',
+    );
+  },
+);
+
+it('rejects a shadowed subscription primary definition before switching the runtime', async () => {
+  const model = {
+    id: 'selected',
+    label: 'Selected',
+    authType: AuthType.QWEN_SUBSCRIPTION,
+    baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+    subscriptionChatModel: true,
+  };
+  const switchModel = vi.fn();
+  const setValue = vi.fn();
+  const settings = createMockSettings(setValue) as LoadedSettings;
+  const forScope = settings.forScope;
+  settings.forScope = (scope) =>
+    scope === SettingScope.System
+      ? ({
+          settings: { modelProviders: { 'qwen-subscription': [] } },
+          originalSettings: {},
+          path: '/mock/settings.json',
+        } as ReturnType<LoadedSettings['forScope']>)
+      : forScope(scope);
+  const config = {
+    getAllConfiguredModels: () => [model],
+    getAvailableModelsForAuthType: () => [model],
+    getSubscriptionModelIds: () => [model.id],
+    refreshSubscriptionModels: vi
+      .fn()
+      .mockResolvedValue({ models: [model.id] }),
+    getContentGeneratorConfig: () => ({
+      authType: AuthType.USE_OPENAI,
+      model: 'previous',
+    }),
+    switchModel,
+  };
+  const context = createMockCommandContext({ services: { config, settings } });
+  await expect(
+    modelCommand.action!(context, 'selected(qwen-subscription)'),
+  ).rejects.toThrow('higher-precedence');
+  expect(switchModel).not.toHaveBeenCalled();
+  expect(setValue).not.toHaveBeenCalled();
 });

@@ -1297,12 +1297,15 @@ describe('Session', () => {
     mockSettings = {
       merged: {},
       isTrusted: false,
-      user: { settings: {} },
-      workspace: { settings: {} },
+      user: { settings: {}, originalSettings: {} },
+      workspace: { settings: {}, originalSettings: {} },
+      recomputeMerged: vi.fn(),
       forScope: vi.fn((scope: SettingScope) =>
         scope === SettingScope.Workspace
           ? mockSettings.workspace
-          : mockSettings.user,
+          : scope === SettingScope.User
+            ? mockSettings.user
+            : { settings: {}, originalSettings: {} },
       ),
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
@@ -14929,6 +14932,167 @@ describe('Session', () => {
   });
 
   describe('setModel', () => {
+    it('discovers an explicitly selected subscription model for a normal new session before saving it', async () => {
+      const model = {
+        id: 'new-session-model',
+        label: 'New session model',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+        subscriptionChatModel: true,
+      };
+      let discovered = false;
+      let switched = false;
+      vi.mocked(mockConfig.getAuthType).mockReturnValue(AuthType.USE_OPENAI);
+      vi.mocked(mockConfig.getAllConfiguredModels).mockImplementation(() =>
+        discovered ? [model] : [],
+      );
+      mockConfig.refreshSubscriptionModels = vi.fn(async () => {
+        discovered = true;
+        return { models: [model.id], cached: false };
+      });
+      vi.mocked(mockConfig.switchModel).mockImplementation(async () => {
+        switched = true;
+      });
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockImplementation(
+        () =>
+          ({
+            authType: switched
+              ? AuthType.QWEN_SUBSCRIPTION
+              : AuthType.USE_OPENAI,
+            model: switched ? model.id : 'previous',
+          }) as ReturnType<Config['getContentGeneratorConfig']>,
+      );
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `${model.id}(${AuthType.QWEN_SUBSCRIPTION})`,
+      });
+      expect(mockConfig.refreshSubscriptionModels).toHaveBeenCalledOnce();
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'modelProviders.qwen-subscription',
+        [expect.objectContaining({ id: model.id })],
+      );
+    });
+
+    it.each(['default', 'session-only', 'managed'] as const)(
+      'persists selected subscription configuration for %s without changing unrelated defaults',
+      async (mode) => {
+        const model = {
+          id: 'qwen-selected',
+          label: 'Selected',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+          subscriptionChatModel: true,
+          modalities: { image: true },
+          contextWindowSize: 1000000,
+        };
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([model]);
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: model.id,
+        } as ReturnType<Config['getContentGeneratorConfig']>);
+        if (mode === 'managed') {
+          session.dispose();
+          vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+            'standalone',
+          );
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+        }
+        await session.setModel(
+          {
+            sessionId: 'test-session-id',
+            modelId: `${model.id}(${AuthType.QWEN_SUBSCRIPTION})`,
+          },
+          { persistDefault: mode === 'default' },
+        );
+        expect(mockSettings.setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'modelProviders.qwen-subscription',
+          [
+            expect.objectContaining({
+              id: model.id,
+              subscriptionChatModel: true,
+              generationConfig: {
+                modalities: { image: true },
+                contextWindowSize: 1000000,
+              },
+            }),
+          ],
+        );
+        if (mode !== 'default') {
+          expect(
+            vi.mocked(mockSettings.setValue).mock.calls.map(([, key]) => key),
+          ).toEqual(['modelProviders.qwen-subscription']);
+        }
+      },
+    );
+
+    it('rejects a shadowed definition save before switching a session-only model', async () => {
+      const model = {
+        id: 'qwen-selected',
+        label: 'Selected',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionChatModel: true,
+        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+      };
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([model]);
+      vi.mocked(mockSettings.forScope).mockImplementation((scope) =>
+        scope === SettingScope.System
+          ? ({
+              settings: { modelProviders: { 'qwen-subscription': [] } },
+              originalSettings: {},
+              path: '/mock/settings.json',
+            } as ReturnType<LoadedSettings['forScope']>)
+          : mockSettings.user,
+      );
+      await expect(
+        session.setModel(
+          {
+            sessionId: 'test-session-id',
+            modelId: `${model.id}(${AuthType.QWEN_SUBSCRIPTION})`,
+          },
+          { persistDefault: false },
+        ),
+      ).rejects.toThrow('higher-precedence');
+      expect(mockConfig.switchModel).not.toHaveBeenCalled();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.recordSessionModel,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('restores the previous route if saving a session-only definition fails', async () => {
+      const model = {
+        id: 'qwen-selected',
+        label: 'Selected',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionChatModel: true,
+      };
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([model]);
+      vi.mocked(mockSettings.setValue).mockImplementation(() => {
+        throw new Error('disk full');
+      });
+      await expect(
+        session.setModel(
+          {
+            sessionId: 'test-session-id',
+            modelId: `${model.id}(${AuthType.QWEN_SUBSCRIPTION})`,
+          },
+          { persistDefault: false },
+        ),
+      ).rejects.toThrow('disk full');
+      expect(mockConfig.getAuthType()).toBe(AuthType.USE_OPENAI);
+      expect(mockConfig.getModel()).toBe('qwen3-code-plus');
+      expect(
+        mockChatRecordingService.recordSessionModel,
+      ).not.toHaveBeenCalled();
+    });
+
     function installReasoningPreference(
       selection: 'none' | 'low' | 'max',
       options: {

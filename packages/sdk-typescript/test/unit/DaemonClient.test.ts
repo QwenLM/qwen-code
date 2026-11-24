@@ -12450,6 +12450,22 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it('requests fresh model discovery only when explicitly requested', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'applied' }),
+      );
+      const workspace = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      }).workspaceByCwd('/work');
+      await workspace.reloadModelProviders();
+      await workspace.reloadModelProviders({ refreshModels: true });
+      expect(JSON.parse(calls[0]!.body as string)).toEqual({});
+      expect(JSON.parse(calls[1]!.body as string)).toEqual({
+        refreshModels: true,
+      });
+    });
+
     it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {
       const list = {
         v: 1,

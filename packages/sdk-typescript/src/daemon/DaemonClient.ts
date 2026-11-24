@@ -10474,11 +10474,12 @@ export class WorkspaceDaemonClient {
 
   reloadModelProviders(opts?: {
     clientId?: string;
+    refreshModels?: boolean;
   }): Promise<DaemonModelProviderRuntimeSyncResult> {
     return this.post(
       '/models/reload',
       'POST /workspaces/:workspace/models/reload',
-      {},
+      opts?.refreshModels === true ? { refreshModels: true } : {},
       opts?.clientId,
       35_000,
     );

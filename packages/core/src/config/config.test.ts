@@ -1250,7 +1250,21 @@ describe('Server Config (config.ts)', () => {
         cliVersion: '0.0.0-test',
         model: 'qwen3.8-max',
         generationConfig: { reasoning: { effort: 'high' } },
-        modelProvidersConfig: { openai: [{ id: 'other-model' }] },
+        modelProvidersConfig: {
+          openai: [{ id: 'other-model' }],
+          'qwen-subscription': [
+            {
+              id: 'qwen3.8-max',
+              baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+              subscriptionChatModel: true,
+            },
+            {
+              id: 'qwen3.8-flash',
+              baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+              subscriptionChatModel: true,
+            },
+          ],
+        },
       });
       await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
       return config;
@@ -1259,32 +1273,39 @@ describe('Server Config (config.ts)', () => {
     it.each([
       ['old-project-model', 'qwen3.8-flash', 'qwen3.8-flash'],
       ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.8-max'],
-      ['old-project-model', 'removed-user-model', undefined],
+      ['old-project-model', 'removed-user-model', 'old-project-model'],
     ])(
       'resolves startup model %s with saved user fallback %s',
       async (projectModel, fallback, expectedModel) => {
         const config = makeConfig({
           authType: AuthType.QWEN_SUBSCRIPTION,
           model: projectModel,
+          modelProvidersConfig: {
+            'qwen-subscription': [
+              {
+                id: 'qwen3.8-max',
+                baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+                subscriptionChatModel: true,
+              },
+              {
+                id: 'qwen3.8-flash',
+                baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+                subscriptionChatModel: true,
+              },
+            ],
+          },
         });
         const refresh = config.refreshAuth(
           AuthType.QWEN_SUBSCRIPTION,
           true,
           fallback,
         );
-        if (expectedModel) {
-          await refresh;
-          expect(config.getContentGeneratorConfig()?.model).toBe(expectedModel);
-          expect(config.getWarnings()).toEqual([]);
-        } else {
-          await expect(refresh).rejects.toThrow(
-            `The selected model, ${projectModel}, is no longer available. Run /model to choose another model.`,
-          );
-          expect(config.getModel()).toBe(projectModel);
-        }
+        await refresh;
+        expect(config.getContentGeneratorConfig()?.model).toBe(expectedModel);
+        expect(config.getWarnings()).toEqual([]);
         expect(
           QwenSubscriptionSession.prototype.getModels,
-        ).toHaveBeenCalledTimes(1);
+        ).not.toHaveBeenCalled();
       },
     );
 
@@ -1305,6 +1326,20 @@ describe('Server Config (config.ts)', () => {
           model: 'qwen4',
           generationConfig,
           generationConfigSources: sources,
+          modelProvidersConfig: {
+            'qwen-subscription': [
+              {
+                id: 'qwen3.8-max',
+                baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+                subscriptionChatModel: true,
+              },
+              {
+                id: 'qwen3.8-flash',
+                baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+                subscriptionChatModel: true,
+              },
+            ],
+          },
         });
 
         await config.refreshAuth(
@@ -1324,8 +1359,62 @@ describe('Server Config (config.ts)', () => {
             .map(({ id }) => id),
         ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
         expect(config.getWarnings()).toEqual([]);
+        expect(
+          QwenSubscriptionSession.prototype.getModels,
+        ).not.toHaveBeenCalled();
       },
     );
+
+    it('copies the fresh primary directory in memory without changing scene or API routes', async () => {
+      const source = await subscriptionConfig();
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockResolvedValueOnce({
+        models: ['qwen3.8-max'],
+        modelMetadata: [
+          {
+            id: 'qwen3.8-max',
+            contextWindowSize: 123456,
+            modalities: { image: true },
+            thinkingStrength: [{ level: 'high', budget_tokens: 3456 }],
+          },
+        ],
+        cached: false,
+      });
+      await source.refreshSubscriptionModels();
+      const target = await subscriptionConfig();
+      const sceneRefresh = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+        .mockResolvedValueOnce({
+          scenes: { image: [{ id: 'image-route' }] },
+          cached: false,
+        });
+      await target.refreshSubscriptionScenes();
+      target.copySubscriptionModelsFrom(source);
+      expect(target.getSubscriptionModelIds()).toEqual(['qwen3.8-max']);
+      expect(target.getSubscriptionModelIds('image')).toEqual(['image-route']);
+      expect(
+        target.getResolvedModelConfig(
+          AuthType.QWEN_SUBSCRIPTION,
+          'qwen3.8-max',
+        ),
+      ).toMatchObject({
+        generationConfig: {
+          contextWindowSize: 123456,
+          modalities: { image: true },
+        },
+        thinkingStrength: [{ level: 'high', budget_tokens: 3456 }],
+      });
+      expect(
+        target
+          .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
+          .map((model) => model.id),
+      ).toContain('other-model');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        1,
+      );
+      sceneRefresh.mockRestore();
+    });
 
     it('initializes an API model when switching from a signed-out subscription', async () => {
       const config = makeConfig({
@@ -1368,6 +1457,7 @@ describe('Server Config (config.ts)', () => {
         cached: false,
       });
       const config = await subscriptionConfig();
+      await config.refreshSubscriptionModels();
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
       expect(
         config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
@@ -1496,65 +1586,32 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    it('reloads the catalog after the login identity changes', async () => {
+    it('does not discover models during auth refresh or provider switches', async () => {
       const config = await subscriptionConfig();
-      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
-        'account-b',
-      );
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
-      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
-        2,
-      );
+      await config.switchModel(AuthType.USE_OPENAI, 'other-model');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
+      expect(
+        QwenSubscriptionSession.prototype.getModels,
+      ).not.toHaveBeenCalled();
+      expect(config.getContentGeneratorConfig()?.model).toBe('qwen3.8-max');
     });
 
-    it('refuses a model unavailable to the replacement account', async () => {
+    it('refuses an unconfigured selection without discovering models', async () => {
       const config = await subscriptionConfig();
-      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
-        'account-b',
-      );
-      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockResolvedValue({
-        models: ['qwen3.8-max'],
-        cached: false,
-      });
       await expect(
-        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
-      ).rejects.toThrow('no longer available');
-      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
-        2,
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'unconfigured-model'),
+      ).rejects.toThrow(
+        "Model 'unconfigured-model' not found for authType 'qwen-subscription'",
       );
+      expect(
+        QwenSubscriptionSession.prototype.getModels,
+      ).not.toHaveBeenCalled();
       expect(config.getModel()).toBe('qwen3.8-max');
     });
 
-    it('does not reuse the catalog after logout', async () => {
-      const config = await subscriptionConfig();
-      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
-        undefined,
-      );
-      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRejectedValue(
-        new Error('session_changed'),
-      );
-      await expect(
-        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
-      ).rejects.toThrow('session_changed');
-      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
-        2,
-      );
-    });
-
-    it('refreshes explicitly and when switching back from another provider', async () => {
-      const config = await subscriptionConfig();
-      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
-      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
-        2,
-      );
-      await config.switchModel(AuthType.USE_OPENAI, 'other-model');
-      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
-      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
-        3,
-      );
-    });
-
-    it('invalidates reuse after a failed explicit catalog refresh', async () => {
+    it('reports an explicit catalog failure without fetching again on model switch', async () => {
       const config = await subscriptionConfig();
       vi.mocked(
         QwenSubscriptionSession.prototype.getModels,
@@ -1564,12 +1621,12 @@ describe('Server Config (config.ts)', () => {
       );
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
       expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
-        3,
+        1,
       );
     });
 
-    it('does not bind a catalog to a login that changed during refresh', async () => {
-      const config = makeConfig({ model: 'qwen3.8-max' });
+    it('does not bind a catalog to a login that changed during explicit refresh', async () => {
+      const config = await subscriptionConfig();
       vi.mocked(
         QwenSubscriptionSession.prototype.getModels,
       ).mockImplementationOnce(async () => {
@@ -1578,23 +1635,21 @@ describe('Server Config (config.ts)', () => {
         ).mockReturnValue('account-b');
         return { models: ['qwen3.8-max', 'old-account-only'], cached: false };
       });
-      await expect(
-        config.refreshAuth(AuthType.QWEN_SUBSCRIPTION),
-      ).rejects.toMatchObject({ code: 'session_changed' });
+      await expect(config.refreshSubscriptionModels()).rejects.toMatchObject({
+        code: 'session_changed',
+      });
       expect(
-        config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
-      ).toEqual([]);
-      expect(
-        config.getContentGenerator({ allowUninitialized: true }),
-      ).toBeUndefined();
-
-      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+        config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .map(({ id }) => id),
+      ).not.toContain('old-account-only');
+      await config.refreshSubscriptionModels();
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
       expect(config.getContentGeneratorConfig()?.model).toBe('qwen3.8-flash');
       expect(
         config
           .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
-          .map((model) => model.id),
+          .map(({ id }) => id),
       ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
       expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
         2,
@@ -11639,12 +11694,17 @@ describe('Server Config (config.ts)', () => {
         const config = await initConfig({
           authType: AuthType.USE_GEMINI,
           model: 'qwen3.8-max',
+          modelProvidersConfig: {
+            'qwen-subscription': [
+              {
+                id: 'qwen3.8-max',
+                baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+                subscriptionChatModel: true,
+              },
+            ],
+          },
         });
         expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
-        vi.spyOn(config, 'refreshSubscriptionModels').mockResolvedValue({
-          models: ['qwen3.8-max'],
-          cached: false,
-        });
         stubContentGenerator();
         await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
         expect(registeredToolNames()).toContain(ToolNames.WEB_SEARCH);

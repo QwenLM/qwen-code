@@ -15,7 +15,7 @@ import {
   createWorkspaceGenerationGuard,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { SettingScope } from '../../config/settings.js';
+import { SettingScope, loadSettings } from '../../config/settings.js';
 
 const mocks = vi.hoisted(() => ({
   userInfo: vi.fn(),
@@ -28,10 +28,35 @@ vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
     getModels = mocks.models;
   },
 }));
-vi.mock('../../config/settings.js', async (original) => ({
-  ...(await original<typeof import('../../config/settings.js')>()),
-  loadSettings: mocks.loadSettings,
-}));
+vi.mock('../../config/settings.js', async (original) => {
+  const actual = await original<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    loadSettings: (...args: unknown[]) => {
+      const settings = mocks.loadSettings(...args);
+      if (!settings || settings.forScope) return settings;
+      const files = {
+        [actual.SettingScope.System]: settings.system,
+        [actual.SettingScope.SystemDefaults]: settings.systemDefaults,
+        [actual.SettingScope.User]: settings.user,
+        [actual.SettingScope.Workspace]: settings.workspace,
+      };
+      return {
+        ...settings,
+        forScope: (scope: SettingScope) => {
+          const file = files[scope];
+          return {
+            ...file,
+            settings: file?.settings ?? {},
+            originalSettings:
+              file?.originalSettings ?? structuredClone(file?.settings ?? {}),
+          };
+        },
+      };
+    },
+  };
+});
+
 beforeEach(() => {
   vi.stubEnv('DEV', false);
   delete process.env['DEV'];
@@ -85,7 +110,7 @@ function setup(trusted = true) {
     mutate: () => (_req, _res, next) => next(),
     persistSettings: async (cwd, writes, assertGenerationOpen) => {
       assertGenerationOpen?.();
-      const fresh = mocks.loadSettings(cwd);
+      const fresh = loadSettings(cwd);
       await persistSettings(
         cwd,
         typeof writes === 'function' ? writes(fresh) : writes,
@@ -222,6 +247,10 @@ it.each([
           key: 'model.baseUrl',
           value: QWEN_SUBSCRIPTION_BASE_URL,
         },
+        expect.objectContaining({
+          scope,
+          key: 'modelProviders.qwen-subscription',
+        }),
       ],
       expect.any(Function),
     );
@@ -283,9 +312,13 @@ it.each(['catalog', 'policy'] as const)(
       expect(response.status).toBe(200);
       expect(persistSettings).toHaveBeenCalledExactlyOnceWith(
         '/primary',
-        ['security.auth.selectedType', 'model.name', 'model.baseUrl'].map(
-          (key) =>
-            expect.objectContaining({ scope: SettingScope.Workspace, key }),
+        [
+          'security.auth.selectedType',
+          'model.name',
+          'model.baseUrl',
+          'modelProviders.qwen-subscription',
+        ].map((key) =>
+          expect.objectContaining({ scope: SettingScope.Workspace, key }),
         ),
         expect.any(Function),
       );
@@ -349,6 +382,10 @@ it.each([SettingScope.User, SettingScope.Workspace])(
           key: 'model.baseUrl',
           value: QWEN_SUBSCRIPTION_BASE_URL,
         },
+        expect.objectContaining({
+          scope,
+          key: 'modelProviders.qwen-subscription',
+        }),
       ],
       expect.any(Function),
     );
@@ -441,6 +478,10 @@ it.each([
             key: 'model.baseUrl',
             value: QWEN_SUBSCRIPTION_BASE_URL,
           },
+          expect.objectContaining({
+            scope: SettingScope.User,
+            key: 'modelProviders.qwen-subscription',
+          }),
         ],
         expect.any(Function),
       );
@@ -623,3 +664,128 @@ it.each(['qwen3.8-max', 'removed-model'])(
     );
   },
 );
+
+it('saves only the selected gateway model and preserves prior configured routes', async () => {
+  const { app, persistSettings } = setup();
+  mocks.models.mockResolvedValue({
+    models: ['selected-chat', 'unselected-chat'],
+    modelMetadata: [
+      {
+        id: 'selected-chat',
+        name: 'Selected Chat',
+        modalities: { image: true },
+        contextWindowSize: 120000,
+        thinkingStrength: [{ level: 'low', budget_tokens: 2048 }],
+      },
+    ],
+    cached: false,
+  });
+  mocks.loadSettings.mockReturnValue({
+    merged: {
+      modelProviders: {
+        'qwen-subscription': [
+          {
+            id: 'saved-image',
+            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+            imageOnly: true,
+          },
+          {
+            id: 'selected-chat',
+            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+            subscriptionChatModel: false,
+            subscriptionScenes: ['image'],
+            supportsImageGeneration: true,
+            imageOnly: true,
+          },
+        ],
+      },
+    },
+    isTrusted: true,
+    workspaceSettingsActive: true,
+    workspace: { settings: {} },
+    user: { settings: {} },
+  });
+  const configured = mocks.loadSettings();
+  configured.user.settings.modelProviders = configured.merged.modelProviders;
+  const response = await request(app).post(
+    '/workspaces/secondary/auth/subscription',
+  );
+  expect(response.status).toBe(200);
+  const writes = persistSettings.mock.calls[0][1];
+  const saved = writes.find(
+    (write: { key: string }) =>
+      write.key === 'modelProviders.qwen-subscription',
+  );
+  expect(saved).toEqual({
+    scope: SettingScope.Workspace,
+    key: 'modelProviders.qwen-subscription',
+    value: [
+      {
+        id: 'saved-image',
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        imageOnly: true,
+      },
+      expect.objectContaining({
+        id: 'selected-chat',
+        name: 'Selected Chat',
+        subscriptionChatModel: true,
+        subscriptionScenes: ['image'],
+        supportsImageGeneration: true,
+        generationConfig: {
+          modalities: { image: true },
+          contextWindowSize: 120000,
+        },
+        thinkingStrength: [{ level: 'low', budget_tokens: 2048 }],
+      }),
+    ],
+  });
+  expect(JSON.stringify(writes)).not.toContain('unselected-chat');
+  expect(JSON.stringify(writes)).not.toContain('access_token');
+});
+
+it('preserves inherited provider placeholders when activation creates a project bucket', async () => {
+  const { app, persistSettings } = setup();
+  const raw = {
+    id: 'saved-asr',
+    baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+    voiceOnly: true,
+    generationConfig: {
+      customHeaders: { 'X-Private': '${SUBSCRIPTION_PRIVATE_HEADER}' },
+    },
+  };
+  const resolved = {
+    ...raw,
+    generationConfig: {
+      customHeaders: { 'X-Private': 'private-activation-fixture' },
+    },
+  };
+  mocks.loadSettings.mockReturnValue({
+    merged: { modelProviders: { 'qwen-subscription': [resolved] } },
+    isTrusted: true,
+    workspaceSettingsActive: true,
+    user: {
+      settings: { modelProviders: { 'qwen-subscription': [resolved] } },
+      originalSettings: { modelProviders: { 'qwen-subscription': [raw] } },
+    },
+    workspace: { settings: {} },
+  });
+  const response = await request(app).post(
+    '/workspaces/secondary/auth/subscription',
+  );
+  expect(response.status).toBe(200);
+  const writes = persistSettings.mock.calls[0]![1];
+  const providerWrite = writes.find(
+    (write: { key: string }) =>
+      write.key === 'modelProviders.qwen-subscription',
+  );
+  expect(JSON.stringify(providerWrite.value)).toContain(
+    '${SUBSCRIPTION_PRIVATE_HEADER}',
+  );
+  expect(JSON.stringify(providerWrite.value)).not.toContain(
+    'private-activation-fixture',
+  );
+  expect(providerWrite.value).toEqual([
+    expect.objectContaining({ id: 'saved-asr' }),
+    expect.objectContaining({ id: 'qwen3.8-max' }),
+  ]);
+});

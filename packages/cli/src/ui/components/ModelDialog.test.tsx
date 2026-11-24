@@ -69,9 +69,23 @@ const renderComponent = (
   const combinedProps = { ...defaultProps, ...props };
 
   const mockSettings = {
+    merged: {},
     isTrusted: true,
-    user: { settings: {} },
-    workspace: { settings: {} },
+    user: { settings: {}, originalSettings: {} },
+    workspace: { settings: {}, originalSettings: {} },
+    forScope: (scope: SettingScope) => {
+      const file =
+        scope === SettingScope.User
+          ? mockSettings.user
+          : scope === SettingScope.Workspace
+            ? mockSettings.workspace
+            : { settings: {}, originalSettings: {} };
+      return {
+        ...file,
+        originalSettings: file.originalSettings ?? file.settings,
+      };
+    },
+    recomputeMerged: vi.fn(),
     setValue: vi.fn(),
     ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
@@ -2524,6 +2538,48 @@ describe('<ModelDialog />', () => {
       { type: 'info', text: 'Kept model as gpt-4' },
       expect.any(Number),
     );
+  });
+
+  it('rejects shadowed subscription configuration before changing the primary runtime', async () => {
+    const model = {
+      id: 'selected',
+      label: 'Selected',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      subscriptionChatModel: true,
+    };
+    const switchModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      {},
+      {
+        getAllConfiguredModels: () => [model],
+        getAuthType: () => AuthType.USE_OPENAI,
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'previous',
+        }),
+        switchModel,
+      },
+      {
+        forScope: (scope) =>
+          scope === SettingScope.System
+            ? ({
+                settings: { modelProviders: { 'qwen-subscription': [] } },
+                originalSettings: {},
+                path: '/mock/settings.json',
+              } as ReturnType<LoadedSettings['forScope']>)
+            : ({ settings: {}, originalSettings: {} } as ReturnType<
+                LoadedSettings['forScope']
+              >),
+      },
+    );
+    await act(async () => {
+      await mockedSelect.mock.calls
+        .at(-1)![0]
+        .onSelect(`${AuthType.QWEN_SUBSCRIPTION}::selected`);
+    });
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it('explains expired subscription selection and still permits another provider', async () => {

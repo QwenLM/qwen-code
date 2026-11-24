@@ -14,12 +14,29 @@ fallback. Reference-image editing and realtime ASR are outside this change.
 
 Fetch `/models` on each main model selection and `/models/scenes` on each scene
 selection, including direct selectors. Only fetch account catalogs when signed
-in. Persist scene catalogs with the existing account credentials, isolated by
-account revision and OAuth environment/client. Restore cached catalogs at
-startup without fetching missing scene catalogs; only entering model selection
-refreshes the catalogs. Retain successful cached data after transient discovery
-failures and report the fallback. Successful empty catalogs replace stale entries. Logout
-removes credentials/catalogs but preserves explicit model settings.
+in. Keep fetched directories in the owning runtime's memory only. Never read or
+write model catalogs in account credential files. Every selection entry fetches
+again; discovery failures report an error instead of using a disk fallback.
+Persist only selected model configurations under `modelProviders.qwen-subscription`
+in the same settings scope as their selectors, using the existing API-key settings
+writer. Save no tokens or environment-key credentials there, and require the fixed
+subscription gateway. Startup restores selected configurations from settings without
+discovery; legacy selectors without a saved configuration require reselection for
+auxiliary capabilities. Logout preserves settings, but invocation requires login.
+
+Reuse the API-key settings adapter and placeholder serializer for selected model
+writes. Merge the target scope's own or lower-priority provider entries, preserve
+raw environment references, and reject a conflicting higher-priority definition
+before changing runtime selection. Voice and account activation use the same
+provider-bucket builder. Persist a session-only selected model definition without
+changing the default model or authentication preference. Resolve bare fast and
+compaction selectors to their actual route when saving definitions; cover direct
+advisor selection as well as pickers.
+
+Each catalog has a request revision and shares an account identity epoch. Only
+the latest request may publish or invalidate that catalog; logout and account
+changes invalidate pending requests. A subscription discovery failure produces
+an independent warning while successful API-key settings reloads remain usable.
 
 Keep chat and scene eligibility separate. Scene image/voice models never become
 main chat candidates. API-key candidates continue to come from local providers.
@@ -41,8 +58,9 @@ must not require activation of a subscription chat model. Surface existing auth
 and request errors; never silently switch billing routes. Use returned model
 names, falling back to IDs. Do not display subscription model descriptions.
 
-Read optional `thinking_strength` from both catalogs and retain it in the account
-cache. Its valid levels and order drive reasoning selection; prefer medium as
+Read optional `thinking_strength` from both catalogs and retain it in memory and
+in selected model configurations. Its valid levels and order drive reasoning
+selection; prefer medium as
 the default when available, otherwise the first advertised level. Missing or
 empty metadata retains the existing client defaults for compatibility. Display
 the returned `budget_tokens` as metadata only, as required by protocol section
@@ -52,13 +70,20 @@ subsequent requests use the new levels without restarting. Keep explicit thinkin
 off and API-key reasoning behavior unchanged.
 
 For model IDs shared by the main and scene catalogs, the latest successfully
-fetched thinking metadata takes effect, including after restart. A cached main
-entry must not hide newer scene metadata, and refreshing main models must also
-replace older scene thinking metadata. Keep model eligibility per catalog.
+fetched thinking metadata takes effect in the live runtime. Selecting a model
+persists its latest metadata for restart; merely browsing never saves the directory.
+Main metadata must not hide newer scene metadata, and refreshing main models must
+also replace older scene thinking metadata. Keep model eligibility per catalog.
+
+Web Shell main selection marks its provider reload with `refreshModels: true`;
+ordinary settings reloads do not discover models. Keep refreshed directories in
+the owning workspace/runtime and copy primary metadata to its live sessions in
+memory, with account and generation checks. Preserve daemon-local API-key provider
+status when displaying the subscription directory, including before a session exists.
 
 Web Shell requests scene discovery explicitly when opening the voice picker or
 selecting a voice model directly with `/model --voice <id>`.
-Routine voice status polling continues to read the cache without discovery.
+Routine voice status polling continues to read runtime memory or selected settings without discovery.
 Legacy-primary and workspace-qualified routes retain their ownership and
 generation checks across the asynchronous refresh.
 
@@ -70,7 +95,8 @@ transcriber and Serve voice consumers. Share route resolution across consumers.
 
 ## Validation and acceptance
 
-Check repeated discovery, cache fallback and empty replacement, account changes,
+Check repeated discovery, failed discovery without fallback, empty replacement,
+restart from selected settings without discovery, absence of catalog disk writes, account changes,
 main/scene separation, qualified and legacy selectors, request-time token refresh,
 correct endpoints and payloads, explicit selection, cancellation, oversized audio,
 and API-key regressions. Run focused package tests, build, typecheck and bundle;

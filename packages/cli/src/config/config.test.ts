@@ -34,7 +34,6 @@ import {
 } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
-import * as SubscriptionModels from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import {
   getTrustFileDecisionBelowIdeRoot,
@@ -1587,10 +1586,6 @@ describe('loadCliConfig', () => {
       vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
         true,
       );
-      vi.spyOn(
-        SubscriptionModels,
-        'readCachedSubscriptionCatalog',
-      ).mockReturnValue({ models: [] });
       const scenes = vi
         .spyOn(ServerConfig.Config.prototype, 'refreshSubscriptionScenes')
         .mockResolvedValue({ scenes: {}, cached: false });

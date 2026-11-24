@@ -10,9 +10,15 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
+import {
+  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+  QWEN_SUBSCRIPTION_BASE_URL,
+} from '../qwen/oauth-config.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
-import { readCachedSubscriptionCatalog } from '../qwen/subscription-models.js';
+import type {
+  SubscriptionScene,
+  SubscriptionModelMetadata,
+} from '../qwen/subscription-models.js';
 import { SubscriptionOAuthError } from '../qwen/subscription-oauth-client.js';
 import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -98,6 +104,9 @@ export interface ModelsConfigOptions {
  */
 export class ModelsConfig {
   private readonly modelRegistry: ModelRegistry;
+  private subscriptionCatalogIdentity?: string;
+  private subscriptionModelsRevision = 0;
+  private subscriptionScenesRevision = 0;
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
@@ -286,8 +295,7 @@ export class ModelsConfig {
     this.hasManualCredentials = false;
     this.strictModelProviderSelection = false;
     this.requireCachedQwenCredentialsOnce = false;
-    this.modelRegistry.setSubscriptionModels([]);
-    this.modelRegistry.setSubscriptionScenes(undefined);
+    this.resetSubscriptionCatalogs();
   }
 
   getCurrentRegistryBaseUrl(): string | null | undefined {
@@ -302,18 +310,46 @@ export class ModelsConfig {
     return this.authTypeWasExplicitlyProvided;
   }
 
+  setSubscriptionModels(
+    models: string[],
+    metadata?: SubscriptionModelMetadata[],
+  ): void {
+    const identity = new QwenSubscriptionSession().getIdentity();
+    if (identity !== this.subscriptionCatalogIdentity)
+      this.resetSubscriptionCatalogs(identity);
+    this.subscriptionModelsRevision++;
+    this.modelRegistry.setSubscriptionModels(models, metadata);
+  }
+
+  invalidateSubscriptionModels(): void {
+    this.subscriptionModelsRevision++;
+    this.modelRegistry.invalidateSubscriptionCatalog(false);
+  }
+
+  getSubscriptionModelIds(scene?: SubscriptionScene): string[] {
+    return this.modelRegistry.getSubscriptionModelIds(scene);
+  }
+
   async refreshSubscriptionModels(
     signal?: AbortSignal,
     cliVersion?: string,
   ): Promise<{ models: string[]; cached: boolean }> {
     const session = new QwenSubscriptionSession();
     const identity = session.getIdentity();
-    const result = await session.getModels(signal, cliVersion).finally(() => {
-      this.assertSubscriptionIdentity(session, identity);
-    });
-    this.modelRegistry.setSubscriptionScenes(
-      readCachedSubscriptionCatalog().scenes,
-    );
+    const revision = this.beginSubscriptionCatalogRefresh(identity, false);
+    const result = await session
+      .getModels(signal, cliVersion)
+      .catch((error: unknown) => {
+        this.assertSubscriptionCatalogRefresh(
+          session,
+          identity,
+          false,
+          revision,
+        );
+        this.modelRegistry.invalidateSubscriptionCatalog(false);
+        throw error;
+      });
+    this.assertSubscriptionCatalogRefresh(session, identity, false, revision);
     this.modelRegistry.setSubscriptionModels(
       result.models,
       result.modelMetadata,
@@ -324,22 +360,61 @@ export class ModelsConfig {
   async refreshSubscriptionScenes(signal?: AbortSignal, cliVersion?: string) {
     const session = new QwenSubscriptionSession();
     const identity = session.getIdentity();
-    const result = await session.getScenes(signal, cliVersion).finally(() => {
-      this.assertSubscriptionIdentity(session, identity);
-    });
-    const { models, modelMetadata } = readCachedSubscriptionCatalog();
-    this.modelRegistry.setSubscriptionModels(models, modelMetadata);
+    const revision = this.beginSubscriptionCatalogRefresh(identity, true);
+    const result = await session
+      .getScenes(signal, cliVersion)
+      .catch((error: unknown) => {
+        this.assertSubscriptionCatalogRefresh(
+          session,
+          identity,
+          true,
+          revision,
+        );
+        this.modelRegistry.invalidateSubscriptionCatalog(true);
+        throw error;
+      });
+    this.assertSubscriptionCatalogRefresh(session, identity, true, revision);
     this.modelRegistry.setSubscriptionScenes(result.scenes);
     return result;
   }
 
-  private assertSubscriptionIdentity(
+  private resetSubscriptionCatalogs(identity?: string): void {
+    this.subscriptionCatalogIdentity = identity;
+    this.subscriptionModelsRevision++;
+    this.subscriptionScenesRevision++;
+    this.modelRegistry.setSubscriptionModels(undefined);
+    this.modelRegistry.setSubscriptionScenes(undefined);
+  }
+
+  private beginSubscriptionCatalogRefresh(
+    identity: string | undefined,
+    scene: boolean,
+  ): number {
+    if (identity !== this.subscriptionCatalogIdentity)
+      this.resetSubscriptionCatalogs(identity);
+    return scene
+      ? ++this.subscriptionScenesRevision
+      : ++this.subscriptionModelsRevision;
+  }
+
+  private assertSubscriptionCatalogRefresh(
     session: QwenSubscriptionSession,
     identity: string | undefined,
+    scene: boolean,
+    revision: number,
   ): void {
+    if (
+      revision !==
+      (scene
+        ? this.subscriptionScenesRevision
+        : this.subscriptionModelsRevision)
+    )
+      throw new DOMException(
+        'Model catalog request was superseded.',
+        'AbortError',
+      );
     if (session.getIdentity() !== identity) {
-      this.modelRegistry.setSubscriptionModels([]);
-      this.modelRegistry.setSubscriptionScenes(undefined);
+      this.resetSubscriptionCatalogs();
       throw new SubscriptionOAuthError('session_changed');
     }
   }
@@ -1263,6 +1338,18 @@ export class ModelsConfig {
       this.strictModelProviderSelection = true;
       // Clear active runtime model snapshot since we're now using a registry model
       this.activeRuntimeModelSnapshotId = undefined;
+      return;
+    }
+
+    if (authType === AuthType.QWEN_SUBSCRIPTION && modelId) {
+      this.applyResolvedModelDefaults({
+        id: modelId,
+        name: modelId,
+        authType,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        capabilities: {},
+        generationConfig: {},
+      });
       return;
     }
 

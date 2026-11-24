@@ -690,6 +690,7 @@ export interface ServeAuthProviderInstallResult {
 
 export interface ServeModelProviderRuntimeSyncResult {
   status: 'applied' | 'deferred' | 'failed';
+  modelCatalogWarning?: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

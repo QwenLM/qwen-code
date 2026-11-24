@@ -10,20 +10,20 @@ import type { SubscriptionScene } from '@qwen-code/qwen-code-core/qwen/subscript
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
-import {
-  SUBSCRIPTION_MODELS_CACHED,
-  SUBSCRIPTION_MODELS_UNAVAILABLE,
-} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 
 export function isSubscriptionSceneModel(
   model: AvailableModel,
   scene?: SubscriptionScene,
+  config?: Config,
 ): boolean {
+  const discovered = config?.getSubscriptionModelIds?.(scene);
   return (
     model.authType !== AuthType.QWEN_SUBSCRIPTION ||
-    (scene
-      ? model.subscriptionScenes?.includes(scene) === true
-      : model.subscriptionChatModel !== false)
+    ((!discovered || discovered.includes(model.id)) &&
+      (scene
+        ? model.subscriptionScenes?.includes(scene) === true
+        : model.subscriptionChatModel !== false))
   );
 }
 
@@ -34,10 +34,9 @@ export async function refreshSubscriptionCatalog(
 ): Promise<string | undefined> {
   if (!new QwenSubscriptionSession().isSignedIn()) return undefined;
   try {
-    const result = scene
-      ? await config.refreshSubscriptionScenes(signal)
-      : await config.refreshSubscriptionModels(signal);
-    return result.cached ? SUBSCRIPTION_MODELS_CACHED : undefined;
+    if (scene) await config.refreshSubscriptionScenes(signal);
+    else await config.refreshSubscriptionModels(signal);
+    return undefined;
   } catch (error) {
     signal?.throwIfAborted();
     return error instanceof SubscriptionOAuthError

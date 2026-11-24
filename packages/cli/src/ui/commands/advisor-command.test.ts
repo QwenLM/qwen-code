@@ -11,11 +11,10 @@ import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import { SettingScope } from '../../config/settings.js';
 const mockCheckAvailability = vi.hoisted(() => vi.fn());
-
-vi.mock('../../config/settings.js', () => ({
-  SettingScope: { User: 'User' },
-}));
 
 vi.mock('../../config/advisor-model.js', () => ({
   checkAdvisorModelAvailability: mockCheckAvailability,
@@ -44,7 +43,8 @@ const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
   }),
 );
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (original) => ({
+  ...(await original<typeof import('@qwen-code/qwen-code-core')>()),
   BTW_MAX_INPUT_LENGTH: 4096,
   runForkedAgent: mockRunForkedAgent,
   buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
@@ -176,6 +176,117 @@ describe('advisorCommand', () => {
       'advisor-model',
     );
     expect(setAdvisorModel).toHaveBeenCalledWith('advisor-model');
+  });
+
+  it('stores a bare subscription Advisor definition despite a same-name API Key route', async () => {
+    const model = {
+      id: 'shared',
+      label: 'Shared',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      subscriptionChatModel: true,
+      contextWindowSize: 123456,
+    };
+    const models = [model, { ...model, authType: AuthType.USE_OPENAI }];
+    mockContext.services.config = createConfig({
+      getContentGeneratorConfig: () => ({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'main',
+      }),
+      getAllConfiguredModels: (auths?: AuthType[]) =>
+        models.filter((m) => !auths || auths.includes(m.authType)),
+    }) as unknown as Config;
+    const user = { settings: {}, originalSettings: {} };
+    Object.assign(mockContext.services.settings, {
+      merged: {},
+      user,
+      workspace: { settings: {}, originalSettings: {} },
+      isTrusted: false,
+      forScope: () => user,
+      recomputeMerged: vi.fn(),
+    });
+    expect(await advisorCommand.action!(mockContext, 'shared')).toMatchObject({
+      messageType: 'info',
+    });
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'modelProviders.qwen-subscription',
+      [
+        expect.objectContaining({
+          id: 'shared',
+          generationConfig: {
+            contextWindowSize: 123456,
+            modalities: undefined,
+          },
+        }),
+      ],
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      'shared',
+    );
+  });
+
+  it('rejects a shadowed subscription definition before enabling Advisor', async () => {
+    const model = {
+      id: 'shared',
+      label: 'Shared',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+    };
+    mockContext.services.config = createConfig({
+      getAllConfiguredModels: () => [model],
+    }) as unknown as Config;
+    const user = { settings: {}, originalSettings: {} };
+    Object.assign(mockContext.services.settings, {
+      merged: {},
+      user,
+      isTrusted: false,
+      forScope: (scope: SettingScope) =>
+        scope === SettingScope.System
+          ? {
+              settings: { modelProviders: { 'qwen-subscription': [] } },
+              originalSettings: {},
+            }
+          : user,
+    });
+    await expect(
+      advisorCommand.action!(mockContext, 'qwen-subscription:shared'),
+    ).rejects.toThrow('higher-precedence');
+    expect(setAdvisorModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('restores the previous Advisor if saving its definition fails', async () => {
+    const model = {
+      id: 'shared',
+      label: 'Shared',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+    };
+    mockContext.services.config = createConfig({
+      getAllConfiguredModels: () => [model],
+      getAdvisorModel: () => 'previous',
+    }) as unknown as Config;
+    const user = { settings: {}, originalSettings: {} };
+    Object.assign(mockContext.services.settings, {
+      merged: {},
+      user,
+      isTrusted: false,
+      forScope: () => user,
+      recomputeMerged: vi.fn(),
+    });
+    setValue.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    await expect(
+      advisorCommand.action!(mockContext, 'qwen-subscription:shared'),
+    ).rejects.toThrow('disk full');
+    expect(setAdvisorModel.mock.calls.map(([model]) => model)).toEqual([
+      'qwen-subscription:shared',
+      'previous',
+    ]);
   });
 
   it('persists off and removes the runtime tool', async () => {

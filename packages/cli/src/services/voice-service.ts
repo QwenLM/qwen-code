@@ -4,10 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ModelProvidersConfig } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
+import { ModelRegistry } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
+import type { SubscriptionSceneCatalog } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  getSubscriptionModelConfig,
+  buildSubscriptionModelProviders,
+} from '../config/subscription-model-persistence.js';
 import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
 import { publicProviderBaseUrl } from '../utils/acpModelUtils.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
@@ -69,6 +73,7 @@ export interface WorkspaceVoiceTranscriptionInput extends RecordedVoiceAudio {
   workspaceCwd: string;
   env?: Readonly<Record<string, string | undefined>>;
   abortSignal?: AbortSignal;
+  modelSource?: VoiceModelSource;
 }
 
 export interface WorkspaceVoiceTranscriptionResult {
@@ -113,15 +118,35 @@ export function voiceSettingsScopeToWire(
 export function buildWorkspaceVoiceSettingsWrites(
   settings: LoadedSettings,
   update: WorkspaceVoiceStateUpdate,
-  opts: { workspaceTrusted?: boolean; scopeOverride?: SettingScope } = {},
+  opts: {
+    workspaceTrusted?: boolean;
+    scopeOverride?: SettingScope;
+    modelSource?: VoiceModelSource;
+  } = {},
 ): WorkspaceVoiceSettingsWrite[] {
   const voiceSettingsScope =
     opts.scopeOverride ??
     getVoiceSettingsScope(settings, opts.workspaceTrusted);
   const writes: WorkspaceVoiceSettingsWrite[] = [];
   if (update.voiceModel !== undefined) {
+    const scope =
+      opts.scopeOverride ?? getPersistScopeForModelSelection(settings);
+    const source = opts.modelSource ?? createVoiceModelSource(settings);
+    const matches = findVoiceModels(
+      source.getAllConfiguredModels(),
+      update.voiceModel,
+    );
+    const selected =
+      matches.length === 1 ? getSubscriptionModelConfig(matches[0]) : undefined;
+    if (selected) {
+      writes.push({
+        scope,
+        key: `modelProviders.${AuthType.QWEN_SUBSCRIPTION}`,
+        value: buildSubscriptionModelProviders(settings, selected, scope),
+      });
+    }
     writes.push({
-      scope: opts.scopeOverride ?? getPersistScopeForModelSelection(settings),
+      scope,
       key: 'voiceModel',
       value: update.voiceModel,
     });
@@ -152,19 +177,36 @@ export function buildWorkspaceVoiceSettingsWrites(
 
 export function createVoiceModelSource(
   settings: LoadedSettings,
+  scenes?: SubscriptionSceneCatalog,
+  onlyDiscovered = false,
 ): VoiceModelSource {
-  return new ModelsConfig({
-    modelProvidersConfig: settings.merged.modelProviders as
-      | ModelProvidersConfig
-      | undefined,
-    providerProtocolConfig: settings.merged.providerProtocol,
-  });
+  const registry = new ModelRegistry(
+    settings.merged.modelProviders,
+    settings.merged.providerProtocol,
+  );
+  if (scenes !== undefined) registry.setSubscriptionScenes(scenes);
+  const ids = new Set(scenes?.voice?.map(({ id }) => id));
+  return {
+    getAllConfiguredModels: () =>
+      Object.values(AuthType).flatMap((authType) =>
+        registry
+          .getModelsForAuthType(authType)
+          .filter(
+            (model) =>
+              !onlyDiscovered ||
+              authType !== AuthType.QWEN_SUBSCRIPTION ||
+              scenes === undefined ||
+              ids.has(model.id),
+          ),
+      ),
+  };
 }
 
 export function listAvailableVoiceModels(
   settings: LoadedSettings,
+  modelSource: VoiceModelSource = createVoiceModelSource(settings),
 ): WorkspaceVoiceModelDescriptor[] {
-  const models = createVoiceModelSource(settings).getAllConfiguredModels();
+  const models = modelSource.getAllConfiguredModels();
   const idCounts = new Map<string, number>();
   for (const model of models) {
     idCounts.set(model.id, (idCounts.get(model.id) ?? 0) + 1);
@@ -222,6 +264,7 @@ export function hasConfiguredBatchVoiceTranscriptionModel(
 export function buildWorkspaceVoiceStatus(
   workspaceCwd: string,
   settings: LoadedSettings,
+  modelSource?: VoiceModelSource,
 ): WorkspaceVoiceStatus {
   const voiceModel = readVoiceModel(settings);
   return {
@@ -231,16 +274,17 @@ export function buildWorkspaceVoiceStatus(
     mode: readVoiceMode(settings),
     language: readVoiceLanguage(settings),
     voiceModel: voiceModel ? publicAuxModelSelectorValue(voiceModel) : null,
-    availableVoiceModels: listAvailableVoiceModels(settings),
+    availableVoiceModels: listAvailableVoiceModels(settings, modelSource),
   };
 }
 
 export function validateWorkspaceVoiceModel(
   settings: LoadedSettings,
   voiceModel: string,
+  modelSource: VoiceModelSource = createVoiceModelSource(settings),
 ): WorkspaceVoiceModelDescriptor {
   assertVoiceModelSignedIn(voiceModel);
-  const models = createVoiceModelSource(settings).getAllConfiguredModels();
+  const models = modelSource.getAllConfiguredModels();
   const matches = findVoiceModels(models, voiceModel);
   const displayModel = formatAuxModelSelectorForDisplay(voiceModel);
   if (matches.length === 0) {
@@ -279,11 +323,18 @@ export function validateWorkspaceVoiceModel(
 export function validateWorkspaceVoiceConfig(
   settings: LoadedSettings,
   voiceModel: string,
-  opts: { env?: Readonly<Record<string, string | undefined>> } = {},
+  opts: {
+    env?: Readonly<Record<string, string | undefined>>;
+    modelSource?: VoiceModelSource;
+  } = {},
 ): WorkspaceVoiceModelDescriptor {
-  const descriptor = validateWorkspaceVoiceModel(settings, voiceModel);
+  const descriptor = validateWorkspaceVoiceModel(
+    settings,
+    voiceModel,
+    opts.modelSource,
+  );
   try {
-    const config = createVoiceModelSource(settings);
+    const config = opts.modelSource ?? createVoiceModelSource(settings);
     if (descriptor.transport === 'qwen-asr-chat') {
       resolveVoiceTranscriptionConfig({
         config,
@@ -314,7 +365,10 @@ export function validateWorkspaceVoiceConfig(
 export function validateWorkspaceVoiceState(
   settings: LoadedSettings,
   update: WorkspaceVoiceStateUpdate,
-  opts: { env?: Readonly<Record<string, string | undefined>> } = {},
+  opts: {
+    env?: Readonly<Record<string, string | undefined>>;
+    modelSource?: VoiceModelSource;
+  } = {},
 ): void {
   if (
     update.enabled === undefined &&
@@ -331,7 +385,7 @@ export function validateWorkspaceVoiceState(
   const nextEnabled = update.enabled ?? isVoiceEnabled(settings);
   const nextVoiceModel = update.voiceModel ?? readVoiceModel(settings);
   if (update.voiceModel) {
-    validateWorkspaceVoiceModel(settings, update.voiceModel);
+    validateWorkspaceVoiceModel(settings, update.voiceModel, opts.modelSource);
   }
   if (!nextEnabled) {
     return;
@@ -352,6 +406,7 @@ export async function transcribeWorkspaceVoiceAudio(
   const descriptor = validateWorkspaceVoiceModel(
     input.settings,
     input.voiceModel,
+    input.modelSource,
   );
   if (descriptor.transport !== 'qwen-asr-chat') {
     throw new WorkspaceVoiceError(
@@ -363,7 +418,7 @@ export async function transcribeWorkspaceVoiceAudio(
   const text = await transcribeVoiceAudio(
     { data: input.data, mimeType: input.mimeType },
     {
-      config: createVoiceModelSource(input.settings),
+      config: input.modelSource ?? createVoiceModelSource(input.settings),
       settings: input.settings,
       voiceModel: input.voiceModel,
       env: input.env,

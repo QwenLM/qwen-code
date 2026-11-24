@@ -12,10 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { QwenSubscriptionSession } from './subscription-session.js';
 import { SubscriptionOAuthError } from './subscription-oauth-client.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from './oauth-config.js';
-import { ModelsConfig } from '../models/modelsConfig.js';
-import { AuthType } from '../core/contentGenerator.js';
 import {
-  readCachedSubscriptionCatalog,
   selectSubscriptionModel,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
 } from './subscription-models.js';
@@ -108,15 +105,17 @@ function sceneResponse(data: unknown, status = 200) {
   };
 }
 
-it('fetches scenes with account credentials on every request and preserves chat cache', async () => {
+it('fetches fresh models and scenes without persisting either catalog', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
+  const credentials = await fs.readFile(file, 'utf8');
   modelFetch.mockResolvedValueOnce(modelResponse(['chat-model']));
-  await session.getModels();
+  expect(await session.getModels()).toEqual({
+    models: ['chat-model'],
+    cached: false,
+  });
   const scenes = {
-    image: [
-      { id: 'image-model', display_name: 'Image', description: 'From gateway' },
-    ],
+    image: [{ id: 'image-model', display_name: 'Image' }],
     voice: [{ id: 'future-asr' }],
   };
   modelFetch.mockResolvedValue(sceneResponse(scenes));
@@ -134,43 +133,26 @@ it('fetches scenes with account credentials on every request and preserves chat 
       }),
     }),
   );
-  expect(readCachedSubscriptionCatalog()).toMatchObject({
-    models: ['chat-model'],
-    scenes,
-  });
-  modelFetch.mockResolvedValueOnce(modelResponse(['new-chat-model']));
-  await session.getModels();
-  expect(readCachedSubscriptionCatalog()).toMatchObject({
-    models: ['new-chat-model'],
-    scenes,
-  });
+  expect(await fs.readFile(file, 'utf8')).toBe(credentials);
 });
 
-it('restores scenes without a chat catalog and replaces withdrawn scenes with an empty catalog', async () => {
+it('does not restore previously fetched scenes after a failed request or restart', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   modelFetch.mockResolvedValueOnce(
     sceneResponse({ image: [{ id: 'image-model' }] }),
   );
   await session.getScenes();
-  expect(readCachedSubscriptionCatalog()).toMatchObject({
-    models: [],
-    scenes: { image: [{ id: 'image-model' }] },
-  });
-  modelFetch.mockRejectedValueOnce(new Error('offline'));
-  expect(await session.getScenes()).toMatchObject({
-    cached: true,
-    scenes: { image: [{ id: 'image-model' }] },
-  });
+  modelFetch.mockRejectedValue(new Error('offline'));
+  await expect(session.getScenes()).rejects.toThrow(
+    SUBSCRIPTION_MODELS_UNAVAILABLE,
+  );
+  await expect(new QwenSubscriptionSession().getScenes()).rejects.toThrow(
+    SUBSCRIPTION_MODELS_UNAVAILABLE,
+  );
   modelFetch.mockResolvedValueOnce(sceneResponse({}));
   expect(await session.getScenes()).toEqual({ cached: false, scenes: {} });
-  modelFetch.mockRejectedValueOnce(new Error('offline'));
-  expect(await new QwenSubscriptionSession().getScenes()).toEqual({
-    cached: true,
-    scenes: {},
-  });
-  await session.signOut();
-  expect(readCachedSubscriptionCatalog()).toEqual({ models: [] });
+  expect(session.isSignedIn()).toBe(true);
 });
 
 it('refreshes scene credentials once after 401 without using cached permissions', async () => {
@@ -211,22 +193,24 @@ it('does not commit old account scenes after signout and reauthorization', async
   await session.signIn(() => {});
   finish(sceneResponse({ image: [{ id: 'old-image' }] }));
   expect(await pending).toMatchObject({ code: 'session_changed' });
-  expect(readCachedSubscriptionCatalog().scenes).toBeUndefined();
 });
 
-it('keeps simultaneous chat and scene updates in the credential cache', async () => {
+it('returns simultaneous chat and scene updates without changing credentials', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
+  const credentials = await fs.readFile(file, 'utf8');
   modelFetch.mockImplementation(async (url: string) =>
     url.endsWith('/scenes')
       ? sceneResponse({ voice: [{ id: 'voice-model' }] })
       : modelResponse(['chat-model']),
   );
-  await Promise.all([session.getModels(), session.getScenes()]);
-  expect(readCachedSubscriptionCatalog()).toMatchObject({
-    models: ['chat-model'],
-    scenes: { voice: [{ id: 'voice-model' }] },
-  });
+  expect(await Promise.all([session.getModels(), session.getScenes()])).toEqual(
+    [
+      { models: ['chat-model'], cached: false },
+      { scenes: { voice: [{ id: 'voice-model' }] }, cached: false },
+    ],
+  );
+  expect(await fs.readFile(file, 'utf8')).toBe(credentials);
 });
 
 it('checks persisted login independently of the selected provider and model cache', async () => {
@@ -297,43 +281,69 @@ it('does not treat credentials for another OAuth environment as signed in', asyn
   expect(session.isSignedIn()).toBe(false);
 });
 
-it('loads every served model, persists the account cache and preserves it across token refresh', async () => {
+it('loads every served model without retaining a catalog across token refresh', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   const ids = ['qwen3.8-max', 'qwen3.7-flash', 'future-model'];
   modelFetch.mockResolvedValue(modelResponse(ids));
   expect(await session.getModels()).toEqual({ models: ids, cached: false });
-  expect(readCachedSubscriptionCatalog().models).toEqual(ids);
   expect(modelFetch).toHaveBeenCalledWith(
     expect.stringMatching(/\/models$/),
     expect.objectContaining({ maxRedirects: 0, timeoutMs: 5000 }),
   );
   await expire();
   await session.getAccessToken();
-  expect(readCachedSubscriptionCatalog().models).toEqual(ids);
-  await session.signOut();
-  expect(readCachedSubscriptionCatalog().models).toEqual([]);
+  expect(JSON.parse(await fs.readFile(file, 'utf8'))).not.toHaveProperty(
+    'models',
+  );
 });
 
-it('retains credentials and the last catalog after network errors and empty responses', async () => {
+it('ignores a legacy disk catalog and strips it on the next credential write', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
-  modelFetch.mockResolvedValue(modelResponse(['served']));
-  await session.getModels();
+  const credentials = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(
+    file,
+    JSON.stringify({
+      ...credentials,
+      models: ['legacy'],
+      modelMetadata: [{ id: 'legacy' }],
+      scenes: { image: [{ id: 'legacy-image' }] },
+    }),
+  );
   modelFetch.mockRejectedValue(new Error('network failure'));
-  expect(await session.getModels()).toEqual({
-    models: ['served'],
-    cached: true,
-  });
-  modelFetch.mockResolvedValue(modelResponse([]));
-  expect(await session.getModels()).toEqual({
-    models: ['served'],
-    cached: true,
-  });
-  expect(await session.getUserInfo()).toEqual(user);
+  await expect(session.getModels()).rejects.toThrow(
+    SUBSCRIPTION_MODELS_UNAVAILABLE,
+  );
+  await expect(session.getScenes()).rejects.toThrow(
+    SUBSCRIPTION_MODELS_UNAVAILABLE,
+  );
+  await expire();
+  await session.getAccessToken();
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  for (const key of ['models', 'modelMetadata', 'scenes'])
+    expect(saved).not.toHaveProperty(key);
 });
 
-it('validates optional metadata per field and replaces or reuses it with the model list', async () => {
+it.each(['network failure', 'empty response', 'server failure'])(
+  'reports %s even after a previously successful model request',
+  async (failure) => {
+    const session = new QwenSubscriptionSession();
+    await session.signIn(() => {});
+    modelFetch.mockResolvedValueOnce(modelResponse(['served']));
+    await session.getModels();
+    if (failure === 'network failure')
+      modelFetch.mockRejectedValue(new Error('network failure'));
+    else
+      modelFetch.mockResolvedValue(
+        modelResponse([], failure === 'server failure' ? 503 : 200),
+      );
+    await expect(session.getModels()).rejects.toThrow();
+    expect(await session.getUserInfo()).toEqual(user);
+  },
+);
+
+it('validates optional metadata per field on every model response', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   modelFetch.mockResolvedValue({
@@ -376,23 +386,20 @@ it('validates optional metadata per field and replaces or reuses it with the mod
     ],
   };
   expect(await session.getModels()).toEqual({ ...catalog, cached: false });
-  expect(readCachedSubscriptionCatalog()).toEqual(catalog);
 
   modelFetch.mockResolvedValue(modelResponse([], 503));
-  expect(await session.getModels()).toEqual({ ...catalog, cached: true });
+  await expect(session.getModels()).rejects.toMatchObject({ status: 503 });
 
   modelFetch.mockResolvedValue(modelResponse(catalog.models));
   expect(await session.getModels()).toEqual({
     models: catalog.models,
     cached: false,
   });
-  expect(readCachedSubscriptionCatalog().modelMetadata).toBeUndefined();
 
   await session.signOut();
-  expect(readCachedSubscriptionCatalog()).toEqual({ models: [] });
 });
 
-it('validates and caches thinking strengths without losing the catalog on unknown levels', async () => {
+it('validates thinking strengths without rejecting unknown levels', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   const thinkingStrength = [
@@ -427,18 +434,15 @@ it('validates and caches thinking strengths without losing the catalog on unknow
     modelMetadata: [{ id: 'reasoner', thinkingStrength }],
   };
   expect(await session.getModels()).toEqual({ ...catalog, cached: false });
-  expect(readCachedSubscriptionCatalog()).toEqual(catalog);
   modelFetch.mockResolvedValue(modelResponse([], 503));
-  expect(await new QwenSubscriptionSession().getModels()).toEqual({
-    ...catalog,
-    cached: true,
-  });
+  await expect(new QwenSubscriptionSession().getModels()).rejects.toMatchObject(
+    { status: 503 },
+  );
   modelFetch.mockResolvedValue(modelResponse(catalog.models));
   await session.getModels();
-  expect(readCachedSubscriptionCatalog().modelMetadata).toBeUndefined();
 });
 
-it('preserves scene thinking strengths through cached fallback and replacement', async () => {
+it('returns scene thinking strengths from each response without disk fallback', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   const scenes = {
@@ -451,129 +455,18 @@ it('preserves scene thinking strengths through cached fallback and replacement',
   };
   modelFetch.mockResolvedValue(sceneResponse(scenes));
   expect(await session.getScenes()).toEqual({ scenes, cached: false });
-  expect(readCachedSubscriptionCatalog().scenes).toEqual(scenes);
   modelFetch.mockResolvedValue(sceneResponse({}, 503));
-  expect(await new QwenSubscriptionSession().getScenes()).toEqual({
-    scenes,
-    cached: true,
-  });
+  await expect(new QwenSubscriptionSession().getScenes()).rejects.toMatchObject(
+    { status: 503 },
+  );
   modelFetch.mockResolvedValue(
     sceneResponse({ fast: [{ id: 'scene-reasoner' }] }),
   );
-  await session.getScenes();
-  expect(readCachedSubscriptionCatalog().scenes).toEqual({
-    fast: [{ id: 'scene-reasoner' }],
+  expect(await session.getScenes()).toEqual({
+    scenes: { fast: [{ id: 'scene-reasoner' }] },
+    cached: false,
   });
 });
-
-it('keeps the latest shared thinking strengths through alternating refreshes, restart and offline fallback', async () => {
-  await new QwenSubscriptionSession().signIn(() => {});
-  const low = [{ level: 'low', budget_tokens: 4096 }];
-  const high = [{ level: 'high', budget_tokens: 16384 }];
-  const medium = [{ level: 'medium', budget_tokens: 8192 }];
-  modelFetch.mockResolvedValue(
-    sceneResponse([
-      { id: 'shared', display_name: 'Chat name', thinking_strength: low },
-      { id: 'untouched', thinking_strength: medium },
-    ]),
-  );
-  const config = new ModelsConfig();
-  const strengths = (models: ModelsConfig, id = 'shared') =>
-    models
-      .getAllConfiguredModels([AuthType.QWEN_SUBSCRIPTION])
-      .find((model) => model.id === id)?.thinkingStrength;
-  await config.refreshSubscriptionModels();
-  expect(strengths(config)).toEqual(low);
-
-  modelFetch.mockResolvedValue(
-    sceneResponse({
-      fast: [{ id: 'shared', display_name: 'Scene name' }],
-      vision: [{ id: 'shared', thinking_strength: high }],
-    }),
-  );
-  await config.refreshSubscriptionScenes();
-  expect(strengths(config)).toEqual(high);
-  expect(strengths(config, 'untouched')).toEqual(medium);
-  expect(readCachedSubscriptionCatalog()).toMatchObject({
-    modelMetadata: [
-      { id: 'shared', name: 'Chat name', thinkingStrength: high },
-      { id: 'untouched', thinkingStrength: medium },
-    ],
-    scenes: {
-      fast: [
-        { id: 'shared', display_name: 'Scene name', thinking_strength: high },
-      ],
-      vision: [{ id: 'shared', thinking_strength: high }],
-    },
-  });
-  const restarted = new ModelsConfig();
-  expect(strengths(restarted)).toEqual(high);
-  modelFetch.mockResolvedValue(sceneResponse({}, 503));
-  expect((await restarted.refreshSubscriptionModels()).cached).toBe(true);
-  expect(strengths(restarted)).toEqual(high);
-
-  modelFetch.mockResolvedValue(
-    sceneResponse([
-      { id: 'shared', thinking_strength: medium },
-      { id: 'untouched', thinking_strength: medium },
-    ]),
-  );
-  await config.refreshSubscriptionModels();
-  expect(strengths(config)).toEqual(medium);
-  expect(
-    readCachedSubscriptionCatalog().scenes?.fast?.[0]?.thinking_strength,
-  ).toEqual(medium);
-  const restartedAgain = new ModelsConfig();
-  expect(strengths(restartedAgain)).toEqual(medium);
-  modelFetch.mockResolvedValue(sceneResponse({}, 503));
-  expect((await restartedAgain.refreshSubscriptionScenes()).cached).toBe(true);
-  expect(strengths(restartedAgain)).toEqual(medium);
-});
-
-it.each([
-  ['models', undefined],
-  ['models', []],
-  ['models', [{ level: 'future', budget_tokens: 4096 }]],
-  ['scenes', undefined],
-  ['scenes', []],
-  ['scenes', [{ level: 'future', budget_tokens: 4096 }]],
-] as const)(
-  'clears stale thinking metadata from both caches for %s withdrawal %j',
-  async (source, thinking_strength) => {
-    const session = new QwenSubscriptionSession();
-    await session.signIn(() => {});
-    const previous = [{ level: 'low', budget_tokens: 4096 }];
-    modelFetch.mockResolvedValue(
-      sceneResponse([{ id: 'shared', thinking_strength: previous }]),
-    );
-    await session.getModels();
-    modelFetch.mockResolvedValue(
-      sceneResponse({
-        fast: [{ id: 'shared', thinking_strength: previous }],
-      }),
-    );
-    await session.getScenes();
-    const withdrawn = { id: 'shared', thinking_strength };
-    modelFetch.mockResolvedValue(
-      sceneResponse(source === 'models' ? [withdrawn] : { fast: [withdrawn] }),
-    );
-    if (source === 'models') await session.getModels();
-    else await session.getScenes();
-    expect(readCachedSubscriptionCatalog()).toEqual({
-      models: ['shared'],
-      modelMetadata: undefined,
-      scenes: { fast: [{ id: 'shared' }] },
-    });
-    const restarted = new ModelsConfig();
-    modelFetch.mockResolvedValue(sceneResponse({}, 503));
-    await restarted.refreshSubscriptionModels();
-    await restarted.refreshSubscriptionScenes();
-    expect(
-      restarted.getAllConfiguredModels([AuthType.QWEN_SUBSCRIPTION])[0]
-        ?.capabilities?.reasoning,
-    ).toBeUndefined();
-  },
-);
 
 it('does not hide a repeated unauthorized response behind the cached catalog', async () => {
   const session = new QwenSubscriptionSession();
@@ -595,11 +488,10 @@ it('does not hide a repeated unauthorized response behind the cached catalog', a
       'User-Agent': `QwenCode/0.0.0-test (${process.platform}; ${process.arch})`,
     })),
   );
-  expect(readCachedSubscriptionCatalog().models).toEqual(['served']);
 });
 
 it.each([false, true])(
-  'preserves a backend model permission error (cached catalog: %s)',
+  'preserves a backend model permission error (previous successful request: %s)',
   async (cached) => {
     const session = new QwenSubscriptionSession();
     await session.signIn(() => {});
@@ -622,9 +514,6 @@ it.each([false, true])(
       status: 403,
       description: 'Your account cannot access this model catalog.',
     });
-    expect(readCachedSubscriptionCatalog().models).toEqual(
-      cached ? ['served'] : [],
-    );
   },
 );
 
@@ -648,7 +537,6 @@ it('does not hide a refresh service failure behind the cached catalog', async ()
     stage: 'refresh',
     status: 503,
   });
-  expect(readCachedSubscriptionCatalog().models).toEqual(['served']);
 });
 
 it.each(['empty response', 'network failure'])(
@@ -663,7 +551,7 @@ it.each(['empty response', 'network failure'])(
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(SubscriptionOAuthError);
     expect(error).toMatchObject({ message: SUBSCRIPTION_MODELS_UNAVAILABLE });
-    expect(readCachedSubscriptionCatalog().models).toEqual([]);
+
     expect(await session.getUserInfo()).toEqual(user);
   },
 );
@@ -688,7 +576,6 @@ it('does not commit a late catalog after logout or a new login', async () => {
   await session.signIn(() => {});
   resolve(modelResponse(['old-account-model']));
   expect(await outcome).toMatchObject({ code: 'session_changed' });
-  expect(readCachedSubscriptionCatalog().models).toEqual([]);
 });
 
 it.each(['response', 'network failure'])(
@@ -733,9 +620,7 @@ it.each(['response', 'network failure'])(
     await vi.waitFor(() => expect(onDevice).toHaveBeenCalledOnce());
     expect(session.getIdentity()).toBe(identity);
     expect(await session.getAccessToken()).toBe(tokens.access_token);
-    expect(readCachedSubscriptionCatalog().models).toEqual([
-      'old-account-model',
-    ]);
+
     expect(modelFetch).toHaveBeenCalledOnce();
     finishAuthorization(rotated);
     await authorization;
@@ -745,7 +630,6 @@ it.each(['response', 'network failure'])(
     else failCatalog(new TypeError('offline'));
     expect(await catalog).toMatchObject({ code: 'session_changed' });
     expect(await session.getAccessToken()).toBe(rotated.access_token);
-    expect(readCachedSubscriptionCatalog().models).toEqual([]);
   },
 );
 
@@ -985,7 +869,7 @@ it('does not write tokens when login was cancelled before polling completed', as
 });
 
 it.each(['cancel', 'device failure', 'access_denied', 'expired_token'])(
-  'preserves the previous account and model cache after authorization %s',
+  'preserves the previous account after authorization %s',
   async (failure) => {
     const session = new QwenSubscriptionSession();
     await session.signIn(() => {});
@@ -1028,7 +912,7 @@ it.each(['cancel', 'device failure', 'access_denied', 'expired_token'])(
     );
     expect(session.getIdentity()).toBe(identity);
     expect(await session.getAccessToken()).toBe(tokens.access_token);
-    expect(readCachedSubscriptionCatalog().models).toEqual(['served']);
+
     expect(client.revokeToken).not.toHaveBeenCalled();
   },
 );

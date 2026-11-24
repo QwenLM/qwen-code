@@ -85,8 +85,9 @@ function createFakeSettings(options?: {
   const workspace = options?.workspace ?? {};
   const merged: Record<string, unknown> = {};
   const settings = {
-    user: { settings: user },
-    workspace: { settings: workspace },
+    user: { settings: user, originalSettings: user },
+    workspace: { settings: workspace, originalSettings: workspace },
+    recomputeMerged: vi.fn(),
     get merged() {
       return merged as Settings;
     },
@@ -129,8 +130,10 @@ function createFakeSettings(options?: {
     },
     forScope: (scope: SettingScope) =>
       scope === SettingScope.User
-        ? { settings: user }
-        : { settings: workspace },
+        ? { settings: user, originalSettings: user }
+        : scope === SettingScope.Workspace
+          ? { settings: workspace, originalSettings: workspace }
+          : { settings: {}, originalSettings: {} },
   } as unknown as LoadedSettings;
   return { settings, written };
 }
@@ -140,6 +143,46 @@ function stubConfig(overrides: Partial<Config>): Config {
 }
 
 describe('buildModelEntries', () => {
+  it('only lists fresh discovery results, preserving scene order and API Key candidates', () => {
+    const catalog: AvailableModel[] = [
+      {
+        id: 'saved-old',
+        label: 'Saved old',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionScenes: ['voice'],
+      },
+      {
+        id: 'second',
+        label: 'Second',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionScenes: ['voice'],
+      },
+      {
+        id: 'first',
+        label: 'First',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionScenes: ['voice'],
+      },
+      { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+    ];
+    let ids: string[] = [];
+    const config = stubConfig({
+      getAllConfiguredModels: () => catalog,
+      getSubscriptionModelIds: () => ids,
+    });
+    expect(
+      buildModelEntries(config, 'voice', true).map((entry) => entry.modelId),
+    ).toEqual(['api']);
+    ids = ['first', 'second'];
+    expect(
+      buildModelEntries(config, 'voice', true).map((entry) => entry.modelId),
+    ).toEqual(['first', 'second', 'api']);
+    ids = [];
+    expect(
+      buildModelEntries(config, 'voice', true).map((entry) => entry.modelId),
+    ).toEqual(['api']);
+  });
+
   it('only shows subscription models advertised for the requested scene', () => {
     const catalog: AvailableModel[] = [
       {
@@ -394,6 +437,7 @@ describe('applyModelSelection', () => {
 
   function resolvedConfig(overrides: Partial<Config>): Config {
     return stubConfig({
+      getAllConfiguredModels: () => [],
       getAuthType: () => AuthType.USE_OPENAI,
       getContentGeneratorConfig: (() => ({
         authType: AuthType.USE_OPENAI,
@@ -458,6 +502,7 @@ describe('applyModelSelection', () => {
           id: 'qwen3.8-max',
           authType: AuthType.QWEN_SUBSCRIPTION,
         });
+        config.getAllConfiguredModels = () => [entry.model!];
         const outcome = await applyModelSelection({
           config,
           settings,
@@ -1063,6 +1108,60 @@ describe('applyModelSelection', () => {
       expect(outcome.ok).toBe(true);
     });
 
+    it.each([
+      'primary',
+      'advisor',
+      'fast',
+      'vision',
+      'compaction',
+      'image',
+    ] as const)(
+      'rejects a shadowed subscription %s definition without changing the runtime',
+      async (mode) => {
+        const setters = {
+          switchModel: vi.fn(),
+          setAdvisorModel: vi.fn(),
+          setFastModel: vi.fn(),
+          setVisionModel: vi.fn(),
+          setCompactionModel: vi.fn(),
+          setImageModel: vi.fn(),
+        };
+        const entries = [
+          modelRow({ id: 'selected', authType: AuthType.QWEN_SUBSCRIPTION }),
+        ];
+        const config = resolvedConfig({
+          ...setters,
+          getAllConfiguredModels: () => entries.map((entry) => entry.model!),
+          resolveImageGenerationModel: () => ({
+            model: 'selected',
+            baseUrl: 'https://gateway.example/api/v1',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          }),
+        });
+        const { settings, written } = createFakeSettings();
+        const forScope = settings.forScope;
+        settings.forScope = (scope) =>
+          scope === SettingScope.System
+            ? ({
+                settings: { modelProviders: { 'qwen-subscription': [] } },
+                originalSettings: {},
+                path: '/mock/settings.json',
+              } as ReturnType<LoadedSettings['forScope']>)
+            : forScope(scope);
+        const result = await applyModelSelection({
+          config,
+          settings,
+          entries,
+          mode,
+          selectionKey: entries[0].key,
+        }).catch((error) => ({ ok: false, error: String(error) }));
+        expect(result.ok).toBe(false);
+        for (const setter of Object.values(setters))
+          expect(setter).not.toHaveBeenCalled();
+        expect(written).toEqual([]);
+      },
+    );
+
     it('image mode persists the account route without a gateway endpoint', async () => {
       const selector = 'qwen-subscription:qwen-image-3.0';
       const setImageModel = vi.fn(async () => {});
@@ -1086,6 +1185,8 @@ describe('applyModelSelection', () => {
           subscriptionScenes: ['image'],
         }),
       ];
+      config.getAllConfiguredModels = () =>
+        entries.map((entry) => entry.model!);
       const outcome = await applyModelSelection({
         config,
         settings,
@@ -1094,6 +1195,11 @@ describe('applyModelSelection', () => {
         selectionKey: entries[0].key,
       });
       expect(outcome.ok).toBe(true);
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'modelProviders.qwen-subscription',
+        value: [expect.objectContaining({ id: entries[0].modelId })],
+      });
       expect(setImageModel).toHaveBeenCalledWith(selector);
       expect(written).toContainEqual({
         scope: SettingScope.User,
@@ -1261,14 +1367,22 @@ describe('applyModelSelection', () => {
           subscriptionScenes: ['voice'],
         }),
       ];
+      const config = resolvedConfig({
+        getAllConfiguredModels: () => entries.map((entry) => entry.model!),
+      });
       const outcome = await applyModelSelection({
-        config: resolvedConfig({}),
+        config,
         settings,
         entries,
         mode: 'voice',
         selectionKey: entries[0].key,
       });
       expect(outcome.ok).toBe(true);
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'modelProviders.qwen-subscription',
+        value: [expect.objectContaining({ id: entries[0].modelId })],
+      });
       expect(written).toContainEqual({
         scope: SettingScope.User,
         key: 'voiceModel',

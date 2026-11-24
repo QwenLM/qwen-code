@@ -10,7 +10,6 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import {
-  readCachedSubscriptionCatalog,
   synchronizeSubscriptionThinkingStrength,
   type SubscriptionModelMetadata,
   type SubscriptionScene,
@@ -210,9 +209,11 @@ export class ModelRegistry {
 
   /** Raw providers config this registry was last built from. */
   private modelProvidersConfig?: ModelProvidersConfig;
-  private subscriptionModels: string[] = [];
+  private subscriptionModels?: string[];
   private subscriptionMetadata?: SubscriptionModelMetadata[];
   private subscriptionScenes?: SubscriptionSceneCatalog;
+  private subscriptionModelsUnavailable = false;
+  private subscriptionScenesUnavailable = false;
 
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
@@ -236,12 +237,10 @@ export class ModelRegistry {
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
-    const { models, modelMetadata, scenes } = readCachedSubscriptionCatalog();
-    this.subscriptionScenes = scenes;
-    this.setSubscriptionModels(models, modelMetadata);
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);
+    this.registerSubscriptionModels();
   }
 
   /**
@@ -279,7 +278,7 @@ export class ModelRegistry {
         continue;
       }
 
-      // qwen-oauth uses hard-coded models and cannot be overridden
+      // Account routes are registered separately with the trusted gateway.
       if (
         protocol === AuthType.QWEN_OAUTH ||
         protocol === AuthType.QWEN_SUBSCRIPTION
@@ -519,10 +518,28 @@ export class ModelRegistry {
     }
   }
 
+  getSubscriptionModelIds(scene?: SubscriptionScene): string[] {
+    if (
+      scene
+        ? this.subscriptionScenesUnavailable
+        : this.subscriptionModelsUnavailable
+    )
+      return [];
+    return scene
+      ? (this.subscriptionScenes?.[scene]?.map(({ id }) => id) ?? [])
+      : [...(this.subscriptionModels ?? [])];
+  }
+
+  invalidateSubscriptionCatalog(scene: boolean): void {
+    if (scene) this.subscriptionScenesUnavailable = true;
+    else this.subscriptionModelsUnavailable = true;
+  }
+
   setSubscriptionModels(
-    ids: string[],
+    ids: string[] | undefined,
     modelMetadata?: SubscriptionModelMetadata[],
   ): void {
+    this.subscriptionModelsUnavailable = false;
     this.subscriptionModels = ids;
     this.subscriptionMetadata = modelMetadata;
     this.synchronizeSubscriptionThinking('models');
@@ -530,6 +547,7 @@ export class ModelRegistry {
   }
 
   setSubscriptionScenes(scenes: SubscriptionSceneCatalog | undefined): void {
+    this.subscriptionScenesUnavailable = false;
     this.subscriptionScenes = scenes;
     this.synchronizeSubscriptionThinking('scenes');
     this.registerSubscriptionModels();
@@ -538,7 +556,7 @@ export class ModelRegistry {
   private synchronizeSubscriptionThinking(source: 'models' | 'scenes'): void {
     const catalog = synchronizeSubscriptionThinkingStrength(
       {
-        models: this.subscriptionModels,
+        models: this.subscriptionModels ?? [],
         modelMetadata: this.subscriptionMetadata,
         scenes: this.subscriptionScenes,
       },
@@ -553,7 +571,7 @@ export class ModelRegistry {
       this.subscriptionMetadata?.map((entry) => [entry.id, entry]),
     );
     const configs = new Map<string, ModelConfig>();
-    for (const id of this.subscriptionModels) {
+    for (const id of this.subscriptionModels ?? []) {
       const metadata = metadataById.get(id);
       configs.set(id, {
         id,
@@ -636,6 +654,47 @@ export class ModelRegistry {
         if (scene === 'fast') config.fastOnly = true;
       }
     }
+    const saved = this.modelProvidersConfig?.[AuthType.QWEN_SUBSCRIPTION];
+    if (Array.isArray(saved)) {
+      for (const model of saved) {
+        if (model.baseUrl !== QWEN_SUBSCRIPTION_BASE_URL) continue;
+        const discovered = configs.get(model.id);
+        if (discovered) {
+          if (
+            this.subscriptionModels === undefined &&
+            model.subscriptionChatModel
+          )
+            discovered.subscriptionChatModel = true;
+          if (this.subscriptionScenes === undefined) {
+            discovered.subscriptionScenes = model.subscriptionScenes;
+            discovered.supportsImageGeneration = model.supportsImageGeneration;
+          }
+          if (discovered.subscriptionChatModel) {
+            discovered.imageOnly = undefined;
+            discovered.voiceOnly = undefined;
+            discovered.visionOnly = undefined;
+            discovered.fastOnly = undefined;
+          }
+          continue;
+        }
+        configs.set(model.id, {
+          id: model.id,
+          name: model.name,
+          description: model.description,
+          thinkingStrength: model.thinkingStrength,
+          subscriptionChatModel: model.subscriptionChatModel,
+          subscriptionScenes: model.subscriptionScenes,
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          generationConfig: model.generationConfig,
+          capabilities: model.capabilities,
+          supportsImageGeneration: model.supportsImageGeneration,
+          imageOnly: model.imageOnly,
+          voiceOnly: model.voiceOnly,
+          visionOnly: model.visionOnly,
+          fastOnly: model.fastOnly,
+        });
+      }
+    }
     this.modelsByAuthType.delete(AuthType.QWEN_SUBSCRIPTION);
     this.registerAuthTypeModels(AuthType.QWEN_SUBSCRIPTION, [
       ...configs.values(),
@@ -664,9 +723,7 @@ export class ModelRegistry {
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
     this.modelProvidersConfig = reloaded.modelProvidersConfig;
-    this.subscriptionModels = reloaded.subscriptionModels;
-    this.subscriptionMetadata = reloaded.subscriptionMetadata;
-    this.subscriptionScenes = reloaded.subscriptionScenes;
+    this.registerSubscriptionModels();
   }
 
   /** The raw providers config this registry was last built from. */

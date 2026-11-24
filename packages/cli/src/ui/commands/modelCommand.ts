@@ -13,10 +13,11 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import {
-  SUBSCRIPTION_MODELS_CACHED,
-  SUBSCRIPTION_MODELS_UNAVAILABLE,
-} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+  persistSubscriptionModel,
+  prepareSubscriptionModelPersistence,
+} from '../../config/subscription-model-persistence.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { MessageType } from '../types.js';
@@ -220,6 +221,13 @@ async function switchMainModel(
   scopeOverride?: SettingScope,
   persistSelection = true,
 ): Promise<string> {
+  if (persistSelection)
+    prepareSubscriptionModelPersistence(
+      settings,
+      config,
+      `${parsed.authType ?? currentAuthType}:${parsed.modelId}`,
+      resolveScope(settings, scopeOverride),
+    );
   if (parsed.authType) {
     await switchPrimaryModel(
       config,
@@ -233,6 +241,12 @@ async function switchMainModel(
         : undefined,
     );
     if (persistSelection) {
+      persistSubscriptionModel(
+        settings,
+        config,
+        `${parsed.authType}:${parsed.modelId}`,
+        resolveScope(settings, scopeOverride),
+      );
       persistSetting(
         settings,
         'security.auth.selectedType',
@@ -252,6 +266,12 @@ async function switchMainModel(
 
   await switchPrimaryModel(config, settings, currentAuthType, parsed.modelId);
   if (persistSelection) {
+    persistSubscriptionModel(
+      settings,
+      config,
+      `${currentAuthType}:${parsed.modelId}`,
+      resolveScope(settings, scopeOverride),
+    );
     persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   }
@@ -455,7 +475,9 @@ function getAvailableModelIds(
       ? config.getAvailableModels()
       : config.getAllConfiguredModels();
   const availableModels = models.filter((m) => {
-    if (!isSubscriptionSceneModel(m, mode === 'main' ? undefined : mode))
+    if (
+      !isSubscriptionSceneModel(m, mode === 'main' ? undefined : mode, config)
+    )
       return false;
     if (mode === 'image')
       return isImageGenerationCapable(m) && !m.fastOnly && !m.voiceOnly;
@@ -691,7 +713,13 @@ export const modelCommand: SlashCommand = {
 
       const availableModels = config
         .getAllConfiguredModels()
-        .filter((m) => !m.fastOnly && !m.imageOnly && !m.visionOnly);
+        .filter(
+          (m) =>
+            isSubscriptionSceneModel(m, 'voice', config) &&
+            !m.fastOnly &&
+            !m.imageOnly &&
+            !m.visionOnly,
+        );
       const matches = findVoiceModels(availableModels, modelName);
       if (matches.length === 0) {
         return {
@@ -730,6 +758,12 @@ export const modelCommand: SlashCommand = {
         publicProviderBaseUrl(endpoint) !== endpoint
           ? voiceSelector.split('\0')[0]!
           : voiceSelector;
+      persistSubscriptionModel(
+        settings,
+        config,
+        persistedSelector,
+        resolveScope(settings, scopeOverride),
+      );
       settings.setValue(scope, 'voiceModel', persistedSelector);
       return {
         type: 'message',
@@ -822,7 +856,7 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (m) =>
-          isSubscriptionSceneModel(m, 'fast') &&
+          isSubscriptionSceneModel(m, 'fast', config) &&
           !m.voiceOnly &&
           !m.imageOnly &&
           !m.visionOnly,
@@ -846,6 +880,14 @@ export const modelCommand: SlashCommand = {
         settings.merged?.fastModel,
         fastModelSelector,
         selector,
+      );
+      persistSubscriptionModel(
+        settings,
+        config,
+        resolveModelId(fastModelToPersist)?.authType
+          ? fastModelToPersist
+          : `${authType}:${fastModelToPersist}`,
+        resolveScope(settings, scopeOverride),
       );
       persistSetting(settings, 'fastModel', fastModelToPersist, scopeOverride);
       // Sync the runtime Config so forked agents pick up the change immediately
@@ -985,7 +1027,7 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (m) =>
-          isSubscriptionSceneModel(m, 'vision') &&
+          isSubscriptionSceneModel(m, 'vision', config) &&
           !m.fastOnly &&
           !m.voiceOnly &&
           !m.imageOnly,
@@ -1036,6 +1078,12 @@ export const modelCommand: SlashCommand = {
       const visionModel = matched.baseUrl
         ? `${qualifiedModelName}\0${matched.baseUrl}`
         : qualifiedModelName;
+      persistSubscriptionModel(
+        settings,
+        config,
+        visionModel,
+        resolveScope(settings, scopeOverride),
+      );
       let timeoutLine: string | undefined;
       if (timeoutMs === undefined) {
         persistSetting(settings, 'visionModel', visionModel, scopeOverride);
@@ -1136,7 +1184,7 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (m) =>
-          isSubscriptionSceneModel(m, 'compaction') &&
+          isSubscriptionSceneModel(m, 'compaction', config) &&
           !m.fastOnly &&
           !m.voiceOnly &&
           !m.imageOnly &&
@@ -1164,6 +1212,16 @@ export const modelCommand: SlashCommand = {
         settings.merged?.compactionModel,
         modelName,
         selector,
+      );
+      const compactionAuthType = config.getContentGeneratorConfig()?.authType;
+      persistSubscriptionModel(
+        settings,
+        config,
+        !resolveModelId(compactionModelToPersist)?.authType &&
+          compactionAuthType
+          ? `${compactionAuthType}:${compactionModelToPersist}`
+          : compactionModelToPersist,
+        resolveScope(settings, scopeOverride),
       );
       persistSetting(
         settings,
@@ -1236,7 +1294,7 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (model) =>
-          isSubscriptionSceneModel(model, 'image') &&
+          isSubscriptionSceneModel(model, 'image', config) &&
           isImageGenerationCapable(model) &&
           !model.fastOnly &&
           !model.voiceOnly,
@@ -1288,6 +1346,12 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      persistSubscriptionModel(
+        settings,
+        config,
+        imageModel,
+        resolveScope(settings, scopeOverride),
+      );
       persistSetting(settings, 'imageModel', imageModel, scopeOverride);
       await config.setImageModel(imageModel);
       return {
@@ -1333,14 +1397,7 @@ export const modelCommand: SlashCommand = {
         Date.now(),
       );
       try {
-        const result = await config.refreshSubscriptionModels(
-          context.abortSignal,
-        );
-        if (result.cached)
-          context.ui.addItem(
-            { type: MessageType.WARNING, text: SUBSCRIPTION_MODELS_CACHED },
-            Date.now(),
-          );
+        await config.refreshSubscriptionModels(context.abortSignal);
       } catch (error) {
         return {
           type: 'message',
@@ -1389,7 +1446,7 @@ export const modelCommand: SlashCommand = {
         .getAvailableModelsForAuthType(targetAuthType)
         .filter(
           (m) =>
-            isSubscriptionSceneModel(m) &&
+            isSubscriptionSceneModel(m, undefined, config) &&
             !m.fastOnly &&
             !m.voiceOnly &&
             !m.imageOnly,

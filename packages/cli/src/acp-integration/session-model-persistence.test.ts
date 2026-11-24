@@ -661,6 +661,8 @@ describe('session-model-persistence', () => {
         getAuthType: () => currentAuth,
         switchModel,
         refreshSubscriptionModels,
+        getAvailableModelsForAuthType: () =>
+          models.map((id) => ({ id, authType: AuthType.QWEN_SUBSCRIPTION })),
       } as unknown as Config;
       const restore = restoreSessionModelThenAuthenticate(
         config,
@@ -689,6 +691,7 @@ describe('session-model-persistence', () => {
         return;
       }
       await restore;
+      expect(refreshSubscriptionModels).not.toHaveBeenCalled();
       if (healthy) {
         expect(currentModel).toBe('recorded-api-model');
         expect(currentAuth).toBe(AuthType.USE_OPENAI);

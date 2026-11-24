@@ -36,7 +36,11 @@ import {
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getDefaultReasoningConfig } from './model-configuration.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
-import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import {
+  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+  QWEN_SUBSCRIPTION_BASE_URL,
+} from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { BTW_STREAM_TIMEOUT_MS } from './btw-generation.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
@@ -11899,6 +11903,94 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(JSON.stringify(providers)).not.toContain('sk-secret');
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('shows only freshly discovered subscription candidates while retaining the active saved route', async () => {
+    vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
+      true,
+    );
+    const discovered = vi.fn().mockReturnValue(['remote-chat']);
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_SUBSCRIPTION),
+      getModel: vi.fn().mockReturnValue('saved-chat'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'saved-chat',
+          label: 'Saved Chat',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          subscriptionChatModel: true,
+        },
+        {
+          id: 'remote-chat',
+          label: 'Remote Chat',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          subscriptionChatModel: true,
+        },
+        {
+          id: 'api-chat',
+          label: 'API Chat',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.example/v1',
+        },
+      ]),
+      getSubscriptionModelIds: discovered,
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'saved-chat',
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      }),
+    } as unknown as Config;
+    const { agent, agentPromise } = await bootAcpAgent();
+    const builders = agent as unknown as {
+      buildAvailableModels(config: Config): {
+        currentModelId: string;
+        availableModels: Array<{ modelId: string }>;
+      };
+    };
+    const status = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceProviders,
+      {},
+    );
+    expect(status).toMatchObject({
+      current: {
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        modelId: 'saved-chat(qwen-subscription)',
+      },
+      providers: expect.arrayContaining([
+        expect.objectContaining({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          current: false,
+          models: [expect.objectContaining({ baseModelId: 'remote-chat' })],
+        }),
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      ]),
+    });
+    expect(builders.buildAvailableModels(mockConfig)).toMatchObject({
+      currentModelId: 'saved-chat(qwen-subscription)',
+      availableModels: [
+        expect.objectContaining({ modelId: 'remote-chat(qwen-subscription)' }),
+        expect.objectContaining({ modelId: 'api-chat(openai)' }),
+      ],
+    });
+    discovered.mockReturnValue([]);
+    const failed = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceProviders,
+      {},
+    );
+    expect(failed).toMatchObject({
+      current: { modelId: 'saved-chat(qwen-subscription)' },
+      providers: [expect.objectContaining({ authType: AuthType.USE_OPENAI })],
+    });
+    expect(builders.buildAvailableModels(mockConfig).availableModels).toEqual([
+      expect.objectContaining({ modelId: 'api-chat(openai)' }),
+    ]);
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -31919,7 +32011,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       const refreshSubscriptionModels = vi
         .fn()
         .mockResolvedValue({ models: ['qwen3.8-max'] });
-      Object.assign(config, { refreshSubscriptionModels });
+      Object.assign(config, {
+        refreshSubscriptionModels,
+        getAvailableModelsForAuthType: vi.fn(() => [
+          { id: 'qwen3.8-max', authType: AuthType.QWEN_SUBSCRIPTION },
+        ]),
+      });
       const setValue = vi.fn();
       vi.mocked(loadSettings).mockReturnValue({
         ...makeRestoreSettings(),
@@ -31956,6 +32053,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           expect(refreshSubscriptionModels).not.toHaveBeenCalled();
           expect(config.switchModel).toHaveBeenCalledTimes(1);
         }
+        expect(refreshSubscriptionModels).not.toHaveBeenCalled();
         expect(setValue).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
@@ -36697,6 +36795,8 @@ describe('sessionLanguage multi-session propagation', () => {
       refreshSubscriptionModels: vi
         .fn()
         .mockResolvedValue({ models: ['qwen3.8-max'], cached: false }),
+      copySubscriptionModelsFrom: vi.fn(),
+      invalidateSubscriptionModels: vi.fn(),
       setSubscriptionPlan: vi.fn<Config['setSubscriptionPlan']>(),
       syncModelSelection: vi.fn<Config['syncModelSelection']>(),
       setImageModel: vi.fn(),
@@ -37033,6 +37133,12 @@ describe('sessionLanguage multi-session propagation', () => {
   });
 
   it('reloads other model providers after a subscription catalog fails', async () => {
+    const signedIn = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'isSignedIn')
+      .mockReturnValue(true);
+    const identity = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+      .mockReturnValue('account');
     const providerConfig = {
       openai: [{ id: 'local-fallback', baseUrl: 'http://127.0.0.1:9/v1' }],
     };
@@ -37105,7 +37211,25 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(bootConfig.syncModelSelection).not.toHaveBeenCalled();
       expect(bootConfig.refreshAuth).not.toHaveBeenCalled();
       expect(otherConfig.switchModel).not.toHaveBeenCalled();
+      await expect(
+        agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: '/tmp', refreshModels: true },
+        ),
+      ).resolves.toMatchObject({
+        configsRefreshed: 2,
+        configsFailed: 0,
+        modelCatalogWarning: expect.stringContaining(
+          'Could not load Qwen Subscription models',
+        ),
+      });
+      expect(bootConfig.refreshSubscriptionModels).toHaveBeenCalledOnce();
+      expect(reloadSession).toHaveBeenCalledTimes(2);
+      expect(otherConfig.invalidateSubscriptionModels).toHaveBeenCalledOnce();
+      expect(otherConfig.copySubscriptionModelsFrom).not.toHaveBeenCalled();
     } finally {
+      signedIn.mockRestore();
+      identity.mockRestore();
       mockConnectionState.resolve();
       await agentPromise;
     }
@@ -37113,6 +37237,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
   it('reloads model providers for busy sessions without running full reload work', async () => {
     const providerConfig = {
+      'qwen-subscription': [{ id: 'qwen3.8-max', subscriptionChatModel: true }],
       idealab: [
         {
           id: 'qwen3',
@@ -37244,7 +37369,7 @@ describe('sessionLanguage multi-session propagation', () => {
       security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
       model: {
         name: 'qwen3.8-max',
-        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
       },
     };
     vi.mocked(settings.reloadScopesFromDiskAtomically).mockImplementation(
@@ -37258,7 +37383,7 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(bootConfig.syncModelSelection).toHaveBeenCalledWith(
         AuthType.QWEN_SUBSCRIPTION,
         'qwen3.8-max',
-        'https://api.qwen.ai/compatible-mode/v1',
+        QWEN_SUBSCRIPTION_BASE_URL,
       );
       expect(bootConfig.refreshAuth).toHaveBeenCalledWith(
         AuthType.QWEN_SUBSCRIPTION,
@@ -37277,11 +37402,39 @@ describe('sessionLanguage multi-session propagation', () => {
         SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
         { cwd: '/provider-1' },
       );
-      expect(bootConfig.refreshSubscriptionModels).toHaveBeenCalledOnce();
-      vi.mocked(bootConfig.refreshSubscriptionModels).mockResolvedValueOnce({
-        models: ['qwen3.8-max'],
-        cached: true,
-      });
+      expect(bootConfig.refreshSubscriptionModels).not.toHaveBeenCalled();
+      const signedIn = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'isSignedIn')
+        .mockReturnValue(true);
+      try {
+        await agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: '/provider-1', refreshModels: true },
+        );
+        expect(bootConfig.refreshSubscriptionModels).toHaveBeenCalledOnce();
+        expect(cfg1.copySubscriptionModelsFrom).toHaveBeenCalledWith(
+          bootConfig,
+        );
+        expect(cfg2.copySubscriptionModelsFrom).not.toHaveBeenCalled();
+        cfg1.copySubscriptionModelsFrom.mockClear();
+        const changedIdentity = vi
+          .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+          .mockReturnValueOnce('old-account')
+          .mockReturnValue('new-account');
+        try {
+          await expect(
+            agent.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+              { cwd: '/provider-1', refreshModels: true },
+            ),
+          ).resolves.toEqual({ configsRefreshed: 0, configsFailed: 1 });
+          expect(cfg1.copySubscriptionModelsFrom).not.toHaveBeenCalled();
+        } finally {
+          changedIdentity.mockRestore();
+        }
+      } finally {
+        signedIn.mockRestore();
+      }
       reload1.mockClear();
       await agent.extMethod(
         SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,

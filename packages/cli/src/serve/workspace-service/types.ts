@@ -303,7 +303,7 @@ export interface DaemonWorkspaceService {
   /** Reload only the runtime model-provider registry and spawn environment. */
   reloadModelProviders(
     ctx: WorkspaceRequestContext,
-    options?: { subscriptionSignedOut?: boolean },
+    options?: { subscriptionSignedOut?: boolean; refreshModels?: boolean },
   ): Promise<ServeModelProviderRuntimeSyncResult>;
 
   /** Drop cached skill status so extension skill changes are re-enumerated. */

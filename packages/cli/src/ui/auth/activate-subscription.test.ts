@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import {
   LoadedSettings,
@@ -46,14 +47,26 @@ const settings = {
   setValues: vi.fn(),
 } as unknown as LoadedSettings;
 function config() {
-  return {
+  const runtime = {
     refreshSubscriptionModels: vi
       .fn()
       .mockResolvedValue({ models: ['qwen3.8-max'], cached: false }),
+    getAllConfiguredModels: vi.fn(() =>
+      ['qwen3.8-max', 'qwen3.8-flash', 'future-model', 'other-model'].map(
+        (id) => ({
+          id,
+          label: id,
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          subscriptionChatModel: true,
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        }),
+      ),
+    ),
     syncModelSelection: vi.fn(),
     refreshAuth: vi.fn().mockResolvedValue(undefined),
     setSubscriptionPlan: vi.fn(),
   } as unknown as Config;
+  return runtime;
 }
 beforeEach(() => {
   vi.mocked(settings.setValues).mockClear();
@@ -69,14 +82,27 @@ it('installs the subscription and switches the current model', async () => {
   const signal = new AbortController().signal;
   await activateSubscription(settings, runtime, signal);
   const [plan, callbacks] = mocks.apply.mock.calls[0];
-  expect(plan).toEqual({
+  expect(plan).toMatchObject({
     providerId: 'qwen-subscription',
     authType: 'qwen-subscription',
     modelSelection: {
       modelId: 'qwen3.8-max',
-      baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
     },
   });
+  expect(plan.modelProviders).toEqual([
+    {
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      models: [
+        expect.objectContaining({
+          id: 'qwen3.8-max',
+          subscriptionChatModel: true,
+        }),
+      ],
+      mergeStrategy: 'replace-owned',
+      ownsModel: expect.any(Function),
+    },
+  ]);
   expect(callbacks.settings).toBe(mocks.adapter);
   expect(settings.setValues).not.toHaveBeenCalled();
   callbacks.syncAuthState(
@@ -88,7 +114,7 @@ it('installs the subscription and switches the current model', async () => {
   expect(runtime.syncModelSelection).toHaveBeenCalledWith(
     'qwen-subscription',
     'qwen3.8-max',
-    'https://api.qwen.ai/compatible-mode/v1',
+    QWEN_SUBSCRIPTION_BASE_URL,
   );
   expect(runtime.refreshAuth).toHaveBeenCalledWith('qwen-subscription');
   expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');
@@ -247,7 +273,7 @@ it.each<{ project: Settings; saveToProject: boolean }>([
         security: { auth: { selectedType: 'qwen-subscription' } },
         model: {
           name: 'qwen3.8-max',
-          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
         },
       });
       if (otherBefore !== '{}') {
@@ -286,7 +312,9 @@ it('keeps committed disk settings and runtime consistent when the dialog closes 
   });
   const adapter = {
     getValue: (key: string) => persisted[key],
-    getModelProviders: () => ({}),
+    getModelProviders: () => ({
+      'qwen-subscription': persisted['modelProviders.qwen-subscription'] ?? [],
+    }),
     setValue: (key: string, value: unknown) => {
       persisted[key] = value;
       write();

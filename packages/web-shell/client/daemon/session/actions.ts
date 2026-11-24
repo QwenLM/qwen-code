@@ -2115,9 +2115,11 @@ export function createDaemonSessionActions({
         observeSessionConfig(sessionConfigGeneration, session);
       }
       const workspace = client.workspaceByCwd(workspaceCwd);
+      let modelCatalogWarning: string | undefined;
       if (!readOnly) {
         const reload = workspace.reloadModelProviders({
           clientId: session?.clientId,
+          refreshModels: true,
         });
         const result = await (session
           ? trackSessionConfigMutation(
@@ -2127,6 +2129,7 @@ export function createDaemonSessionActions({
             )
           : reload);
         if (!isCurrent()) return;
+        modelCatalogWarning = result.modelCatalogWarning;
         if (
           result.status !== 'applied' &&
           !(result.status === 'deferred' && !session)
@@ -2204,7 +2207,8 @@ export function createDaemonSessionActions({
               }
             : current,
         );
-        if (!readOnly) checkSubscriptionSelection(models.models);
+        if (!readOnly && !modelCatalogWarning)
+          checkSubscriptionSelection(models.models);
       } else {
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;
@@ -2214,6 +2218,7 @@ export function createDaemonSessionActions({
           !providers.initialized ||
           (models.length === 0 &&
             providers.current?.authType &&
+            !modelCatalogWarning &&
             !(readOnly && providers.current.authType === 'qwen-subscription'))
         ) {
           throw new Error(
@@ -2243,7 +2248,18 @@ export function createDaemonSessionActions({
               }
             : current,
         );
-        if (!readOnly) checkSubscriptionSelection(models);
+        if (!readOnly && !modelCatalogWarning)
+          checkSubscriptionSelection(models);
+      }
+      if (modelCatalogWarning && isCurrent()) {
+        const notice = session ? noticeForSession(session) : addNotice;
+        notice({
+          severity: 'warning',
+          category: 'user_action',
+          code: 'daemon.models.catalog_unavailable',
+          message: modelCatalogWarning,
+          recoverable: true,
+        });
       }
     },
 

@@ -5,6 +5,8 @@
  */
 
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
+import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { isSubscriptionSessionExpired } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
 import {
@@ -8910,7 +8912,14 @@ class QwenAgent implements Agent {
             : undefined,
         ]),
       );
-      const modelOptions = buildAcpModelOptions(models);
+      const allModelOptions = buildAcpModelOptions(models);
+      const discovered = config.getSubscriptionModelIds?.();
+      const modelOptions = allModelOptions.filter(
+        ({ model }) =>
+          model.authType !== AuthType.QWEN_SUBSCRIPTION ||
+          !discovered ||
+          discovered.includes(model.id),
+      );
       const reasoningSnapshot = captureReasoningSnapshot(
         models.map((model) => ({
           ...model,
@@ -8925,7 +8934,7 @@ class QwenAgent implements Agent {
       );
       const currentAcpModelId = hasCurrentModel
         ? getCurrentAcpModelId(
-            modelOptions,
+            allModelOptions,
             currentModelId,
             currentAuth,
             activeRuntimeSnapshot
@@ -15993,36 +16002,53 @@ class QwenAgent implements Agent {
           }
           return { configsRefreshed, configsFailed };
         }
-        let subscriptionModels: string[] | undefined;
-        if (
-          merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION ||
-          [
-            this.config,
-            ...this.initializingConfigs,
-            ...Array.from(this.sessions.values(), (session) =>
-              session.getConfig(),
-            ),
-          ].some(
-            (config) =>
-              config.getModelsConfig().getCurrentAuthType() ===
-              AuthType.QWEN_SUBSCRIPTION,
+        const subscriptionModels = merged.modelProviders?.[
+          AuthType.QWEN_SUBSCRIPTION
+        ]
+          ?.filter(
+            (model) =>
+              model.subscriptionChatModel !== false &&
+              !model.imageOnly &&
+              !model.voiceOnly &&
+              !model.fastOnly &&
+              !model.visionOnly &&
+              !model.realtimeOnly,
           )
-        ) {
-          try {
-            const catalog = await this.config.refreshSubscriptionModels();
-            subscriptionModels = catalog.models;
-          } catch {
-            debugLogger.debug(
-              'Subscription catalog refresh failed during provider reload',
-            );
-          }
-          if (reloadRevision !== this.modelProviderReloadRevision)
-            return { configsRefreshed: 0, configsFailed: 0 };
-        }
+          .map((model) => model.id);
         reloadEnvironment(merged, cwd);
         const providerProtocol = merged.providerProtocol ?? {};
         let configsRefreshed = 0;
         let configsFailed = 0;
+        let modelCatalogWarning: string | undefined;
+        const subscriptionSession = new QwenSubscriptionSession();
+        const refreshModels =
+          params['refreshModels'] === true && subscriptionSession.isSignedIn();
+        const subscriptionIdentity = subscriptionSession.getIdentity();
+        const canCopyCatalog = () =>
+          refreshModels &&
+          reloadRevision === this.modelProviderReloadRevision &&
+          subscriptionSession.getIdentity() === subscriptionIdentity;
+        if (refreshModels) {
+          try {
+            await this.config.refreshSubscriptionModels();
+          } catch {
+            modelCatalogWarning = SUBSCRIPTION_MODELS_UNAVAILABLE;
+            debugLogger.debug(
+              'Subscription catalog refresh failed during model selection',
+            );
+          }
+          if (
+            reloadRevision !== this.modelProviderReloadRevision ||
+            subscriptionSession.getIdentity() !== subscriptionIdentity
+          )
+            return { configsRefreshed: 0, configsFailed: 1 };
+        }
+
+        const updateSubscriptionCatalog = (config: Config) => {
+          if (!canCopyCatalog()) return;
+          if (modelCatalogWarning) config.invalidateSubscriptionModels();
+          else config.copySubscriptionModelsFrom(this.config);
+        };
 
         const reloadConfig = async (config: Config, id: string) => {
           if (reloadRevision !== this.modelProviderReloadRevision) return;
@@ -16031,6 +16057,7 @@ class QwenAgent implements Agent {
               merged.modelProviders,
               providerProtocol,
             );
+            if (config !== this.config) updateSubscriptionCatalog(config);
             await config.setImageModel(merged.imageModel);
             configsRefreshed += 1;
           } catch {
@@ -16069,6 +16096,7 @@ class QwenAgent implements Agent {
         for (const [id, session] of this.sessions) {
           try {
             await session.reloadModelProvidersFromDisk();
+            updateSubscriptionCatalog(session.getConfig());
             configsRefreshed += 1;
           } catch {
             configsFailed += 1;
@@ -16079,6 +16107,7 @@ class QwenAgent implements Agent {
         return {
           configsRefreshed,
           configsFailed,
+          ...(modelCatalogWarning ? { modelCatalogWarning } : {}),
         };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
@@ -18703,13 +18732,17 @@ class QwenAgent implements Agent {
 
   private buildSelectableModelOptions(config: Config) {
     const currentAuthType = config.getAuthType();
+    const discovered = config.getSubscriptionModelIds?.();
     return buildAcpModelOptions(
       config
         .getAllConfiguredModels()
         .filter(
           (model) =>
-            model.authType !== AuthType.QWEN_OAUTH ||
-            currentAuthType === AuthType.QWEN_OAUTH,
+            (model.authType !== AuthType.QWEN_OAUTH ||
+              currentAuthType === AuthType.QWEN_OAUTH) &&
+            (model.authType !== AuthType.QWEN_SUBSCRIPTION ||
+              !discovered ||
+              discovered.includes(model.id)),
         ),
     );
   }

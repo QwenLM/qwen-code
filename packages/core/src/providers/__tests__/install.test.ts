@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '../../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from '../../models/types.js';
-import * as subscriptionModels from '../../qwen/subscription-models.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '../../qwen/oauth-config.js';
 import { ModelsConfig } from '../../models/modelsConfig.js';
 import {
   applyProviderInstallPlan,
@@ -421,15 +421,22 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
-  it('installs an API-key ASR route alongside the same cached subscription model', async () => {
-    vi.spyOn(
-      subscriptionModels,
-      'readCachedSubscriptionCatalog',
-    ).mockReturnValue({
-      models: [],
-      scenes: { voice: [{ id: 'qwen3-asr-flash' }] },
-    });
-    expect(new ModelsConfig().getAllConfiguredModels()).toEqual(
+  it('installs an API-key ASR route alongside the same configured subscription model', async () => {
+    const providers: ModelProvidersConfig = {
+      [AuthType.QWEN_SUBSCRIPTION]: [
+        {
+          id: 'qwen3-asr-flash',
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          voiceOnly: true,
+          subscriptionScenes: ['voice'],
+        },
+      ],
+    };
+    expect(
+      new ModelsConfig({
+        modelProvidersConfig: providers,
+      }).getAllConfiguredModels(),
+    ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: 'qwen3-asr-flash',
@@ -438,7 +445,7 @@ describe('applyProviderInstallPlan', () => {
       ]),
     );
     const selected = 'qwen-subscription:qwen3-asr-flash';
-    const adapter = createAdapter({}, { voiceModel: selected });
+    const adapter = createAdapter(providers, { voiceModel: selected });
     const result = await apply(
       asrPlan(DASHSCOPE, { purpose: 'voice' }),
       adapter,

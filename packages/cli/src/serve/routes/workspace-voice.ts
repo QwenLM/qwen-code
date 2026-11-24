@@ -13,8 +13,8 @@ import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscript
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import {
-  SUBSCRIPTION_MODELS_CACHED,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
+  type SubscriptionSceneCatalog,
 } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import {
   loadSettings,
@@ -25,6 +25,7 @@ import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
+  createVoiceModelSource,
   EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
   transcribeWorkspaceVoiceAudio,
   validateWorkspaceVoiceState,
@@ -65,6 +66,12 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+interface VoiceModelCatalog {
+  revision: number;
+  identity?: string;
+  scenes?: SubscriptionSceneCatalog;
+}
+
 type WorkspaceVoiceTranscriber = (
   input: WorkspaceVoiceTranscriptionInput,
 ) => Promise<WorkspaceVoiceTranscriptionResult>;
@@ -105,6 +112,7 @@ export interface WorkspaceVoiceRouteDeps {
   transcribe?: WorkspaceVoiceTranscriber;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  modelCatalog?: VoiceModelCatalog;
 }
 
 export interface WorkspaceQualifiedVoiceRouteDeps {
@@ -242,6 +250,7 @@ async function persistVoiceUpdate(
   const writes = buildWorkspaceVoiceSettingsWrites(settings, update, {
     workspaceTrusted,
     ...(deps.scopeOverride ? { scopeOverride: deps.scopeOverride } : {}),
+    modelSource: getVoiceModelSource(deps, settings),
   });
 
   if (deps.persistSettings) {
@@ -451,6 +460,23 @@ function sendUnsupportedVoiceContentType(res: Response): void {
   });
 }
 
+function getVoiceModelSource(
+  deps: WorkspaceVoiceRouteDeps,
+  settings: LoadedSettings,
+  onlyDiscovered = false,
+) {
+  const catalog = deps.modelCatalog;
+  if (
+    catalog &&
+    catalog.identity !== new QwenSubscriptionSession().getIdentity()
+  ) {
+    catalog.revision++;
+    catalog.identity = undefined;
+    catalog.scenes = undefined;
+  }
+  return createVoiceModelSource(settings, catalog?.scenes, onlyDiscovered);
+}
+
 async function handleVoiceStatus(
   req: Request,
   res: Response,
@@ -473,9 +499,15 @@ async function handleVoiceStatus(
       return;
     }
     let modelCatalogWarning: string | undefined;
+    const catalog = deps.modelCatalog;
     if (refreshModels === 'true') {
       const session = new QwenSubscriptionSession();
       const identity = session.getIdentity();
+      const revision = catalog ? ++catalog.revision : undefined;
+      if (catalog) {
+        catalog.identity = identity;
+        catalog.scenes = {};
+      }
       if (identity) {
         const signal = requestAbortSignal(req, res);
         const assertRefreshOwner = () => {
@@ -485,25 +517,36 @@ async function handleVoiceStatus(
         };
         try {
           const result = await session.getScenes(signal);
-          if (result.cached) modelCatalogWarning = SUBSCRIPTION_MODELS_CACHED;
+          assertRefreshOwner();
+          if (catalog && catalog.revision === revision) {
+            catalog.scenes = result.scenes;
+          }
         } catch (error) {
           signal.throwIfAborted();
           assertRefreshOwner();
-          if (
-            error instanceof SubscriptionOAuthError &&
-            (error.stage || !error.status || error.status < 500)
-          )
-            throw error;
-          modelCatalogWarning = SUBSCRIPTION_MODELS_UNAVAILABLE;
+          if (!catalog || catalog.revision === revision) {
+            if (catalog) catalog.scenes = {};
+            if (
+              error instanceof SubscriptionOAuthError &&
+              (error.stage || !error.status || error.status < 500)
+            )
+              throw error;
+            modelCatalogWarning = SUBSCRIPTION_MODELS_UNAVAILABLE;
+          }
         }
         assertRefreshOwner();
+      } else if (catalog) {
+        catalog.identity = undefined;
+        catalog.scenes = {};
       }
     }
     assertGenerationOpen?.();
+    const settings = loadVoiceSettings(deps);
     res.status(200).json({
       ...buildWorkspaceVoiceStatus(
         deps.boundWorkspace,
-        loadVoiceSettings(deps),
+        settings,
+        getVoiceModelSource(deps, settings, true),
       ),
       ...(modelCatalogWarning ? { modelCatalogWarning } : {}),
     });
@@ -547,7 +590,14 @@ async function handleVoiceUpdate(
   }
   const settings = loadVoiceSettings(deps);
   try {
-    validateWorkspaceVoiceState(settings, parsed, { env: deps.env });
+    validateWorkspaceVoiceState(settings, parsed, {
+      env: deps.env,
+      modelSource: getVoiceModelSource(
+        deps,
+        settings,
+        parsed.voiceModel !== undefined,
+      ),
+    });
   } catch (err) {
     if (sendVoiceError(res, err)) return;
     throw err;
@@ -582,10 +632,15 @@ async function handleVoiceUpdate(
   }
   try {
     assertGenerationOpen?.();
+    const refreshedSettings = loadVoiceSettings(deps);
     res
       .status(200)
       .json(
-        buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
+        buildWorkspaceVoiceStatus(
+          deps.boundWorkspace,
+          refreshedSettings,
+          getVoiceModelSource(deps, refreshedSettings, true),
+        ),
       );
   } catch (err) {
     if (sendGenerationClosedError(res, err)) return;
@@ -674,6 +729,7 @@ async function handleVoiceTranscription(
         workspaceCwd: deps.boundWorkspace,
         env: deps.env,
         abortSignal: combinedAbortSignal(req, res),
+        modelSource: getVoiceModelSource(deps, settings),
       });
     } finally {
       releaseOperation?.();
@@ -757,6 +813,7 @@ export function registerWorkspaceVoiceRoutes(
   app: Application,
   deps: WorkspaceVoiceRouteDeps,
 ): void {
+  deps = { ...deps, modelCatalog: { revision: 0 } };
   app.get('/workspace/voice', (req: Request, res: Response) =>
     handleVoiceStatus(req, res, deps, 'GET /workspace/voice'),
   );
@@ -790,6 +847,7 @@ export function registerWorkspaceVoiceRoutes(
 function createRuntimeVoiceDeps(
   runtime: WorkspaceRuntime,
   deps: WorkspaceQualifiedVoiceRouteDeps,
+  modelCatalog: VoiceModelCatalog,
 ): WorkspaceVoiceRouteDeps {
   const env =
     runtime.env.mode === 'runtime-overlay'
@@ -797,6 +855,7 @@ function createRuntimeVoiceDeps(
       : runtime.env.effectiveEnv;
   return {
     boundWorkspace: runtime.workspaceCwd,
+    modelCatalog,
     mutate: deps.mutate,
     safeBody: deps.safeBody,
     persistSetting: deps.persistSetting,
@@ -831,23 +890,30 @@ function resolveQualifiedVoiceTarget(
   req: Request,
   res: Response,
   deps: WorkspaceQualifiedVoiceRouteDeps,
+  catalogs: WeakMap<WorkspaceRuntime, VoiceModelCatalog>,
   includeDraining = false,
 ): WorkspaceVoiceRouteDeps | undefined {
   const runtime = includeDraining
     ? resolveManagedWorkspaceRuntimeFromParam(deps.workspaceRegistry, req, res)
     : resolveWorkspaceRuntimeFromParam(deps.workspaceRegistry, req, res);
   if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
-  return createRuntimeVoiceDeps(runtime, deps);
+  let catalog = catalogs.get(runtime);
+  if (!catalog) {
+    catalog = { revision: 0 };
+    catalogs.set(runtime, catalog);
+  }
+  return createRuntimeVoiceDeps(runtime, deps, catalog);
 }
 
 export function registerWorkspaceQualifiedVoiceRoutes(
   app: Application,
   deps: WorkspaceQualifiedVoiceRouteDeps,
 ): void {
+  const catalogs = new WeakMap<WorkspaceRuntime, VoiceModelCatalog>();
   app.get(
     '/workspaces/:workspace/voice',
     async (req: Request, res: Response) => {
-      const target = resolveQualifiedVoiceTarget(req, res, deps);
+      const target = resolveQualifiedVoiceTarget(req, res, deps, catalogs);
       if (!target) return;
       await handleVoiceStatus(
         req,
@@ -862,7 +928,7 @@ export function registerWorkspaceQualifiedVoiceRoutes(
     '/workspaces/:workspace/voice',
     deps.mutate({ strict: true }),
     async (req: Request, res: Response) => {
-      const target = resolveQualifiedVoiceTarget(req, res, deps);
+      const target = resolveQualifiedVoiceTarget(req, res, deps, catalogs);
       if (!target) return;
       await handleVoiceUpdate(
         req,
@@ -881,7 +947,13 @@ export function registerWorkspaceQualifiedVoiceRoutes(
       res: Response,
       next: import('express').NextFunction,
     ) => {
-      const target = resolveQualifiedVoiceTarget(req, res, deps, true);
+      const target = resolveQualifiedVoiceTarget(
+        req,
+        res,
+        deps,
+        catalogs,
+        true,
+      );
       if (!target) return;
       req.voiceRouteDeps = target;
       if (admitVoiceTranscription(req, res, target)) next();

@@ -162,6 +162,14 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
         res,
       );
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const refreshModels = deps.safeBody(req)['refreshModels'];
+      if (refreshModels !== undefined && typeof refreshModels !== 'boolean') {
+        res.status(400).json({
+          error: '`refreshModels` must be a boolean',
+          code: 'invalid_refresh_models',
+        });
+        return;
+      }
       const clientId = parseAndValidateWorkspaceClientId(
         req,
         res,
@@ -175,7 +183,12 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
           route,
           clientId,
         );
-        const result = await runtime.workspaceService.reloadModelProviders(ctx);
+        const result =
+          refreshModels === true
+            ? await runtime.workspaceService.reloadModelProviders(ctx, {
+                refreshModels: true,
+              })
+            : await runtime.workspaceService.reloadModelProviders(ctx);
         runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       } catch (err) {

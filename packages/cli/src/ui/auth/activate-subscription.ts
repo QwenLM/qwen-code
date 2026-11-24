@@ -12,6 +12,7 @@ import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscrip
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { selectSubscriptionModel } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { getSubscriptionModelConfig } from '../../config/subscription-model-persistence.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 
 export async function activateSubscription(
@@ -36,11 +37,30 @@ export async function activateSubscription(
   const { models } = await config.refreshSubscriptionModels(signal);
   const modelId = selectSubscriptionModel(models);
   signal.throwIfAborted();
+  const selected = config
+    .getAllConfiguredModels()
+    .find(
+      (model) =>
+        !model.isRuntimeModel &&
+        model.authType === AuthType.QWEN_SUBSCRIPTION &&
+        model.id === modelId,
+    );
+  const modelConfig = selected && getSubscriptionModelConfig(selected);
+  if (!modelConfig)
+    throw new Error('Selected subscription model is unavailable.');
   // After committing settings, finish the runtime switch even if the dialog closes.
   await applyProviderInstallPlan(
     {
       providerId: 'qwen-subscription',
       authType: AuthType.QWEN_SUBSCRIPTION,
+      modelProviders: [
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          models: [modelConfig],
+          mergeStrategy: 'replace-owned',
+          ownsModel: (model) => model.id === modelId,
+        },
+      ],
       modelSelection: {
         modelId,
         baseUrl: QWEN_SUBSCRIPTION_BASE_URL,

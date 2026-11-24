@@ -161,6 +161,50 @@ describe('workspace-qualified Voice routes', () => {
     resetHomeEnvBootstrapForTesting();
   });
 
+  it.each(['failure', 'success'] as const)(
+    'keeps the newest runtime voice directory after an older %s',
+    async (outcome) => {
+      const { app } = await createApp();
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account');
+      type Result = Awaited<ReturnType<QwenSubscriptionSession['getScenes']>>;
+      let resolveOld!: (result: Result) => void;
+      let rejectOld!: (error: Error) => void;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const pending = new Promise<Result>((resolve, reject) => {
+        resolveOld = resolve;
+        rejectOld = reject;
+      });
+      vi.spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+        .mockImplementationOnce(() => {
+          markStarted();
+          return pending;
+        })
+        .mockResolvedValueOnce({
+          scenes: { voice: [{ id: 'new-asr' }] },
+          cached: false,
+        });
+      const get = (query = '') =>
+        request(app).get(`/workspaces/secondary-id/voice${query}`);
+      const old = get('?refreshModels=true').then((response) => response);
+      await started;
+      const latest = await get('?refreshModels=true');
+      expect(latest.status).toBe(200);
+      if (outcome === 'failure') rejectOld(new Error('older failed'));
+      else
+        resolveOld({ scenes: { voice: [{ id: 'stale-asr' }] }, cached: false });
+      await old;
+      expect((await get()).body.availableVoiceModels).toEqual([
+        expect.objectContaining({ id: 'qwen-subscription:new-asr' }),
+      ]);
+    },
+  );
+
   it('refreshes only the selected runtime picker and never falls back for invalid targets', async () => {
     const { app, secondary, registry } = await createApp();
     vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
@@ -191,6 +235,41 @@ describe('workspace-qualified Voice routes', () => {
     );
     expect(draining.status).toBe(503);
     expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps discovered voice models in their runtime and drops them after an account change', async () => {
+    const { app } = await createApp();
+    const identity = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+      .mockReturnValue('account-a');
+    const refresh = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+      .mockResolvedValue({
+        scenes: { voice: [{ id: 'secondary-account-asr' }] },
+        cached: false,
+      });
+    const discovered = await request(app).get(
+      '/workspaces/secondary-id/voice?refreshModels=true',
+    );
+    expect(discovered.body.availableVoiceModels).toEqual([
+      expect.objectContaining({
+        id: 'qwen-subscription:secondary-account-asr',
+      }),
+    ]);
+    expect(
+      (await request(app).get('/workspaces/primary-id/voice')).body
+        .availableVoiceModels,
+    ).toEqual([]);
+    expect(
+      (await request(app).get('/workspaces/secondary-id/voice')).body
+        .availableVoiceModels,
+    ).toHaveLength(1);
+    identity.mockReturnValue('account-b');
+    expect(
+      (await request(app).get('/workspaces/secondary-id/voice')).body
+        .availableVoiceModels,
+    ).toEqual([]);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it('selects only the trusted target runtime and writes Voice settings in workspace scope', async () => {

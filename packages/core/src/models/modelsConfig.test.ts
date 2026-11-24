@@ -16,10 +16,211 @@ import {
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from './types.js';
 import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
-import { readCachedSubscriptionCatalog } from '../qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 
 describe('ModelsConfig', () => {
+  it('preserves a saved primary route when the first account discovery is a shared scene model', async () => {
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_SUBSCRIPTION,
+      modelProvidersConfig: {
+        [AuthType.QWEN_SUBSCRIPTION]: [
+          {
+            id: 'shared',
+            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+            subscriptionChatModel: true,
+          },
+        ],
+      },
+    });
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
+      'account',
+    );
+    vi.spyOn(
+      QwenSubscriptionSession.prototype,
+      'getScenes',
+    ).mockResolvedValueOnce({
+      scenes: { fast: [{ id: 'shared' }] },
+      cached: false,
+    });
+    try {
+      await config.refreshSubscriptionScenes();
+      expect(config.getAvailableModels().map((model) => model.id)).toEqual([
+        'shared',
+      ]);
+      expect(config.getSubscriptionModelIds()).toEqual([]);
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'shared'),
+      ).resolves.toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('hides failed discovery without changing a saved primary shared with a fast scene', async () => {
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_SUBSCRIPTION,
+      modelProvidersConfig: {
+        [AuthType.QWEN_SUBSCRIPTION]: [
+          {
+            id: 'shared',
+            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+            subscriptionChatModel: true,
+          },
+        ],
+      },
+    });
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
+      'account',
+    );
+    vi.spyOn(
+      QwenSubscriptionSession.prototype,
+      'getScenes',
+    ).mockResolvedValueOnce({
+      scenes: { fast: [{ id: 'shared' }] },
+      cached: false,
+    });
+    try {
+      await config.refreshSubscriptionScenes();
+      config.invalidateSubscriptionModels();
+      expect(config.getSubscriptionModelIds()).toEqual([]);
+      expect(config.getSubscriptionModelIds('fast')).toEqual(['shared']);
+      expect(config.getAvailableModels().map((model) => model.id)).toEqual([
+        'shared',
+      ]);
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'shared'),
+      ).resolves.toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each(['models', 'scenes'] as const)(
+    'keeps the newest %s directory when an older request fails or succeeds late',
+    async (catalog) => {
+      const config = new ModelsConfig();
+      const data = (id: string) => ({
+        models: [id],
+        scenes: { image: [{ id }] },
+        cached: false,
+      });
+      let rejectOld!: (error: Error) => void;
+      let resolveOld!: (value: ReturnType<typeof data>) => void;
+      const pending = new Promise<ReturnType<typeof data>>(
+        (resolve, reject) => {
+          resolveOld = resolve;
+          rejectOld = reject;
+        },
+      );
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account');
+      const fetch = vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        catalog === 'models' ? 'getModels' : 'getScenes',
+      );
+      fetch.mockReturnValueOnce(pending).mockResolvedValueOnce(data('fresh'));
+      const refresh = () =>
+        catalog === 'models'
+          ? config.refreshSubscriptionModels()
+          : config.refreshSubscriptionScenes();
+      const ids = () =>
+        config.getSubscriptionModelIds(
+          catalog === 'models' ? undefined : 'image',
+        );
+      try {
+        const old = refresh().catch((error) => error);
+        await refresh();
+        rejectOld(new Error('old failure'));
+        expect(await old).toMatchObject({ name: 'AbortError' });
+        expect(ids()).toEqual(['fresh']);
+        const pendingSuccess = new Promise<ReturnType<typeof data>>(
+          (resolve) => {
+            resolveOld = resolve;
+          },
+        );
+        fetch
+          .mockReturnValueOnce(pendingSuccess)
+          .mockResolvedValueOnce(data('newest'));
+        const late = refresh().catch((error) => error);
+        await refresh();
+        resolveOld(data('stale'));
+        expect(await late).toMatchObject({ name: 'AbortError' });
+        expect(ids()).toEqual(['newest']);
+        fetch.mockRejectedValueOnce(new Error('newest failure'));
+        await expect(refresh()).rejects.toThrow('newest failure');
+        expect(ids()).toEqual([]);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it('does not let an old account request clear a new account scene directory', async () => {
+    const config = new ModelsConfig();
+    let identity = 'old-account';
+    let rejectOld!: (error: Error) => void;
+    vi.spyOn(
+      QwenSubscriptionSession.prototype,
+      'getIdentity',
+    ).mockImplementation(() => identity);
+    vi.spyOn(
+      QwenSubscriptionSession.prototype,
+      'getModels',
+    ).mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectOld = reject;
+      }),
+    );
+    vi.spyOn(
+      QwenSubscriptionSession.prototype,
+      'getScenes',
+    ).mockResolvedValueOnce({
+      scenes: { image: [{ id: 'new-image' }] },
+      cached: false,
+    });
+    try {
+      const old = config.refreshSubscriptionModels().catch((error) => error);
+      identity = 'new-account';
+      await config.refreshSubscriptionScenes();
+      rejectOld(new Error('old request failed'));
+      expect(await old).toMatchObject({ name: 'AbortError' });
+      expect(config.getSubscriptionModelIds('image')).toEqual(['new-image']);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each(['clearAuth', 'invalidateSubscriptionModels'] as const)(
+    'discards a pending catalog request after %s',
+    async (action) => {
+      const config = new ModelsConfig();
+      let resolveOld!: (value: { models: string[]; cached: boolean }) => void;
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account');
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getModels',
+      ).mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+      );
+      try {
+        const old = config.refreshSubscriptionModels().catch((error) => error);
+        config[action]();
+        resolveOld({ models: ['old'], cached: false });
+        expect(await old).toMatchObject({ name: 'AbortError' });
+        expect(config.getSubscriptionModelIds()).toEqual([]);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
   it.each(['models', 'scenes'] as const)(
     'rejects a late %s refresh after account identity changes',
     async (catalog) => {
@@ -55,17 +256,27 @@ describe('ModelsConfig', () => {
     },
   );
   it('keeps scene-only subscription models out of primary selection and auth activation', async () => {
-    vi.mocked(readCachedSubscriptionCatalog).mockReturnValueOnce({
-      models: ['chat-model'],
+    const models = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_SUBSCRIPTION,
+    });
+    vi.spyOn(
+      QwenSubscriptionSession.prototype,
+      'getModels',
+    ).mockResolvedValueOnce({ models: ['chat-model'], cached: false });
+    vi.spyOn(
+      QwenSubscriptionSession.prototype,
+      'getScenes',
+    ).mockResolvedValueOnce({
       scenes: {
         fast: [{ id: 'aux-model' }],
         compaction: [{ id: 'aux-model' }],
         voice: [{ id: 'asr' }],
       },
+      cached: false,
     });
-    const models = new ModelsConfig({
-      initialAuthType: AuthType.QWEN_SUBSCRIPTION,
-    });
+    await models.refreshSubscriptionModels();
+    await models.refreshSubscriptionScenes();
+    vi.restoreAllMocks();
     expect(
       models.getAllConfiguredModels().some((model) => model.id === 'aux-model'),
     ).toBe(true);
@@ -2257,6 +2468,11 @@ describe('Qwen Subscription model selection', () => {
         modalities: { image: true },
       },
       onModelChange: changed,
+      modelProvidersConfig: {
+        [AuthType.QWEN_SUBSCRIPTION]: [
+          { id: QWEN_SUBSCRIPTION_MODEL, baseUrl: QWEN_SUBSCRIPTION_BASE_URL },
+        ],
+      },
     });
     await config.switchModel(
       AuthType.QWEN_SUBSCRIPTION,
@@ -2283,6 +2499,11 @@ describe('Qwen Subscription model selection', () => {
     process.env['DEV'] = 'true';
     const config = new ModelsConfig({
       initialAuthType: AuthType.QWEN_SUBSCRIPTION,
+      modelProvidersConfig: {
+        [AuthType.QWEN_SUBSCRIPTION]: [
+          { id: QWEN_SUBSCRIPTION_MODEL, baseUrl: QWEN_SUBSCRIPTION_BASE_URL },
+        ],
+      },
     });
     config.syncAfterAuthRefresh(
       AuthType.QWEN_SUBSCRIPTION,
@@ -2295,8 +2516,3 @@ describe('Qwen Subscription model selection', () => {
     });
   });
 });
-
-vi.mock('../qwen/subscription-models.js', async (original) => ({
-  ...(await original<typeof import('../qwen/subscription-models.js')>()),
-  readCachedSubscriptionCatalog: vi.fn(() => ({ models: ['qwen3.8-max'] })),
-}));

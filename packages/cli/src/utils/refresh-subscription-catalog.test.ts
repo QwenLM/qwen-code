@@ -6,10 +6,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { refreshSubscriptionCatalog } from './refresh-subscription-catalog.js';
-import {
-  SUBSCRIPTION_MODELS_CACHED,
-  SUBSCRIPTION_MODELS_UNAVAILABLE,
-} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 
 const account = vi.hoisted(() => ({ signedIn: true }));
 vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
@@ -44,13 +41,8 @@ it('does not request account catalogs for API-key-only users', async () => {
   await refreshSubscriptionCatalog(config, true);
   expect(scenes).not.toHaveBeenCalled();
 });
-it('reports cached fallback and discovery failure without hiding local providers', async () => {
-  scenes
-    .mockResolvedValueOnce({ cached: true })
-    .mockRejectedValueOnce(new Error('offline'));
-  expect(await refreshSubscriptionCatalog(config, true)).toBe(
-    SUBSCRIPTION_MODELS_CACHED,
-  );
+it('reports discovery failure without falling back to an old directory', async () => {
+  scenes.mockRejectedValueOnce(new Error('offline'));
   expect(await refreshSubscriptionCatalog(config, true)).toBe(
     SUBSCRIPTION_MODELS_UNAVAILABLE,
   );

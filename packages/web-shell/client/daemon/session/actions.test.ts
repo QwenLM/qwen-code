@@ -8725,6 +8725,7 @@ describe('model catalog refresh', () => {
       );
       expect(h.workspace.reloadModelProviders).toHaveBeenCalledWith({
         clientId: 'client-session-a',
+        refreshModels: true,
       });
       expect(
         h.workspace.reloadModelProviders.mock.invocationCallOrder[0],
@@ -8737,6 +8738,69 @@ describe('model catalog refresh', () => {
       expect(h.session.setModel).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps refreshed API Key choices usable after subscription discovery fails', async () => {
+    const h = setup();
+    const warning = 'Subscription catalog unavailable';
+    const result = { status: 'applied', modelCatalogWarning: warning };
+    h.workspace.reloadModelProviders.mockResolvedValue(result);
+    await expect(h.actions.refreshModels()).resolves.toBeUndefined();
+    expect(h.session.context).toHaveBeenCalledOnce();
+    expect(h.workspace.workspaceProviders).toHaveBeenCalledOnce();
+    expect(h.getConnection().models?.map((model) => model.id)).toEqual([
+      'old-model',
+      'new-model',
+    ]);
+  });
+
+  it('reports a discovery warning without treating the configured subscription choice as removed', async () => {
+    const session = createMockSession('session-a');
+    const workspace = session.client.workspaceByCwd();
+    session.client.workspaceByCwd.mockReturnValue(workspace);
+    const warning = 'Subscription catalog unavailable';
+    const result = { status: 'applied', modelCatalogWarning: warning };
+    workspace.reloadModelProviders.mockResolvedValue(result);
+    workspace.workspaceProviders.mockResolvedValue({
+      v: 1,
+      initialized: true,
+      workspaceCwd: '/workspace',
+      providers: [],
+      current: {
+        authType: 'qwen-subscription',
+        modelId: 'missing-subscription',
+      },
+    });
+    const context = contextStatus('session-a');
+    context.state.models = {
+      currentModelId: 'missing-subscription',
+      availableModels: [],
+    };
+    session.context.mockResolvedValue(context);
+    const addNotice = vi.fn();
+    const h = createActionsHarness({
+      session,
+      addNotice,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace',
+        currentModel: 'missing-subscription',
+        models: [
+          {
+            id: 'missing-subscription',
+            label: 'Subscription',
+            authType: 'qwen-subscription',
+          },
+        ],
+      },
+    });
+    await expect(h.actions.refreshModels()).resolves.toBeUndefined();
+    expect(h.getConnection().models).toEqual([]);
+    expect(h.getConnection().currentModel).toBe('missing-subscription');
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ severity: 'warning', message: warning }),
+    );
+  });
 
   it('applies refresh across an equivalent same-session context replacement', async () => {
     const h = setup();

@@ -5,6 +5,8 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import {
   LoadedSettings,
   SettingScope,
@@ -57,6 +59,62 @@ function expectWorkspaceVoiceError(action: () => unknown, code: string): void {
 }
 
 describe('voice service', () => {
+  it.each([SettingScope.User, SettingScope.Workspace])(
+    'keeps provider placeholders and inherited routes in voice writes to %s',
+    (scope) => {
+      const rawModel = {
+        id: 'saved-main',
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        subscriptionChatModel: true,
+        generationConfig: {
+          customHeaders: { 'X-Private': '${VOICE_PRIVATE_HEADER}' },
+        },
+      };
+      const settings = makeSettings({
+        user: { modelProviders: { 'qwen-subscription': [rawModel] } },
+      });
+      settings.user.settings.modelProviders![
+        'qwen-subscription'
+      ]![0]!.generationConfig!.customHeaders!['X-Private'] =
+        'private-voice-fixture';
+      settings.recomputeMerged();
+      const writes = buildWorkspaceVoiceSettingsWrites(
+        settings,
+        { voiceModel: 'qwen-subscription:new-asr' },
+        {
+          scopeOverride: scope,
+          modelSource: {
+            getAllConfiguredModels: () => [
+              {
+                id: 'new-asr',
+                label: 'New ASR',
+                authType: AuthType.QWEN_SUBSCRIPTION,
+                baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+                subscriptionScenes: ['voice'],
+                voiceOnly: true,
+                subscriptionChatModel: false,
+              },
+            ],
+          },
+        },
+      );
+      const providerWrite = writes.find(
+        (write) => write.key === 'modelProviders.qwen-subscription',
+      )!;
+      expect(providerWrite.scope).toBe(scope);
+      expect(JSON.stringify(providerWrite.value)).toContain(
+        '${VOICE_PRIVATE_HEADER}',
+      );
+      expect(JSON.stringify(providerWrite.value)).not.toContain(
+        'private-voice-fixture',
+      );
+      expect(providerWrite.value).toEqual([
+        expect.objectContaining({ id: 'saved-main' }),
+        expect.objectContaining({ id: 'new-asr' }),
+      ]);
+    },
+  );
+
   it.each(['openai:', 'qwen-subscription:'])(
     'treats malformed selector %s as an unknown voice model',
     (selector) => {

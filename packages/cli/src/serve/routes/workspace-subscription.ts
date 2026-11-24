@@ -14,6 +14,11 @@ import {
   SubscriptionModelSelectionError,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
 } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { ModelRegistry } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
+import {
+  getSubscriptionModelConfig,
+  buildSubscriptionModelProviders,
+} from '../../config/subscription-model-persistence.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import {
   SettingScope,
@@ -144,7 +149,7 @@ export function registerWorkspaceSubscriptionRoutes(
           res.status(403).json({ code: 'subscription_required' });
           return;
         }
-        const { models } = await session.getModels(
+        const { models, modelMetadata } = await session.getModels(
           controller.signal,
           deps.qwenCodeVersion,
         );
@@ -174,6 +179,15 @@ export function registerWorkspaceSubscriptionRoutes(
                   loadPolicySettings(runtime.workspaceCwd),
                 );
               }
+              const registry = new ModelRegistry(
+                fresh.merged.modelProviders,
+                fresh.merged.providerProtocol,
+              );
+              registry.setSubscriptionModels(models, modelMetadata);
+              const selected = registry
+                .getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+                .find((model) => model.id === modelId)!;
+              const modelConfig = getSubscriptionModelConfig(selected)!;
               savedScope = scope;
               return [
                 {
@@ -186,6 +200,15 @@ export function registerWorkspaceSubscriptionRoutes(
                   scope,
                   key: 'model.baseUrl',
                   value: QWEN_SUBSCRIPTION_BASE_URL,
+                },
+                {
+                  scope,
+                  key: `modelProviders.${AuthType.QWEN_SUBSCRIPTION}`,
+                  value: buildSubscriptionModelProviders(
+                    fresh,
+                    modelConfig,
+                    scope,
+                  ),
                 },
               ];
             },

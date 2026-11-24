@@ -19,11 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
-import { getQwenOAuthConfig } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
-import {
-  SUBSCRIPTION_MODELS_CACHED,
-  SUBSCRIPTION_MODELS_UNAVAILABLE,
-} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SUBSCRIPTION_MODELS_UNAVAILABLE } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   SettingScope,
@@ -222,23 +218,14 @@ describe('workspace voice routes', () => {
     await teardown(h);
   });
 
-  it('refreshes every picker request from a cold cache while ordinary polling stays local', async () => {
+  it('refreshes every picker request into memory while ordinary polling stays local', async () => {
     vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
       'account-a',
     );
     const scenes = { voice: [{ id: 'server-asr' }] };
     const refresh = vi
       .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
-      .mockImplementation(async () => {
-        const { baseUrl, clientId } = getQwenOAuthConfig();
-        await writeJson(path.join(h.home, 'subscription_credentials.json'), {
-          baseUrl,
-          clientId,
-          tokens: { access_token: 'test-token' },
-          scenes,
-        });
-        return { scenes, cached: false };
-      });
+      .mockResolvedValue({ scenes, cached: false });
     const get = (query = '') =>
       request(h.app)
         .get(`/workspace/voice${query}`)
@@ -258,30 +245,169 @@ describe('workspace voice routes', () => {
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['offline', 'unavailable', 'cached'] as const)(
+  it.each(['failure', 'success'] as const)(
+    'keeps the latest voice directory after an older %s',
+    async (outcome) => {
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account');
+      type Result = Awaited<ReturnType<QwenSubscriptionSession['getScenes']>>;
+      let resolveOld!: (value: Result) => void;
+      let rejectOld!: (error: Error) => void;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const oldResult = new Promise<Result>((resolve, reject) => {
+        resolveOld = resolve;
+        rejectOld = reject;
+      });
+      vi.spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+        .mockImplementationOnce(() => {
+          markStarted();
+          return oldResult;
+        })
+        .mockResolvedValueOnce({
+          scenes: { voice: [{ id: 'new-asr' }] },
+          cached: false,
+        });
+      const route = '/workspace/voice';
+      const get = (query = '') =>
+        request(h.app)
+          .get(`${route}${query}`)
+          .set('Host', hostHeader)
+          .set('Authorization', 'Bearer secret');
+      const old = get('?refreshModels=true').then((response) => response);
+      await started;
+      const fresh = await get('?refreshModels=true');
+      expect(fresh.status).toBe(200);
+      if (outcome === 'failure') rejectOld(new Error('old failure'));
+      else
+        resolveOld({ scenes: { voice: [{ id: 'stale-asr' }] }, cached: false });
+      await old;
+      const latest = await get();
+      expect(latest.body.availableVoiceModels).toEqual([
+        expect.objectContaining({ id: 'qwen-subscription:new-asr' }),
+      ]);
+    },
+  );
+
+  it('does not reuse a previous subscription directory when refresh fails', async () => {
+    await writeVoiceModelSettings(h);
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
+      'account-a',
+    );
+    const refresh = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+      .mockResolvedValueOnce({
+        scenes: { voice: [{ id: 'server-asr' }] },
+        cached: false,
+      })
+      .mockRejectedValueOnce(new Error('offline'));
+    const get = (query = '') =>
+      request(h.app)
+        .get(`/workspace/voice${query}`)
+        .set('Host', hostHeader)
+        .set('Authorization', 'Bearer secret');
+    expect(
+      (await get('?refreshModels=true')).body.availableVoiceModels,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'qwen-subscription:server-asr' }),
+      ]),
+    );
+    const failed = await get('?refreshModels=true');
+    expect(failed.body.modelCatalogWarning).toBe(
+      SUBSCRIPTION_MODELS_UNAVAILABLE,
+    );
+    expect(failed.body.availableVoiceModels).toEqual([
+      expect.objectContaining({ id: 'qwen3-asr-flash' }),
+    ]);
+    expect((await get()).body.availableVoiceModels).toEqual([
+      expect.objectContaining({ id: 'qwen3-asr-flash' }),
+    ]);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    await expect(
+      fsp.access(path.join(h.home, 'subscription_credentials.json')),
+    ).rejects.toThrow();
+  });
+
+  it('persists the selected subscription voice configuration alongside its selector', async () => {
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
+      'account-a',
+    );
+    vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
+      true,
+    );
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getScenes').mockResolvedValue({
+      scenes: {
+        voice: [
+          {
+            id: 'server-asr',
+            display_name: 'Server ASR',
+            context_window_tokens: 8192,
+          },
+        ],
+      },
+      cached: false,
+    });
+    await request(h.app)
+      .get('/workspace/voice?refreshModels=true')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret');
+    const selected = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ voiceModel: 'qwen-subscription:server-asr' });
+    expect(selected.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'modelProviders.qwen-subscription',
+      [
+        expect.objectContaining({
+          id: 'server-asr',
+          name: 'Server ASR',
+          subscriptionScenes: ['voice'],
+          generationConfig: expect.objectContaining({
+            contextWindowSize: 8192,
+          }),
+        }),
+      ],
+      expect.any(Function),
+    );
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'voiceModel',
+      'qwen-subscription:server-asr',
+      expect.any(Function),
+    );
+  });
+
+  it.each(['offline', 'unavailable'] as const)(
     'keeps local API-key candidates visible with a discovery warning (%s)',
     async (state) => {
-      const cached = state === 'cached';
       await writeVoiceModelSettings(h);
       vi.spyOn(
         QwenSubscriptionSession.prototype,
         'getIdentity',
       ).mockReturnValue('account-a');
       const refresh = vi.spyOn(QwenSubscriptionSession.prototype, 'getScenes');
-      if (cached) refresh.mockResolvedValue({ scenes: {}, cached: true });
-      else
-        refresh.mockRejectedValue(
-          state === 'unavailable'
-            ? new SubscriptionOAuthError('service_unavailable', 503)
-            : new Error('offline'),
-        );
+      refresh.mockRejectedValue(
+        state === 'unavailable'
+          ? new SubscriptionOAuthError('service_unavailable', 503)
+          : new Error('offline'),
+      );
       const response = await request(h.app)
         .get('/workspace/voice?refreshModels=true')
         .set('Host', hostHeader)
         .set('Authorization', 'Bearer secret');
       expect(response.status).toBe(200);
       expect(response.body.modelCatalogWarning).toBe(
-        cached ? SUBSCRIPTION_MODELS_CACHED : SUBSCRIPTION_MODELS_UNAVAILABLE,
+        SUBSCRIPTION_MODELS_UNAVAILABLE,
       );
       expect(response.body.availableVoiceModels).toEqual([
         expect.objectContaining({ id: 'qwen3-asr-flash' }),
