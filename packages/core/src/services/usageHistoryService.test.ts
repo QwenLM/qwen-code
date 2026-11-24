@@ -3441,6 +3441,81 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     });
   });
 
+  it('keeps an independent response past an unbounded future run', async () => {
+    const sessionId = 'unbounded-future-window';
+    const project = '/future/unbounded-window';
+    const futureRun = (id: string, startTime: string, endTime: string) => ({
+      ...persistedRec(sessionId, 100, true),
+      project,
+      startTime: Date.parse(startTime),
+      timestamp: Date.parse(endTime),
+      runScoped: true,
+      requestExecutionIds: [id],
+      successfulRequestExecutionIds: [id],
+    });
+    seedPersisted([
+      futureRun(
+        'bounded-future-run',
+        '2026-07-02T00:02:00.000Z',
+        '2026-07-02T00:06:00.000Z',
+      ),
+      {
+        ...futureRun(
+          'unbounded-future-run',
+          '2026-07-02T00:04:00.000Z',
+          '2026-07-02T00:10:00.000Z',
+        ),
+        startTime: Number.NaN,
+        durationMs: Number.NaN,
+      },
+    ]);
+    const file = writeTranscript('unbounded-future-window', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 100,
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:02:30.000Z',
+      'bounded-future-run',
+      100,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:04:30.000Z',
+      'unbounded-future-run',
+      100,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:08:00.000Z',
+      'independent-unbounded-response',
+      50,
+    );
+
+    const records = await loadUsageHistoryWithLive({
+      sinceMs: 0,
+      readAt: Date.parse('2026-07-02T00:02:30.000Z'),
+    });
+    expect(records).toHaveLength(3);
+    expect(
+      records.some(
+        (record) =>
+          record.transcriptSupplement === true &&
+          record.requestExecutionIds?.includes(
+            'independent-unbounded-response',
+          ),
+      ),
+    ).toBe(true);
+    expect(aggregateUsage(records, 'all')).toMatchObject({
+      totalRequests: 3,
+      models: { 'qwen-max': { totalTokens: 250 } },
+    });
+  });
+
   it('replays a response after its future-owner snapshot is removed', async () => {
     const sessionId = 'future-owner-cache-removal';
     const project = '/future/owner-cache-removal';
@@ -4988,6 +5063,35 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       totalRequests: 2,
       models: { 'qwen-max': { totalTokens: 200 } },
     });
+
+    const olderWithCoverage = {
+      ...runRec('skill-coverage', 200, t0 + 1_000, t0 + 2_000),
+      requestExecutionIds: ['shared', 'older-only'],
+      models: { 'qwen-max': modelUsage(2, 200, 0, 200) },
+    };
+    const newerWithSkills = {
+      ...runRec('skill-coverage', 100, t0 + 1_500, t0 + 2_500),
+      requestExecutionIds: ['shared'],
+      skills: {
+        totalCalls: 3,
+        totalSuccess: 3,
+        totalFail: 0,
+        byName: { qreview: { count: 3, success: 3, fail: 0 } },
+      },
+    };
+    for (const records of [
+      [olderWithCoverage, newerWithSkills],
+      [newerWithSkills, olderWithCoverage],
+    ]) {
+      const reduced = dedupBySessionId(records);
+      expect(reduced).toHaveLength(1);
+      expect(totalTokensOf(aggregateUsage(reduced, 'all'))).toBe(200);
+      expect(aggregateUsage(reduced, 'all').totalRequests).toBe(2);
+      expect(reduced[0]?.skills).toMatchObject({
+        totalCalls: 3,
+        byName: { qreview: { count: 3 } },
+      });
+    }
   });
 
   it('does not count a partial identity overlap as independent usage', () => {

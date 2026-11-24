@@ -1822,6 +1822,33 @@ function requestIdsPartiallyOverlap(
   );
 }
 
+function withCoveredRunSkills(
+  winner: UsageSummaryRecord,
+  covered: UsageSummaryRecord,
+): UsageSummaryRecord {
+  const source = [winner, covered].sort(
+    (left, right) =>
+      (right.skills?.totalCalls ?? 0) - (left.skills?.totalCalls ?? 0) ||
+      (right.skills?.totalSuccess ?? 0) - (left.skills?.totalSuccess ?? 0) ||
+      (right.skills?.totalFail ?? 0) - (left.skills?.totalFail ?? 0) ||
+      byNameCoverage(right.skills?.byName ?? {}) -
+        byNameCoverage(left.skills?.byName ?? {}),
+  )[0]!;
+  if (source === winner || !source.skills) return winner;
+  return {
+    ...winner,
+    skills: {
+      ...source.skills,
+      byName: Object.fromEntries(
+        Object.entries(source.skills.byName).map(([name, metrics]) => [
+          name,
+          { ...metrics },
+        ]),
+      ),
+    },
+  };
+}
+
 // Model execution identity does not prove best-effort tool/file telemetry survived.
 function toolsAndFilesCoverRun(
   rebuilt: UsageSummaryRecord,
@@ -1934,8 +1961,10 @@ export function dedupBySessionId(
         if ((overlaps || sameWindow) && requestIdsOverlap(k, r) !== false) {
           const partialOverlap = requestIdsPartiallyOverlap(k, r);
           if (!partialOverlap || rebuildCoversRun(r, k, true)) {
-            kept.splice(i, 1);
+            kept.splice(i, 1, withCoveredRunSkills(r, k));
+            keepRun = false;
           } else if (rebuildCoversRun(k, r, true)) {
+            kept[i] = withCoveredRunSkills(k, r);
             keepRun = false;
             break;
           }
@@ -2462,7 +2491,12 @@ function transcriptReplayScope(
       scope.beforeMsBySession.delete(key);
       continue;
     }
-    if (record.runScoped === true && Number.isFinite(record.timestamp)) {
+    if (
+      record.runScoped === true &&
+      Number.isFinite(record.timestamp) &&
+      (!Array.isArray(record.requestExecutionIds) ||
+        replayRunStartTime(record) !== undefined)
+    ) {
       const previous = scope.afterMsBySession.get(key);
       if (previous === undefined || record.timestamp > previous) {
         scope.afterMsBySession.set(key, record.timestamp);

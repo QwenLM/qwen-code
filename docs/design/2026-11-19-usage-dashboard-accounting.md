@@ -729,6 +729,10 @@ day attribution remains the day of the actual response. A midnight test must
 check those two calendars independently rather than forcing yesterday's ledger
 into today's token bucket.
 
+An identified run/run coverage reduction retains the richer whole skills
+payload from the covered side; it never drops those observed invocations or
+adds their counters to the covering run's distinct execution IDs.
+
 Both live and ordinary history readers keep the full durable history for replay
 ownership and for the decision that history exists. Each read captures one
 `readAt`: replay ownership, the outer/inner root split and the ended/future
@@ -766,7 +770,9 @@ trailing timestamp falls back to the latest valid included row, then the
 header, so measured tool/file activity is not discarded. Where a future run has
 real response IDs and a finite end but an invalid start, a finite non-negative
 duration may derive a start in `[0, end]`; that same bounded start governs both
-ordinary replay inclusion and future-tool ownership. An invalid or unknown
+ordinary replay inclusion and future-tool ownership. An identified future record without a bounded start cannot extend the
+supplement cutoff past it, so an independently dated later response can still
+be retained rather than lost between two deadlines. An invalid or unknown
 row timestamp cannot prove future membership and is therefore not truncated by
 that boundary. Without a valid window, matching tool counts alone are not an
 identity, so an uncertain extra observation may remain instead of deleting
