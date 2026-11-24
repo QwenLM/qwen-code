@@ -18946,6 +18946,64 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.missingSession).not.toBe(true);
   });
 
+  it('caps retries on persistent retryable 413 responses instead of looping forever', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const persistentPressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'dense-543m',
+        dimension: 'index',
+        measuredBytes: 326_447_504,
+        maxBytes: 326_446_972,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* persistentPressureEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw persistentPressure;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(120);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBe(4);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'Insufficient daemon heap to index the snapshot',
+      errorStatus: 413,
+    });
+    expect(connection?.missingSession).not.toBe(true);
+  });
+
   it('keeps a plain 409 conflict error retriable (not terminal)', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,

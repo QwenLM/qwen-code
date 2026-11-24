@@ -118,6 +118,7 @@ export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 1024 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_LINE_BYTES = 32 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES = 256 * 1024 * 1024;
+const SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
@@ -2648,19 +2649,24 @@ async function buildIndex(params: {
   let startTime: string | undefined;
   const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
   const buildHeapUsedStart = process.memoryUsage().heapUsed;
-  const availableHeapBytes = Math.max(
-    0,
-    getHeapStatistics().heap_size_limit - buildHeapUsedStart,
-  );
+  const heapSizeLimit = getHeapStatistics().heap_size_limit;
+  const availableHeapBytes = Math.max(0, heapSizeLimit - buildHeapUsedStart);
   const remainingHeapBudget =
     availableHeapBudgetForTest ??
     Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
-  const heapHeadroomLimited = remainingHeapBudget < maxIndexEstimateBytes;
   const maxIndexBuildBytes = Math.min(
     maxIndexEstimateBytes,
     remainingHeapBudget,
   );
-  const heapLimitDetails = heapHeadroomLimited ? { retryable: true } : {};
+  // Only mark a heap-limited estimate rejection retryable when live heap
+  // occupancy is elevated (or a test injects a constrained headroom). An idle
+  // process with a small fixed --max-old-space-size will reject the same file
+  // on every retry.
+  const transientHeapPressure =
+    availableHeapBudgetForTest !== undefined
+      ? remainingHeapBudget < maxIndexEstimateBytes
+      : remainingHeapBudget < maxIndexEstimateBytes &&
+        buildHeapUsedStart >= Math.floor(heapSizeLimit / 4);
   let estimatedIndexBytes =
     INDEX_ENTRY_BASE_BYTES +
     INDEX_CONTAINER_BASE_BYTES * 7 +
@@ -2754,6 +2760,21 @@ async function buildIndex(params: {
               entry,
             );
           }
+          if (estimatedIndexBytes > maxIndexBuildBytes) {
+            const retryable =
+              transientHeapPressure &&
+              estimatedIndexBytes <= maxIndexEstimateBytes;
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              snapshotSize,
+              maxIndexBuildBytes,
+              {
+                dimension: 'index',
+                measuredBytes: estimatedIndexBytes,
+                ...(retryable ? { retryable: true } : {}),
+              },
+            );
+          }
           // The cache estimate intentionally stays unchanged. For the hard
           // build ceiling, periodically sample real heap growth as well —
           // short-record retention can cost materially more than the estimate
@@ -2763,31 +2784,22 @@ async function buildIndex(params: {
           if ((sequence & 1023) === 1) {
             const heapGrowth =
               process.memoryUsage().heapUsed - buildHeapUsedStart;
-            if (heapGrowth > maxIndexBuildBytes) {
+            if (heapGrowth > remainingHeapBudget) {
+              const retryable =
+                estimatedIndexBytes <= maxIndexEstimateBytes &&
+                (transientHeapPressure ||
+                  estimatedIndexBytes < Math.floor(remainingHeapBudget / 2));
               throw new SessionTranscriptTooLargeError(
                 sessionId,
                 snapshotSize,
-                maxIndexBuildBytes,
+                remainingHeapBudget,
                 {
                   dimension: 'index',
                   measuredBytes: heapGrowth,
-                  retryable: true,
+                  ...(retryable ? { retryable: true } : {}),
                 },
               );
             }
-            estimatedIndexBytes = Math.max(estimatedIndexBytes, heapGrowth);
-          }
-          if (estimatedIndexBytes > maxIndexBuildBytes) {
-            throw new SessionTranscriptTooLargeError(
-              sessionId,
-              snapshotSize,
-              maxIndexBuildBytes,
-              {
-                dimension: 'index',
-                measuredBytes: estimatedIndexBytes,
-                ...heapLimitDetails,
-              },
-            );
           }
         }
       },
@@ -2929,24 +2941,10 @@ async function buildIndex(params: {
     byUuid,
     branchPointsByAssistantUuid,
   };
-  const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
-  if (finalHeapGrowth > maxIndexBuildBytes) {
-    throw new SessionTranscriptTooLargeError(
-      sessionId,
-      snapshotSize,
-      maxIndexBuildBytes,
-      {
-        dimension: 'index',
-        measuredBytes: finalHeapGrowth,
-        retryable: true,
-      },
-    );
-  }
-  const finalEstimatedBytes = Math.max(
-    estimateIndexCacheBytes(builtIndex),
-    finalHeapGrowth,
-  );
+  const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
   if (finalEstimatedBytes > maxIndexBuildBytes) {
+    const retryable =
+      transientHeapPressure && finalEstimatedBytes <= maxIndexEstimateBytes;
     throw new SessionTranscriptTooLargeError(
       sessionId,
       snapshotSize,
@@ -2954,7 +2952,24 @@ async function buildIndex(params: {
       {
         dimension: 'index',
         measuredBytes: finalEstimatedBytes,
-        ...heapLimitDetails,
+        ...(retryable ? { retryable: true } : {}),
+      },
+    );
+  }
+  const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
+  if (finalHeapGrowth > remainingHeapBudget) {
+    const retryable =
+      finalEstimatedBytes <= maxIndexEstimateBytes &&
+      (transientHeapPressure ||
+        finalEstimatedBytes < Math.floor(remainingHeapBudget / 2));
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      remainingHeapBudget,
+      {
+        dimension: 'index',
+        measuredBytes: finalHeapGrowth,
+        ...(retryable ? { retryable: true } : {}),
       },
     );
   }
@@ -3836,7 +3851,7 @@ export class SessionTranscriptReader {
     // Preserve the base O(1) behavior of session-list enrichment on very
     // large transcripts. Restore/paging reads use the expanded limit below;
     // prompt timestamps are optional metadata, not worth an entire index scan.
-    if (stats.size > 256 * 1024 * 1024) return undefined;
+    if (stats.size > SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES) return undefined;
     const pending = (async (): Promise<LastUserPromptSnapshot> => {
       let index: TranscriptIndex;
       try {

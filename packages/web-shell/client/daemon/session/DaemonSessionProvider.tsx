@@ -917,6 +917,9 @@ const TERMINAL_SESSION_HTTP_STATUSES = new Set([
   ...MISSING_SESSION_HTTP_STATUSES,
   413,
 ]);
+// Cap automatic retries for retryable HTTP 413 responses so a persistent
+// memory-pressure failure cannot loop forever rebuilding a large index.
+const MAX_RETRYABLE_PAYLOAD_TOO_LARGE_ATTEMPTS = 3;
 
 interface HeartbeatFailureState {
   session?: DaemonSessionClient;
@@ -2077,6 +2080,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         !restoreSessionId &&
         newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let retryablePayloadTooLargeAttempts = 0;
       let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let resyncSnapshotPending = false;
       let skipMetadataRefresh = false;
@@ -4145,6 +4149,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
+              retryablePayloadTooLargeAttempts = 0;
             }
             const currentRepair = liveJournalRepairRef.current;
             if (
@@ -4770,6 +4775,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
           }
           trajectoryLiveStore.invalidate(activeSession, 'stream_closed');
+          retryablePayloadTooLargeAttempts = 0;
           if (
             sessionRef.current !== activeSession &&
             !resyncRequested &&
@@ -5028,7 +5034,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             reconnectSessionId ??
             epochResetSessionIdRef.current;
           const isAuthFailure = isAuthFailureHttpError(error);
-          const isTerminal = isTerminalSessionHttpError(error);
+          const isRetryable413 = isRetryablePayloadTooLargeHttpError(error);
+          if (isRetryable413) {
+            retryablePayloadTooLargeAttempts += 1;
+          } else {
+            retryablePayloadTooLargeAttempts = 0;
+          }
+          const isTerminal =
+            isTerminalSessionHttpError(error) ||
+            (isRetryable413 &&
+              retryablePayloadTooLargeAttempts >
+                MAX_RETRYABLE_PAYLOAD_TOO_LARGE_ATTEMPTS);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
             locallyBoundPromptIdsRef.current.delete(failedSessionId);
             if (epochResetSessionIdRef.current === failedSessionId) {
@@ -7296,19 +7312,20 @@ function bumpSessionEventSignals(
   });
 }
 
-function isTerminalSessionHttpError(error: unknown): boolean {
-  if (isSessionArchivedHttpError(error)) return true;
+function isRetryablePayloadTooLargeHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
-  if (
+  return (
     status === 413 &&
     error instanceof DaemonHttpError &&
-    error.body &&
-    typeof error.body === 'object' &&
-    'retryable' in error.body &&
+    isRecord(error.body) &&
     error.body['retryable'] === true
-  ) {
-    return false;
-  }
+  );
+}
+
+function isTerminalSessionHttpError(error: unknown): boolean {
+  if (isSessionArchivedHttpError(error)) return true;
+  if (isRetryablePayloadTooLargeHttpError(error)) return false;
+  const status = extractHttpStatus(error);
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
 }
 

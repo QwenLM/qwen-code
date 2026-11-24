@@ -2455,11 +2455,34 @@ describe('SessionTranscriptReader', () => {
     );
   });
 
+  it('keeps structural estimate overflows terminal even when a heap budget cap is active', async () => {
+    const oversizedUuid = 'u-' + 'a'.repeat(8 * 1024);
+    await writeRecords([record(oversizedUuid, null, 'hello')]);
+    setSessionTranscriptMaxIndexEstimateBytesForTest(8 * 1024);
+    setSessionTranscriptAvailableHeapBudgetForTest(6 * 1024);
+    try {
+      let caught: unknown;
+      try {
+        await newReader().readPage(sessionId, { limit: 10 });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+      const err = caught as SessionTranscriptTooLargeError;
+      expect(err.dimension).toBe('index');
+      expect(err.measuredBytes).toBeGreaterThan(8 * 1024);
+      expect(err.retryable).toBeUndefined();
+    } finally {
+      setSessionTranscriptMaxIndexEstimateBytesForTest(undefined);
+      setSessionTranscriptAvailableHeapBudgetForTest(undefined);
+    }
+  });
+
   it('marks a mid-scan heap spike retryable and does not poison the prompt cache', async () => {
     const records = longTurn(4, () => 'answer');
     await writeRecords(records);
     const expectedPromptTime = records[0]?.timestamp;
-    setSessionTranscriptMaxIndexEstimateBytesForTest(64 * 1024);
+    setSessionTranscriptAvailableHeapBudgetForTest(64 * 1024);
     const original = process.memoryUsage.bind(process);
     let calls = 0;
     const spy = vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
@@ -2479,7 +2502,7 @@ describe('SessionTranscriptReader', () => {
       );
     } finally {
       spy.mockRestore();
-      setSessionTranscriptMaxIndexEstimateBytesForTest(undefined);
+      setSessionTranscriptAvailableHeapBudgetForTest(undefined);
     }
 
     expect(await reader.getLastUserPromptAt(sessionId)).toBe(
@@ -2580,7 +2603,7 @@ describe('SessionTranscriptReader', () => {
       await writeRecords(lines);
 
       if (budgetKind === 'index') {
-        setSessionTranscriptMaxIndexEstimateBytesForTest(48 * 1024);
+        setSessionTranscriptMaxIndexEstimateBytesForTest(16 * 1024);
       } else {
         setSessionTranscriptMaxLineBytesForTest(4 * 1024);
       }
