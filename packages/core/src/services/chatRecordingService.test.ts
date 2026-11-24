@@ -32,6 +32,9 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import * as storageUtils from '../utils/sessionStorageUtils.js';
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
+import { postProcessSummary } from './postCompactAttachments.js';
 import {
   collectSessionTurnState,
   computeInitialTurnFromHistory,
@@ -277,6 +280,73 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('getExistingTranscriptPath', () => {
+    const transcript =
+      '/test/project/root/.gemini/projects/test-project/chats/test-session-id.jsonl';
+
+    beforeEach(() => {
+      vi.mocked(path.basename).mockImplementation(
+        (file) => file.split('/').at(-1)!,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation((file) =>
+        file.startsWith('/'),
+      );
+    });
+
+    it('returns an existing local file and never creates it', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      const stat = vi.spyOn(fs, 'lstatSync').mockReturnValue({
+        isFile: () => true,
+        size: 100,
+      } as fs.Stats);
+      const managed = vi
+        .spyOn(storageUtils, 'readManagedExecutionEvidenceSync')
+        .mockReturnValue(false);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBe(transcript);
+      expect(stat).toHaveBeenCalledWith(transcript);
+      managed.mockReturnValue(true);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(undefined);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(false);
+      stat.mockReturnValue({ isFile: () => true, size: 0 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockReturnValue({ isFile: () => false, size: 100 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(fs.mkdirSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('does not broaden the lookup for a glob metacharacter in a session ID', async () => {
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-*');
+      const recorder = new ChatRecordingService(mockConfig, undefined, false);
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await recorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
+
+    it('does not point a rotated recorder at the new session', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      legacyRecorder.pinSessionIdentity('test-session-id');
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
   });
 
   type UserArgs = Parameters<ChatRecordingService['recordUserMessage']>;
@@ -654,6 +724,46 @@ describe('ChatRecordingService', () => {
 
       const record = await flushed();
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
+    });
+
+    it('persists the summary without its live transcript pointer', async () => {
+      vi.mocked(path.basename).mockReturnValue('session.jsonl');
+      const hint = buildCompactionTranscriptHint('/host/session.jsonl');
+      const liveSummary = postProcessSummary('Task summary', hint);
+      svc.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [
+          {
+            role: 'user',
+            parts: [{ text: 'Startup prelude' }, { text: liveSummary }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ],
+      });
+      const record = await flushed();
+      const checkpoint = JSON.stringify(record.systemPayload);
+      expect(checkpoint).not.toContain('<compaction-transcript-hint>');
+      expect(checkpoint).not.toContain('/host');
+      expect(checkpoint).not.toContain('session.jsonl');
+      expect(record.systemPayload).toMatchObject({
+        compressedHistory: [
+          {
+            parts: [
+              { text: 'Startup prelude' },
+              { text: postProcessSummary('Task summary') },
+            ],
+          },
+          {},
+        ],
+      });
+      expect(liveSummary).toContain(hint);
     });
 
     it('freezes compression snapshot containers against later live-history mutation', async () => {
