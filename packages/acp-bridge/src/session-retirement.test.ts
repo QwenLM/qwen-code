@@ -35,7 +35,9 @@ describe('native retirement ledger', () => {
     );
     expect(() =>
       ledger.begin({ ...identity, operationId: randomUUID() }),
-    ).toThrow();
+    ).toThrow(
+      expect.objectContaining({ code: 'session_retire_identity_conflict' }),
+    );
     expect(() =>
       ledger.settle({ ...identity, eventEpoch: randomUUID() }, 'retired'),
     ).toThrow();

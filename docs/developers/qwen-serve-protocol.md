@@ -4255,6 +4255,12 @@ cannot reserve the selected generation, the server returns HTTP 409 with
 `code: "turn_extension_generation_unavailable"`, `sessionId` and
 `definitivelyNotStarted: true`.
 
+An unverified transaction journal, including a quarantined corrupt record,
+prevents admission of a new protected generation. Inspect the Store recovery
+logs and verify the installed artifacts and transaction state before clearing
+the quarantined record. A retry alone does not establish that the Store is
+consistent.
+
 Every participating local Store writer checks live readers under the artifact
 commit lock. An install, removal or activation change against a held Store
 fails with `extension_store_in_use` by default. On a global managed mutation
@@ -4300,7 +4306,7 @@ The daemon records a source workspace fence before sending the strict close
 request. It admits the operation only when queued prompts, runtime holds,
 permission requests, and native attachment activity are absent. Committed
 attachments in the native attachment store are also a refusal because the
-workspace export does not transport that store. The owning ACP child must negotiate operation-bound retirement receipts. An older child receives no close request. A live session without a recorder can explicitly decline the operation and stay open. Files managed directly in the
+workspace export does not transport that store. The owning ACP child must negotiate operation-bound retirement receipts. An older child receives no close request. A live session can explicitly decline before close if its recorder is absent or its initial flush fails. Files managed directly in the
 workspace remain the integrator's responsibility. An external writer must be
 fenced by that integrator before treating an archived workspace as consistent.
 

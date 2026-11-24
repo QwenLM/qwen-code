@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import { statfsSync, type Dirent } from 'node:fs';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isNodeError } from '../utils/errors.js';
@@ -57,7 +58,12 @@ async function withSocketDirectory<T>(
   directory: string,
   probe: (alias: string) => Promise<T>,
 ): Promise<T> {
-  const temp = await fs.mkdtemp('/tmp/qwen-er-');
+  const prefix = path.join(tmpdir(), 'qwen-er-');
+  // Leave space for mkdtemp's suffix, the alias, the UUID and the terminating NUL.
+  const socketPath = path.join(prefix + 'XXXXXX', 'r', '0'.repeat(36));
+  const temp = await fs.mkdtemp(
+    Buffer.byteLength(socketPath) < 104 ? prefix : '/tmp/qwen-er-',
+  );
   try {
     const alias = path.join(temp, 'r');
     await fs.symlink(directory, alias);

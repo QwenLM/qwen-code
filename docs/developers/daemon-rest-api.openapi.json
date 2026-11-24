@@ -3670,6 +3670,10 @@
           "sessionId": {
             "type": "string"
           },
+          "eventEpoch": {
+            "type": "string",
+            "description": "Epoch of the live native session's event stream."
+          },
           "workspaceCwd": {
             "type": "string"
           },

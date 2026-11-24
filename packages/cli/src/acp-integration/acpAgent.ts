@@ -5087,7 +5087,18 @@ class QwenAgent implements Agent {
     if (opts?.retirement && !recorder)
       return { closed: false, holds: [], retirementUnavailable: true };
     const requireFlush = opts?.requireFlush === true;
-    if (requireFlush) await recorder?.flush();
+    if (requireFlush) {
+      try {
+        await recorder?.flush();
+      } catch (error) {
+        if (!opts?.retirement) throw error;
+        debugLogger.warn(
+          'Native retirement refused before close: recorder flush failed',
+          error,
+        );
+        return { closed: false, holds: [], retirementUnavailable: true };
+      }
+    }
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     // The memory flush below spends only what the close budget has left: the
     // bridge sizes drainTimeoutMs under its own outer wait.

@@ -30313,6 +30313,15 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
         retirementOperationId: request.retirementOperationId,
         retirementUnavailable: true,
       });
+      recording.flush.mockRejectedValueOnce(new Error('recorder flush failed'));
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, request),
+      ).resolves.toMatchObject({
+        closed: false,
+        retirementOperationId: request.retirementOperationId,
+        retirementUnavailable: true,
+      });
+      expect(recording.close).not.toHaveBeenCalled();
       await expect(
         agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, request),
       ).resolves.toEqual({

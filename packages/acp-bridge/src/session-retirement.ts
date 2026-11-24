@@ -133,7 +133,22 @@ export class SessionRetirementLedger {
   }
 
   begin(identity: SessionRetirementIdentity): void {
-    this.write({ ...identity, state: 'retiring' }, true);
+    try {
+      this.write({ ...identity, state: 'retiring' }, true);
+    } catch (error) {
+      if (
+        error === null ||
+        typeof error !== 'object' ||
+        !('code' in error) ||
+        error.code !== 'EEXIST'
+      )
+        throw error;
+      throw new SessionRetirementError(
+        'session_retire_identity_conflict',
+        'A retirement already owns this native session',
+        identity,
+      );
+    }
   }
 
   releaseNotStarted(identity: SessionRetirementIdentity): void {

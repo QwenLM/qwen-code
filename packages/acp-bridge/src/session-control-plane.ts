@@ -13956,6 +13956,11 @@ export function createSessionControlPlane(
                     identity,
                   );
                 } catch (error) {
+                  if (
+                    error instanceof SessionRetirementError &&
+                    error.code === 'session_retire_identity_conflict'
+                  )
+                    throw error;
                   const recorded = retirementLedger.read(sessionId);
                   if (
                     recorded?.operationId !== operationId ||

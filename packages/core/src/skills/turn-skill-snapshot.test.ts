@@ -11,6 +11,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { parseAgentPluginSkill } from '../extension/agent-plugins-v1/skills.js';
 import { SkillTool } from '../tools/skill.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import { partToString } from '../utils/partUtils.js';
@@ -74,6 +75,23 @@ describe('turn skill snapshot', () => {
     leases.push(lease);
     return lease.snapshot;
   }
+
+  it('captures Agent Plugins v1 skills with their original discovery semantics', async () => {
+    const filePath = path.join(skillDirectory, 'SKILL.md');
+    const contents =
+      '---\nname: skill\ndescription: Plugin Skill\nallowed-tools: Read Bash\n---\nOriginal instructions\n';
+    await fs.writeFile(filePath, contents);
+    const parsed = parseAgentPluginSkill(contents, filePath, 'skill');
+
+    const snapshot = await capture({
+      ...parsed,
+      name: 'fixture:skill',
+      authoredName: 'skill',
+      extensionName: 'fixture',
+    });
+    expect(snapshot.skills[0]?.body).toBe('Original instructions');
+    expect(snapshot.skills[0]?.allowedTools).toBeUndefined();
+  });
 
   function setupTool(initial: SkillConfig, bundled?: SkillConfig) {
     let discovered = initial;

@@ -12,6 +12,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { realpathNearestExisting } from '../utils/paths.js';
+import { parseAgentPluginSkill } from '../extension/agent-plugins-v1/skills.js';
 import { parseSkillContent } from './skill-load.js';
 import { SkillActivationRegistry } from './skill-activation.js';
 import type { SkillManager } from './skill-manager.js';
@@ -291,7 +292,13 @@ export async function prepareTurnSkillSnapshot(
       const filePath = path.join(target, path.basename(original.filePath));
       const contents = await fs.readFile(filePath, 'utf8');
       let parsed: SkillConfig;
-      if (original.level === 'extension') {
+      if (original.extensionSkillFormat === 'agent-plugins-v1') {
+        parsed = parseAgentPluginSkill(
+          contents,
+          filePath,
+          path.basename(originalDirectory),
+        );
+      } else if (original.level === 'extension') {
         parsed = parseSkillContent(contents, filePath);
       } else if (options?.skillManager) {
         parsed = options.skillManager.parseSkillContent(
