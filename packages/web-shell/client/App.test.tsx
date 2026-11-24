@@ -61867,6 +61867,35 @@ describe('overload pause guards in App', () => {
     ]);
   });
 
+  it('returns false for an ordinary first prompt while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = undefined;
+    const onSubmitBefore = vi.fn();
+    const toasts: Array<[string, string]> = [];
+    renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'ordinary first prompt';
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = await testState.latestChatEditorProps?.onSubmit(
+        'ordinary first prompt',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('ordinary first prompt');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
   it('keeps /fork on the existing ACP runtime while paused', async () => {
     armOverload();
     mockConnection.sessionId = 'source-session';
