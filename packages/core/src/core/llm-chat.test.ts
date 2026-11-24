@@ -78,6 +78,8 @@ import {
   getApiHistoryPromptId,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { buildCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
+import { postProcessSummary } from '../services/postCompactAttachments.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
@@ -340,6 +342,33 @@ describe('LlmChat', async () => {
   let chat: LlmChat;
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
+
+  it('omits an inherited transcript hint in a chat without its recorder', () => {
+    const hint = buildCompactionTranscriptHint('/parent/session.jsonl');
+    const summary = postProcessSummary('Earlier summary', hint);
+    const parentHistory: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'Startup prelude' }, { text: summary }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: `This literal example should survive: ${hint}` }],
+      },
+    ];
+    const child = new LlmChat(mockConfig, {}, parentHistory);
+
+    expect(child.getHistory()[0].parts).toEqual([
+      { text: 'Startup prelude' },
+      { text: postProcessSummary('Earlier summary') },
+    ]);
+    expect(child.getHistory()[2]).toEqual(parentHistory[2]);
+    expect(parentHistory[0].parts?.[1].text).toBe(summary);
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
