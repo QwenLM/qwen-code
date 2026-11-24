@@ -143,6 +143,7 @@ import {
   persistAndTruncateToolResult,
 } from '../tools/truncation.js';
 import {
+  applyPermissionRequestHookUpdates,
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
 } from './permission-helpers.js';
@@ -4746,6 +4747,13 @@ export class CoreToolScheduler {
                 (!hookResult.shouldAllow || allowApplies)
               ) {
                 if (hookResult.shouldAllow) {
+                  if (hookResult.updatedPermissions) {
+                    await applyPermissionRequestHookUpdates(
+                      hookResult.updatedPermissions,
+                      this.config.getOnPersistPermissionRule?.(),
+                      this.config.getPermissionManager?.(),
+                    );
+                  }
                   if (planShellDecision.classification !== 'not-applicable') {
                     const approval = await runInRequestGoalContext(
                       reqInfo,

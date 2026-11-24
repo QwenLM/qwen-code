@@ -1364,7 +1364,10 @@ describe('CoreToolScheduler', () => {
       Partial<
         Pick<
           PermissionManager,
-          'hasRelevantRules' | 'hasMatchingAskRule' | 'evaluate'
+          | 'hasRelevantRules'
+          | 'hasMatchingAskRule'
+          | 'evaluate'
+          | 'addSessionAllowRule'
         >
       >;
     deferredHiddenNames?: ReadonlySet<string>;
@@ -6839,6 +6842,57 @@ describe('CoreToolScheduler', () => {
       ToolConfirmationOutcome.ProceedOnce,
     );
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('adds the rules a PermissionRequest hook returns with its allow', async () => {
+    const addSessionAllowRule = vi.fn();
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+
+    await scheduleAndSettle(
+      createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(
+          askingTool({
+            kind: Kind.Execute,
+            getConfirmationDetails: vi
+              .fn()
+              .mockResolvedValue(
+                execDetails(
+                  'Run command',
+                  'npm test',
+                  'npm',
+                  vi.fn().mockResolvedValue(undefined),
+                ),
+              ),
+            execute,
+          }),
+        ),
+        approvalMode: ApprovalMode.DEFAULT,
+        permissionManager: {
+          isToolEnabled: vi.fn().mockResolvedValue(true),
+          findMatchingDenyRule: () => undefined,
+          hasRelevantRules: () => false,
+          evaluate: vi.fn().mockResolvedValue('default'),
+          hasMatchingAskRule: () => false,
+          addSessionAllowRule,
+        },
+        messageBus: permissionRequestHookBus({
+          behavior: 'allow',
+          updatedPermissions: [
+            {
+              type: 'addRules',
+              rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+              behavior: 'allow',
+              destination: 'session',
+            },
+          ],
+        }),
+        disableHooks: false,
+      }),
+      shellRequest('hook-permission-updates', 'npm test'),
+    );
+
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Bash(npm test)');
     expect(execute).toHaveBeenCalledOnce();
   });
 

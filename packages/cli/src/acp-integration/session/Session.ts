@@ -356,6 +356,7 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { applyPermissionRequestHookUpdates } from '@qwen-code/qwen-code-core/core/permission-helpers.js';
 import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -19238,6 +19239,13 @@ export class Session implements SessionContext {
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
+                  if (hookResult.updatedPermissions) {
+                    await applyPermissionRequestHookUpdates(
+                      hookResult.updatedPermissions,
+                      this.config.getOnPersistPermissionRule?.(),
+                      this.config.getPermissionManager?.(),
+                    );
+                  }
                   if (planShellDecision.classification !== 'not-applicable') {
                     const approval = await validatePlanModeShellApproval({
                       config: this.config,

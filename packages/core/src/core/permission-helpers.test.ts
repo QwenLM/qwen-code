@@ -8,9 +8,11 @@ import path from 'node:path';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyPermissionRequestHookUpdates,
   buildPermissionCheckContext,
   persistPermissionOutcome,
 } from './permission-helpers.js';
+import type { PermissionManager } from '../permissions/permission-manager.js';
 
 describe('buildPermissionCheckContext', () => {
   it('uses an absolute directory as the permission cwd', () => {
@@ -188,6 +190,86 @@ describe('persistPermissionOutcome', () => {
       'project',
       'allow',
       'Bash(git status)',
+    );
+  });
+});
+
+describe('applyPermissionRequestHookUpdates', () => {
+  const setup = () => {
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const pm = {
+      addSessionAllowRule: vi.fn(),
+      addSessionDenyRule: vi.fn(),
+      addSessionAskRule: vi.fn(),
+      addPersistentRule: vi.fn(),
+    };
+    const apply = (updates: unknown[]) =>
+      applyPermissionRequestHookUpdates(
+        updates,
+        persist,
+        pm as unknown as PermissionManager,
+      );
+    return { persist, pm, apply };
+  };
+  const addRules = (
+    behavior: string,
+    destination: string,
+    rules: unknown[] = [{ toolName: 'Bash', ruleContent: 'npm test' }],
+  ) => ({ type: 'addRules', rules, behavior, destination });
+
+  it('adds session rules in memory only', async () => {
+    const { persist, pm, apply } = setup();
+    await apply([
+      addRules('allow', 'session'),
+      addRules('deny', 'session', [{ toolName: 'Bash', ruleContent: 'rm *' }]),
+      addRules('ask', 'session', [{ toolName: 'WebFetch' }]),
+    ]);
+    expect(pm.addSessionAllowRule).toHaveBeenCalledWith('Bash(npm test)');
+    expect(pm.addSessionDenyRule).toHaveBeenCalledWith('Bash(rm *)');
+    expect(pm.addSessionAskRule).toHaveBeenCalledWith('WebFetch');
+    expect(persist).not.toHaveBeenCalled();
+    expect(pm.addPersistentRule).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['projectSettings', 'project'],
+    ['localSettings', 'project'],
+    ['userSettings', 'user'],
+  ])('persists %s rules to the %s scope', async (destination, scope) => {
+    const { persist, pm, apply } = setup();
+    await apply([addRules('deny', destination)]);
+    expect(persist).toHaveBeenCalledWith(scope, 'deny', 'Bash(npm test)');
+    expect(pm.addPersistentRule).toHaveBeenCalledWith('Bash(npm test)', 'deny');
+  });
+
+  it('skips unsupported entries and rules without a tool name', async () => {
+    const { persist, pm, apply } = setup();
+    await apply([
+      { type: 'setMode', mode: 'acceptEdits', destination: 'session' },
+      addRules('allow', 'elsewhere'),
+      addRules('maybe', 'session'),
+      { type: 'addRules', behavior: 'allow', destination: 'session' },
+      addRules('allow', 'session', [{ ruleContent: 'npm test' }, null]),
+      null,
+    ]);
+    expect(pm.addSessionAllowRule).not.toHaveBeenCalled();
+    expect(pm.addSessionAskRule).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('keeps going when a rule cannot be persisted', async () => {
+    const { persist, pm, apply } = setup();
+    persist.mockRejectedValueOnce(new Error('read-only settings'));
+    await apply([
+      addRules('allow', 'projectSettings', [
+        { toolName: 'Bash', ruleContent: 'npm test' },
+        { toolName: 'Bash', ruleContent: 'npm run lint' },
+      ]),
+    ]);
+    expect(pm.addPersistentRule).toHaveBeenCalledOnce();
+    expect(pm.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(npm run lint)',
+      'allow',
     );
   });
 });
