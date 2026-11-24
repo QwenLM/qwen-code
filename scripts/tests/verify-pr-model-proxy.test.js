@@ -1185,7 +1185,7 @@ describe('local container recipe pins', () => {
         return { text: current, wrapped, overflow };
       };
       const trailingShellSuffix =
-        /(?:\s*(?:(?:\d*(?:>>?|<<?|<>&|>&|&>>?))\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]+)|&|;)\s*)*$/;
+        /^(?:\s*(?:(?:\d*(?:>>?|<<?|<>&|>&|&>>?))\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]+)|&|;)\s*)*$/;
       const stripGroupedTail = (text, open, close) => {
         if (!text.startsWith(open)) return null;
         let depth = 0;

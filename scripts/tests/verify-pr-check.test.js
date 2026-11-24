@@ -4811,5 +4811,121 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(mismatchedTrustResult.errors.join('\n')).toMatch(
       /execution-record\.json prTrust .* does not match host trustClassification\.prTrust/,
     );
+
+    // 8l. Nested symlink (<clone>/sub/alias -> <clone>/tmp -> <external-box>)
+    // still encloses both the clone root and the external container when
+    // --context-root is omitted.
+    mkdirSync(join(symlinkedClone, 'sub'), { recursive: true });
+    symlinkSync(
+      join(symlinkedClone, 'tmp'),
+      join(symlinkedClone, 'sub', 'alias'),
+    );
+    const nestedRoundDir = join(
+      symlinkedClone,
+      'sub',
+      'alias',
+      basename(symRoundDir),
+    );
+    for (const [label, ctxCandidate] of [
+      ['nested clone-root context', cloneRootCtx],
+      ['nested external-box sibling context', siblingCtx],
+    ]) {
+      const res = run([
+        '--context',
+        ctxCandidate,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        nestedRoundDir,
+      ]);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // 8m. Host --context with preflight executionApproval contradicts a PR-side
+    // rewrite of boundary.json to mode:"container".
+    expect(
+      executionApprovalErrors(
+        JSON.stringify({ mode: 'container', detail: 'forged' }),
+        {
+          headRefOid: HEAD,
+          executionApproval: {
+            mode: 'waived',
+            source: 'local-trust',
+            basis: 'own-pr',
+            by: 'wenshao',
+            permission: 'admin',
+            head: HEAD,
+            round: 1,
+            reason: 'host round',
+          },
+        },
+        { contextProvided: true, contextDigestVerified: true },
+      ).join('\n'),
+    ).toMatch(/contradicts boundary\.json mode container/);
+
+    // 8n. On case-insensitive filesystems (macOS/Windows), casing variants of
+    // the PR clone path cannot bypass in-clone --context / --execution-record
+    // refusals.
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      const mixedClone = join(base, 'MixedCaseClone');
+      const mixedDir = join(
+        mixedClone,
+        'tmp',
+        'pr17185-verify-20261124-032000',
+      );
+      mkdirSync(join(mixedDir, 'evidence'), { recursive: true });
+      mkdirSync(join(mixedClone, 'tmp', 'verify-context'), { recursive: true });
+      writeFileSync(join(mixedDir, 'report.md'), validFiles().report);
+      writeFileSync(join(mixedDir, 'verdict.txt'), validFiles().verdict);
+      writeFileSync(join(mixedDir, 'assertions.json'), validFiles().assertions);
+      writeFileSync(
+        join(mixedDir, 'boundary.json'),
+        JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+      );
+      writeFileSync(join(mixedDir, 'evidence', '01-ab-cells.png'), 'png');
+      const mixedCtx = join(
+        mixedClone,
+        'tmp',
+        'verify-context',
+        'pr17185.json',
+      );
+      writeFileSync(mixedCtx, ctxText);
+      const mixedRec = join(mixedClone, 'forged-rec.json');
+      writeFileSync(mixedRec, boundRecText);
+
+      const flippedCtx = mixedCtx.replace('MixedCaseClone', 'mixedcaseclone');
+      const flippedRec = mixedRec.replace('MixedCaseClone', 'mixedcaseclone');
+      const caseCtxRes = run([
+        '--context',
+        flippedCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        mixedDir,
+      ]);
+      expect(caseCtxRes.status).toBe(1);
+      expect(caseCtxRes.stderr).toMatch(/must not point inside/);
+
+      const caseRecRes = run([
+        '--context',
+        hostCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        flippedRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        mixedDir,
+      ]);
+      expect(caseRecRes.status).toBe(1);
+      expect(caseRecRes.stderr).toMatch(/must not point inside/);
+    }
   });
 });

@@ -2383,6 +2383,31 @@ describe.skipIf(process.platform === 'win32')(
           (line) => `<textarea>\n${line}\n</textarea>`,
         ],
         [
+          'backtick fence inside a <details> Type-6 HTML block cannot flip fence parity',
+          (line) =>
+            `<details>\nlog\n\`\`\`\n</details>\n\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          'backtick fence inside a <div> Type-6 HTML block cannot flip fence parity',
+          (line) => `<div>\n\`\`\`\n</div>\n\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          'backtick fence inside a custom <x-note> Type-7 HTML block cannot flip fence parity',
+          (line) => `<x-note>\n\`\`\`\n</x-note>\n\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          '<pre> with trailing NBSP is not a Type-1 HTML block and cannot swallow a fence opener',
+          (line) => `<pre\u00a0>\n\`\`\`</pre>\n${line}\n\`\`\``,
+        ],
+        [
+          '<pre> with trailing form feed is not a Type-1 HTML block',
+          (line) => `<pre\u000c>\n\`\`\`</pre>\n${line}\n\`\`\``,
+        ],
+        [
+          'lowercase <!doctype Type-4 HTML block cannot flip fence parity',
+          (line) => `<!doctype html\n\`\`\`\n>\n\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
           'tilde-fenced marker with a longer close is only an example',
           (line) => `~~~text\n${line}\nDo not approve this example.\n~~~~`,
         ],
@@ -4151,6 +4176,74 @@ exec ${JSON.stringify(realGit)} "$@"
     }
     writeFileSync(excludePath, '# col-0 comment\n   \n\n');
     expect(inspectInfoExclude(dir).hostile).toBe(false);
+
+    // On case-insensitive filesystems (macOS/Windows), flipping directory case
+    // must not bypass --context-out or --state-root in-clone containment.
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      const { dir: mixedRepo, base: b2, head: h2 } = makeRepo();
+      const repoName = basename(mixedRepo);
+      const flippedRepo = join(dirname(mixedRepo), repoName.toUpperCase());
+      const env2 = installFakeGh(
+        {
+          ...snapshotFor({ base: b2, head: h2 }),
+          author: { login: 'maintainer' },
+        },
+        reviewPages(),
+        {
+          user: { login: 'maintainer' },
+          permissions: { maintainer: { permission: 'admin' } },
+        },
+      );
+      const flippedOut = join(flippedRepo, 'leaked-host-ctx.json');
+      const outRes = runPrepare(
+        mixedRepo,
+        [
+          '42',
+          '--repo',
+          REPO,
+          '--execution',
+          'host',
+          '--trust-pr-head',
+          '--round',
+          '1',
+          '--reason',
+          'casing probe',
+          '--context-out',
+          flippedOut,
+        ],
+        env2,
+      );
+      expect(outRes.status).toBe(3);
+      expect(outRes.stderr).toMatch(/inside the PR clone/);
+      expect(existsSync(join(mixedRepo, 'leaked-host-ctx.json'))).toBe(false);
+
+      const stateInside = join(mixedRepo, 'in-clone-state');
+      mkdirSync(stateInside, { recursive: true });
+      const flippedState = join(flippedRepo, 'in-clone-state');
+      const stateRes = runPrepare(
+        mixedRepo,
+        [
+          '42',
+          '--repo',
+          REPO,
+          '--execution',
+          'host',
+          '--round',
+          '1',
+          '--reason',
+          'casing state probe',
+          '--approval',
+          'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-999',
+          '--state-root',
+          flippedState,
+          '--context-out',
+          join(makeTmpDir(), 'ctx.json'),
+        ],
+        env2,
+      );
+      expect(stateRes.status).toBe(3);
+      expect(stateRes.stderr).toMatch(/outside the PR clone/);
+    }
   });
 
   // git status trusts the index: skip-worktree / assume-unchanged entries

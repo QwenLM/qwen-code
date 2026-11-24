@@ -29,6 +29,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   readSync,
   realpathSync,
   statSync,
@@ -197,14 +198,21 @@ export function isFilesystemRoot(root) {
 
 // Root-aware containment. A filesystem root contains every path, so it must
 // fail closed rather than compare against '//' — no real path starts with
+const CASE_INSENSITIVE_FS =
+  process.platform === 'darwin' || process.platform === 'win32';
+const normalizeFsPath = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
+const realPath = (p) => realpathSync.native(p);
+
 // '//', which silently disabled the refusal for a round dir directly under a
 // root-level tmp/ (R17-1). Both the --context refusal and the --context-root
 // containment test use this so the two stay consistent.
 function withinRoot(root, p) {
+  if (isFilesystemRoot(root)) return true;
+  const normRoot = normalizeFsPath(root);
+  const normP = normalizeFsPath(p);
   return (
-    isFilesystemRoot(root) ||
-    p === root ||
-    p.startsWith(root.endsWith(sep) ? root : root + sep)
+    normP === normRoot ||
+    normP.startsWith(normRoot.endsWith(sep) ? normRoot : normRoot + sep)
   );
 }
 
@@ -1140,6 +1148,16 @@ export function executionApprovalErrors(
     return [];
   }
   if (
+    declared?.mode === 'container' &&
+    snapshot?.executionApproval &&
+    typeof snapshot.executionApproval === 'object' &&
+    !Array.isArray(snapshot.executionApproval)
+  ) {
+    return [
+      `host --context carries a preflight executionApproval for mode ${JSON.stringify(snapshot.executionApproval.mode)}, which contradicts boundary.json mode container; re-run prepare --execution container instead of rewriting boundary.json`,
+    ];
+  }
+  if (
     !declared ||
     !['vm', 'waived'].includes(declared.mode) ||
     (declared.mode === 'vm' && declared.backend === 'provider-vm')
@@ -1922,8 +1940,8 @@ function main(argv) {
     let realRoot;
     let realDir;
     try {
-      realRoot = realpathSync(contextRoot);
-      realDir = realpathSync(dir);
+      realRoot = realPath(contextRoot);
+      realDir = realPath(dir);
     } catch {
       process.stderr.write(
         `verify-pr check: --context-root ${contextRoot} must resolve to a directory\n\n${HELP}`,
@@ -2036,25 +2054,57 @@ function main(argv) {
   };
   const deriveTrustRoots = () => {
     try {
-      if (contextRoot) return { roots: [realpathSync.native(contextRoot)] };
+      if (contextRoot) return { roots: [realPath(contextRoot)] };
       const roots = new Set();
-      const realDir = realpathSync.native(dir);
+      const realDir = realPath(dir);
       roots.add(realDir);
-      const realContainer = dirname(realDir);
-      const lexicalContainer = dirname(resolve(dir));
       const realDirPrNumber =
         dirPrNumber ?? /^pr(\d+)-verify-/.exec(basename(realDir))?.[1];
-      if (realDirPrNumber && basename(realContainer) === 'tmp') {
-        roots.add(dirname(realContainer));
+      if (!realDirPrNumber) return { roots: [...roots] };
+
+      const recordContainer = (containerPath) => {
+        if (basename(containerPath) === 'tmp') {
+          roots.add(realPath(dirname(containerPath)));
+          roots.add(realPath(containerPath));
+        }
+      };
+
+      // Walk the OS path step-by-step without collapsing symlink/.. lexically
+      // so every intermediate symlink container (including nested
+      // <clone>/sub/alias -> <clone>/tmp -> <external-box>) is observed and
+      // enclosed whenever the remaining segment is the artifact directory leaf.
+      const rawAbsolute = dir.startsWith(sep) ? dir : join(process.cwd(), dir);
+      const queue = rawAbsolute.split(sep).filter((part) => part !== '');
+      let cur = sep;
+      let linkHops = 0;
+      while (queue.length > 0) {
+        const part = queue.shift();
+        if (part === '.') continue;
+        if (part === '..') {
+          cur = dirname(cur);
+        } else {
+          cur = cur === sep ? `${sep}${part}` : `${cur}${sep}${part}`;
+        }
+        if (queue.length === 1) recordContainer(cur);
+        const st = lstatSync(cur);
+        if (st.isSymbolicLink()) {
+          linkHops += 1;
+          if (linkHops > 40) {
+            return {
+              error: `could not resolve artifact directory ${dir}: too many symlink hops`,
+            };
+          }
+          const target = readlinkSync(cur);
+          const targetParts = target.split(sep).filter((p) => p !== '');
+          if (target.startsWith(sep)) {
+            cur = sep;
+          } else {
+            cur = dirname(cur);
+          }
+          queue.unshift(...targetParts);
+        }
       }
-      if (realDirPrNumber && basename(lexicalContainer) === 'tmp') {
-        roots.add(realpathSync.native(dirname(lexicalContainer)));
-        // When <clone>/tmp is a symlink to an external container directory,
-        // PR-writable sibling files (e.g. verify-context/pr<n>.json) live
-        // inside realContainer too, so both the clone root and realContainer
-        // must be enclosed in the refusal set.
-        roots.add(realContainer);
-      }
+      recordContainer(dirname(realDir));
       return { roots: [...roots] };
     } catch (error) {
       return {
@@ -2079,7 +2129,7 @@ function main(argv) {
     // being followed (R12-1).
     let realContext;
     try {
-      realContext = realpathSync(contextPath);
+      realContext = realPath(contextPath);
     } catch {
       realContext = resolve(contextPath);
     }
@@ -2252,7 +2302,7 @@ function main(argv) {
   if (executionRecordPath) {
     let realExecRecord;
     try {
-      realExecRecord = realpathSync(executionRecordPath);
+      realExecRecord = realPath(executionRecordPath);
     } catch {
       realExecRecord = resolve(executionRecordPath);
     }

@@ -1149,12 +1149,25 @@ function maintainerPermission(owner, name, login) {
   return { permission };
 }
 
+const CASE_INSENSITIVE_FS =
+  process.platform === 'darwin' || process.platform === 'win32';
+const normalizeFsPath = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
+const realPath = (p) => realpathSync.native(p);
+function isSameOrWithin(root, candidate) {
+  const normRoot = normalizeFsPath(root);
+  const normCandidate = normalizeFsPath(candidate);
+  return (
+    normCandidate === normRoot ||
+    normCandidate.startsWith(normRoot.endsWith(sep) ? normRoot : normRoot + sep)
+  );
+}
+
 function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
   let stateRoot;
   try {
-    stateRoot = realpathSync(options.stateRoot);
-    const realClone = realpathSync(cloneRoot);
-    if (stateRoot === realClone || stateRoot.startsWith(realClone + sep)) {
+    stateRoot = realPath(options.stateRoot);
+    const realClone = realPath(cloneRoot);
+    if (isSameOrWithin(realClone, stateRoot)) {
       return {
         error: '--state-root must be a trusted directory outside the PR clone',
       };
@@ -1162,11 +1175,8 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
     const path = watchStatePath(stateRoot, snapshot.number);
     // A trusted root can hold a nested .qwen/tmp symlink back into the PR
     // clone; canonicalize the leaf's whole route before accepting the file.
-    const resolvedPath = realpathSync(path);
-    if (
-      resolvedPath === realClone ||
-      resolvedPath.startsWith(realClone + sep)
-    ) {
+    const resolvedPath = realPath(path);
+    if (isSameOrWithin(realClone, resolvedPath)) {
       return {
         error: '--state-root must be a trusted directory outside the PR clone',
       };
@@ -1211,13 +1221,23 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
   };
 }
 
+// CommonMark 0.31.2 §4.6 HTML block start patterns (types 6 and 7).
+const HTML_BLOCK_TYPE6_START =
+  /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>]|\/?>|$)/i;
+const HTML_BLOCK_TYPE7_START =
+  /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*\/?>|<\/[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$/;
+
 function directApprovalMarkers(body) {
   const markers = [];
   let fence = null;
   let htmlEnd = null;
   for (const line of body.replace(/\r\n?/g, '\n').split('\n')) {
     if (htmlEnd) {
-      if (htmlEnd.test(line)) htmlEnd = null;
+      if (htmlEnd === 'blank') {
+        if (/^[ \t]*$/.test(line)) htmlEnd = null;
+      } else if (htmlEnd.test(line)) {
+        htmlEnd = null;
+      }
       continue;
     }
     const run = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
@@ -1242,11 +1262,10 @@ function directApprovalMarkers(body) {
         continue;
       }
     }
-    // CommonMark §4.6 HTML blocks (types 1–5): lines inside <pre>/<script>/
-    // <style>/<textarea>, multi-line <!-- ... -->, <? ... ?>, <!DECL ...>,
-    // or <![CDATA[ ... ]]> must neither open/flip code fences nor supply an
-    // approval marker.
-    if (/^ {0,3}<(?:pre|script|style|textarea)(?:[\s>]|$)/i.test(line)) {
+    // CommonMark 0.31.2 §4.6 HTML blocks (all types 1–7): lines inside any
+    // HTML block must neither open/flip code fences nor supply an approval
+    // marker. Type 1 strictly allows ASCII space/tab/>/EOL (not Unicode \s).
+    if (/^ {0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)/i.test(line)) {
       if (!/<\/(?:pre|script|style|textarea)>/i.test(line)) {
         htmlEnd = /<\/(?:pre|script|style|textarea)>/i;
       }
@@ -1269,12 +1288,19 @@ function directApprovalMarkers(body) {
       if (!line.includes('?>')) htmlEnd = /\?>/;
       continue;
     }
-    if (/^ {0,3}<![A-Z]/.test(line)) {
+    if (/^ {0,3}<![A-Za-z]/.test(line)) {
       if (!line.includes('>')) htmlEnd = />/;
       continue;
     }
     if (/^ {0,3}<!\[CDATA\[/.test(line)) {
       if (!line.includes(']]>')) htmlEnd = /\]\]>/;
+      continue;
+    }
+    if (
+      HTML_BLOCK_TYPE6_START.test(line) ||
+      HTML_BLOCK_TYPE7_START.test(line)
+    ) {
+      htmlEnd = 'blank';
       continue;
     }
   }
@@ -1422,13 +1448,14 @@ function captureWriteRecord(path, label, next, expectedParent = null) {
   const leafError = singleLinkFileError(path, label);
   if (leafError) return { error: leafError };
   try {
-    record.parentReal = realpathSync(dirname(path));
+    record.parentReal = realPath(dirname(path));
   } catch (error) {
     return { error: `could not inspect the ${label} parent: ${error.message}` };
   }
   if (
     record.expectedParent !== null &&
-    record.parentReal !== record.expectedParent
+    normalizeFsPath(record.parentReal) !==
+      normalizeFsPath(record.expectedParent)
   ) {
     return {
       error: `refusing to write the ${label} through a redirected parent directory: ${path}`,
@@ -1456,10 +1483,11 @@ function writeRecordError(record) {
   const leafError = singleLinkFileError(record.path, record.label);
   if (leafError) return leafError;
   try {
-    const parentReal = realpathSync(dirname(record.path));
+    const parentReal = realPath(dirname(record.path));
     if (
-      parentReal !== record.parentReal ||
-      (record.expectedParent !== null && parentReal !== record.expectedParent)
+      normalizeFsPath(parentReal) !== normalizeFsPath(record.parentReal) ||
+      (record.expectedParent !== null &&
+        normalizeFsPath(parentReal) !== normalizeFsPath(record.expectedParent))
     ) {
       return `refusing to write the ${record.label} through a redirected parent directory: ${record.path}`;
     }
@@ -1702,11 +1730,12 @@ function main(argv) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
   try {
-    artifactCanonical = realpathSync(artifacts);
+    artifactCanonical = realPath(artifacts);
     if (
       !lstatSync(artifacts).isDirectory() ||
       lstatSync(artifacts).isSymbolicLink() ||
-      artifactCanonical !== join(realpathSync(tmpDir), basename(artifacts))
+      normalizeFsPath(artifactCanonical) !==
+        normalizeFsPath(join(realPath(tmpDir), basename(artifacts)))
     ) {
       return fail(
         3,
@@ -1854,8 +1883,8 @@ function main(argv) {
     let outPath = null;
     if (options.contextOut) {
       outPath = resolve(options.contextOut);
-      const realRoot = realpathSync(root);
-      if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+      const realRoot = realPath(root);
+      if (isSameOrWithin(realRoot, outPath)) {
         return fail(
           3,
           `refusing to write the host snapshot inside the PR clone: ${outPath}`,
@@ -1869,19 +1898,16 @@ function main(argv) {
           if (next === existingParent) break;
           existingParent = next;
         }
-        const realExisting = realpathSync(existingParent);
-        if (
-          realExisting === realRoot ||
-          realExisting.startsWith(realRoot + sep)
-        ) {
+        const realExisting = realPath(existingParent);
+        if (isSameOrWithin(realRoot, realExisting)) {
           return fail(
             3,
             `refusing to write the host snapshot inside the PR clone: ${outPath}`,
           );
         }
         mkdirSync(parent, { recursive: true });
-        const realParent = realpathSync(parent);
-        if (realParent === realRoot || realParent.startsWith(realRoot + sep)) {
+        const realParent = realPath(parent);
+        if (isSameOrWithin(realRoot, realParent)) {
           return fail(
             3,
             `refusing to write the host snapshot inside the PR clone: ${outPath}`,
@@ -1890,11 +1916,12 @@ function main(argv) {
         if (executionApproval?.source === 'comment') {
           const statePath = watchStatePath(options.stateRoot, context.pr);
           const protectedPaths = [statePath, `${statePath}.lock`];
-          const canonicalOut = join(realParent, basename(outPath));
+          const canonicalOut = normalizeFsPath(
+            join(realParent, basename(outPath)),
+          );
           for (const protectedPath of protectedPaths) {
-            const canonicalProtected = join(
-              realpathSync(dirname(protectedPath)),
-              basename(protectedPath),
+            const canonicalProtected = normalizeFsPath(
+              join(realPath(dirname(protectedPath)), basename(protectedPath)),
             );
             let sameFile = false;
             try {
