@@ -531,6 +531,57 @@ describe('StandardFileSystemService', () => {
       writtenBuffer();
     });
 
+    it('should refuse to write characters the file encoding cannot represent', async () => {
+      await expect(
+        write('/test/file.txt', '# 减法\n', { encoding: 'iso-8859-1' }),
+      ).rejects.toThrow(
+        'iso-8859-1 cannot represent "减" (U+51CF), "法" (U+6CD5); /test/file.txt was not written.',
+      );
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('encodeTextFileContent refuses characters the file encoding cannot represent', () => {
+      expect(() =>
+        encodeTextFileContent('/test/file.txt', 'total → 42\n', {
+          encoding: 'windows-1252',
+        }),
+      ).toThrow('windows-1252 cannot represent "→" (U+2192)');
+      expect(() =>
+        encodeTextFileContent('/test/file.txt', 'ok \u{1F600}\n', {
+          encoding: 'iso-8859-1',
+        }),
+      ).toThrow('iso-8859-1 cannot represent "\u{1F600}" (U+1F600)');
+      expect(() =>
+        encodeTextFileContent('/test/file.txt', '一二三四五六七', {
+          encoding: 'iso-8859-1',
+        }),
+      ).toThrow('"五" (U+4E94) and 2 more;');
+    });
+
+    it('should write characters whose bytes read back differently', async () => {
+      // Shift_JIS has `¥` at 0x5C, which decodes as `\`.
+      await write('/test/file.txt', '¥100?\n', { encoding: 'shift_jis' });
+      expect(writtenBuffer()).toEqual(Buffer.from('\\100?\n'));
+    });
+
+    it('should write back the bytes a single-byte decode produced', async () => {
+      // "# 用户\n" in GBK, as it reads when detected as ISO-8859-1.
+      const original = Buffer.from([0x23, 0x20, 0xd3, 0xc3, 0xbb, 0xa7, 0x0a]);
+      await write('/test/file.txt', original.toString('latin1') + 'x = 1\n', {
+        encoding: 'iso-8859-1',
+      });
+      expect(writtenBuffer()).toEqual(
+        Buffer.concat([original, Buffer.from('x = 1\n')]),
+      );
+    });
+
+    it('should write UTF-16LE content that starts with U+FEFF', async () => {
+      await write('/test/file.txt', '\ufeffHi', { encoding: 'utf-16le' });
+      expect(writtenBuffer()).toEqual(
+        Buffer.from([0xff, 0xfe, 0x48, 0x00, 0x69, 0x00]),
+      );
+    });
+
     it('should write file as UTF-8 when encoding is utf-8', async () => {
       await expectWrite('/test/file.txt', 'Hello', 'Hello', {
         encoding: 'utf-8',
