@@ -219,6 +219,7 @@ export {
   getSkillSource,
   getTurnSkillSnapshot,
   prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
   runWithTurnSkillSnapshot,
   type TurnSkillSnapshot,
   type TurnSkillSnapshotLease,

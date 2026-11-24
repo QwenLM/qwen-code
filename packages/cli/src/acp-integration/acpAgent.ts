@@ -347,8 +347,9 @@ import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { TurnSkillLeases } from './session/turn-skill-leases.js';
 import {
-  canApplySkillSideEffects,
   prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  UnsupportedTurnExtensionComponentError,
   runWithTurnSkillSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -7611,7 +7612,9 @@ class QwenAgent implements Agent {
         this.turnSkillLeases.settle(
           sessionId,
           skillLeaseKey,
-          () => session.collectActiveWorkHolds(true).length === 0,
+          () =>
+            !hasTurnResourceWork(lease.snapshot) &&
+            session.collectActiveWorkHolds(true).length === 0,
         );
       }
     } finally {
@@ -10457,6 +10460,7 @@ class QwenAgent implements Agent {
             );
           }
           let unavailable = false;
+          let unsupportedComponent = false;
           try {
             const digest = await this.turnSkillLeases.prepare(
               sessionId,
@@ -10470,6 +10474,8 @@ class QwenAgent implements Agent {
                       .acquireTurnExtensionLease(expectedGeneration);
                   } catch (error) {
                     unavailable = true;
+                    unsupportedComponent =
+                      error instanceof UnsupportedTurnExtensionComponentError;
                     throw error;
                   }
                 }
@@ -10484,20 +10490,6 @@ class QwenAgent implements Agent {
                       skill.level !== 'bundled' &&
                       sessionConfig.isSkillEnabled(skill),
                   );
-                  if (
-                    !sessionConfig.isWorkspaceAgentSession() &&
-                    enabled.some(
-                      (skill) =>
-                        canApplySkillSideEffects(skill, sessionConfig) &&
-                        (skill.allowedTools?.length ||
-                          Object.keys(skill.hooks ?? {}).length),
-                    )
-                  ) {
-                    throw RequestError.invalidParams(
-                      undefined,
-                      'Skill hooks or allow rules cannot be pinned',
-                    );
-                  }
                   const lease = await prepareTurnSkillSnapshot(enabled, {
                     baseDirectory: sessionConfig.storage.getProjectTempDir(),
                     skillManager: manager,
@@ -10523,7 +10515,10 @@ class QwenAgent implements Agent {
             );
             return { digest, extensionGeneration: expectedGeneration };
           } catch (error) {
-            if (unavailable) return {};
+            if (unavailable)
+              return unsupportedComponent
+                ? { unsupportedExtensionComponent: true }
+                : {};
             throw error;
           }
         } else

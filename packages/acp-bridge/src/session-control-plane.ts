@@ -15065,6 +15065,7 @@ export function createSessionControlPlane(
       return requestSessionStatus<{
         digest?: string;
         extensionGeneration?: number;
+        unsupportedExtensionComponent?: true;
       }>(sessionId, TURN_SKILL_LEASE_METHOD, {
         key,
         action,

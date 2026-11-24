@@ -17,6 +17,7 @@ import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
   hashDaemonWorkspace,
+  supportsLocalExtensionTurnStore,
   readCronTasks,
   Storage,
   WebTerminalRegistry,
@@ -1246,7 +1247,9 @@ export function createServeApp(
               typeof runtime.bridge.updateTurnSkillLease === 'function',
           ),
       turnExtensionStoreLeaseAvailable: () =>
-        (process.platform === 'linux' || process.platform === 'darwin') &&
+        supportsLocalExtensionTurnStore(
+          path.join(Storage.getGlobalQwenDir(), 'extension-store'),
+        ) &&
         workspaceRegistry
           .listAll()
           .some(

@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { statfsSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -30,6 +31,25 @@ const localTypes =
     : process.platform === 'darwin'
       ? new Set([17, 26])
       : new Set<number>();
+
+/** Capability probe before the Store exists. Actual admission rechecks the live mount. */
+export function supportsLocalExtensionTurnStore(storeDir: string): boolean {
+  let candidate = path.resolve(storeDir);
+  for (;;) {
+    try {
+      return localTypes.has(statfsSync(candidate).type >>> 0);
+    } catch (error) {
+      const parent = path.dirname(candidate);
+      if (
+        !isNodeError(error) ||
+        error.code !== 'ENOENT' ||
+        parent === candidate
+      )
+        return false;
+      candidate = parent;
+    }
+  }
+}
 
 // AF_UNIX has a small address limit. Bind through a private short alias; the
 // socket inode itself lives in the Store, including when QWEN_HOME is long.

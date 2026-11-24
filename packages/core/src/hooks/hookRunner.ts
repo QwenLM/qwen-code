@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { holdTurnResourcesFor } from '../skills/turn-skill-snapshot.js';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { rmSync, writeFileSync } from 'node:fs';
@@ -928,12 +929,14 @@ export class HookRunner {
     }
 
     // Execute in background with proper error handling
-    this.executeCommandHookInBackground(
-      hookConfig,
-      eventName,
-      input,
-      hookId,
-      signal,
+    holdTurnResourcesFor(
+      this.executeCommandHookInBackground(
+        hookConfig,
+        eventName,
+        input,
+        hookId,
+        signal,
+      ),
     ).catch((error) => {
       // This catch handles any unexpected errors that escape the try-catch in executeCommandHookInBackground
       debugLogger.error(

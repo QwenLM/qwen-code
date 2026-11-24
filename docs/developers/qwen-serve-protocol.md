@@ -4221,8 +4221,7 @@ resolve through their existing installed definitions and do not affect this
 digest. A configured Skill with the same name takes precedence as usual.
 Path references to files outside those directories, session-scoped hooks and permission grants,
 process-wide tool registrations, MCP server processes, and external executable
-dependencies have their existing behavior. A session where a selected skill
-would register a hook or allow rule is rejected before this opt-in admission.
+dependencies have their existing behavior. An unused skill that declares session-level hooks or allow rules does not block admission. If invoked, a pinned skill requiring such side effects fails at the tool boundary with `turn_skill_session_effects_unavailable` before applying either its hooks or grants. This keeps its security behavior intact.
 Requests without `pinSkills` keep the ordinary prompt contract.
 
 #### Managed extension generations
@@ -4254,7 +4253,14 @@ must run the lease-aware binary and use the same Store directory. The pinned
 session refuses an extension-owned full tool-graph refresh; administrative MCP,
 hook, or LSP management outside that path and external provider failures have
 their own lifecycle. An active package without a managed artifact generation
-also requires an isolated runtime. Readers are owned by the native execution
+is rejected before admission with `409 turn_extension_component_unsupported`,
+`sessionId` and `definitivelyNotStarted: true`. Retrying the same unmanaged artifact
+on the same runtime cannot change that result. A package's independently running channel
+plugin or an external daemon started by a hook owns its own lifecycle. Extension-owned
+MCP and LSP process configurations include the installed artifact generation to replace
+the old process even when its command and arguments stay the same. A Qwen-managed
+background command hook retains its turn's files until its execution settles.
+Readers are owned by the native execution
 process. Cancellation or a disconnected client alone does not release them.
 A local UNIX-domain socket held by the process proves it is alive. After
 process exit, even SIGKILL or a reboot, the writer reclaims the stale socket.

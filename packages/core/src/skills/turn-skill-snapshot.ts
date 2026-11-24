@@ -54,6 +54,25 @@ export function getTurnSkillSnapshot(): TurnSkillSnapshot | undefined {
   return activeView.getStore()?.snapshot;
 }
 
+// A nonblocking hook can outlive the prompt promise and even its Session's
+// notification registry. Keep the originating files until the actual task settles.
+const backgroundWork = new WeakMap<TurnSkillSnapshot, number>();
+
+export function holdTurnResourcesFor<T>(task: Promise<T>): Promise<T> {
+  const snapshot = getTurnSkillSnapshot();
+  if (!snapshot) return task;
+  backgroundWork.set(snapshot, (backgroundWork.get(snapshot) ?? 0) + 1);
+  return task.finally(() => {
+    const remaining = (backgroundWork.get(snapshot) ?? 1) - 1;
+    if (remaining) backgroundWork.set(snapshot, remaining);
+    else backgroundWork.delete(snapshot);
+  });
+}
+
+export function hasTurnResourceWork(snapshot: TurnSkillSnapshot): boolean {
+  return backgroundWork.has(snapshot);
+}
+
 export function getSkillSource(skill: SkillConfig): SkillConfig {
   if ('sourceFilePath' in skill && typeof skill.sourceFilePath === 'string') {
     return { ...skill, filePath: skill.sourceFilePath };

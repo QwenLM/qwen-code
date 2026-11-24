@@ -9,6 +9,11 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import {
+  hasTurnResourceWork,
+  runWithTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+} from '../skills/turn-skill-snapshot.js';
 import { HookRunner } from './hookRunner.js';
 import { HookCommandCgroup } from './hook-command-cgroup.js';
 import {
@@ -2059,6 +2064,27 @@ describe('HookRunner', () => {
 
       expect(result.outcome).toBe('non_blocking_error');
       expect(result.isAsync).toBe(true);
+    });
+
+    it('retains only the originating turn until the async hook child closes', async () => {
+      const child = createControllableMockProcess();
+      mockSpawn.mockReturnValue(child);
+      const source: TurnSkillSnapshot = {
+        version: 1,
+        id: 'old',
+        digest: 'old',
+        skills: [],
+      };
+      const next = { ...source, id: 'new' };
+      const result = await runWithTurnSkillSnapshot(source, runAsyncHook);
+      expect(result.isAsync).toBe(true);
+      expect(hasTurnResourceWork(source)).toBe(true);
+      expect(hasTurnResourceWork(next)).toBe(false);
+      await vi.waitFor(() =>
+        expect(child.on).toHaveBeenCalledWith('close', expect.any(Function)),
+      );
+      child.emit('close', 0);
+      await vi.waitFor(() => expect(hasTurnResourceWork(source)).toBe(false));
     });
 
     it('reports an async hook handed to the background as success', async () => {

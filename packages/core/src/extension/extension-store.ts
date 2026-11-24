@@ -14,7 +14,10 @@ import {
   assertNoExtensionTurnReaders,
   ExtensionStoreInUseError,
 } from './turn-readers.js';
-export { ExtensionStoreInUseError } from './turn-readers.js';
+export {
+  ExtensionStoreInUseError,
+  supportsLocalExtensionTurnStore,
+} from './turn-readers.js';
 import lockfile from 'proper-lockfile';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';

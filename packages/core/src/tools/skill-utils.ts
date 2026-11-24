@@ -531,7 +531,7 @@ export async function applySkillSideEffects(
     (skill.allowedTools?.length || Object.keys(skill.hooks ?? {}).length)
   ) {
     throw new Error(
-      'Turn-pinned skills with session-scoped hooks or allow rules are unsupported',
+      `turn_skill_session_effects_unavailable: "${skill.name}" requires session-scoped hooks or allow rules and cannot run in this pinned turn`,
     );
   }
   applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {

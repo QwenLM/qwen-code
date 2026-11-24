@@ -2893,7 +2893,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     action: 'prepare' | 'release',
     expectedDigest?: string,
     expectedExtensionGeneration?: number,
-  ): Promise<{ digest?: string; extensionGeneration?: number }>;
+  ): Promise<{
+    digest?: string;
+    extensionGeneration?: number;
+    unsupportedExtensionComponent?: true;
+  }>;
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,

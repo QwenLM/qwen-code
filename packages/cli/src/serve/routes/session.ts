@@ -10000,7 +10000,9 @@ export function registerSessionRoutes(
             ) {
               await releaseLease().catch(() => {});
               res.status(409).json({
-                code: 'turn_extension_generation_unavailable',
+                code: receipt.unsupportedExtensionComponent
+                  ? 'turn_extension_component_unsupported'
+                  : 'turn_extension_generation_unavailable',
                 sessionId,
                 definitivelyNotStarted: true,
                 error:

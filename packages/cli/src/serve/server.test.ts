@@ -21502,10 +21502,13 @@ describe('createServeApp', () => {
       const bridge = fakeBridge();
       const digest = 'c'.repeat(64);
       bridge.updateTurnSkillLease = vi.fn(
-        async (_session, _key, action, _digest, generation) =>
-          action === 'prepare' && generation === 7
-            ? { digest, extensionGeneration: 7 }
-            : {},
+        async (_session, _key, action, _digest, generation) => {
+          if (action === 'prepare' && generation === 7)
+            return { digest, extensionGeneration: 7 };
+          if (action === 'prepare' && generation === 5)
+            return { unsupportedExtensionComponent: true as const };
+          return {};
+        },
       );
       const app = createServeApp(baseOpts, undefined, {
         bridge,
@@ -21523,6 +21526,13 @@ describe('createServeApp', () => {
             expectedExtensionGeneration: generation,
             idempotencyKey,
           });
+      const unmanaged = await submit(5, 'unmanaged');
+      expect(unmanaged.status).toBe(409);
+      expect(unmanaged.body).toMatchObject({
+        code: 'turn_extension_component_unsupported',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
       const unavailable = await submit(6, 'not-admitted');
       expect(unavailable.status).toBe(409);
       expect(unavailable.body).toMatchObject({

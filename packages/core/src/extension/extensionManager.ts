@@ -394,6 +394,13 @@ export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
 
 export type ExtensionCommitCallback = (generation: number) => void;
 
+export class UnsupportedTurnExtensionComponentError extends Error {
+  constructor() {
+    super('The active extension has no managed immutable artifact');
+    this.name = 'UnsupportedTurnExtensionComponentError';
+  }
+}
+
 export class PreparedExtensionConsumedError extends Error {
   readonly code = 'prepared_extension_consumed';
 
@@ -847,7 +854,11 @@ export class ExtensionManager {
       this.refreshing ||
       !this.extensionCache ||
       this.runtimeGeneration !== generation ||
-      this.storeSnapshot?.generation !== generation ||
+      this.storeSnapshot?.generation !== generation
+    ) {
+      throw new Error('Extension runtime generation unavailable');
+    }
+    if (
       this.getLoadedExtensions().some(
         (ext) =>
           ext.isActive &&
@@ -857,7 +868,7 @@ export class ExtensionManager {
               undefined),
       )
     ) {
-      throw new Error('Extension runtime generation unavailable');
+      throw new UnsupportedTurnExtensionComponentError();
     }
     this.turnReaders++;
     try {
