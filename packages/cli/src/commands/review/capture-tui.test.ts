@@ -7294,25 +7294,21 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     60_000,
   );
 
-  it(// No pgrep needed: sentinel + child disposition only.
-  'dies OF the signal even when it lands during the render window', async () => {
-    // The tail after reap is synchronous (freeze render up to its belt);
-    // a queued signal must drain to the handler before the listeners go
-    // away — without the drain the process exited 0 with the success JSON
-    // as if the harness's kill never landed.
+  it('dies OF the signal even when it lands during the render window', async () => {
     const captureTuiTs = captureTuiSource();
-    const slowFreeze = join(dir, 'slow-freeze');
-    // The sentinel line is what the wait below keys on — one write, so the
-    // fixture a maintainer edits is the one the child runs.
-    const renderStarted = join(dir, 'render-started');
+    const signallingFreeze = join(dir, 'signalling-freeze');
+    const renderSignalSent = join(dir, 'render-signal-sent');
+    // Signal directly from the renderer while its parent is in spawnSync.
+    // Polling a sentinel from this test can miss the window on a busy runner.
     writeFileSync(
-      slowFreeze,
-      // `sleep` from PATH, and FAIL LOUD if it is not there: hardcoding
-      // /bin/sleep collapsed the 4s render window to ~0ms on hosts that do
-      // not have it (NixOS store paths, minimal rootfs) — sh has no set -e,
-      // so the shim went on to write the png and the test silently stopped
-      // testing the render window.
-      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n: > "${renderStarted}"\nsleep 4 || exit 97\nprintf x > "$last"\n`,
+      signallingFreeze,
+      `#!/bin/sh
+for output do :; done
+[ "$PPID" = "$CAPTURE_TEST_RENDER_PID" ] || exit 97
+kill -TERM "$PPID" || exit 97
+: > "$CAPTURE_TEST_RENDER_SIGNAL_SENT" || exit 97
+printf x > "$output"
+`,
       { mode: 0o755 },
     );
     const driver = join(dir, 'driver-render.mts');
@@ -7321,57 +7317,40 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       [
         `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
         `mod.probes.freeze = () => ({ status: 'ok', out: '' });`,
-        `mod.freezeRender.bin = ${JSON.stringify(slowFreeze)};`,
+        `mod.freezeRender.bin = ${JSON.stringify(signallingFreeze)};`,
+        `process.env.CAPTURE_TEST_RENDER_PID = String(process.pid);`,
         `await mod.runCaptureTui({ command: 'printf "RSIG\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'RSIG', keys: undefined, out: ${JSON.stringify(join(dir, 'rsig'))}, timeoutMs: 30_000 } as never);`,
       ].join('\n'),
     );
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['--import', 'tsx', driver], {
       cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CAPTURE_TEST_RENDER_SIGNAL_SENT: renderSignalSent,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    // Attached BEFORE the wait, like its mid-poll sibling: if the child
-    // dies during the render window the sole exit event fires unobserved
-    // and the await below never settles.
     const disposition = new Promise<{
       code: number | null;
       signal: string | null;
-    }>((resolve) =>
-      child.once('exit', (code, signal) => resolve({ code, signal })),
-    );
-    // ...and the child is killed on ANY exit from here, including a thrown
-    // assertion. Without this, a sentinel that never appears (a cold tsx
-    // start on a loaded runner, a fixture regression) threw before the
-    // kill below and left the node process AND its private tmux server
-    // alive together — measured through a 16s window. SIGTERM, never
-    // SIGKILL: the child's own handler is what reaps the server, and a
-    // SIGKILL'd child leaves it standing (measured).
-    // Recorded, not just sent: SIGTERM is also the disposition this test
-    // asserts, so a child the guard had to kill produces exactly the
-    // expected death and would pass green with nothing saying so.
+    }>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    // The guard lets the capture reap its private server on a timeout.
+    // Record it so the guard's SIGTERM cannot satisfy the assertion.
     let guardFired = false;
     const orphanGuard = setTimeout(() => {
       guardFired = true;
       child.kill('SIGTERM');
     }, 20_000);
     try {
-      let waited = 0;
-      while (!existsSync(renderStarted) && waited < 200) {
-        await sleep(50);
-        waited++;
-      }
-      expect(existsSync(renderStarted)).toBe(true);
-      child.kill('SIGTERM');
       const { code, signal } = await disposition;
-      // Death BY the signal — not a swallowed exit 0 with success JSON.
-      expect(signal ?? `code:${code}`).toBe('SIGTERM');
       expect(guardFired).toBe(false);
-      // Same as the mid-poll sibling: the child's own pid is what proves
-      // the signal path cleaned up after itself.
+      expect(existsSync(renderSignalSent)).toBe(true);
+      expect(signal ?? `code:${code}`).toBe('SIGTERM');
       expect(leakedSentinels(child.pid as number)).toEqual([]);
-    } catch (e) {
-      child.kill('SIGTERM');
-      throw e;
     } finally {
       clearTimeout(orphanGuard);
     }

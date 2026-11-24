@@ -92,7 +92,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { constants as osConstants, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createContext, runInContext, type Context } from 'node:vm';
 import {
@@ -1827,11 +1827,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // Linux/Node 22 through the real command: one turn swallowed the SIGTERM
   // every time (exit 0, success JSON, handler never entered, kernel showing
   // the signal delivered and no longer pending); two turns died 143.
-  const drainSignalsThenRelease = async (): Promise<void> => {
+  const waitForSignalPoll = async (): Promise<void> => {
     for (let turn = 0; turn < 2; turn++) {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
+  };
+  let signalForwarding: Promise<NodeJS.Signals> | undefined;
+  const drainSignalsThenRelease = async (): Promise<boolean> => {
+    await waitForSignalPoll();
     releaseSignals();
+    if (!signalForwarding) return false;
+    const signal = await signalForwarding;
+    process.exitCode = 128 + osConstants.signals[signal];
+    return true;
   };
   function onSignal(sig: NodeJS.Signals): void {
     reap();
@@ -1846,6 +1854,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // Litter is cosmetic; the reap above is what matters here.
     }
     releaseSignals();
+    // A remaining signal listener may need to deliver the re-raised
+    // signal before Node exits. Keep a poll turn alive for that listener,
+    // even if capture was already finishing when the signal arrived.
+    signalForwarding = waitForSignalPoll().then(() => sig);
     process.kill(process.pid, sig);
   }
   for (const s of REAP_SIGNALS) process.on(s, onSignal);
@@ -2065,7 +2077,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       // The refusal reason below is the primary signal either way.
     }
-    await drainSignalsThenRelease();
+    if (await drainSignalsThenRelease()) return;
     refuse(
       `cannot write capture output: ${e instanceof Error ? e.message : String(e)}`,
     );
@@ -2504,7 +2516,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // signature that authorizes a later run to delete them. The foreign file
     // is left untouched; only this run's own stage was removed above. The
     // server was already reaped before the .ans write, so nothing leaks.
-    await drainSignalsThenRelease();
+    if (await drainSignalsThenRelease()) return;
     refuse(
       `${ansPath} was replaced during the render window; this run can no ` +
         'longer show the .ans it wrote and will not credit or remove the ' +
@@ -2608,7 +2620,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       // Unreachable in practice; the per-path catches above own the risk.
     }
-    await drainSignalsThenRelease();
+    if (await drainSignalsThenRelease()) return;
     refuse(
       `cannot write capture manifest: ${e instanceof Error ? e.message : String(e)}`,
     );
@@ -2621,7 +2633,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // manifest both written. The evidence is on disk and described by the
   // time we get here; nothing stdio does after that changes what happened.
   artifactsComplete = true;
-  await drainSignalsThenRelease();
+  if (await drainSignalsThenRelease()) return;
   writeStderrLineSafe(
     `capture-tui: ${manifest.evidence} at ${args.cols}x${args.rows} ` +
       `(settled by ${settledBy})${degradedBecause ? ` — ${degradedBecause}` : ''}`,
