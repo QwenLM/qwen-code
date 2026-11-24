@@ -5904,7 +5904,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.description.general.displayLanguage':
     '在終端和 Web Shell 中把模型的回覆和展開的思考翻譯成該語言顯示。模型照常回答；儲存的對話、模型讀到的內容和複製的文字保持原文。每個翻譯的區塊呼叫一次 fast model，未設定時使用會話模型。無需安裝任何東西，也無需開啟實驗性功能。修改後新會話生效。',
   'settings.option.general.displayLanguage.off': '關閉',
-  'settings.option.general.displayLanguage.zh-CN': '简体中文',
+  'settings.option.general.displayLanguage.zh-CN': '簡體中文',
   'settings.option.general.displayLanguage.en': 'English',
   'settings.label.general.preventSystemSleep': '執行時防止系統睡眠',
   'settings.description.general.preventSystemSleep':
