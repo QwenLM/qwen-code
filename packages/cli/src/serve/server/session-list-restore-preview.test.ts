@@ -123,6 +123,29 @@ describe('worktree restoration preview metadata', () => {
     expect(worktree?.canRestore).toBe(true);
   });
 
+  it('does not advertise restoration while the session has an archived twin', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target);
+    const archiveDir = path.join(
+      path.dirname(record.transcriptPath),
+      'archive',
+    );
+    fs.mkdirSync(archiveDir, { recursive: true });
+    fs.copyFileSync(
+      record.transcriptPath,
+      path.join(archiveDir, path.basename(record.transcriptPath)),
+    );
+    const map = summaries(target, record.id);
+
+    await enrichWorktreeSidecars(map, target.service, 'active');
+
+    const worktree = map.get(record.id)!.worktree;
+    expect(worktree?.worktreeRemoved).toEqual({
+      archiveKey: record.archiveKey,
+    });
+    expect(worktree?.canRestore).toBe(false);
+  });
+
   it('offers restoration after a historical removal omitted its binding without writing the record', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const record = await removedRecord(target, { writeBinding: false });

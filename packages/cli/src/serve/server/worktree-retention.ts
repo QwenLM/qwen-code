@@ -18,6 +18,7 @@ import {
   type WorktreeSnapshotPaths,
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
+  getSessionRuntimeLiveness,
   readWorktreeSessionStrict,
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
@@ -120,6 +121,29 @@ async function retentionRoot(
     canonicalPathForTesting(repoTop),
   );
   return canonicalPathForTesting(managedRootService.getUserWorktreesDir());
+}
+
+/**
+ * A live owner outside this daemon (for example a TUI that resumed the same
+ * session) never appears on this runtime's bridge, but its runtime record
+ * names the checkout it is working in. Only an explicit `active` answer
+ * blocks the sweep: `unknown` is what sessions without any record return,
+ * which is the normal state for daemon-created chats.
+ */
+async function ownerProcessActive(
+  sessionId: string,
+  sidecar: { originalCwd: string; worktreePath: string },
+): Promise<boolean> {
+  try {
+    return (
+      (await getSessionRuntimeLiveness(sessionId, [
+        sidecar.originalCwd,
+        sidecar.worktreePath,
+      ])) === 'active'
+    );
+  } catch {
+    return true;
+  }
 }
 
 function assertCurrentRuntime(
@@ -309,6 +333,7 @@ async function collectEligible(
       ) {
         continue;
       }
+      if (await ownerProcessActive(sessionId, plan.sidecar)) continue;
       if (await organization.isSessionPinnedStrict(sessionId)) continue;
       const release = await acquireWorktreeCleanupLock(plan);
       try {
@@ -573,6 +598,8 @@ async function removeRetainedCheckout(
             }
             if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
               return false;
+            if (await ownerProcessActive(plan.sessionId, plan.sidecar))
+              return false;
             if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
               return false;
             }
@@ -653,6 +680,8 @@ async function removeRetainedCheckout(
               return false;
             }
             if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
+              return false;
+            if (await ownerProcessActive(plan.sessionId, plan.sidecar))
               return false;
             if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
               return false;

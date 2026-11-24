@@ -28,6 +28,7 @@ import {
   selectWorktreeSnapshot,
   verifyRestoredWorktreeSnapshot,
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
+import { writeRuntimeStatus } from '@qwen-code/qwen-code-core/utils/runtimeStatus.js';
 
 function git(cwd: string, home: string, ...args: string[]): string {
   return execFileSync('git', args, {
@@ -236,6 +237,29 @@ async function sweep(
 ) {
   return runWithWorkspaceRuntimeStorage(runtime.runtime, () =>
     sweepWorktreeRetentionOnce(runtime.runtime, registry, coordinator),
+  );
+}
+
+async function writeOwnerRuntimeStatus(
+  target: RetentionTestRuntime,
+  sessionId: string,
+  worktreePath: string,
+  pid?: number,
+): Promise<void> {
+  await writeRuntimeStatus(
+    path.join(
+      target.runtime.sessionRuntimeBaseDir,
+      'projects',
+      'owner-probe',
+      'chats',
+      `${sessionId}.runtime.json`,
+    ),
+    {
+      sessionId,
+      workDir: worktreePath,
+      qwenVersion: null,
+      ...(pid === undefined ? {} : { pid }),
+    },
   );
 }
 
@@ -604,6 +628,58 @@ describe('worktree retention with real repositories', () => {
       }
     },
   );
+
+  it('preserves a checkout whose owning session is live in another process', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const external = await makeRetainedSession(target, {
+      slug: 'external-live',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-eligible',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    await writeOwnerRuntimeStatus(target, external.id, external.worktreePath);
+
+    expect((await sweep(target)).removed).toEqual([evicted.id]);
+    expect(fs.existsSync(external.worktreePath)).toBe(true);
+    const read = await readWorktreeSessionStrict(external.sidecarPath);
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.worktreeRemoved).toBeUndefined();
+    }
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('ignores a runtime record whose owning process is gone', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const stale = await makeRetainedSession(target, {
+      slug: 'stale-record',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    await writeOwnerRuntimeStatus(
+      target,
+      stale.id,
+      stale.worktreePath,
+      2_147_483_646,
+    );
+
+    expect((await sweep(target)).removed).toEqual([stale.id]);
+    await expectRetainedSnapshot(target, stale);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
 
   it('discards only a failed attempt snapshot after proving the checkout intact', async () => {
     const target = makeRetentionRepo(root, 'primary');

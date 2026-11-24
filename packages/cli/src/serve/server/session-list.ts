@@ -605,24 +605,32 @@ export async function enrichWorktreeSidecars(
     let canRestore = false;
     if (removed && archiveState === 'active') {
       try {
-        const candidate = await preclassifyWorktreeCleanup(
-          sessionService,
-          sessionId,
-          sessionService.getProjectRoot(),
-          { quiet: true, runtimeRoots: await getRuntimeRoots() },
-        );
+        // The restore route refuses every non-active location, so a row that
+        // still has an archived twin must not advertise a capability the
+        // click can never satisfy.
         if (
-          candidate &&
-          path.dirname(candidate.sidecarPath) === path.dirname(sidecarPath)
+          (await sessionService.getMaintainableSessionLocation(sessionId)) ===
+          'active'
         ) {
-          await assertRestoreCoordinates(candidate);
-          canRestore =
-            (await selectWorktreeSnapshot({
-              directory: path.dirname(sidecarPath),
-              sessionId,
-              slug: sidecar.slug,
-              archiveKey: removed.archiveKey,
-            })) !== undefined;
+          const candidate = await preclassifyWorktreeCleanup(
+            sessionService,
+            sessionId,
+            sessionService.getProjectRoot(),
+            { quiet: true, runtimeRoots: await getRuntimeRoots() },
+          );
+          if (
+            candidate &&
+            path.dirname(candidate.sidecarPath) === path.dirname(sidecarPath)
+          ) {
+            await assertRestoreCoordinates(candidate);
+            canRestore =
+              (await selectWorktreeSnapshot({
+                directory: path.dirname(sidecarPath),
+                sessionId,
+                slug: sidecar.slug,
+                archiveKey: removed.archiveKey,
+              })) !== undefined;
+          }
         }
       } catch {
         // An unavailable pair is shown as such, never as a restore capability.
