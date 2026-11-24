@@ -1236,6 +1236,13 @@ describe('local container recipe pins', () => {
         const headToken = /^[^\s;|&()]+/.exec(stripped)?.[0];
         if (!headToken) return false;
         const rest = stripped.slice(headToken.length).trimStart();
+        if (
+          /\$\{(?!\{)[^}]*\}/.test(headToken) ||
+          (rest !== '' && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(headToken)) ||
+          /^[A-Za-z0-9_./'"\\-]+\$[A-Za-z_][A-Za-z0-9_]*/.test(headToken)
+        ) {
+          return true;
+        }
         const { name, obfuscated } = unquoteCommandToken(headToken);
         if (name === 'gh') {
           if (!rest && !wrapped && /^~\/\.config\/gh$/.test(headToken)) {
@@ -3564,6 +3571,12 @@ describe('local container recipe pins', () => {
         'deeply nested timeout wrapper (>12)',
         `${'timeout 10 '.repeat(13)}gh pr merge <n>`,
       ],
+      ['text fence IFS expansion', '```text\ngh${IFS}pr${IFS}merge <n>\n```'],
+      ['text fence param expansion', '```text\ng${x:-h} pr merge <n>\n```'],
+      ['console IFS expansion', '```console\ngh${IFS}pr${IFS}merge <n>\n```'],
+      ['bare IFS expansion', 'gh${IFS}pr${IFS}merge <n>'],
+      ['bare param expansion', 'g${x:-h} pr merge <n>'],
+      ['bare var command', '$cmd pr merge <n>'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
@@ -3572,6 +3585,11 @@ describe('local container recipe pins', () => {
     }
     for (const hostile of [
       '`gh pr merge <n> --squash --delete-branch`',
+      '`gh${IFS}pr${IFS}merge <n>`',
+      '`g${x:-h} pr merge <n>`',
+      '`${cmd} pr merge <n>`',
+      '`$cmd pr merge <n>`',
+      '`gh$IFS"pr"`',
       '`gh api -X DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
       '`gh api --method DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
       '`gh api -XDELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
