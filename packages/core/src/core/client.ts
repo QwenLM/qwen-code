@@ -301,6 +301,7 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
+    ...(options?.retractToolCallsOnRetry && { retractToolCallsOnRetry: true }),
     ...(options?.interactionSpan && {
       interactionSpan: options.interactionSpan,
     }),
@@ -530,6 +531,12 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * The consumer buffers streamed `functionCall` parts until end-of-stream and
+   * discards them on `LlmEventType.Retry`, so a transport cut that delivered
+   * only thinking and unexecuted tool calls can replay cleanly.
+   */
+  retractToolCallsOnRetry?: boolean;
   /**
    * Stable model-availability ledger turn key for this send, when it differs
    * from the send's `prompt_id`. A headless runtime Goal run keeps the
@@ -5343,6 +5350,7 @@ export class LlmClient {
           messageType !== SendMessageType.Teammate &&
           !this.backgroundInteractionPromptIds.has(prompt_id),
         options?.ledgerTurnKey,
+        options?.retractToolCallsOnRetry,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

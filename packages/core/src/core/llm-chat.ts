@@ -284,6 +284,25 @@ function hasNonThoughtCandidateParts(
   );
 }
 
+function hasVisibleNonToolCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => {
+        if (part.thought || part.functionCall) return false;
+        return Boolean(
+          (typeof part.text === 'string' && part.text.length > 0) ||
+            part.inlineData ||
+            part.fileData ||
+            part.executableCode ||
+            part.codeExecutionResult,
+        );
+      }),
+    ),
+  );
+}
+
 function syncFunctionCallsField(
   response: GenerateContentResponse,
   parts: readonly Part[],
@@ -779,6 +798,12 @@ export interface LlmChatSendOptions {
    * public transcript (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * The consumer buffers streamed `functionCall` parts until end-of-stream and
+   * discards them on `StreamEventType.RETRY`, so a cut that yielded only
+   * thinking and unexecuted tool calls (no visible output) can replay cleanly.
+   */
+  retractToolCallsOnRetry?: boolean;
   /**
    * A `UserPromptSubmit` block suppressed as already delivered. Compression
    * can drop the history entry holding its only copy inside this same send,
@@ -4650,6 +4675,7 @@ export class LlmChat {
           let streamEstablished = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
+          let streamYieldedVisibleContent = false;
           // A cut that already delivered a `functionCall` cannot be continued
           // from — see the continuation gate below.
           let streamYieldedFunctionCall = false;
@@ -4735,6 +4761,9 @@ export class LlmChat {
               }
               if (hasNonThoughtCandidateParts(chunk)) {
                 streamYieldedContentChunk = true;
+              }
+              if (hasVisibleNonToolCandidateParts(chunk)) {
+                streamYieldedVisibleContent = true;
               }
               // Mirror the visible text into the continuation buffer as it is
               // yielded. Reading it back off history is not an option on the
@@ -4938,19 +4967,24 @@ export class LlmChat {
             // (#13319). Such sends never take the continuation arm below.
             const replayAdmitsDeliveredContent =
               options?.retractDeliveredOutputOnRetry === true;
+            const replayAdmitsCutFunctionCalls =
+              options?.retractToolCallsOnRetry === true &&
+              !streamYieldedVisibleContent;
+            const canReplayAttempt =
+              replayAdmitsDeliveredContent ||
+              ((!streamYieldedContentChunk || replayAdmitsCutFunctionCalls) &&
+                // `streamYieldedContentChunk` is per-attempt, so on its own it
+                // cannot tell "nothing has been delivered" from "this attempt
+                // was cut while thinking, after earlier attempts already put
+                // text on screen". Only the first is replayable; replaying the
+                // second discards output the caller is watching. The
+                // accumulated buffer is what distinguishes them, and it must be
+                // consulted here because this branch is checked before the
+                // continuation one below.
+                transportContinuationText.trim().length === 0);
             if (
               isReplayableStreamError &&
-              (replayAdmitsDeliveredContent ||
-                (!streamYieldedContentChunk &&
-                  // `streamYieldedContentChunk` is per-attempt, so on its own it
-                  // cannot tell "nothing has been delivered" from "this attempt
-                  // was cut while thinking, after earlier attempts already put
-                  // text on screen". Only the first is replayable; replaying the
-                  // second discards output the caller is watching. The
-                  // accumulated buffer is what distinguishes them, and it must be
-                  // consulted here because this branch is checked before the
-                  // continuation one below.
-                  transportContinuationText.trim().length === 0)) &&
+              canReplayAttempt &&
               streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
@@ -5102,12 +5136,11 @@ export class LlmChat {
                   : 'Transport stream retry not taken',
                 {
                   retryPath: 'stream',
-                  retryDecision: attemptClosedWithOwnOutput
-                    ? 'skipped_terminal_finish_reason'
-                    : streamYieldedContentChunk ||
-                        transportContinuationText.trim().length > 0
-                      ? 'skipped_after_content'
-                      : 'exhausted',
+                  retryDecision: canReplayAttempt
+                    ? 'exhausted'
+                    : attemptClosedWithOwnOutput
+                      ? 'skipped_terminal_finish_reason'
+                      : 'skipped_after_content',
                   attempts: streamReplayRetryCount,
                   maxRetries: STREAM_RETRY_CONFIG.maxRetries,
                   continuationAttempts: transportContinuationCount,
