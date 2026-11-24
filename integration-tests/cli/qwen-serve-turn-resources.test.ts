@@ -234,6 +234,24 @@ describe.skipIf(
 
   it('holds the first skill and companion through approval while another session and the next prompt use the new files', async () => {
     writeSkill(1);
+    const unused = path.join(workspace, '.qwen', 'skills', 'unused');
+    mkdirSync(unused);
+    writeFileSync(
+      path.join(unused, 'SKILL.md'),
+      `---
+name: unused
+description: A separate capability the prompt never invokes
+allowedTools: [read_file]
+hooks:
+  PreToolUse:
+    - matcher: Shell
+      hooks:
+        - type: command
+          command: exit 2
+---
+Unrelated skill.
+`,
+    );
     await start();
     const a = await session('default');
     const first = await prompt(a, 'RESOURCE_PROBE_skill_first');
