@@ -5905,6 +5905,12 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.placeholder.general.outputLanguage': '自動（跟隨輸入）',
   'settings.option.general.outputLanguage.useCustom': (v) =>
     `使用“${v?.value ?? ''}”`,
+  'settings.label.general.displayLanguage': '語言：顯示翻譯',
+  'settings.description.general.displayLanguage':
+    '在終端和 Web Shell 中把模型的回覆和展開的思考翻譯成該語言顯示。模型照常回答；儲存的對話、模型讀到的內容和複製的文字保持原文。每個翻譯的區塊呼叫一次 fast model，未設定時使用會話模型。無需安裝任何東西，也無需開啟實驗性功能。修改後新會話生效。',
+  'settings.option.general.displayLanguage.off': '關閉',
+  'settings.option.general.displayLanguage.zh-CN': '簡體中文',
+  'settings.option.general.displayLanguage.en': 'English',
   'settings.label.general.preventSystemSleep': '執行時防止系統睡眠',
   'settings.description.general.preventSystemSleep':
     '當 Qwen Code 正在流式生成模型回覆或執行工具時防止系統睡眠。空閒輸入狀態和權限確認狀態不會阻止睡眠。',
@@ -6096,7 +6102,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '讓會話執行在共享的 agent loop 上。未設定時，每個入口使用自己的預設值：headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理執行在共享 loop 上，Hosted Harness 仍使用自己的 loop（在該入口上屬實驗性）。設為 `true` 時它們都執行在共享 loop 上（Hosted Harness 的模型輪執行在它上面，同時保留其 journal 化工具派發），設為 `false` 時它們都用各自的 loop，headless、ACP 會話、兩個 TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 環境變數按入口覆蓋此設定：`1` 開啟所有入口，`0` 關閉所有入口，逗號分隔的列表（如 `headless,acp=0`）強制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作為整值識別，不在列表內生效；列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.eventBusAgentLoop': '事件匯流排 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '讓共享 agent loop 執行在事件匯流排架構上。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。未設定時，headless 會話執行在核心上，其他執行共享 loop 的入口使用過程式路徑。設為 `true` 時使用核心，設為 `false` 時使用過程式路徑，headless 也可切回。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
+    '讓共享 agent loop 執行在事件匯流排架構上。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。未設定時，headless 會話和 Ink TUI 執行在核心上，其他執行共享 loop 的入口使用過程式路徑。設為 `true` 時使用核心，設為 `false` 時使用過程式路徑，headless 和 Ink TUI 也可切回。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.modelAvailabilityTracking': '模型可用性台賬',
   'settings.description.experimental.modelAvailabilityTracking':
     '在會話內跨請求記住模型健康狀態（實驗性）。當某個 fallback 模型在容量錯誤（429/503/529）上耗盡重試後，模型 fallback 鏈在本輪剩餘請求中跳過它，並在下一輪重新探測一次；顯式重試也會重新探測被跳過的模型。primary 模型仍每個請求都會被嘗試。永久配額耗盡仍快速失敗，不視為瞬時容量跳過。關閉時 fallback 鏈行為與之前完全一致。',

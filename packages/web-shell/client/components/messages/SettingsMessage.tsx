@@ -266,6 +266,7 @@ function scopeHintKey(
   setting: DaemonSettingDescriptor,
   scope: Scope,
 ): 'settings.modifiedIn' | 'settings.alsoModifiedIn' | undefined {
+  if (setting.key === 'general.displayLanguage') return undefined;
   const otherHasValue =
     scope === 'workspace'
       ? setting.values.user !== undefined
@@ -754,7 +755,8 @@ export function SettingsMessage({
     const visibleSettings = settings.filter(
       (setting) =>
         !HIDDEN_SETTING_KEYS.has(setting.key) &&
-        !LIVE_SETTING_KEYS.has(setting.key),
+        !LIVE_SETTING_KEYS.has(setting.key) &&
+        (scope === 'user' || setting.key !== 'general.displayLanguage'),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
