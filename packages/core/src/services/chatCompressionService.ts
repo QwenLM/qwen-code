@@ -1352,14 +1352,17 @@ export class ChatCompressionService {
         typeof reportedCandidates === 'number' &&
         typeof prompt === 'number'
       ) {
-        return outputTokenCount(
-          {
-            input: prompt,
-            output: reportedCandidates,
-            thoughts,
-            total: usage?.totalTokenCount ?? 0,
-          },
-          compactionAuthType,
+        return Math.max(
+          outputTokenCount(
+            {
+              input: prompt,
+              output: reportedCandidates,
+              thoughts,
+              total: usage?.totalTokenCount ?? 0,
+            },
+            compactionAuthType,
+          ),
+          thoughts,
         );
       }
       if (
@@ -1616,23 +1619,33 @@ export class ChatCompressionService {
     // once: where the output count already holds it, it is not added again.
     // This check and the room check below read the same count (#15936 R8-2,
     // R11-2).
+    const reportedOutputSpent = computeReportedOutputSpent(
+      compressionUsageMetadata,
+    );
+    const reportedOutputExhausted =
+      typeof reportedOutputSpent === 'number' &&
+      reportedOutputSpent >= coldOutputBudget;
     const outputSpentTokenCount = outputCountIsEstimated
       ? compressionOutputTokenCount
-      : computeReportedOutputSpent(compressionUsageMetadata);
+      : reportedOutputSpent;
     const truncationThreshold = outputCountIsEstimated
       ? COMPACT_MAX_OUTPUT_TOKENS
       : coldOutputBudget;
     if (
       !usedCacheSharing &&
-      (!outputCountIsEstimated || !isSummaryEmpty) &&
-      typeof outputSpentTokenCount === 'number' &&
-      outputSpentTokenCount >= truncationThreshold
+      (reportedOutputExhausted ||
+        (!isSummaryEmpty &&
+          typeof outputSpentTokenCount === 'number' &&
+          outputSpentTokenCount >= truncationThreshold))
     ) {
+      const hitThreshold = reportedOutputExhausted
+        ? coldOutputBudget
+        : truncationThreshold;
       config
         .getDebugLogger()
         .warn(
           `[chat-compression] summary output reached the truncation ` +
-            `threshold (${truncationThreshold}); ` +
+            `threshold (${hitThreshold}); ` +
             `dropping potentially-truncated result. This counts as a ` +
             `compression failure for the per-chat circuit breaker.`,
         );

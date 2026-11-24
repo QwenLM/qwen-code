@@ -5630,6 +5630,56 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     },
   );
 
+  it('drops non-empty prose cut at budget when usage reports only promptTokenCount and thoughtsTokenCount', async () => {
+    // When a provider omits candidatesTokenCount and totalTokenCount but
+    // reports thoughtsTokenCount hitting the requested output budget alongside
+    // non-empty plain prose, the local text estimate fallback must not mask
+    // the provider-reported budget exhaustion.
+    const generateText = vi.fn().mockImplementation(async (args) => {
+      const maxOut = args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+      return {
+        text: 'Summary of work so far: the user asked to port the parser and I',
+        usage: {
+          promptTokenCount: 10_000,
+          thoughtsTokenCount: maxOut,
+        },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(
+      [userText('fix the bug'), modelText('investigating')],
+      10_000,
+    );
+
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
+
+  it('still accepts non-empty prose when thoughtsTokenCount-only usage stays well below the output budget', async () => {
+    const generateText = vi.fn().mockResolvedValue({
+      text: 'Summary of work so far: parser ported and verified.',
+      usage: {
+        promptTokenCount: 10_000,
+        thoughtsTokenCount: 250,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(
+      [userText('fix the bug'), modelText('investigating')],
+      10_000,
+    );
+
+    expectCompressed(result);
+  });
+
   it('strips unsigned thoughts from the reduced retry payload (combined oversized-text + thought fixture)', async () => {
     // getColdInput strips the thoughts so the first budget is clamped but
     // sendable; reduceColdInput must strip them again on the retry, otherwise

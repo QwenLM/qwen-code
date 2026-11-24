@@ -657,4 +657,53 @@ describe('ChatCompressionService real local HTTP/SSE integration', () => {
       'succeeded after required-thinking retry',
     );
   });
+
+  it('drops non-empty prose cut at budget over real HTTP/SSE when usage omits completion_tokens and reports reasoning_tokens', async () => {
+    const model = 'custom-reasoning-only-usage-model';
+    const { baseUrl, requests } = await startMockGateway((req, res) => {
+      const maxTokens = Number(req.body['max_tokens']);
+      writeSse(res, [
+        sseDeltaChunk(
+          model,
+          {
+            role: 'assistant',
+            content:
+              'Summary of work so far: the user asked to port the parser and I',
+          },
+          'length',
+        ),
+        sseUsageChunk(model, {
+          prompt_tokens: 10_000,
+          completion_tokens_details: { reasoning_tokens: maxTokens },
+        }),
+      ]);
+    });
+
+    const { config, service } = createRealRuntime({
+      baseUrl,
+      model,
+      contextWindowSize: 65_536,
+    });
+
+    const result = await service.compress(
+      createFakeChat([
+        { role: 'user', parts: [{ text: 'fix the bug' }] },
+        { role: 'model', parts: [{ text: 'investigating' }] },
+      ]),
+      {
+        promptId: 'real-http-p7',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 10_000,
+        signal: new AbortController().signal,
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(result.newHistory).toBeNull();
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
 });
