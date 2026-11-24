@@ -1646,6 +1646,22 @@ public final class ManagedExtensionRecords {
                 () -> label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
         require(Normalizer.isNormalized(value, Normalizer.Form.NFC),
                 () -> label + " must use NFC normalization");
+        // PAD SPACE collations fold trailing spaces, so two distinct ids would
+        // compare equal; the boundary refuses them rather than relying on the
+        // column to preserve exactness.
+        require(!value.endsWith(" "),
+                () -> label + " must not end with a space");
+        return value;
+    }
+
+    /**
+     * An id bounded by its column's VARCHAR width. MySQL counts code points
+     * and H2 counts UTF-16 units, so the UTF-16 length bounds both.
+     */
+    public static String id(JsonNode node, String label, int maxChars) {
+        String value = id(node, label);
+        require(value.length() <= maxChars,
+                () -> label + " exceeds " + maxChars + " characters");
         return value;
     }
 

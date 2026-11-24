@@ -50,6 +50,10 @@ jobs:
       actions: 'read'
       checks: 'read'
       contents: 'read'
+      # The fork approval fallback reads the pull request to confirm the
+      # candidate run still points at this head; a run whose pull_requests
+      # list is empty cannot be matched without it.
+      pull-requests: 'read'
     outputs:
       sha: '${{ steps.paths.outputs.sha }}'
       tier: '${{ steps.tier.outputs.tier }}'
@@ -216,43 +220,7 @@ jobs:
           GH_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'
           RUN_ID: '${{ github.run_id }}'
-        run: |-
-          set -euo pipefail
-          tier=none
-          if [[ "${TOUCHED}" == 'true' ]]; then
-            case "${EVENT_NAME}" in
-              pull_request | push | merge_group) tier=fast ;;
-              pull_request_review)
-                # A maintainer's approval only. qwen-triage-finalize.yml watches
-                # this workflow and posts a deferred APPROVE once a PR's checks
-                # land green, so an ungated check lets the gate's own fast tier
-                # buy the most expensive run in the repository with no human
-                # involved. An empty association fails closed the same way.
-                if [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
-                  ' OWNER MEMBER COLLABORATOR ' == *" ${REVIEW_AUTHOR_ASSOCIATION} "* ]]; then
-                  tier=full
-                  urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&per_page=100" \
-                    --jq '.check_runs[] | select(.status != "completed" or .conclusion == "success") | .details_url')"
-                  for run in $({ grep -oE '/runs/[0-9]+/' <<< "${urls}" || true; } | tr -dc '0-9\n' | sort -u); do
-                    [[ "${run}" == "${RUN_ID}" ]] && continue
-                    IFS=$'\t' read -r event prs <<< "$(gh api "repos/${REPO}/actions/runs/${run}" --jq '[.event, ([.pull_requests[].number] | map(tostring) | join(" "))] | @tsv')"
-                    # A passing check of the required name covers this head
-                    # only when it came from THIS pull request's review run
-                    # whose callee actually ran: another PR's review run on
-                    # the shared head sha and a run that reported without a
-                    # suite both ran no Java lane.
-                    [[ "${event}" == 'pull_request_review' ]] || continue
-                    [[ " ${prs} " == *" ${PR_NUMBER} "* ]] || continue
-                    [[ "$(gh api "repos/${REPO}/actions/runs/${run}/jobs?per_page=100" --jq '[.jobs[].name | startswith("SDK Java (full)")] | any')" == 'true' ]] || continue
-                    echo "Run ${run} already covers ${HEAD_SHA}."
-                    tier=none
-                    break
-                  done
-                fi
-                ;;
-            esac
-          fi
-          echo "tier=${tier}" >> "${GITHUB_OUTPUT}"
+        run: 'bash .github/scripts/managed-agent-gate-tier.sh'
 
   suite:
     name: 'SDK Java (${{ needs.scope.outputs.tier }})'
@@ -265,24 +233,30 @@ jobs:
       ref: '${{ needs.scope.outputs.sha }}'
       tier: '${{ needs.scope.outputs.tier }}'
 
-  # Only a full run, an unaffected change, or a push/merge group reports the
-  # required name. A touched pull request therefore shows the required check
-  # as expected until its first approval's full run reports it; the most
-  # recently updated check of a name is the one branch protection reads.
+  # Keep the required-check context stable for every run that can satisfy it:
+  # fast/full pull requests, untouched runs, pushes and merge groups. A touched
+  # review that selects no full run keeps a non-required name; a skipped review
+  # job leaves its expression unevaluated, so neither can overwrite a real
+  # required-check result.
   gate:
     name: >-
       ${{ (needs.scope.outputs.tier == 'full' || needs.scope.outputs.touched != 'true' ||
+      ((needs.scope.outputs.tier == 'fast' || needs.scope.outputs.tier == '') &&
+      github.event_name == 'pull_request') ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' &&
+      github.event.pull_request.state == 'open' && needs.scope.outputs.tier == '') ||
       (github.event_name != 'pull_request' && github.event_name != 'pull_request_review')) && 'Managed Agent gate' ||
-      needs.scope.outputs.tier == 'fast' && 'Managed Agent fast tier' || 'Managed Agent review (no full run)' }}
+      'Managed Agent review (no full run)' }}
     needs:
       - 'scope'
       - 'suite'
     # A cancelled PR run must release concurrency even if scope was cancelled
-    # before choosing a tier. Full runs and main/merge-group cancellations
-    # still report. A review that is not an approval, or one submitted after
-    # the pull request closed, skips with `scope` above: reporting a tier it
-    # never selected would only add a green check.
-    if: "${{ always() && (github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open')) && (github.event_name != 'pull_request' || needs.scope.outputs.tier == 'full' || !cancelled()) }}"
+    # before choosing a tier. It still reports the required name so a cancelled
+    # fast suite cannot leave the context absent or green. A review that is not
+    # an approval, or one submitted after the pull request closed, skips with
+    # `scope` above; its computed name stays unevaluated, so no skipped check is
+    # published under the required context.
+    if: "${{ always() && (github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open')) }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
@@ -308,15 +282,6 @@ jobs:
             exit 0
           fi
           if [[ "${SUITE_RESULT}" != 'success' ]]; then
-            if [[ "${TIER}" == 'fast' && "${EVENT_NAME}" == 'pull_request' && "${SUITE_RESULT}" == 'cancelled' ]]; then
-              # A superseding push cancels the in-flight fast tier: this check
-              # then means "replaced by a newer run", not "broken". Only the
-              # pull request arm cancels in progress, and only the fast tier
-              # may soften: a cancelled full run stays red so the next
-              # approval retries the suite instead of deduping against it.
-              echo "::warning::The fast tier was cancelled, superseded by a newer push."
-              exit 0
-            fi
             echo "::error::The ${TIER} tier ${SUITE_RESULT}."
             exit 1
           fi

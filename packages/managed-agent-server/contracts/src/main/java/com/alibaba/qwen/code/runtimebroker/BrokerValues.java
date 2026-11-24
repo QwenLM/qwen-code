@@ -16,6 +16,8 @@ public final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
     private static final Pattern PATH_SAFE_ID = Pattern.compile(
             "[A-Za-z0-9._-]{1," + MAXIMUM_ID_LENGTH + "}");
+    private static final Pattern TENANT_ID = Pattern.compile(
+            "[A-Za-z0-9._:-]{1,36}");
     private static final int MAXIMUM_DECIMAL_SCALE = 2048;
     // The JDBC codec's reader (fastjson2 2.0.65) refuses a number literal
     // with more digits than this, whatever its scale.
@@ -34,6 +36,213 @@ public final class BrokerValues {
                     + " must be a bounded non-empty string");
         }
         return value;
+    }
+
+    public static boolean isTenantId(String value) {
+        return value != null && TENANT_ID.matcher(value).matches();
+    }
+
+    public static String requireTenantId(String value, String name) {
+        if (!isTenantId(value)) {
+            throw new IllegalArgumentException(name
+                    + " must match [A-Za-z0-9._:-]{1,36}");
+        }
+        return value;
+    }
+
+    public static String requireBindingId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * An operation identity stored in a VARCHAR(128) column. PAD SPACE
+     * collations fold trailing spaces, so two distinct ids would compare
+     * equal; the boundary refuses them rather than relying on the column to
+     * preserve exactness.
+     */
+    public static String requireOperationId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A child-run identity stored in a VARCHAR(256) column (record_id,
+     * child_run_id, execution_call_id, CHILD_RESULT delivery_id). The union
+     * mint is {@code hostedPromptKey(<=64) + ":" + callId(<=128)}, so 256
+     * covers it with headroom. PAD SPACE collations fold trailing spaces, so
+     * two distinct ids would compare equal; the boundary refuses them rather
+     * than relying on the column to preserve exactness.
+     */
+    public static String requireChildRunId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 256 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-256 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A raw model tool-call identity stored in a VARCHAR(128) column
+     * (tool_call_id). Known providers mint far shorter ids; 128 is the
+     * converged contract bound. PAD SPACE collations fold trailing spaces, so
+     * two distinct ids would compare equal; the boundary refuses them rather
+     * than relying on the column to preserve exactness.
+     */
+    public static String requireToolCallId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A Runtime instance or lease identity stored in a VARCHAR(128) column
+     * (runtime_instance_id, runtime_lease_id). Dynamic placements mint the
+     * binding id (<=128) or a UUID(36); static operator slugs are shorter.
+     * PAD SPACE collations fold trailing spaces, so two distinct ids would
+     * compare equal; the boundary refuses them rather than relying on the
+     * column to preserve exactness.
+     */
+    public static String requireRuntimeIdentity(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * An originating Harness Session identity stored in a VARCHAR(64) column
+     * (ma_runtime_session.harness_session_id, ma_tool_execution.harness_session_id,
+     * ma_session_head.harness_session_id). MySQL counts code points and H2 counts
+     * UTF-16 units, so the UTF-16 length bounds both. PAD SPACE collations fold
+     * trailing spaces, so the boundary refuses them rather than relying on the
+     * column to preserve exactness.
+     */
+    public static String requireHarnessSessionId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 64 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-64 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A Runtime execution Session identity stored in a VARCHAR(128) column
+     * (ma_runtime_session.runtime_session_id, ma_tool_execution.runtime_session_id,
+     * ma_storage_owner.runtime_session_id). PAD SPACE collations fold trailing
+     * spaces, so the boundary refuses them rather than relying on the column to
+     * preserve exactness.
+     */
+    public static String requireRuntimeSessionId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * An idempotency key stored in a VARCHAR(128) column. Unicode is allowed
+     * (queue keys are not forced to ASCII); PAD SPACE collations fold trailing
+     * spaces, so two distinct keys would compare equal and the boundary refuses
+     * them rather than relying on the column to preserve exactness.
+     */
+    public static String requireIdempotencyKey(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A Workspace identity stored in a VARCHAR column. PAD SPACE collations
+     * fold trailing spaces, so two distinct ids would compare equal; the
+     * boundary refuses them rather than relying on the column to preserve
+     * exactness. The 512 budget is the global {@link #requireId} bound that
+     * RuntimeScope and automation still admit.
+     */
+    public static String requireWorkspaceId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-512 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /** A logical storage identity stored in a VARCHAR(256) column. */
+    public static String requireStorageId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 256 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-256 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A short identity stored in a VARCHAR(64) column (agent, schedule,
+     * message, pack, lease, query, memory-store, receipt, prompt, turn,
+     * event, boot and epoch ids). PAD SPACE collations fold trailing spaces,
+     * so two distinct ids would compare equal; the boundary refuses them
+     * rather than relying on the column to preserve exactness.
+     */
+    public static String requireShortId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 64 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-64 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A Harness pool instance identity stored in a VARCHAR(128) column
+     * (harness_instance_id, claim_instance_id). The pool endpoint boundary
+     * admits exactly this charset; PAD SPACE collations fold trailing
+     * spaces, so the column boundary refuses anything outside it rather
+     * than letting two instances compare equal.
+     */
+    public static String requireInstanceId(String value, String name) {
+        if (value == null || !value.matches("[A-Za-z0-9._:-]{1,128}")) {
+            throw new IllegalArgumentException(name
+                    + " must match [A-Za-z0-9._:-]{1,128}");
+        }
+        return value;
+    }
+
+    /**
+     * A worker claim identity stored in a VARCHAR(128) column (claim,
+     * dispatch, lease, builder and operation owners). Production owners are
+     * ASCII prefix+UUID mints; an externally supplied owner must stay
+     * bounded, well-formed and free of trailing spaces so a PAD SPACE fold
+     * can never release another holder's claim.
+     */
+    public static String requireWorkerOwner(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
     }
 
     /**

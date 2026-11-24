@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { truncateToolOutput } from './truncation.js';
+import {
+  MAX_SESSION_BYTES,
+  truncateToolOutput,
+  WEB_FETCH_SAVED_TEXT_PREFIX,
+  WEB_FETCH_URL_PREFIX,
+} from './truncation.js';
 import { measureToolOutput, type ToolOutputSize } from './tool-output-size.js';
 import { LRUCache } from 'mnemonist';
 import { rm } from 'node:fs/promises';
@@ -17,7 +22,6 @@ import {
   isPrivateHost,
 } from '../utils/fetch.js';
 import type { Storage } from '../config/storage.js';
-import { MAX_SESSION_BYTES } from './truncation.js';
 import {
   formatByteSize,
   isBinaryContentType,
@@ -350,8 +354,8 @@ To fetch the redirected content, call ${WebFetchTool.Name} again with:
   private buildMetadataHeader(entry: CacheEntry): string {
     const urlLine =
       entry.finalUrl !== this.params.url
-        ? `URL: ${this.params.url} (final: ${entry.finalUrl})`
-        : `URL: ${this.params.url}`;
+        ? `${WEB_FETCH_URL_PREFIX}${this.params.url} (final: ${entry.finalUrl})`
+        : `${WEB_FETCH_URL_PREFIX}${this.params.url}`;
     return `${urlLine}
 Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.contentType || 'unknown'} | Size: ${entry.byteLength.toLocaleString('en-US')} bytes`;
   }
@@ -628,7 +632,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       const header =
         this.buildMetadataHeader(entry) +
         (entry.persistedTextPath
-          ? `\nFull extracted text saved to: ${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
+          ? `\n${WEB_FETCH_SAVED_TEXT_PREFIX}${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
           : '');
       const binaryNote = entry.persistedPath
         ? `\n\n[Binary content (${entry.persistedMime || entry.contentType || 'unknown'}, ${formatByteSize(entry.persistedSize ?? entry.byteLength)}) saved to ${entry.persistedPath}.${readHintForPath(entry.persistedPath)}]`
@@ -764,6 +768,7 @@ ${entry.content}
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
         rawOutputSize: entry.rawOutputSize,
+        persistedOutputFiles,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),

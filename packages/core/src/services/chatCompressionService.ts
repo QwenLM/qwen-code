@@ -55,6 +55,11 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+import {
+  buildCompactionTranscriptHint,
+  stripCompactionTranscriptHint,
+  withoutCompactionTranscriptHint,
+} from './compaction-transcript-hint.js';
 
 import {
   markCompressedHistory,
@@ -379,6 +384,7 @@ export interface CompressOptions {
   config: Config;
   onPreparedCompaction?: (candidate: ChatCompressionCandidate) => Promise<void>;
   restoreRecentFiles?: boolean;
+  getExistingTranscriptPath?: () => Promise<string | undefined>;
   /**
    * Number of consecutive auto-compaction failures for this chat. When it reaches
    * MAX_CONSECUTIVE_FAILURES, the cheap-gate stops trying until a successful
@@ -875,9 +881,12 @@ export class ChatCompressionService {
     const originalHistoryTokenCount =
       originalTokenCount +
       (preserveTail ? (opts.unaccountedOutputTokens ?? 0) : 0);
-    const sideQueryHistory = preserveTail
+    const historyToSummarize = preserveTail
       ? curatedHistory.slice(0, candidateTailStart)
       : [...sideQueryBase, ...visiblePendingHistory];
+    const sideQueryHistory =
+      withoutCompactionTranscriptHint(historyToSummarize);
+    const summaryHistoryChanged = historyToSummarize !== sideQueryHistory;
     const pendingToolResultTokenCount = estimateContentTokens(
       visiblePendingHistory,
       slimmingConfig.imageTokenEstimate,
@@ -1205,6 +1214,8 @@ export class ChatCompressionService {
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
       sharedRequestFits &&
+      // Removing the previous hint also changes this request's warmed prefix.
+      !summaryHistoryChanged &&
       // The shared request is built from the UNSLIMMED history. A
       // payload-overflow compaction exists because that exact payload was
       // just rejected at the gateway's byte limit — re-uploading it would
@@ -1225,7 +1236,9 @@ export class ChatCompressionService {
                 `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
                 `effectiveLimit=${reactiveContextCeiling}, window=${contextLimit}, ` +
                 `ceiling=${opts.observedServerCeiling ?? 'none'}`
-              : 'payload-overflow recovery ships the slimmed cold path only';
+              : summaryHistoryChanged
+                ? 'removed a prior transcript hint from the warmed prefix'
+                : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
     if (canShareCache) {
@@ -1420,7 +1433,7 @@ export class ChatCompressionService {
         }
       }
     }
-    const summary = summaryResult.text;
+    const summary = stripCompactionTranscriptHint(summaryResult.text ?? '');
     // Check the PROCESSED summary: postProcessSummary strips <analysis>
     // blocks, so a response that is ONLY <analysis>...</analysis> (no
     // <state_snapshot>) has a non-empty RAW body but strips to nothing. If
@@ -1626,6 +1639,10 @@ export class ChatCompressionService {
     let restorationTokenCount = 0;
 
     if (!isSummaryEmpty) {
+      const transcriptPath = await opts.getExistingTranscriptPath?.();
+      const transcriptHint = transcriptPath
+        ? buildCompactionTranscriptHint(transcriptPath)
+        : undefined;
       // Manual /compress has no pending functionResponse, so a trailing
       // model+functionCall is an ORPHAN (e.g. an interrupted/cancelled tool
       // call). Preserving it emits model[functionCall] immediately followed
@@ -1650,6 +1667,7 @@ export class ChatCompressionService {
           summary,
           {
             workspaceRoot: config.getTargetDir(),
+            transcriptHint,
             signal,
             // A payload-overflow compaction (#10380) exists because the
             // serialized request exceeded the gateway's BYTE limit while
@@ -1711,7 +1729,10 @@ export class ChatCompressionService {
         extraHistory = [
           {
             role: 'user',
-            parts: [{ text: postProcessSummary(summary) }, ...reminderParts],
+            parts: [
+              { text: postProcessSummary(summary, transcriptHint) },
+              ...reminderParts,
+            ],
           },
           {
             role: 'model',
@@ -1727,6 +1748,11 @@ export class ChatCompressionService {
         extraHistory.slice(2),
         slimmingConfig.imageTokenEstimate,
       );
+      if (transcriptHint) {
+        restorationTokenCount += Math.ceil(
+          (transcriptHint.length + 2) / CHARS_PER_TOKEN,
+        );
+      }
       if (retainedTail.length > 0) {
         const temporalReminder = RETAINED_COMPACTION_TAIL_REMINDER;
         restorationTokenCount += Math.ceil(
@@ -1797,6 +1823,22 @@ export class ChatCompressionService {
             compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
+        if (summaryHistoryChanged) {
+          // Provider usage excludes the old hint stripped from the side
+          // query. It still lived in the original prompt token count.
+          newTokenCount = Math.max(
+            0,
+            newTokenCount -
+              (estimateContentTokens(
+                historyToSummarize.slice(0, 2),
+                slimmingConfig.imageTokenEstimate,
+              ) -
+                estimateContentTokens(
+                  sideQueryHistory.slice(0, 2),
+                  slimmingConfig.imageTokenEstimate,
+                )),
+          );
+        }
         // The composer injects file-restoration blocks (up to
         // maxRecentFiles × 5K tokens) and an image-restoration block (up to
         // maxRecentImages images) that are NOT in

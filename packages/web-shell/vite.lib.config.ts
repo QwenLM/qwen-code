@@ -17,6 +17,9 @@ const COMPONENT_ROOT_SCOPE =
 function scopeComponentCss(root: Root): void {
   const scopeNode = selectorParser().astSync(COMPONENT_SCOPE).first.first;
   if (!scopeNode) throw new Error('Invalid WebShell component CSS scope');
+  const rootScope = selectorParser().processSync(COMPONENT_ROOT_SCOPE, {
+    lossless: false,
+  });
   const keyframeNames = new Map<string, string>();
   const propertyNames = new Map<string, string>();
 
@@ -73,6 +76,15 @@ function scopeComponentCss(root: Root): void {
     rule.selector = selectorParser((selectors) => {
       selectors.each((selector) => {
         const first = selector.first;
+        if (
+          first?.type === 'pseudo' &&
+          first.value === ':is' &&
+          selectorParser().processSync(first.toString(), {
+            lossless: false,
+          }) === rootScope
+        ) {
+          return;
+        }
         if (first?.type === 'tag' || first?.type === 'universal') {
           selector.insertAfter(first, scopeNode.clone());
         } else {
@@ -171,6 +183,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/AssistantMessageRow.transcript-stub.tsx',
     ],
     [
+      './client/components/messages/ThinkingBody.tsx',
+      './client/components/messages/ThinkingBody.transcript-stub.tsx',
+    ],
+    [
       './client/components/streaming-tail.ts',
       './client/components/streaming-tail.transcript-stub.ts',
     ],
@@ -254,6 +270,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/managed/managed-artifact-library-messages.ts',
       './client/components/managed/managed-artifact-library-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/workspace-artifact-library-messages.ts',
+      './client/components/artifacts/workspace-artifact-library-messages.transcript-stub.ts',
     ],
     ['./client/i18n-catalogs.ts', './client/i18n-catalogs.eager.ts'],
     ['./client/i18n-zh-tw.ts', './client/i18n-zh-tw.transcript-stub.ts'],

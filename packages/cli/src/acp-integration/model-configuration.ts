@@ -19,9 +19,11 @@ import {
 import {
   resolveReasoningForModel,
   getEffectiveReasoning,
+  hasOpenRouterReasoningEffortOverride,
   type ReasoningProfile,
   type ResolvedReasoning,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { getBuiltinKimiK3Reasoning } from '@qwen-code/qwen-code-core/core/kimi-reasoning.js';
 import {
   getBuiltinDeepSeekReasoning,
   getDeepSeekReasoningState,
@@ -159,6 +161,7 @@ export function getDefaultReasoningConfig(
 export function getGptReasoningOverrideState(
   generation: ContentGeneratorConfig,
   configuredReasoning?: ModelReasoningConfiguration,
+  config?: Pick<Config, 'getResolvedModelConfig'>,
 ):
   | {
       enabled: boolean;
@@ -215,11 +218,14 @@ export function getGptReasoningOverrideState(
   }
   if (nested === undefined) {
     const suppressedConfiguredTier = openRouter
-      ? !parseModelReasoningCapabilities(configuredReasoning) &&
-        !isReasoningEffortPlaceholder(
-          generation.samplingParams?.['reasoning_effort'],
-        ) &&
-        !isReasoningEffortPlaceholder(flat)
+      ? getBuiltinKimiK3Reasoning({ ...generation, model })
+        ? !removedFlatNone &&
+          hasOpenRouterReasoningEffortOverride(config, generation, model)
+        : !parseModelReasoningCapabilities(configuredReasoning) &&
+          !isReasoningEffortPlaceholder(
+            generation.samplingParams?.['reasoning_effort'],
+          ) &&
+          !isReasoningEffortPlaceholder(flat)
       : removedFlatNone;
     const effort = removedFlatNone
       ? undefined
@@ -460,6 +466,7 @@ export function clearReasoningRequestOverrides(
     getGptReasoningOverrideState(
       generation,
       resolveReasoningForModel(config, generation),
+      config,
     )?.blocksTierChange
   )
     return;
@@ -785,7 +792,7 @@ export function getReasoningForDisplay(
   if (!resolved) return generation.reasoning;
   const deepSeek = getDeepSeekReasoningState(generation, resolved);
   if (deepSeek) return deepSeek.enabled ? { effort: deepSeek.effort } : false;
-  const override = getGptReasoningOverrideState(generation, resolved);
+  const override = getGptReasoningOverrideState(generation, resolved, config);
   if (override) return override.enabled ? { effort: override.effort } : false;
   if (config.getReasoningEffortOverride?.()) return generation.reasoning;
   return getEffectiveReasoning(generation, resolved);

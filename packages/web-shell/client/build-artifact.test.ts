@@ -322,9 +322,9 @@ describe('build artifact — package boundary', () => {
       }
     });
 
-    expect(scrollbarRootRule?.selector).toContain(
-      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))',
-    );
+    const rootScope =
+      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))';
+    expect(scrollbarRootRule?.selectors).toEqual([rootScope, `${rootScope} *`]);
   });
 
   it('keeps component resets and utilities above plain host selectors', () => {
@@ -394,6 +394,44 @@ describe('build artifact — package boundary', () => {
       }
     });
     expect(conflictingLayers).toEqual([]);
+  });
+
+  it('keeps the iOS input size rule scoped and unlayered in shared CSS', () => {
+    const css = postcss.parse(readInjectedCss(readTranscriptBundle()));
+    const rules: Rule[] = [];
+    css.walkAtRules('supports', (supports) => {
+      if (!/^\(-webkit-touch-callout:\s*none\)$/.test(supports.params)) return;
+      supports.walkAtRules('media', (media) => {
+        expect(media.params.replace(/\s+/g, '')).toBe(
+          '(hover:none)and(pointer:coarse)',
+        );
+        media.walkRules((rule) => rules.push(rule));
+      });
+    });
+
+    expect(rules).toHaveLength(1);
+    const rule = rules[0]!;
+    expect(enclosingLayer(rule)).toBeUndefined();
+    expect(rule.selector).toContain(
+      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))',
+    );
+    for (const field of [
+      'input:is(:not([type])',
+      'textarea',
+      '[contenteditable',
+      '[data-composer] .cm-content',
+      '[data-composer] .cm-line',
+    ]) {
+      expect(rule.selector).toContain(field);
+    }
+    expect(
+      rule.nodes.some(
+        (node) =>
+          node.type === 'decl' &&
+          node.prop === 'font-size' &&
+          node.value === '16px',
+      ),
+    ).toBe(true);
   });
 
   it('removes the transcript width cap from fullscreen panels', () => {
@@ -605,6 +643,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toMatch(/["'`]workspaceArtifactLibrary\./);
     expect(js).not.toContain(
       'No artifacts have been produced in this workspace yet.',
     );
@@ -612,6 +651,7 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
     const interactive = readPackageJavascript();
     expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('workspaceArtifactLibrary.title');
     expect(interactive).toContain('Artifact library');
     expect(interactive).toContain('产物库');
     expect(interactive).toContain('Библиотека артефактов');
@@ -853,6 +893,9 @@ describe('build artifact — transcript entry (#11031)', () => {
       );
 
       expect(preflightIndex).toBeGreaterThanOrEqual(0);
+      expect(rules[preflightIndex]?.selectors).toContain(
+        ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn])) ::backdrop',
+      );
       expect(katexIndex).toBeGreaterThan(preflightIndex);
     }
   });

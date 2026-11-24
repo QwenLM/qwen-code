@@ -37,6 +37,7 @@ const ROW_PROPS: Partial<
   Record<ModRenderSite, Record<string, 'string' | 'boolean'>>
 > = {
   AssistantMessage: { text: 'string', isFirstOfReply: 'boolean' },
+  Thinking: { text: 'string' },
 };
 
 // How long a client's ask waits: for the Mods to load, the rows ahead of it,

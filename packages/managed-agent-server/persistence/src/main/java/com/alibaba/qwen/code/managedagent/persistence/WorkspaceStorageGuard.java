@@ -6,9 +6,9 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageMarkers.Ma
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -85,7 +85,7 @@ public class WorkspaceStorageGuard {
             return "unconfigured";
         }
         var alias = LocalStorageOwners.alias(jdbc, tenantId, storageId, false);
-        if (alias == null || !(alias.get("physical_key") instanceof String physical)) {
+        if (alias == null || !(alias.get("physical_id") instanceof String physical)) {
             return "unverified";
         }
         Registration row = row(physical, false);
@@ -289,9 +289,9 @@ public class WorkspaceStorageGuard {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             jdbc.update("INSERT INTO ma_storage_owner"
-                    + " (storage_key, physical_key, tenant_id, storage_id) VALUES (?, ?, ?, ?)"
-                    + " ON DUPLICATE KEY UPDATE storage_key = storage_key",
-                    key, key, tenantId, storageId);
+                    + " (physical_id, tenant_id, storage_id) VALUES (?, ?, ?)"
+                    + " ON DUPLICATE KEY UPDATE physical_id = physical_id",
+                    key, tenantId, storageId);
             Registration row = row(key, true);
             requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
@@ -310,7 +310,7 @@ public class WorkspaceStorageGuard {
                 jdbc.update("UPDATE ma_storage_owner SET tenant_id = ?, storage_id = ?,"
                         + " mount_operation_id = ?, mount_root = ?, mount_host_id = ?,"
                         + " mount_device = ?, mount_inode = ?, mount_birth_time = ?, mount_registration_id = ?"
-                        + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'UNVERIFIED'",
+                        + " WHERE physical_id = ? AND storage_kind = 'LOCAL' AND mount_state = 'UNVERIFIED'",
                         tenantId, storageId, operationId, identity.root(), identity.hostId(),
                         identity.device(), identity.inode(), identity.birthTime(), registrationId, key);
                 return row(key, true);
@@ -357,7 +357,7 @@ public class WorkspaceStorageGuard {
             }
             int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
-                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE storage_key = ? AND storage_kind = 'LOCAL' "
+                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE physical_id = ? AND storage_kind = 'LOCAL' "
                     + " AND mount_state = 'UNVERIFIED' AND mount_operation_id = ?"
                     + " AND mount_revision = 0", operationId, key, operationId);
             if (changed != 1) {
@@ -369,16 +369,14 @@ public class WorkspaceStorageGuard {
 
     private void prepareAlias(String tenant, String storage, String physical, String operation) {
         String request = "{\"schemaVersion\":1,\"operationId\":\"" + operation + "\"}";
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
-                + " storage_kind, registration_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
-                + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_key IS NULL OR registration_json IS NULL OR storage_kind = 'UNREGISTERED' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_key = COALESCE(physical_key, VALUES(physical_key)),"
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
+                + " storage_kind, registration_json, gmt_create, gmt_modified) VALUES (?, ?, ?, 'LOCAL', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
+                + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_id IS NULL OR registration_json IS NULL OR storage_kind = 'UNREGISTERED' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_id = COALESCE(physical_id, VALUES(physical_id)),"
                 + " storage_kind = CASE WHEN storage_kind = 'UNREGISTERED' THEN 'LOCAL' ELSE storage_kind END,"
                 + " registration_json = COALESCE(registration_json, VALUES(registration_json))",
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage),
-                RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey(storage), tenant, storage, physical, request);
+                tenant, storage, physical, request);
         var alias = LocalStorageOwners.alias(jdbc, tenant, storage, true);
-        if (alias == null || !physical.equals(alias.get("physical_key")) || !"LOCAL".equals(alias.get("storage_kind"))
+        if (alias == null || !physical.equals(alias.get("physical_id")) || !"LOCAL".equals(alias.get("storage_kind"))
                 || !List.of("FENCE_ONLY", "REGISTERED").contains(alias.get("registration_state"))
                 || alias.get("fence_operation_id") != null
                 || !operation.equals(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse((String) alias.get("registration_json")).path("operationId").asText())) {
@@ -387,8 +385,8 @@ public class WorkspaceStorageGuard {
     }
 
     private void completeAlias(String tenant, String storage, String physical) {
-        if (jdbc.update("UPDATE ma_storage SET gmt_modified = CASE WHEN registration_state <> 'REGISTERED' OR registration_revision IS NULL THEN " + ManagedSchemaTime.SQL_NOW + " ELSE gmt_modified END, registration_state = 'REGISTERED', registration_revision = COALESCE(registration_revision, 1) WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage), physical) != 1) {
+        if (jdbc.update("UPDATE ma_storage SET gmt_modified = CASE WHEN registration_state <> 'REGISTERED' OR registration_revision IS NULL THEN " + ManagedSchemaTime.SQL_NOW + " ELSE gmt_modified END, registration_state = 'REGISTERED', registration_revision = COALESCE(registration_revision, 1) WHERE tenant_id = ? AND storage_id = ? AND physical_id = ? AND storage_kind = 'LOCAL'",
+                tenant, storage, physical) != 1) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -421,9 +419,9 @@ public class WorkspaceStorageGuard {
             int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET mount_state = 'FENCED', mount_operation_id = ?,"
                     + " mount_completed_operation_id = NULL"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                    + " WHERE physical_id = ? AND storage_kind = 'LOCAL'"
                     + " AND mount_state = 'READY' AND mount_revision = ?"
-                    + " AND holder_key IS NULL AND binding_id IS NULL"
+                    + " AND holder_id IS NULL AND binding_id IS NULL"
                     + " AND runtime_generation IS NULL AND runtime_session_id IS NULL",
                     operationId, physical, revision);
             if (changed != 1) {
@@ -470,7 +468,7 @@ public class WorkspaceStorageGuard {
             int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
                     + " mount_operation_id = NULL, mount_completed_operation_id = ?"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'FENCED'"
+                    + " WHERE physical_id = ? AND storage_kind = 'LOCAL' AND mount_state = 'FENCED'"
                     + " AND mount_revision = ? AND mount_operation_id = ?",
                     operationId, physical, revision, operationId);
             if (changed != 1) {
@@ -515,7 +513,7 @@ public class WorkspaceStorageGuard {
     }
 
     private boolean occupied(String physical, boolean lock) {
-        List<Number> counts = jdbc.query("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?"
+        List<Number> counts = jdbc.query("SELECT member_count FROM ma_storage_owner WHERE physical_id = ?"
                 + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> (Number) row.getObject("member_count"), physical);
         return !counts.isEmpty() && counts.getFirst().longValue() > 0;
@@ -586,19 +584,19 @@ public class WorkspaceStorageGuard {
     }
 
     private Registration row(String key, boolean lock) {
-        List<Registration> rows = jdbc.query("SELECT physical_key, tenant_id, storage_id, holder_key,"
+        List<Registration> rows = jdbc.query("SELECT physical_id, tenant_id, storage_id, holder_id,"
                 + " binding_id, runtime_generation, runtime_session_id,"
                 + " mount_revision, mount_state, mount_operation_id, mount_root,"
                 + " mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
                 + " mount_completed_operation_id"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                + " FROM ma_storage_owner WHERE physical_id = ? AND storage_kind = 'LOCAL'"
                 + (lock ? " FOR UPDATE" : ""), (result, index) -> {
-                    if (!key.equals(result.getString("physical_key"))) {
+                    if (!key.equals(ManagedSchemaRows.identity(result, "physical_id"))) {
                         throw WorkspaceExecutionStore.unavailable();
                     }
                     return new Registration(
                         result.getString("tenant_id"), result.getString("storage_id"),
-                        result.getString("holder_key"), result.getString("binding_id"),
+                        ManagedSchemaRows.identity(result, "holder_id"), result.getString("binding_id"),
                         result.getObject("runtime_generation", Long.class),
                         result.getString("runtime_session_id"), result.getLong("mount_revision"),
                         result.getString("mount_state"), result.getString("mount_operation_id"),
@@ -746,13 +744,13 @@ public class WorkspaceStorageGuard {
             if (physical.equals(previous)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            int created = jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id,"
+            int created = jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, tenant_id, storage_id,"
                     + " mount_root, mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
-                    + " mount_revision, mount_state, mount_completed_operation_id) VALUES (?, ?, 'LOCAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)",
-                    physical, physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
+                    + " mount_revision, mount_state, mount_completed_operation_id) VALUES (?, 'LOCAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)",
+                    physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
                     target.birthTime(), registration, source.mountRevision() + 1, operation);
-            if (created != 1 || jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", physical_key = ?, registration_revision = registration_revision + 1 WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
-                    physical, RuntimeAdmissionFences.storageAliasKey(source.tenantId(), source.storageId()), previous) != 1) {
+            if (created != 1 || jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", physical_id = ?, registration_revision = registration_revision + 1 WHERE tenant_id = ? AND storage_id = ? AND physical_id = ? AND storage_kind = 'LOCAL'",
+                    physical, source.tenantId(), source.storageId(), previous) != 1) {
                 throw WorkspaceExecutionStore.unavailable();
             }
         });
@@ -811,7 +809,7 @@ public class WorkspaceStorageGuard {
             }
         }
         var alias = LocalStorageOwners.alias(jdbc, tenantId, storageId, false);
-        if (alias == null || !LocalStorageOwners.physicalKey(identity).equals(alias.get("physical_key"))
+        if (alias == null || !LocalStorageOwners.physicalKey(identity).equals(alias.get("physical_id"))
                 || row.tenantId() == null || row.storageId() == null
                 || !identity.root().equals(row.root()) || !identity.hostId().equals(row.hostId())
                 || !identity.device().equals(row.device()) || !identity.inode().equals(row.inode())
