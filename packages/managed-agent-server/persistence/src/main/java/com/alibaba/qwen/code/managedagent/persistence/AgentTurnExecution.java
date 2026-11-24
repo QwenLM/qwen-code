@@ -761,8 +761,7 @@ final class AgentTurnExecution {
     }
 
     boolean failRecoveryBlockedTurn(String tenantId, String sessionId, String turnId, String owner, String message) {
-        return settleFailedTurn(tenantId, sessionId, turnId, owner,
-                "managed_runtime_recovery_blocked", message, false);
+        return settleFailedTurn(tenantId, sessionId, turnId, owner, "managed_runtime_recovery_blocked", message, false);
     }
 
     boolean settleFailedTurn(String tenantId, String sessionId, String turnId, String owner, String code, String message, boolean allowCancelling) {
