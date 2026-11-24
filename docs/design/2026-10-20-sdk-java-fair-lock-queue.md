@@ -386,7 +386,9 @@ order this section exists to prevent.
   behind an aliased target, and the only `find -delete` allowed outside it is
   the write-back's host-cache coordinate purge, pinned to that whole command
   verbatim so neither an aliased target nor a broader purge of the shared
-  cache can pass. Other destructive verbs are outside this pin.
+  cache can pass. This is a lexical pin: other destructive verbs, and
+  obfuscated spellings of the same verbs (escaped or quoted tokens such as
+  `r\m` or `-de'lete'`), are outside its reach.
   These cleanup and missing-helper
   probes set both `cwd` and `GITHUB_WORKSPACE` to a private fixture workspace
   so a `$PWD`-based deletion cannot touch the source checkout; the log-pipe

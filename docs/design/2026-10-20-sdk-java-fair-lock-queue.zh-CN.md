@@ -301,7 +301,7 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   情况，输出通道可写时以 `::warning::` 注解标出残留路径；清理与告警输出的
   I/O 失败均保留原 step 状态；告警子 shell 隔离了日志管道关闭引发的 `SIGPIPE`，使主 step shell 能恢复原状态；
   权限拒绝用例由真实删除探测决定能否运行，而不是仅凭 uid 0 跳过；移除 DAC 能力的 root CI lane 仍会执行。
-  探测准备错误或非预期删除错误会显式失败，不会静默丢失覆盖。每个 `seed_helper` 步骤恰好只有一条 trap，且必须位于完整的缺失 helper 守卫（`if ... fi`）内部、`mktemp` 之后与 `curl` 之前；它被精确钉住为单操作数的 `${seed_helper}` 删除加告警子 shell 与原状态恢复，拒绝额外操作数与额外 trap。该 trap 是步骤内唯一的 `rm`/`unlink`，因此删除命令无法借变量别名隐藏目标；trap 之外唯一允许的 `find -delete` 是写回对宿主缓存的坐标清除，并逐字钉住该整条命令，使别名目标或对共享缓存的更大范围清除都无法通过；其他破坏性动词不在本 pin 范围内。
+  探测准备错误或非预期删除错误会显式失败，不会静默丢失覆盖。每个 `seed_helper` 步骤恰好只有一条 trap，且必须位于完整的缺失 helper 守卫（`if ... fi`）内部、`mktemp` 之后与 `curl` 之前；它被精确钉住为单操作数的 `${seed_helper}` 删除加告警子 shell 与原状态恢复，拒绝额外操作数与额外 trap。该 trap 是步骤内唯一的 `rm`/`unlink`，因此删除命令无法借变量别名隐藏目标；trap 之外唯一允许的 `find -delete` 是写回对宿主缓存的坐标清除，并逐字钉住该整条命令，使别名目标或对共享缓存的更大范围清除都无法通过。这是一条词法 pin：其他破坏性动词，以及同一动词的混淆拼写（转义或引号拆词，如 `r\m`、`-de'lete'`），都不在它的覆盖范围内。
   本轮清理与 helper 缺失探针都将 `cwd` 和 `GITHUB_WORKSPACE` 指向私有夹具 workspace，使基于 `$PWD` 的删除目标无法触及真实 checkout；日志管道清理探针还以真实 checkout helper 的字节初始化夹具 workspace 副本，并核实该副本字节未被改变。
   以目录作为删除对象，使清理失败不依赖 DAC 能力；无读端 FIFO 臂验证 `SIGPIPE` 不会终止主 shell 且保留原退出状态，普通可读 pipe 臂则断言唯一告警及残留路径。
   其他 source、seed、挂载及 prune 失败保持 fail-closed；reference 构建直接 source checkout 内的 helper，不需要回退下载。
