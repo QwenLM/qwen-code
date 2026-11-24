@@ -396,10 +396,13 @@ export function sandboxVerdict(
       containerRuntime: probe(),
       hostProbe,
     });
-    if (selection.kind === 'container') {
-      return { kind: 'container', runtime: selection.runtime };
-    }
-    return { kind: 'refused', reason: selection.reason };
+    return {
+      kind: 'refused',
+      reason:
+        selection.kind === 'container'
+          ? `requested hardware backend "${requestedBackend}" cannot fall back to a shared-kernel container`
+          : selection.reason,
+    };
   }
 
   const runtime = probe();
@@ -508,16 +511,20 @@ export function refuseHostExecutionPhase(
   if (policy !== 'required' && policy !== 'tiered' && !forceHardware) {
     return null;
   }
-  const trust = classifyReviewTrust(opts.trustContext, env, fileSourced);
-  const reasons =
-    trust.escalationReasons.length > 0
-      ? ` [${trust.escalationReasons.join(', ')}]`
-      : '';
   const trigger = forceHardware
     ? 'QWEN_REVIEW_FORCE_HARDWARE=1'
     : `review.sandbox is "${policy}"`;
+  let trustSuffix = '';
+  if (opts.trustContext !== undefined) {
+    const trust = classifyReviewTrust(opts.trustContext, env, fileSourced);
+    const reasons =
+      trust.escalationReasons.length > 0
+        ? ` [${trust.escalationReasons.join(', ')}]`
+        : '';
+    trustSuffix = ` (${trust.prTrust} -> ${trust.executionClass}${reasons})`;
+  }
   return (
-    `${trigger} (${trust.prTrust} -> ${trust.executionClass}${reasons}) and ` +
+    `${trigger}${trustSuffix} and ` +
     'host tmux execution cannot provide an isolated sandbox boundary — refusing ' +
     'to run untrusted commands directly on the host'
   );
@@ -726,12 +733,20 @@ export function reapContainer(
   name: string,
   spawn: typeof spawnSync = spawnSync,
 ): ContainerReapResult {
+  let rmFailedDetail: string | undefined;
   try {
-    spawn(runtime, ['rm', '-f', name], {
-      stdio: 'ignore',
+    const rm = spawn(runtime, ['rm', '-f', name], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'ignore', 'pipe'],
       timeout: 30_000,
       env: runtimeClientEnv(),
     });
+    if (rm.error) {
+      rmFailedDetail = `${runtime} rm -f ${name} error: ${rm.error.message}`;
+    } else if (rm.status !== 0) {
+      const rmErr = String(rm.stderr ?? '').trim();
+      rmFailedDetail = `${runtime} rm -f ${name} exited ${String(rm.status)}${rmErr ? `: ${rmErr}` : ''}`;
+    }
   } catch (err) {
     return {
       status: 'failed',
@@ -744,7 +759,7 @@ export function reapContainer(
       ['inspect', '--format', '{{.State.Running}}', name],
       {
         encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 10_000,
         env: runtimeClientEnv(),
       },
@@ -755,18 +770,33 @@ export function reapContainer(
         detail: `could not verify teardown of ${name}: ${inspect.error.message}`,
       };
     }
-    if (
-      inspect.status === 0 &&
-      String(inspect.stdout ?? '')
-        .trim()
-        .toLowerCase() === 'true'
-    ) {
+    const stdout = String(inspect.stdout ?? '')
+      .trim()
+      .toLowerCase();
+    const stderr = String(inspect.stderr ?? '').trim();
+    if (inspect.status === 0) {
+      if (stdout === 'false') return { status: 'clean' };
       return {
         status: 'failed',
-        detail: `container ${name} is still running after ${runtime} rm -f`,
+        detail:
+          stdout === 'true'
+            ? `container ${name} is still running after ${runtime} rm -f`
+            : `unexpected ${runtime} inspect output for ${name}: ${JSON.stringify(stdout)}`,
       };
     }
-    return { status: 'clean' };
+    if (/no such (?:container|object)/i.test(stderr)) {
+      return { status: 'clean' };
+    }
+    if (!rmFailedDetail && stderr === '') {
+      return { status: 'clean' };
+    }
+    return {
+      status: 'failed',
+      detail:
+        `could not confirm removal of ${name} (inspect exited ${String(inspect.status)}` +
+        `${stderr ? `: ${stderr}` : ''}` +
+        `${rmFailedDetail ? `; ${rmFailedDetail}` : ''})`,
+    };
   } catch (err) {
     return {
       status: 'failed',

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { accessSync, constants as fsConstants } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import type { ReviewExecutionClass } from './sandbox-trust.js';
 
@@ -104,19 +104,49 @@ export function requestedSandboxBackend(
   return 'auto';
 }
 
-function commandExists(cmd: string): boolean {
-  const probe = spawnSync('which', [cmd], {
-    stdio: 'ignore',
-    timeout: 5_000,
-  });
-  return !probe.error && probe.status === 0;
+function commandExists(
+  cmd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const pathEnv = env['PATH'] ?? '';
+  for (const dir of pathEnv.split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, cmd);
+    try {
+      if (statSync(candidate).isFile()) {
+        accessSync(candidate, fsConstants.X_OK);
+        return true;
+      }
+    } catch {
+      // Not present or not executable in this PATH entry.
+    }
+  }
+  return false;
 }
 
-function pathAccessible(p: string | undefined, mode: number): boolean {
-  if (!p) return false;
+function readableFilePath(p: string | undefined): string | undefined {
+  if (!p) return undefined;
   try {
-    accessSync(p, mode);
-    return true;
+    if (!statSync(p).isFile()) return undefined;
+    accessSync(p, fsConstants.R_OK);
+    return p;
+  } catch {
+    return undefined;
+  }
+}
+
+const DISALLOWED_FCSANDBOX_TEMPLATES = new Set([
+  'default',
+  'base',
+  'python',
+  'code-interpreter',
+]);
+
+function isValidHttpsEndpoint(raw: string | undefined): boolean {
+  if (!raw || /\s/.test(raw)) return false;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'https:' && parsed.hostname.length > 0;
   } catch {
     return false;
   }
@@ -140,25 +170,30 @@ export function probeHostReviewBackends(
 
   const rawKernel = operatorEnvValue('QWEN_REVIEW_VM_KERNEL', env, fileSourced);
   const rawRootfs = operatorEnvValue('QWEN_REVIEW_VM_ROOTFS', env, fileSourced);
-  const readableKernel = pathAccessible(rawKernel, fsConstants.R_OK)
-    ? rawKernel
-    : undefined;
-  const readableRootfs = pathAccessible(rawRootfs, fsConstants.R_OK)
-    ? rawRootfs
-    : undefined;
+  const readableKernel = readableFilePath(rawKernel);
+  const readableRootfs = readableFilePath(rawRootfs);
+
+  const canAccess = (p: string, mode: number): boolean => {
+    try {
+      accessSync(p, mode);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   return {
     platform,
     arch,
     hasKvm:
       platform === 'linux' &&
-      pathAccessible('/dev/kvm', fsConstants.R_OK | fsConstants.W_OK),
-    hasFirecracker: platform === 'linux' && commandExists('firecracker'),
-    hasJailer: platform === 'linux' && commandExists('jailer'),
-    hasVfkit: platform === 'darwin' && commandExists('vfkit'),
+      canAccess('/dev/kvm', fsConstants.R_OK | fsConstants.W_OK),
+    hasFirecracker: platform === 'linux' && commandExists('firecracker', env),
+    hasJailer: platform === 'linux' && commandExists('jailer', env),
+    hasVfkit: platform === 'darwin' && commandExists('vfkit', env),
     hasSandboxExec:
       platform === 'darwin' &&
-      pathAccessible('/usr/bin/sandbox-exec', fsConstants.X_OK),
+      canAccess('/usr/bin/sandbox-exec', fsConstants.X_OK),
     firecrackerKernel: readableKernel,
     firecrackerRootfs: readableRootfs,
     vfkitKernel: readableKernel,
@@ -192,8 +227,8 @@ export function buildReviewBackendPlan(
     if (!probe.hasKvm) missing.push('/dev/kvm');
     if (!probe.hasFirecracker) missing.push('firecracker');
     if (!probe.hasJailer) missing.push('jailer');
-    if (!probe.firecrackerKernel) missing.push('QWEN_REVIEW_VM_KERNEL');
-    if (!probe.firecrackerRootfs) missing.push('QWEN_REVIEW_VM_ROOTFS');
+    if (!probe.firecrackerKernel?.trim()) missing.push('QWEN_REVIEW_VM_KERNEL');
+    if (!probe.firecrackerRootfs?.trim()) missing.push('QWEN_REVIEW_VM_ROOTFS');
     return {
       backend,
       ready: missing.length === 0,
@@ -211,8 +246,8 @@ export function buildReviewBackendPlan(
     }
     if (!probe.hasVfkit) missing.push('vfkit');
     if (!probe.hasSandboxExec) missing.push('/usr/bin/sandbox-exec');
-    if (!probe.vfkitKernel) missing.push('QWEN_REVIEW_VM_KERNEL');
-    if (!probe.vfkitRootfs) missing.push('QWEN_REVIEW_VM_ROOTFS');
+    if (!probe.vfkitKernel?.trim()) missing.push('QWEN_REVIEW_VM_KERNEL');
+    if (!probe.vfkitRootfs?.trim()) missing.push('QWEN_REVIEW_VM_ROOTFS');
     return {
       backend,
       ready: missing.length === 0,
@@ -228,12 +263,16 @@ export function buildReviewBackendPlan(
   if (!probe.providerVmDriver) {
     missing.push('QWEN_REVIEW_PROVIDER_VM_DRIVER (fcsandbox|aliyun-ecs)');
   }
-  if (!probe.providerVmEndpoint) {
-    missing.push('QWEN_REVIEW_PROVIDER_VM_ENDPOINT');
+  if (!isValidHttpsEndpoint(probe.providerVmEndpoint?.trim())) {
+    missing.push('QWEN_REVIEW_PROVIDER_VM_ENDPOINT (valid https:// URL)');
   }
   if (probe.providerVmDriver === 'fcsandbox') {
     const tpl = probe.providerVmTemplate?.trim();
-    if (!tpl || tpl.toLowerCase() === 'default') {
+    if (
+      !tpl ||
+      /\s/.test(tpl) ||
+      DISALLOWED_FCSANDBOX_TEMPLATES.has(tpl.toLowerCase())
+    ) {
       missing.push(
         'QWEN_REVIEW_FCSANDBOX_TEMPLATE (non-default VPC-isolated template required)',
       );

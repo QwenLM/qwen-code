@@ -14,6 +14,8 @@ import {
   forceHardwareRequested,
   trustInputFromPlan,
 } from './sandbox-trust.js';
+import { buildDiffPlan } from './diff-plan.js';
+import { buildPlanReport, stringifyPlanReport } from './report.js';
 
 describe('forceHardwareRequested', () => {
   it('accepts operator env truthy values and ignores file-sourced repo values', () => {
@@ -251,5 +253,196 @@ describe('trustInputFromPlan', () => {
     expect(trustInputFromPlan(join(dir, 'missing.json'))).toEqual({
       isLocal: false,
     });
+  });
+
+  it('fails closed on incremental or partial PR plans while keeping demoted full-range collaborator plans trusted', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sandbox-trust-inc-'));
+    dirs.push(dir);
+
+    const incPlan = join(dir, 'incremental.json');
+    writeFileSync(
+      incPlan,
+      JSON.stringify({
+        prNumber: '18226',
+        isCrossRepository: false,
+        authorAssociation: 'MEMBER',
+        diffStat: { files: 2 },
+        incremental: { effective: true, since: 'abc123' },
+        files: [{ path: 'packages/cli/src/a.ts', binary: false }],
+      }),
+    );
+    const incTrust = classifyReviewTrust(
+      trustInputFromPlan(incPlan),
+      {},
+      () => false,
+    );
+    expect(incTrust.prTrust).toBe('collaborator');
+    expect(incTrust.executionClass).toBe('hardware-isolated');
+    expect(incTrust.escalationReasons).toContain('changed-files-incomplete');
+
+    const countMismatchPlan = join(dir, 'mismatch.json');
+    writeFileSync(
+      countMismatchPlan,
+      JSON.stringify({
+        prNumber: '18226',
+        isCrossRepository: false,
+        authorAssociation: 'MEMBER',
+        diffStat: { files: 2 },
+        files: [{ path: 'packages/cli/src/a.ts', binary: false }],
+      }),
+    );
+    expect(
+      classifyReviewTrust(
+        trustInputFromPlan(countMismatchPlan),
+        {},
+        () => false,
+      ).escalationReasons,
+    ).toContain('changed-files-incomplete');
+
+    const demotedFullPlan = join(dir, 'demoted-full.json');
+    writeFileSync(
+      demotedFullPlan,
+      JSON.stringify({
+        prNumber: '18226',
+        isCrossRepository: false,
+        authorAssociation: 'MEMBER',
+        diffStat: { files: 1 },
+        incremental: { effective: false, reason: 'nothing-to-narrow' },
+        files: [{ path: 'packages/cli/src/a.ts', binary: false }],
+      }),
+    );
+    expect(
+      classifyReviewTrust(trustInputFromPlan(demotedFullPlan), {}, () => false),
+    ).toEqual({
+      prTrust: 'collaborator',
+      executionClass: 'trusted-shared-kernel',
+      escalationReasons: [],
+    });
+  });
+
+  it('propagates 100755, 120000, and 160000 git modes from unified diffs through buildPlanReport into trustInputFromPlan', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sandbox-trust-mode-'));
+    dirs.push(dir);
+    const diff = [
+      'diff --git a/src/link.ts b/src/link.ts',
+      'new file mode 120000',
+      'index 0000000..1111111',
+      '--- /dev/null',
+      '+++ b/src/link.ts',
+      '@@ -0,0 +1 @@',
+      '+/etc/passwd',
+      'diff --git a/src/tool b/src/tool',
+      'index 1111111..2222222 100755',
+      '--- a/src/tool',
+      '+++ b/src/tool',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      'diff --git a/vendor/sub b/vendor/sub',
+      'index 1111111..2222222 160000',
+      '--- a/vendor/sub',
+      '+++ b/vendor/sub',
+      '@@ -1 +1 @@',
+      '-Subproject commit 1111111',
+      '+Subproject commit 2222222',
+      'diff --git a/src/plain.ts b/src/plain.ts',
+      'index 1111111..2222222 100644',
+      '--- a/src/plain.ts',
+      '+++ b/src/plain.ts',
+      '@@ -1 +1,2 @@',
+      ' const x = 1;',
+      '+new file mode 100755',
+    ].join('\n');
+
+    const report = buildPlanReport(
+      buildDiffPlan(diff, 400),
+      () => 10,
+      {},
+      diff,
+    );
+    const byPath = new Map(report.files.map((f) => [f.path, f]));
+    expect(byPath.get('src/link.ts')?.mode).toBe('120000');
+    expect(byPath.get('src/tool')?.mode).toBe('100755');
+    expect(byPath.get('vendor/sub')?.mode).toBe('160000');
+    expect(byPath.get('src/plain.ts')?.mode).toBeUndefined();
+
+    const planFile = join(dir, 'mode-plan.json');
+    writeFileSync(
+      planFile,
+      stringifyPlanReport({
+        prNumber: '77',
+        isCrossRepository: false,
+        authorAssociation: 'MEMBER',
+        diffStat: { files: 4 },
+        ...report,
+      } as Parameters<typeof stringifyPlanReport>[0]),
+    );
+    const classified = classifyReviewTrust(
+      trustInputFromPlan(planFile),
+      {},
+      () => false,
+    );
+    expect(classified.executionClass).toBe('hardware-isolated');
+    expect(classified.escalationReasons).toEqual(
+      expect.arrayContaining([
+        'symlink-entry:src/link.ts',
+        'executable-mode:src/tool',
+        'submodule-entry:vendor/sub',
+      ]),
+    );
+  });
+
+  it('fails closed on adversarial plan shapes, numeric prNumber, traversal, and config files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sandbox-trust-adv-'));
+    dirs.push(dir);
+
+    for (const [name, payload] of [
+      ['array.json', []],
+      ['empty.json', {}],
+      [
+        'numeric-pr.json',
+        {
+          prNumber: 123,
+          isCrossRepository: true,
+          files: [{ path: 'src/a.ts' }],
+        },
+      ],
+      [
+        'no-prnum-fork.json',
+        { isCrossRepository: true, files: [{ path: 'src/a.ts' }] },
+      ],
+      [
+        'malformed-entry.json',
+        { files: [{ path: 'src/a.ts' }, { bogus: true }] },
+      ],
+    ] as const) {
+      const p = join(dir, name);
+      writeFileSync(p, JSON.stringify(payload));
+      const res = classifyReviewTrust(trustInputFromPlan(p), {}, () => false);
+      expect(res.executionClass).toBe('hardware-isolated');
+    }
+
+    const extraReasons = detectReviewMandatoryEscalations([
+      { path: '.gitmodules' },
+      { path: '.gitattributes' },
+      { path: '.eslintrc.cjs' },
+      { path: 'jest.config.ts' },
+      { path: 'packages/sdk-typescript/scripts/build.js' },
+      { path: 'packages/node-repl/build.mjs' },
+      { path: '././scripts//deploy.js' },
+      { path: 'src/../scripts/evil.js' },
+    ]);
+    expect(extraReasons).toEqual(
+      expect.arrayContaining([
+        'ci-or-agent-config:.gitmodules',
+        'ci-or-agent-config:.gitattributes',
+        'build-or-sandbox-tooling:.eslintrc.cjs',
+        'build-or-sandbox-tooling:jest.config.ts',
+        'build-or-sandbox-tooling:packages/sdk-typescript/scripts/build.js',
+        'build-or-sandbox-tooling:packages/node-repl/build.mjs',
+        'build-or-sandbox-tooling:scripts/deploy.js',
+        'suspicious-path-traversal:src/../scripts/evil.js',
+      ]),
+    );
   });
 });

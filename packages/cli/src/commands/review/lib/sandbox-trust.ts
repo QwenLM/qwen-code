@@ -51,6 +51,12 @@ export interface ReviewTrustInput {
    * bypassed by missing metadata.
    */
   changedFiles?: ReviewChangedFile[];
+  /**
+   * True when `changedFiles` is known to be incomplete (e.g. an incremental
+   * delta-narrowed round or a plan whose file list disagrees with `diffStat.files`).
+   * Forces fail-closed escalation to `hardware-isolated`.
+   */
+  partialFileList?: boolean;
   /** Explicit override; also read from operator env `QWEN_REVIEW_FORCE_HARDWARE`. */
   forceHardware?: boolean;
 }
@@ -88,22 +94,22 @@ const ESCALATION_RULES: ReadonlyArray<{
   {
     reason: 'dependency-manifest',
     matches: (p) =>
-      /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|\.npmrc|\.pnpmfile\.mjs|pom\.xml|mvnw(?:\.cmd)?)$/i.test(
+      /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|\.npmrc|\.yarnrc(?:\.ya?ml)?|\.pnpmfile\.mjs|pom\.xml|mvnw(?:\.cmd)?|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|requirements[^/]*\.txt|setup\.py|Gemfile(?:\.lock)?|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradlew(?:\.bat)?)$/i.test(
         p,
       ) || /(?:^|\/)(?:patches|\.mvn)\//i.test(p),
   },
   {
     reason: 'ci-or-agent-config',
     matches: (p) =>
-      /^(?:\.github\/(?:workflows|actions)\/|\.husky\/|\.qwen\/|\.claude\/)/i.test(
+      /(?:^|\/)(?:\.github\/(?:workflows|actions)\/|\.husky\/|\.qwen\/|\.claude\/)/i.test(
         p,
-      ),
+      ) || /(?:^|\/)(?:\.gitmodules|\.gitattributes)$/i.test(p),
   },
   {
     reason: 'build-or-sandbox-tooling',
     matches: (p) =>
-      /^scripts\//i.test(p) ||
-      /(?:^|\/)(?:Dockerfile(?:\.[^/]+)?|docker-compose[^/]*\.ya?ml|Makefile|esbuild\.config\.[^/]+|vite\.config\.[^/]+|vitest\.config\.[^/]+|tsconfig[^/]*\.json|eslint\.config\.[^/]+)$/i.test(
+      /(?:^|\/)scripts\//i.test(p) ||
+      /(?:^|\/)(?:Dockerfile(?:\.[^/]+)?|docker-compose[^/]*\.ya?ml|(?:GNU)?Makefile|[^/]+\.mk|justfile|Taskfile\.ya?ml|turbo\.json|build\.[cm]?[jt]s|(?:esbuild|vite|vitest|babel|webpack|rollup|jest|playwright|postcss|tailwind|next|prettier|eslint)\.config\.[^/]+|tsconfig[^/]*\.json|\.eslintrc(?:\.[^/]+)?|\.prettierrc\.(?:js|cjs|mjs))$/i.test(
         p,
       ),
   },
@@ -115,7 +121,14 @@ const ESCALATION_RULES: ReadonlyArray<{
 ];
 
 function normalizePath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/^\.\//, '');
+  return p
+    .replace(/\\/g, '/')
+    .replace(/\/{2,}/g, '/')
+    .replace(/^(?:\.\/|\/)+/, '');
+}
+
+function hasPathTraversalSegment(normalizedPath: string): boolean {
+  return normalizedPath.split('/').some((seg) => seg === '..');
 }
 
 /**
@@ -157,6 +170,9 @@ export function detectReviewMandatoryEscalations(
     for (const rawPath of candidates) {
       const normalized = normalizePath(rawPath);
       if (!normalized) continue;
+      if (hasPathTraversalSegment(normalized)) {
+        reasons.add(`suspicious-path-traversal:${normalized}`);
+      }
       for (const rule of ESCALATION_RULES) {
         if (rule.matches(normalized)) {
           reasons.add(`${rule.reason}:${normalized}`);
@@ -216,6 +232,10 @@ export function classifyReviewTrust(
     escalationReasons.push('unknown-pr-trust');
   }
 
+  if (input.partialFileList === true) {
+    escalationReasons.push('changed-files-incomplete');
+  }
+
   if (input.changedFiles === undefined) {
     if (!input.isLocal) {
       escalationReasons.push('changed-files-unavailable');
@@ -240,24 +260,48 @@ export function classifyReviewTrust(
 
 interface PlanTrustShape {
   prNumber?: unknown;
+  ownerRepo?: unknown;
+  headRefName?: unknown;
   isCrossRepository?: unknown;
   authorAssociation?: unknown;
+  diffPath?: unknown;
+  collapsedFromUpstream?: unknown;
+  baseFetchFailed?: unknown;
+  incremental?: unknown;
+  diffStat?: {
+    files?: unknown;
+  };
   files?: Array<{
     path?: unknown;
     renameFrom?: unknown;
+    mode?: unknown;
     binary?: unknown;
   }>;
 }
 
 /**
  * Extracts `ReviewTrustInput` from a `fetch-pr` or `capture-local` plan file.
- * Returns fail-closed `{ isLocal: false }` if the file cannot be read or parsed.
+ * Returns fail-closed `{ isLocal: false }` if the file cannot be read, parsed,
+ * or lacks a valid plan shape.
  */
 export function trustInputFromPlan(planPath: string): ReviewTrustInput {
   try {
-    const raw = JSON.parse(readFileSync(planPath, 'utf8')) as PlanTrustShape;
+    const parsed: unknown = JSON.parse(readFileSync(planPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { isLocal: false };
+    }
+    const raw = parsed as PlanTrustShape;
+    const hasPrNumber =
+      (typeof raw.prNumber === 'string' && raw.prNumber.trim().length > 0) ||
+      (typeof raw.prNumber === 'number' &&
+        Number.isSafeInteger(raw.prNumber) &&
+        raw.prNumber > 0);
     const isPr =
-      typeof raw.prNumber === 'string' && raw.prNumber.trim().length > 0;
+      hasPrNumber ||
+      raw.isCrossRepository !== undefined ||
+      raw.authorAssociation !== undefined ||
+      raw.ownerRepo !== undefined ||
+      raw.headRefName !== undefined;
     const changedFiles: ReviewChangedFile[] | undefined = Array.isArray(
       raw.files,
     )
@@ -265,24 +309,68 @@ export function trustInputFromPlan(planPath: string): ReviewTrustInput {
           .filter(
             (
               f,
-            ): f is { path: string; renameFrom?: unknown; binary?: unknown } =>
-              typeof f?.path === 'string' && f.path.length > 0,
+            ): f is {
+              path: string;
+              renameFrom?: unknown;
+              mode?: unknown;
+              binary?: unknown;
+            } => typeof f?.path === 'string' && f.path.length > 0,
           )
           .map((f) => ({
             path: f.path,
             ...(typeof f.renameFrom === 'string' && f.renameFrom.length > 0
               ? { renameFrom: f.renameFrom }
               : {}),
+            ...(typeof f.mode === 'string' && f.mode.trim().length > 0
+              ? { mode: f.mode.trim() }
+              : {}),
             ...(typeof f.binary === 'boolean' ? { binary: f.binary } : {}),
           }))
       : undefined;
 
+    const hasMalformedFileEntry =
+      Array.isArray(raw.files) &&
+      changedFiles !== undefined &&
+      changedFiles.length !== raw.files.length;
+
     if (!isPr) {
+      if (changedFiles === undefined || hasMalformedFileEntry) {
+        return {
+          isLocal: false,
+          ...(hasMalformedFileEntry ? { partialFileList: true } : {}),
+        };
+      }
       return {
         isLocal: true,
-        ...(changedFiles !== undefined ? { changedFiles } : {}),
+        changedFiles,
       };
     }
+
+    const incrementalNarrowed =
+      raw.incremental !== undefined &&
+      raw.incremental !== null &&
+      (typeof raw.incremental !== 'object' ||
+        (raw.incremental as { effective?: unknown }).effective !== false);
+    const advertisedFiles =
+      raw.diffStat &&
+      typeof raw.diffStat === 'object' &&
+      typeof raw.diffStat.files === 'number' &&
+      Number.isFinite(raw.diffStat.files) &&
+      raw.diffStat.files >= 0
+        ? raw.diffStat.files
+        : undefined;
+    const diffMissing =
+      raw.diffPath === null &&
+      (advertisedFiles === undefined || advertisedFiles > 0);
+    const partialFileList =
+      hasMalformedFileEntry ||
+      incrementalNarrowed ||
+      diffMissing ||
+      raw.collapsedFromUpstream === true ||
+      raw.baseFetchFailed === true ||
+      (advertisedFiles !== undefined &&
+        changedFiles !== undefined &&
+        changedFiles.length !== advertisedFiles);
 
     return {
       isLocal: false,
@@ -294,6 +382,7 @@ export function trustInputFromPlan(planPath: string): ReviewTrustInput {
         ? { authorAssociation: raw.authorAssociation.trim() }
         : {}),
       ...(changedFiles !== undefined ? { changedFiles } : {}),
+      ...(partialFileList ? { partialFileList: true } : {}),
     };
   } catch {
     return { isLocal: false };

@@ -61,14 +61,14 @@
   - `external`：fork PR（`isCrossRepository: true`）或非协作者关联（`CONTRIBUTOR`、`FIRST_TIME_CONTRIBUTOR`、`FIRST_TIMER`、`NONE`、`MANNEQUIN`）。
   - `unknown`：PR 评审缺少 `isCrossRepository` 或 `authorAssociation`，或值无法识别。
 - **`executionClass`**：
-  - `trusted-shared-kernel`：仅当 `prTrust` 为 `local-owner` 或 `collaborator`、`forceHardware` 为 false、PR 变更文件列表完整且零条强制升级规则命中时成立。
-  - `hardware-isolated`：其余所有情况（`external`、`unknown`、`forceHardware`、PR 缺少变更文件列表或命中任意强制升级规则）。
+  - `trusted-shared-kernel`：仅当 `prTrust` 为 `local-owner` 或 `collaborator`、`forceHardware` 为 false、PR 变更文件列表完整（非增量收窄或已降级回全量、`files.length === diffStat.files`、且 diff 捕获未崩溃/缺失）且零条强制升级规则命中时成立。
+  - `hardware-isolated`：其余所有情况（`external`、`unknown`、`forceHardware`、PR 缺少或存在增量/不完整变更文件列表、畸形 plan JSON 或命中任意强制升级规则）。
 - **强制升级触发器（`detectReviewMandatoryEscalations`）**：
-  - 供应链与依赖清单：`package.json`、`package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`.npmrc`、`.pnpmfile.mjs`、`patches/**`、`pom.xml`、`.mvn/**`、`mvnw`。
-  - CI / hooks / agent / review 配置：`.github/workflows/**`、`.github/actions/**`、`.husky/**`、`.qwen/**`、`.claude/**`。
-  - 构建 / 沙箱 / 验证工具脚本：`scripts/**`、`Dockerfile*`、`docker-compose*`、`Makefile`、`esbuild.config.*`、`vite.config.*`、`vitest.config.*`、`tsconfig*.json`、`eslint.config.*`。
-  - 可执行文件、符号链接、子模块或二进制：git mode `100755`、`120000`、`160000`、`binary: true`，或可执行脚本/二进制扩展名（`.sh`、`.bash`、`.zsh`、`.py`、`.rb`、`.pl`、`.ps1`、`.bat`、`.cmd`、`.exe`、`.dll`、`.so`、`.dylib`）。
-  - 同时检查 `file.path` 与 `file.renameFrom`，防止通过重命名绕过升级。
+  - 供应链与依赖清单：`package.json`、`package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`bun.lock*`、`.npmrc`、`.yarnrc*`、`.pnpmfile.mjs`、`patches/**`、`pom.xml`、`.mvn/**`、`mvnw*`、`Cargo.toml`、`Cargo.lock`、`go.mod`、`go.sum`、`pyproject.toml`、`requirements*.txt`、`setup.py`、`Gemfile*`、`build.gradle*`、`settings.gradle*`、`gradlew*`。
+  - CI / hooks / agent / git / review 配置：`.github/workflows/**`、`.github/actions/**`、`.husky/**`、`.qwen/**`、`.claude/**`、`.gitmodules`、`.gitattributes`。
+  - 构建 / 沙箱 / 验证 / JS 执行型工具链配置：`**/scripts/**`、`build.{js,mjs,cjs,ts}`、`Dockerfile*`、`docker-compose*`、`(GNU)Makefile`、`*.mk`、`justfile`、`Taskfile.ya?ml`、`turbo.json`、`esbuild/vite/vitest/babel/webpack/rollup/jest/playwright/postcss/tailwind/next/prettier/eslint.config.*`、`tsconfig*.json`、`.eslintrc*`、`.prettierrc.{js,cjs,mjs}`。
+  - 可执行文件、符号链接、子模块、二进制或路径遍历：git mode `100755`、`120000`、`160000`（从 unified diff 头部的 `new/deleted file mode`、`new/old mode` 与 `index <old>..<new> <mode>` 解析进入 `FileMetric.mode` 并由 `trustInputFromPlan` 透传）、`binary: true`、`..` 路径遍历段，或可执行脚本/二进制扩展名（`.sh`、`.bash`、`.zsh`、`.py`、`.rb`、`.pl`、`.ps1`、`.bat`、`.cmd`、`.exe`、`.dll`、`.so`、`.dylib`）。
+  - 同时对 `file.path` 与 `file.renameFrom` 做路径归一化与检测，防止通过重命名或冗余斜杠绕过升级。
 
 ### 3.3 轻量容器档硬化（`lib/sandboxed-exec.ts`）
 
@@ -78,16 +78,16 @@
 - `--security-opt=no-new-privileges:true`：阻断容器内通过 setuid/setgid 提权。
 - `--pids-limit=512`：限制进程/线程数以防 fork bomb，同时兼容 Vitest / esbuild 合法并发 worker。
 - 保留网络分权：`install` 允许联网，`build` 与 `test` 强制 `--network none`。
-- 可验证回收（`reapContainer()` / `killContainer()`）：先执行 `<runtime> rm -f <name>`，再通过 `<runtime> inspect --format '{{.State.Running}}' <name>` 确认容器已销毁或停止，返回 `'clean'` 或 `'failed'`（`ReviewTeardownStatus`），避免把回收失败悄无声息吞掉。
+- 可验证回收（`reapContainer()` / `killContainer()`）：先执行 `<runtime> rm -f <name>`，再通过 `<runtime> inspect --format '{{.State.Running}}' <name>`（同时捕获 stderr）核验容器确已不存在（`No such container/object`）或已停止（`false`），返回 `'clean'` 或 `'failed'`（`ReviewTeardownStatus`），防止 daemon 断连或仍在运行的容器被误报为清理成功。
 
 ### 3.4 分层后端适配器与 fail-closed 选路（`lib/sandbox-backends.ts`）
 
 定义与 `scripts/verify-pr-vm-runner.mjs` 对齐的后端抽象边界：
 
 - 支持的硬件隔离后端：
-  - `firecracker`（Linux KVM `/dev/kvm` + `firecracker` + `jailer` + 操作者配置的 kernel/rootfs 资产）。
-  - `vfkit`（macOS Apple Silicon `arm64` + `vfkit` + 强制模式 Seatbelt `sandbox-exec` + 操作者配置的 kernel/rootfs 资产）。
-  - `provider-vm`（阿里云 `fcsandbox` 显式自定义无公网/VPC 隔离模板，或一次性 `aliyun-ecs`）。
+  - `firecracker`（Linux KVM `/dev/kvm` + `firecracker` + `jailer` + 操作者配置的可读普通文件 kernel/rootfs 资产）。
+  - `vfkit`（macOS Apple Silicon `arm64` + `vfkit` + 强制模式 Seatbelt `sandbox-exec` + 操作者配置的可读普通文件 kernel/rootfs 资产）。
+  - `provider-vm`（阿里云 `fcsandbox` 显式自定义无公网/VPC 隔离模板——拒绝 `default`、`base`、`python`、`code-interpreter` 与含空白模板名——或一次性 `aliyun-ecs`，且要求合法 `https://` 端点 URL）。
 - `hardware-isolated` 选路顺序：
   1. 若 `QWEN_REVIEW_SANDBOX_BACKEND` 显式指定硬件后端（`firecracker`、`vfkit`、`provider-vm`），仅校验该后端（不可用或为 `hardware-isolated` 指定了 `container` 均 fail-closed 拒绝）。
   2. 否则按宿主原生优先级探测：`firecracker`（Linux）→ `vfkit`（macOS arm64）→ `provider-vm`（云端兜底）。

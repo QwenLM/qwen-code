@@ -5,8 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { tmpdir } from 'node:os';
 import {
   buildReviewBackendPlan,
+  probeHostReviewBackends,
   requestedSandboxBackend,
   selectReviewSandboxBackend,
   type ReviewBackendProbe,
@@ -124,6 +126,43 @@ describe('buildReviewBackendPlan', () => {
     expect(defaultTpl.ready).toBe(false);
     expect(defaultTpl.missing[0]).toContain('non-default');
 
+    for (const disallowed of [
+      'default',
+      'BASE',
+      'python',
+      'code-interpreter',
+      'bad name',
+    ]) {
+      const tpl = buildReviewBackendPlan(
+        'provider-vm',
+        emptyProbe({
+          providerVmDriver: 'fcsandbox',
+          providerVmEndpoint: 'https://sandbox.example',
+          providerVmTemplate: disallowed,
+        }),
+      );
+      expect(tpl.ready).toBe(false);
+    }
+
+    const badEndpoint = buildReviewBackendPlan(
+      'provider-vm',
+      emptyProbe({
+        providerVmDriver: 'aliyun-ecs',
+        providerVmEndpoint: 'http://insecure.example',
+      }),
+    );
+    expect(badEndpoint.ready).toBe(false);
+
+    const probeWithDir = probeHostReviewBackends(
+      {
+        QWEN_REVIEW_VM_KERNEL: tmpdir(),
+        QWEN_REVIEW_VM_ROOTFS: tmpdir(),
+      },
+      () => false,
+    );
+    expect(probeWithDir.firecrackerKernel).toBeUndefined();
+    expect(probeWithDir.vfkitRootfs).toBeUndefined();
+
     const isolatedTpl = buildReviewBackendPlan(
       'provider-vm',
       emptyProbe({
@@ -167,16 +206,23 @@ describe('selectReviewSandboxBackend', () => {
     expect(refused.kind).toBe('refused');
   });
 
-  it('never downgrades hardware-isolated to container even when Docker is running', () => {
+  it('never downgrades hardware-isolated to container even when Docker and provider-vm are ready', () => {
     const forcedContainer = selectReviewSandboxBackend({
       executionClass: 'hardware-isolated',
       requestedBackend: 'container',
       containerRuntime: 'docker',
-      hostProbe: emptyProbe(),
+      hostProbe: emptyProbe({
+        providerVmDriver: 'fcsandbox',
+        providerVmEndpoint: 'https://sandbox.example',
+        providerVmTemplate: 'review-vpc-no-egress-v1',
+      }),
     });
     expect(forcedContainer.kind).toBe('refused');
     if (forcedContainer.kind === 'refused') {
-      expect(forcedContainer.reason).toContain('hardware-isolated');
+      expect(forcedContainer.reason).toContain(
+        'shared-kernel containers cannot run',
+      );
+      expect(forcedContainer.checked).toEqual([]);
     }
 
     const missingHardware = selectReviewSandboxBackend({

@@ -1503,9 +1503,13 @@ export function applyHandOffPolicy(
   report: BuildTestReport,
   policy: SandboxPolicy = sandboxPolicy(),
 ): BuildTestReport {
+  const trigger =
+    policy === 'required' || policy === 'tiered'
+      ? `review.sandbox is "${policy}"`
+      : 'QWEN_REVIEW_FORCE_HARDWARE=1';
   return handOffRefused(report.toolchain, policy)
     ? refusedReport(
-        `review.sandbox is "${policy}" and no toolchain adapter could scope ` +
+        `${trigger} and no toolchain adapter could scope ` +
           `this repository, so the only remaining route was to hand its ` +
           `install, build and test commands to an agent shell this policy ` +
           `cannot contain`,

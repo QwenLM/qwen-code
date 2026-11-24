@@ -61,14 +61,14 @@ Mirrors `scripts/verify-pr-prepare.mjs` with `/review`-native inputs derived fro
   - `external`: fork PR (`isCrossRepository: true`) or non-collaborator association (`CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `NONE`, `MANNEQUIN`).
   - `unknown`: PR review where `isCrossRepository` or `authorAssociation` is missing or unrecognized.
 - **`executionClass`**:
-  - `trusted-shared-kernel`: only when `prTrust` is `local-owner` or `collaborator`, `forceHardware` is false, changed file list is available (for PRs), and zero mandatory escalation rules fire.
-  - `hardware-isolated`: in all other cases (`external`, `unknown`, `forceHardware`, missing file list on a PR, or any mandatory escalation hit).
+  - `trusted-shared-kernel`: only when `prTrust` is `local-owner` or `collaborator`, `forceHardware` is false, changed file list is complete (for PRs: non-incremental or demoted full-range, `files.length === diffStat.files`, and diff capture did not collapse/fail), and zero mandatory escalation rules fire.
+  - `hardware-isolated`: in all other cases (`external`, `unknown`, `forceHardware`, missing or incomplete/incremental file list on a PR, malformed plan JSON, or any mandatory escalation hit).
 - **Mandatory escalation triggers (`detectReviewMandatoryEscalations`)**:
-  - Supply-chain / dependency manifests: `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `.npmrc`, `.pnpmfile.mjs`, `patches/**`, `pom.xml`, `.mvn/**`, `mvnw`.
-  - CI / hooks / agent / review config: `.github/workflows/**`, `.github/actions/**`, `.husky/**`, `.qwen/**`, `.claude/**`.
-  - Build / sandbox / verification tooling: `scripts/**`, `Dockerfile*`, `docker-compose*`, `Makefile`, `esbuild.config.*`, `vite.config.*`, `vitest.config.*`, `tsconfig*.json`, `eslint.config.*`.
-  - Executable, symlink, submodule, or binary artifacts: git mode `100755`, `120000`, `160000`, `binary: true`, or executable script/binary extensions (`.sh`, `.bash`, `.zsh`, `.py`, `.rb`, `.pl`, `.ps1`, `.bat`, `.cmd`, `.exe`, `.dll`, `.so`, `.dylib`).
-  - Both `file.path` and `file.renameFrom` are inspected so renames cannot bypass escalation.
+  - Supply-chain / dependency manifests: `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock*`, `.npmrc`, `.yarnrc*`, `.pnpmfile.mjs`, `patches/**`, `pom.xml`, `.mvn/**`, `mvnw*`, `Cargo.toml`, `Cargo.lock`, `go.mod`, `go.sum`, `pyproject.toml`, `requirements*.txt`, `setup.py`, `Gemfile*`, `build.gradle*`, `settings.gradle*`, `gradlew*`.
+  - CI / hooks / agent / git / review config: `.github/workflows/**`, `.github/actions/**`, `.husky/**`, `.qwen/**`, `.claude/**`, `.gitmodules`, `.gitattributes`.
+  - Build / sandbox / verification / JS-executed tooling config: `**/scripts/**`, `build.{js,mjs,cjs,ts}`, `Dockerfile*`, `docker-compose*`, `(GNU)Makefile`, `*.mk`, `justfile`, `Taskfile.ya?ml`, `turbo.json`, `esbuild/vite/vitest/babel/webpack/rollup/jest/playwright/postcss/tailwind/next/prettier/eslint.config.*`, `tsconfig*.json`, `.eslintrc*`, `.prettierrc.{js,cjs,mjs}`.
+  - Executable, symlink, submodule, binary, or traversal artifacts: git mode `100755`, `120000`, `160000` (parsed from `new/deleted file mode`, `new/old mode`, and `index <old>..<new> <mode>` diff headers into `FileMetric.mode` and copied by `trustInputFromPlan`), `binary: true`, `..` path-traversal segments, or executable script/binary extensions (`.sh`, `.bash`, `.zsh`, `.py`, `.rb`, `.pl`, `.ps1`, `.bat`, `.cmd`, `.exe`, `.dll`, `.so`, `.dylib`).
+  - Both `file.path` and `file.renameFrom` are normalized and inspected so renames or redundant slashes cannot bypass escalation.
 
 ### 3.3 Hardened Lightweight Container Tier (`lib/sandboxed-exec.ts`)
 
@@ -78,16 +78,16 @@ Every `containerCommand()` invocation now enforces:
 - `--security-opt=no-new-privileges:true`: blocks setuid/setgid privilege escalation inside the container.
 - `--pids-limit=512`: bounds process/thread creation against fork bombs while accommodating concurrent Vitest/esbuild workers.
 - Network split preserved: `install` keeps network access; `build` and `test` pass `--network none`.
-- Verifiable teardown (`reapContainer()` / `killContainer()`): executes `<runtime> rm -f <name>` and verifies via `<runtime> inspect --format '{{.State.Running}}' <name>` that the container is gone or stopped, returning `'clean'` or `'failed'` (`ReviewTeardownStatus`) so callers can record teardown failures instead of silently discarding them.
+- Verifiable teardown (`reapContainer()` / `killContainer()`): executes `<runtime> rm -f <name>` and verifies via `<runtime> inspect --format '{{.State.Running}}' <name>` (capturing stderr) that the container is explicitly gone (`No such container/object`) or stopped (`false`), returning `'clean'` or `'failed'` (`ReviewTeardownStatus`) so daemon outages or still-running containers never register as clean teardown.
 
 ### 3.4 Tiered Backend Adapter and Fail-Closed Selection (`lib/sandbox-backends.ts`)
 
 Defines a clean adapter boundary aligned with `scripts/verify-pr-vm-runner.mjs`:
 
 - Supported hardware backends:
-  - `firecracker` (Linux KVM `/dev/kvm` + `firecracker` + `jailer` + operator-supplied kernel/rootfs assets).
-  - `vfkit` (macOS Apple Silicon `arm64` + `vfkit` + enforcing Seatbelt `sandbox-exec` + operator-supplied kernel/rootfs assets).
-  - `provider-vm` (Aliyun `fcsandbox` with an explicit non-default isolated VPC template, or ephemeral `aliyun-ecs`).
+  - `firecracker` (Linux KVM `/dev/kvm` + `firecracker` + `jailer` + operator-supplied readable regular-file kernel/rootfs assets).
+  - `vfkit` (macOS Apple Silicon `arm64` + `vfkit` + enforcing Seatbelt `sandbox-exec` + operator-supplied readable regular-file kernel/rootfs assets).
+  - `provider-vm` (Aliyun `fcsandbox` with an explicit non-default isolated VPC template — rejecting `default`, `base`, `python`, `code-interpreter`, and whitespace — or ephemeral `aliyun-ecs`, with a valid `https://` endpoint URL).
 - Selection order for `hardware-isolated`:
   1. If `QWEN_REVIEW_SANDBOX_BACKEND` explicitly names a hardware backend (`firecracker`, `vfkit`, or `provider-vm`), validate only that backend (fail-closed if unavailable or if `container` was requested for a `hardware-isolated` run).
   2. Otherwise probe in host-native priority order: `firecracker` (Linux) -> `vfkit` (macOS arm64) -> `provider-vm` (cloud fallback).

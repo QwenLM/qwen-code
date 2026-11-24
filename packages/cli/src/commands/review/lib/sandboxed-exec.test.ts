@@ -1196,6 +1196,24 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
     }) as unknown as typeof spawnSync);
     expect(throwing.status).toBe('failed');
     expect(throwing.detail).toContain('daemon gone');
+
+    const daemonDown = reapContainer('docker', 'c5', ((
+      _cmd: string,
+      a: string[],
+    ) =>
+      a[0] === 'rm'
+        ? {
+            status: 1,
+            stdout: '',
+            stderr: 'Cannot connect to the Docker daemon',
+          }
+        : {
+            status: 1,
+            stdout: '',
+            stderr: 'Cannot connect to the Docker daemon',
+          }) as typeof spawnSync);
+    expect(daemonDown.status).toBe('failed');
+    expect(daemonDown.detail).toContain('Cannot connect to the Docker daemon');
   });
 
   it('tiered sandboxVerdict allows hardened container for low-risk collaborator PRs and refuses external/high-risk PRs even when Docker answers', () => {
@@ -1256,13 +1274,27 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
         fileSourced: () => false,
       }),
     ).toBeNull();
-    expect(
-      refuseHostExecutionPhase({
-        policy: 'required',
-        env: {},
-        fileSourced: () => false,
-      }),
-    ).toContain('review.sandbox is "required"');
+    const reqMsg = refuseHostExecutionPhase({
+      policy: 'required',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(reqMsg).toContain('review.sandbox is "required"');
+    expect(reqMsg).not.toContain('unknown-pr-trust');
+
+    const withTrustMsg = refuseHostExecutionPhase({
+      policy: 'tiered',
+      env: {},
+      trustContext: {
+        isLocal: false,
+        isCrossRepository: true,
+        changedFiles: [{ path: 'src/a.ts' }],
+      },
+      fileSourced: () => false,
+    });
+    expect(withTrustMsg).toContain('external -> hardware-isolated');
+    expect(withTrustMsg).toContain('cross-repository-pr');
+
     expect(
       refuseHostExecutionPhase({
         policy: 'tiered',
