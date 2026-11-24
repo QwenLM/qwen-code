@@ -88,7 +88,7 @@ never be retired — while the unproven drain keeps the monitor loops on a
 ## 4. Acceptance
 
 A takeover case beside `drains a turn-held Runtime at close through the drain
-arm (#13856)` in `hosted-harness-session.test.ts`: a Session prewritten and
+arm (#13856)` in `hosted-harness-session.runtime-cleanup.test.ts`: a Session prewritten and
 closed without ever draining (the dead process), its held Runtime Session
 still listed by the Broker, is loaded by a fresh process and DELETEd there;
 the replacement's `release` must go out with `[{ drain: true }]` for the held

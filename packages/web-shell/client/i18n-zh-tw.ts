@@ -2670,11 +2670,6 @@ export const ZH_TW: Record<string, MessageValue> = {
   'queue.submittingDisabled': '排隊訊息正在提交中...',
   'queue.summaryEditDisabled': '恢復的佇列摘要無法還原原始附件。',
   'queue.admissionUnknown': '訊息是否送達尚不確定，請先檢查會話再重試。',
-  'queue.restoreUnknown': '恢復本地副本',
-  'queue.discardUnknown': '丟棄本地副本',
-  'queue.continueEditing': '繼續編輯',
-  'queue.continueEditingConfirm':
-    '這條訊息可能已經在執行。只有在接受重複傳送風險時才繼續編輯。',
   'queue.commandBlocked': '當前回合執行時，Slash 命令不能進入排隊。',
   'queue.commandGoalBlocked':
     'Goal 正在佔用會話或狀態仍在載入，暫時無法執行 Slash 命令。',
@@ -4206,8 +4201,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'userMessage.showMore': '顯示更多',
   'userMessage.showLess': '收起',
   'userMessage.automatic.title': '自動觸發',
-  'userMessage.sendFailed': '傳送失敗',
-  'userMessage.retrySend': '重新傳送訊息',
+  'userMessage.retrySend': '重發',
+  'userMessage.retryUncertain': '可能未送達，點擊重發',
+  'userMessage.deliveryUncertain': '訊息可能未送達，點擊左側驚嘆號重發',
   'userMessage.edit': '編輯訊息',
   'message.moreActions': '更多操作',
   'messageDelete.commandFailed': '命令執行失敗。',
