@@ -227,6 +227,15 @@
           "type": "string",
           "default": "auto"
         },
+        "displayLanguage": {
+          "description": "Show the model's replies and opened thoughts translated into this language in the terminal and the Web Shell. The model answers as usual; the stored conversation, what the model reads and copied text keep the original. Each translated block costs one call to the fast model, or the session model when none is set. Works without installing anything or turning on experimental features. Options: off, zh-CN, en",
+          "enum": [
+            "off",
+            "zh-CN",
+            "en"
+          ],
+          "default": "off"
+        },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
           "type": "boolean",

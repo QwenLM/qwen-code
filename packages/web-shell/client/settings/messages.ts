@@ -256,6 +256,12 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.placeholder.general.outputLanguage': '自动（跟随输入）',
   'settings.option.general.outputLanguage.useCustom': (v) =>
     `使用“${v?.value ?? ''}”`,
+  'settings.label.general.displayLanguage': '语言：显示翻译',
+  'settings.description.general.displayLanguage':
+    '在终端和 Web Shell 中把模型的回复和展开的思考翻译成该语言显示。模型照常回答；存储的对话、模型读到的内容和复制的文本保持原文。每个翻译的块调用一次 fast model，未设置时使用会话模型。无需安装任何东西，也无需打开实验性功能。修改后新会话生效。',
+  'settings.option.general.displayLanguage.off': '关闭',
+  'settings.option.general.displayLanguage.zh-CN': '简体中文',
+  'settings.option.general.displayLanguage.en': 'English',
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
@@ -496,6 +502,12 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.placeholder.general.outputLanguage': 'auto (следовать вводу)',
   'settings.option.general.outputLanguage.useCustom': (v) =>
     `Использовать «${v?.value ?? ''}»`,
+  'settings.label.general.displayLanguage': 'Язык: перевод отображения',
+  'settings.description.general.displayLanguage':
+    'Показывать ответы модели и раскрытые размышления в переводе на этот язык в терминале и Web Shell. Модель отвечает как обычно; сохранённый разговор, то, что читает модель, и копируемый текст остаются в оригинале. Каждый переведённый блок — один вызов быстрой модели, а если она не задана, модели сессии. Ничего устанавливать и включать экспериментальные функции не нужно. Применяется к новым сессиям.',
+  'settings.option.general.displayLanguage.off': 'Выключено',
+  'settings.option.general.displayLanguage.zh-CN': '简体中文',
+  'settings.option.general.displayLanguage.en': 'English',
   'settings.label.ui.accessibility.enableLoadingPhrases':
     'Включить фразы загрузки',
   'settings.description.ui.accessibility.enableLoadingPhrases':
