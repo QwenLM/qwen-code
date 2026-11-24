@@ -938,7 +938,9 @@ describe('WorkspaceDetailsTooltip interactive overview facets', () => {
         onOpenOverviewItem={onOpenOverviewItem}
         manageableItems={new Set(['mcp', 'context'])}
       >
-        <button type="button">qwen-code</button>
+        <div>
+          <button type="button">qwen-code</button>
+        </div>
       </WorkspaceDetailsTooltip>,
     );
 
@@ -959,6 +961,10 @@ describe('WorkspaceDetailsTooltip interactive overview facets', () => {
     });
     expect(onOpenOverviewItem).toHaveBeenCalledWith('mcp');
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+    // The production anchor contains a button. This distinguishes
+    // close(false) from close(), which restores focus to that button.
+    expect(trigger).toBe(container.querySelector<HTMLElement>('button'));
+    expect(document.activeElement).toBe(document.body);
     expect(document.activeElement).not.toBe(trigger);
   });
 });

@@ -43,6 +43,7 @@ import type {
   ContextUsageControls,
   RegisterContextUsageControls,
 } from './hooks/useContextUsageControls';
+import type { DaemonProductSessionContext } from './daemon/session/types';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import * as browserNotifications from './browser-turn-notifications';
 import {
@@ -59,6 +60,7 @@ import {
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
   type DaemonBrand,
+  type DaemonCapabilities,
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
   type DaemonSessionTaskWithWorkflowStatus,
@@ -285,7 +287,6 @@ type StreamingState = 'idle' | 'responding';
 type MockConnection = {
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
-  sessionContext?: { kind: 'standalone' };
   context?: DaemonSessionContextStatus;
   clientId: string;
   displayName: string | undefined;
@@ -1061,10 +1062,28 @@ const {
         manageLiveState?: boolean;
         onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
       } | null,
+      latestPluginManagerProps: null as React.ComponentProps<
+        typeof import('./components/plugins/PluginManagerPage').PluginManagerPage
+      > | null,
       latestChannelsManagerProps: null as {
         clientId?: string;
         sessionWorkspaceCwd?: string;
+        initialWorkspaceCwd?: string;
+        navigationRequest?: number;
       } | null,
+      onOpenWorkspaceManagement: undefined as
+        | ((
+            target:
+              | 'mcp'
+              | 'skills'
+              | 'extensions'
+              | 'channels'
+              | 'settings'
+              | 'context'
+              | 'hooks',
+            workspaceCwd: string,
+          ) => void)
+        | undefined,
       latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
@@ -2061,6 +2080,17 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
+      onOpenWorkspaceManagement?: (
+        target:
+          | 'mcp'
+          | 'skills'
+          | 'extensions'
+          | 'channels'
+          | 'settings'
+          | 'context'
+          | 'hooks',
+        workspaceCwd: string,
+      ) => void;
       onLoadSession?: (
         sessionId: string,
         workspaceCwd?: string,
@@ -2090,6 +2120,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSearchQueryChange?: (query: string) => void;
       currentSessionActive?: boolean;
     }) => {
+      testState.onOpenWorkspaceManagement = props.onOpenWorkspaceManagement;
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
@@ -2620,12 +2651,30 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
     },
   };
 });
+vi.doMock('./components/plugins/PluginManagerPage', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./components/plugins/PluginManagerPage')
+    >();
+  const React = await import('react');
+  return {
+    ...actual,
+    PluginManagerPage: (
+      props: React.ComponentProps<typeof actual.PluginManagerPage>,
+    ) => {
+      testState.latestPluginManagerProps = props;
+      return React.createElement(actual.PluginManagerPage, props);
+    },
+  };
+});
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
     ChannelsManagerPage: (props: {
       clientId?: string;
       sessionWorkspaceCwd?: string;
+      initialWorkspaceCwd?: string;
+      navigationRequest?: number;
     }) => {
       testState.latestChannelsManagerProps = props;
       return React.createElement('div', {
@@ -13837,7 +13886,9 @@ beforeEach(() => {
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
+  testState.latestPluginManagerProps = null;
   testState.latestChannelsManagerProps = null;
+  testState.onOpenWorkspaceManagement = undefined;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -51299,6 +51350,71 @@ describe('App session callbacks', () => {
     expect(testState.latestSettingsHookOptions).toEqual({
       autoLoad: true,
       enabled: true,
+    });
+  });
+
+  it('routes every plugin and channel management selection to its clicked workspace', async () => {
+    mockWorkspace.workspaceCwd = '/work/primary';
+    mockConnection.workspaceCwd = '/work/primary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/primary',
+    } as DaemonProductSessionContext;
+    Object.assign(mockWorkspace.capabilities, {
+      v: 1,
+      mode: 'native',
+      workspaceCwd: '/work/primary',
+      modelServices: [],
+      features: [
+        'workspace_settings',
+        'workspace_skills_config_runtime',
+        'channel_management',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as DaemonCapabilities);
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(mockConnection.sessionId).toBe('session-1');
+    expect(testState.onOpenWorkspaceManagement).toBeTypeOf('function');
+
+    for (const [index, target] of (
+      ['mcp', 'skills', 'extensions'] as const
+    ).entries()) {
+      await act(async () => {
+        testState.onOpenWorkspaceManagement?.(target, '/work/secondary');
+      });
+      await flush();
+      expect(testState.latestPluginManagerProps).toMatchObject({
+        initialTab: target,
+        initialWorkspaceCwd: '/work/secondary',
+        navigationRequest: index + 1,
+      });
+    }
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('channels', '/work/secondary');
+    });
+    await flush();
+    expect(testState.latestChannelsManagerProps).toMatchObject({
+      initialWorkspaceCwd: '/work/secondary',
+      navigationRequest: 1,
+      sessionWorkspaceCwd: '/work/primary',
     });
   });
 
