@@ -623,8 +623,15 @@ export class CronScheduler {
     if (!this.projectRoot) {
       throw new Error('Durable cron jobs require a project root.');
     }
+    // create() installs synchronously, so preserve the incumbent reference.
+    const previousJobs = new Map(this.jobs);
     const job = this.create(cronExpr, prompt, recurring, gate);
     job.durable = true;
+    const incumbent = previousJobs.get(job.id);
+    if (incumbent) {
+      this.jobs.set(job.id, incumbent);
+      throw new Error(`scheduled task id already exists: ${job.id}`);
+    }
     this.pendingAdd.add(job.id);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
@@ -1665,6 +1672,7 @@ export class CronScheduler {
     taskId: string,
     firedAt: number,
     outcome: CronRunSessionOutcome,
+    expectedTaskSessionId: string | null,
   ): Promise<void> {
     if (outcome.sessionId && this.consumedPerRunOneShots.delete(taskId)) {
       this.restorablePerRunOneShots.delete(taskId);
@@ -1677,7 +1685,7 @@ export class CronScheduler {
     await this.pendingPersist;
     await updateCronTasks(this.projectRoot, (tasks) =>
       tasks.map((task) =>
-        task.id === taskId
+        task.id === taskId && (task.sessionId ?? null) === expectedTaskSessionId
           ? annotateCronRunSession(task, firedAt, outcome)
           : task,
       ),

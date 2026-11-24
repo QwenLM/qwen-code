@@ -327,19 +327,24 @@ export function useArtifactWorkspaceTarget(
         requireScheduledTaskOwner(workspaceId);
         return result;
       },
-      async updateScheduledTask(id, update, workspaceId) {
+      async updateScheduledTask(id, update, workspaceId, expectedSessionId) {
         requireScheduledTaskOwner(workspaceId);
         const result = await primaryActions.updateScheduledTask(
           id,
           update,
           workspaceId,
+          expectedSessionId,
         );
         requireScheduledTaskOwner(workspaceId);
         return result;
       },
-      async deleteScheduledTask(id, workspaceId) {
+      async deleteScheduledTask(id, workspaceId, expectedSessionId) {
         requireScheduledTaskOwner(workspaceId);
-        await primaryActions.deleteScheduledTask(id, workspaceId);
+        await primaryActions.deleteScheduledTask(
+          id,
+          workspaceId,
+          expectedSessionId,
+        );
         requireScheduledTaskOwner(workspaceId);
       },
     };

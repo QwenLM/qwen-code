@@ -94,6 +94,16 @@ async function mount(
       sessionId: string | null,
     ) => void | Promise<void>;
     onError?: (error: unknown, message: string) => void;
+    isTaskDeleted?: (task: {
+      id: string;
+      workspaceId?: string;
+      sessionId?: string | null;
+    }) => boolean;
+    onTaskDeleted?: (task: {
+      id: string;
+      workspaceId?: string;
+      sessionId?: string | null;
+    }) => void;
     currentSession?: {
       sessionId: string;
       workspaceCwd: string;
@@ -166,6 +176,8 @@ async function mount(
               autofixPrWatchesAvailable={nextOpts.autofixPrWatchesAvailable}
               workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
+              isTaskDeleted={nextOpts.isTaskDeleted}
+              onTaskDeleted={nextOpts.onTaskDeleted}
               onError={nextOpts.onError ?? vi.fn()}
             />
           </I18nProvider>
@@ -359,6 +371,7 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({ gate: null }),
       undefined,
+      null,
     );
   });
 
@@ -417,6 +430,7 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({ gate: null }),
       undefined,
+      null,
     );
   });
 
@@ -491,6 +505,7 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({ gate: `${gate} | head` }),
       undefined,
+      null,
     );
   });
 
@@ -930,6 +945,7 @@ describe('ScheduledTasksDialog editing', () => {
         groupId: null,
       },
       undefined,
+      null,
     );
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
   });
@@ -991,6 +1007,7 @@ describe('ScheduledTasksDialog editing', () => {
         groupId: 'group-1',
       }),
       undefined,
+      null,
     );
   });
 
@@ -1023,6 +1040,7 @@ describe('ScheduledTasksDialog editing', () => {
         prompt: promptText,
       }),
       undefined,
+      null,
     );
   });
 
@@ -1049,6 +1067,7 @@ describe('ScheduledTasksDialog editing', () => {
         prompt: '@ext:clickhouse @mcp:repo-tools',
       }),
       undefined,
+      null,
     );
   });
 
@@ -1072,6 +1091,7 @@ describe('ScheduledTasksDialog editing', () => {
         prompt: '@ext:clickhouse /review',
       }),
       undefined,
+      null,
     );
   });
 
@@ -1437,6 +1457,7 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({ cron: '0 9 * * 1,3,5' }),
       undefined,
+      null,
     );
   });
 });
@@ -1489,7 +1510,11 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
 
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
+    expect(actions.runScheduledTask).toHaveBeenCalledWith(
+      't1',
+      undefined,
+      'controller-1',
+    );
     expect(onRunPrompt).not.toHaveBeenCalled();
   });
 
@@ -1501,7 +1526,11 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     // Server-side run record (updates last-run) + client run in the bound session.
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
+    expect(actions.runScheduledTask).toHaveBeenCalledWith(
+      't1',
+      undefined,
+      'sess-9',
+    ); // consumed
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
   });
 
@@ -1636,7 +1665,11 @@ describe('ScheduledTasksDialog run now', () => {
     );
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
+    expect(actions.runScheduledTask).toHaveBeenCalledWith(
+      't1',
+      undefined,
+      'sess-9',
+    );
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
@@ -1660,6 +1693,78 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     expect(order).toEqual(['enqueue', 'record']);
+  });
+
+  it('invalidates a pending fresh read after this dialog confirms deletion', async () => {
+    const task = baseTask({ sessionId: 'sess-9', prompt: 'do not run' });
+    const sibling = baseTask({
+      sessionId: 'another-session',
+      prompt: 'survivor prompt',
+    });
+    const pendingRead = deferred<(typeof task)[]>();
+    const onRunPrompt = vi.fn();
+    const onTaskDeleted = vi.fn();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      await mount([task], { onRunPrompt, onTaskDeleted });
+      actions.listScheduledTasks.mockReturnValueOnce(pendingRead.promise);
+      click(document.querySelector('[aria-label="Run now"]'));
+      await flush();
+      actions.listScheduledTasks.mockResolvedValue([sibling]);
+      actions.deleteScheduledTask.mockResolvedValue(undefined);
+      actions.runScheduledTask.mockResolvedValue(sibling);
+      click(document.querySelector('[aria-label="Delete"]'));
+      await flush();
+      expect(actions.deleteScheduledTask).toHaveBeenCalledWith(
+        't1',
+        undefined,
+        'sess-9',
+      );
+      expect(onTaskDeleted).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 't1', sessionId: 'sess-9' }),
+      );
+
+      pendingRead.resolve([task]);
+      await flush();
+      expect(onRunPrompt).not.toHaveBeenCalled();
+      expect(actions.runScheduledTask).not.toHaveBeenCalled();
+      const survivor = document.querySelector('[aria-label="Run now"]');
+      expect(survivor).not.toBeNull();
+      expect((survivor as HTMLButtonElement).disabled).toBe(false);
+      click(survivor);
+      await flush();
+      expect(onRunPrompt).toHaveBeenCalledWith(
+        'survivor prompt',
+        'another-session',
+      );
+      expect(actions.runScheduledTask).toHaveBeenCalledWith(
+        't1',
+        undefined,
+        'another-session',
+      );
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('invalidates a pending fresh read after Environment confirms deletion', async () => {
+    const task = baseTask({ sessionId: 'sess-9', prompt: 'do not run' });
+    const pendingRead = deferred<(typeof task)[]>();
+    const onRunPrompt = vi.fn();
+    let deleted = false;
+    await mount([task], {
+      onRunPrompt,
+      isTaskDeleted: () => deleted,
+    });
+    actions.listScheduledTasks.mockReturnValue(pendingRead.promise);
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    deleted = true;
+    pendingRead.resolve([task]);
+    await flush();
+
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
   });
 
   it('serializes run now: a second click while one is pending is ignored', async () => {
@@ -1909,6 +2014,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
           't1',
           expect.objectContaining({ prompt: 'summarize the day' }),
           undefined,
+          null,
         );
       }
     },
@@ -2448,12 +2554,17 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       's1',
       { enabled: false },
       'id-other',
+      null,
     );
 
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     click(document.querySelector('[aria-label="Delete"]'));
     await flush();
-    expect(actions.deleteScheduledTask).toHaveBeenCalledWith('s1', 'id-other');
+    expect(actions.deleteScheduledTask).toHaveBeenCalledWith(
+      's1',
+      'id-other',
+      null,
+    );
     confirmSpy.mockRestore();
   });
 
@@ -2508,6 +2619,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
         groupId: 'missing-group',
       }),
       'id-other',
+      null,
     );
   });
 
@@ -3370,6 +3482,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
         },
       }),
       undefined,
+      null,
     );
     click(document.querySelector('[aria-label="Edit"]'));
     await flush();
@@ -3380,6 +3493,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       't1',
       expect.objectContaining({ delivery: null }),
       undefined,
+      null,
     );
   });
 
@@ -3417,6 +3531,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
         sessionMode: 'persistent',
       }),
       undefined,
+      null,
     );
     expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
       'delivery',
@@ -3444,6 +3559,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       't1',
       expect.objectContaining({ sessionMode: 'persistent' }),
       undefined,
+      null,
     );
     expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
       'delivery',
@@ -3490,6 +3606,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
           prompt: 'Summarize the project',
         }),
         undefined,
+        null,
       );
       expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
         'delivery',
@@ -3522,6 +3639,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       't1',
       expect.objectContaining({ sessionMode: 'per_run', delivery: null }),
       undefined,
+      null,
     );
   });
 

@@ -28,7 +28,14 @@ cron 的取消是会话级的。拿到持久任务 ID 后绝不能回退去删�
 - secondary 必须有精确且受信任的注册匹配，使用其注册 ID 走 qualified 路由。
 - 未注册、歧义、不受信任或已移除的注册记录禁止 durable 读取，绝不通过 primary 重试，也不能把未受信任的 primary 当作受信任primary来放行。撤销信任后同样受服务端 `untrusted_workspace` 拒绝约束。
 
+非空 workspace 注册表必须有恰好一个 cwd 匹配，且 workspace ID 无歧义；`primary` 标记必须与 daemon 实际 primary cwd 一致。重复 cwd 或 ID，以及错误标成 primary 的 secondary，都会禁用 durable 读取且绝不回落 primary。只有 workspace 注册字段缺失且 cwd 精确等于实际 primary cwd 的旧 legacy 情形才使用上面的兼容规则。显式为空的 `workspaces: []` 不会被静默解释为 primary。
+
 tab 的 owner ID 和 primary 的路由参数是两组不同事实。调度详情守卫只为核验过的 primary owner 接受空路由；secondary 丢失身份仍需 fail closed。当前读取与历史恢复共用同一个路由解析器。旧 primary owner ID 会在 live 查询、更新匹配和删除身份归一为未限定路由，但不会替代 secondary 的注册路由。
+
+PATCH、DELETE 和 Run 都用 `expectedSessionId` 声明预期的任务 owner，空值表示未绑定任务。服务端在任务文件写锁内，只接受恰好一条 ID 与 owner 相符的记录；未指定 owner 的旧 mutation 遇到重复 ID 时返回 409，绝不修改第一条记录。每个创建路径都拒绝生成 ID 冲突。owner 选择失败或 ID 歧义的请求，不得获得对原 owner 的恢复否决权。已绑定 owner 的 tombstone 使用 `[sessionId, taskId]`：即使返回 404，因为任务已被消费，同 owner 的 pending delete 仍否决恢复；删除另一个 owner 的 sibling 则不能阻断它。失败恢复和 per-run 结果归属都使用原 mutation 选择的 owner，而不是同 ID 的第一条记录。独立地，per-run dispatch 进行中删除 parent session 仍然否决恢复，保护既有绑定子会话生命周期语义。手工运行也只有在 fresh read 中找到恰好一条 ID 与 session 相符的记录后，才能入队该任务的 prompt；已确认的删除会使该任务仍在飞行的 fresh read 在 prompt 入队或登记前失效，但不能撤回已被接纳的 prompt。
+每个在飞行中的手工 per-run 结果都绑定自己的运行标识，同一毫秒内的两次运行不能覆盖彼此的子会话结果。自然派发归属还要匹配触发任务的 owner，包括显式未绑定 owner；没有该标识的旧运行记录为兼容仍按时间戳匹配。
+
+同一 cwd 更换注册 ID 时，live 恢复将 tab 的 owner 归一为当前合法注册，并通过这个新 owner 执行操作；不能让控件继续绑定不可用的旧 owner。primary 的路由仍只在自己的校验通过后保持未限定。
 
 前端生命周期代次和 durable 读取代次必须同时生效。owner 切换使相关请求失效。durable 被禁用后，其代次增加，清除 durable UI 状态和待运行锁，并拒绝撤销前的读取及 mutation 回调，即使设置后来重新启用也一样。重新启用后新的合法读取与这些被拒绝的操作相互独立，仍可得到权威空快照。
 
@@ -36,7 +43,10 @@ tab 的 owner ID 和 primary 的路由参数是两组不同事实。调度详情
 
 规范化的 owner 范围视图同时供应 Environment 列表和已经打开的详情。详情只消费 source session、任务 ID 和 workspace 全部匹配的 live durable 记录，或身份相同的已确认删除记录。即使历史回退已经恢复了原始创建记录，同 ID 绑定到另一个 session 的任务也不能作为可编辑替代对象。读取和 mutation 回执还会比较请求 owner 与当前任务 scope。
 
-详情只通过这个受保护的投影接入 live 字段，不会为每次更新额外发起一次列表请求。详情确认删除后，通过共享确认函数立即移除 Environment 行、记录带 workspace 的 tombstone，并淘汰旧读取，而不是依赖下一轮旧数据刷新来收敛。删除确认属于任务/session scope，而不是易变的 provider 对象身份。
+详情只通过这个受保护的投影接入 live 字段，不会为每次更新额外发起一次列表请求。详情确认删除后，通过共享确认函数立即移除 Environment 行、记录带 workspace 的 tombstone，并淘汰旧读取，而不是依赖下一轮旧数据刷新来收敛。删除确认属于任务/session scope，而不是易变的 provider 对象身份。后续被接纳的列表响应也会应用 tombstone，旧响应或重复记录不能复活已确认删除的行。
+全页任务管理器共享当前会话同步更新的确认谓词，并为自己直接确认删除的任务记录 workspace+session+id tombstone。两条路径都拦截尚未验证的 Manual Run 旧读取。共享刷新回调在 React 发起替代读取前淘汰旧列表响应，已确认保存的详情不能被更早接纳的旧投影回写；更新的读取仍可正常更新详情。
+
+服务端已确认的 session 停止也存入 Environment 使用的同一 owner 状态，并以只读取消 ID 集合提供给详情。当前详情以及同一 owner 下之后创建的详情实例，都必须显示已确认停止的快照，不能把它与自然过期或 live 状态未知混为一谈；其他 source session 不能借用这份确认。详情内的直接停止可以把焦点还给稳定的 detail group，而 Environment 的停止是独立的焦点事务，不能被详情的本地 effect 覆盖。
 
 外部启用、停用、改名、prompt 更新或重新读取同一任务，都不能覆盖用户正在编辑的草稿。关闭编辑器后，已确认的保存结果也不能被旧 live 任务覆盖。明确删除会让编辑操作失效。来自 Environment 和来自详情自身的删除遵循同一确认规则。比这些新事实更早的请求结果必须丢弃。
 
@@ -49,6 +59,8 @@ owner 匹配且支持此能力的 durable 快照不再包含已加载的任务�
 用户确认删除后，有后续幸存任务则把焦点移给该任务；否则交给分区标题或稳定的 Environment 容器。在详情中停止会话任务后，焦点留在该详情，不落到文档主体。失败或被用户取消的操作不抢走焦点。
 
 待恢复焦点属于发起操作的会话和工作区。owner 改变时丢弃旧的焦点意图和缓存任务按钮引用，避免把焦点带到替代会话里的对应控件。
+
+每个删除/停止意图都带请求序号。请求失败、服务端明确返回未确认取消，或 Promise 被拒绝时，只撤销对应这一次 intent。后续如果任务自然离开快照，旧的失败 intent 绝不能把焦点从用户新位置抢走。已确认移除仍使用原来的恢复链。详情本地的 Stop 聚焦只用于这次直接操作，不用于通过共享状态送达的 Environment 停止。同样的结算规则沿用旧式 `Promise<void>` resolve-only handler：它只能在完成后确认；显式 `false` 或 Promise 被拒绝始终不能恢复焦点。在结算到来之前自然消失，不能被当作已确认移除。
 
 ## 6. 手工运行与刷新
 

@@ -281,6 +281,41 @@ describe('useSessionScheduledTasks', () => {
     expect(latest?.hasLiveDurableSnapshot).toBe(true);
   });
 
+  it('does not apply a list response captured before an explicit refresh', async () => {
+    const oldRead = Promise.withResolvers<DaemonScheduledTask[]>();
+    const freshRead = Promise.withResolvers<DaemonScheduledTask[]>();
+    sdkMock.workspaceActions.listScheduledTasks
+      .mockReturnValueOnce(oldRead.promise)
+      .mockReturnValueOnce(freshRead.promise);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      latest!.refresh();
+      oldRead.resolve([durableTask({ prompt: 'stale value' })]);
+      await oldRead.promise;
+      expect(latest?.tasks).toEqual([]);
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(
+          sdkMock.workspaceActions.listScheduledTasks,
+        ).toHaveBeenCalledTimes(2),
+      );
+      freshRead.resolve([durableTask({ prompt: 'fresh value' })]);
+      await freshRead.promise;
+    });
+    expect(latest?.tasks).toHaveLength(1);
+    expect(latest?.tasks[0]?.prompt).toBe('fresh value');
+  });
+
   it('toggles and deletes durable tasks and cancels session-scoped tasks', async () => {
     const durable = durableTask({ id: 'd-1', enabled: true });
     const sessionTask = sessionCronTask({ id: 'c-1' });
@@ -320,6 +355,7 @@ describe('useSessionScheduledTasks', () => {
       'd-1',
       { enabled: false },
       'ws-1',
+      'session-1',
     );
     expect(latest?.taskStatusById.get('d-1')).toBe('paused');
 
@@ -331,6 +367,7 @@ describe('useSessionScheduledTasks', () => {
       'cron',
     );
     expect(latest?.activeSessionCount).toBe(0);
+    expect(latest?.confirmedCancelledSessionTaskIds.has('c-1')).toBe(true);
 
     await act(async () => {
       await latest!.deleteDurableTask(durableEntry!);
@@ -338,6 +375,7 @@ describe('useSessionScheduledTasks', () => {
     expect(sdkMock.workspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'd-1',
       'ws-1',
+      'session-1',
     );
     expect(latest?.tasks).toHaveLength(0);
   });
@@ -452,6 +490,7 @@ describe('useSessionScheduledTasks', () => {
     expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledWith(
       'd-run',
       'ws-1',
+      'session-1',
     );
     expect(onRunPrompt.mock.invocationCallOrder[0]).toBeLessThan(
       sdkMock.workspaceActions.runScheduledTask.mock.invocationCallOrder[0],
@@ -549,6 +588,7 @@ describe('useSessionScheduledTasks', () => {
     expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledWith(
       'durable-secondary',
       'ws-secondary',
+      'session-1',
     );
   });
 
@@ -673,7 +713,7 @@ describe('useSessionScheduledTasks', () => {
     });
     expect(
       sdkMock.workspaceActions.runScheduledTask,
-    ).toHaveBeenCalledExactlyOnceWith('b-run', 'ws-b');
+    ).toHaveBeenCalledExactlyOnceWith('b-run', 'ws-b', 'session-2');
     expect(latest?.manualRunActive).toBe(false);
   });
 
@@ -770,6 +810,7 @@ describe('useSessionScheduledTasks', () => {
       expect(sdkMock.workspaceActions.runScheduledTask).toHaveBeenCalledWith(
         'one-shot-owner',
         'ws-a',
+        'session-1',
       );
     });
 
@@ -927,6 +968,127 @@ describe('useSessionScheduledTasks', () => {
       }
     },
   );
+
+  it('does not enqueue a fresh-read response after a confirmed delete', async () => {
+    const task = durableTask({
+      id: 'pending-run-delete',
+      sessionId: 'session-1',
+      recurring: true,
+      enabled: true,
+      workspaceId: 'ws-1',
+    });
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValueOnce([task]);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+    });
+    await vi.waitFor(() => expect(latest?.tasks).toHaveLength(1));
+    let releaseRead!: (tasks: DaemonScheduledTask[]) => void;
+    const pendingRead = new Promise<DaemonScheduledTask[]>((resolve) => {
+      releaseRead = resolve;
+    });
+    sdkMock.workspaceActions.listScheduledTasks.mockImplementationOnce(
+      () => pendingRead,
+    );
+    const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+    const running = latest!.runDurableTask(entry);
+    await vi.waitFor(() =>
+      expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+        2,
+      ),
+    );
+
+    await act(async () => {
+      latest?.confirmDurableDeletion({
+        id: task.id,
+        sessionId: 'session-1',
+        workspaceId: 'ws-1',
+      });
+      releaseRead([task]);
+      await running;
+    });
+
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(sdkMock.workspaceActions.runScheduledTask).not.toHaveBeenCalled();
+    expect(latest?.tasks).toEqual([]);
+    expect(latest?.manualRunActive).toBe(false);
+  });
+
+  it('rejects a foreign same-id toggle response without changing the owner projection', async () => {
+    const owned = durableTask({ id: 'shared-id', sessionId: 'session-1' });
+    const foreign = {
+      ...owned,
+      sessionId: 'session-b',
+      prompt: 'PROMPT_B',
+      enabled: false,
+    };
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([
+      foreign,
+      owned,
+    ]);
+    sdkMock.workspaceActions.updateScheduledTask.mockResolvedValue(foreign);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+
+    await act(async () => latest!.toggleDurableTask(entry));
+
+    expect(onError).toHaveBeenCalled();
+    expect(latest?.tasks).toHaveLength(1);
+    expect(latest?.tasks[0]?.enabled).toBe(true);
+    expect(latest?.tasks[0]?.task.prompt).toBe(owned.prompt);
+    expect(latest?.taskStatusById.get('shared-id')).toBe('active');
+  });
+
+  it('keeps a confirmed owner deletion retired across later list responses', async () => {
+    const owned = durableTask({ id: 'shared-id', sessionId: 'session-1' });
+    const foreign = {
+      ...owned,
+      sessionId: 'session-b',
+      prompt: 'PROMPT_B',
+    };
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([
+      foreign,
+      owned,
+    ]);
+    sdkMock.workspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+    });
+    await act(async () => Promise.resolve());
+    const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+    await act(async () => latest!.deleteDurableTask(entry));
+    expect(latest?.tasks).toEqual([]);
+
+    let releaseRead!: (tasks: DaemonScheduledTask[]) => void;
+    const pendingRead = new Promise<DaemonScheduledTask[]>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readCount =
+      sdkMock.workspaceActions.listScheduledTasks.mock.calls.length;
+    sdkMock.workspaceActions.listScheduledTasks.mockImplementationOnce(
+      () => pendingRead,
+    );
+    await act(async () => latest!.refresh());
+    await vi.waitFor(() =>
+      expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+        readCount + 1,
+      ),
+    );
+    await act(async () => {
+      releaseRead([foreign, owned]);
+      await pendingRead;
+      await Promise.resolve();
+    });
+    expect(latest?.tasks).toEqual([]);
+  });
 
   it.each(['toggle', 'delete'] as const)(
     'does not let a read started during a %s overwrite its mutation result',

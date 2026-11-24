@@ -522,6 +522,17 @@ describe('cronTasksFile', () => {
       expect(tasks[1]!.id).toBe('second');
     });
 
+    it('rejects an id collision without duplicating the existing task', async () => {
+      await addCronTask(tmpDir, makeTask({ id: 'shared-id' }));
+
+      await expect(
+        addCronTask(tmpDir, makeTask({ id: 'shared-id', prompt: 'other' })),
+      ).rejects.toThrow('scheduled task id already exists: shared-id');
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.prompt).toBe('echo hello');
+    });
+
     it('creates file when none exists', async () => {
       await addCronTask(tmpDir, makeTask());
       expect(await readCronTasks(tmpDir)).toHaveLength(1);

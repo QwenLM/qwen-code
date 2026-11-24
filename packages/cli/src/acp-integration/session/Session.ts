@@ -2215,6 +2215,7 @@ function toAdmissibleNotification(
  * imported type, so core stays a type-only dependency of the fire path. */
 interface CronFire {
   id?: string;
+  boundSessionId?: string;
   prompt: string;
   cronExpr?: string;
   recurring?: boolean;
@@ -13300,7 +13301,12 @@ export class Session implements SessionContext {
     const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
       if (!job.id || firedAt === undefined) return;
       await scheduler
-        .annotateRunSession(job.id, firedAt, outcome)
+        .annotateRunSession(
+          job.id,
+          firedAt,
+          outcome,
+          job.boundSessionId ?? null,
+        )
         .catch((error) => {
           debugLogger.warn(
             `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,

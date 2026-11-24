@@ -2365,6 +2365,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       { enabled: false },
       'secondary-id',
+      'active-session',
     );
 
     const openDelete = Array.from(container.querySelectorAll('button')).find(
@@ -2382,6 +2383,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'cron-secondary',
       'secondary-id',
+      'active-session',
     );
   });
 
@@ -2499,6 +2501,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       expect.objectContaining({ prompt: 'unsaved draft' }),
       'secondary-id',
+      'active-session',
     );
     expect(document.body.querySelector('textarea')).toBeNull();
     expect(container.textContent).toContain('confirmed save');
@@ -2657,6 +2660,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       expect.objectContaining({ prompt: 'unsaved draft' }),
       'secondary-id',
+      'active-session',
     );
     expect(container.textContent).toContain('confirmed save');
   });
@@ -2831,6 +2835,75 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
   });
 
+  it('does not expose durable mutations when the workspace target has no actions', async () => {
+    const capability = {
+      workspaceCwd: '/primary',
+      workspaces: [
+        {
+          id: 'primary-id',
+          cwd: '/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'new-registration',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const liveTask = {
+      ...secondaryScheduledTask,
+      enabled: true,
+      sessionId: 'active-session',
+    };
+    mockWorkspace.capabilities = capability;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+          liveDurableScheduledTasks: [
+            {
+              scope: 'durable',
+              id: liveTask.id,
+              title: liveTask.name ?? liveTask.prompt,
+              prompt: liveTask.prompt,
+              cronExpr: liveTask.cron,
+              recurring: liveTask.recurring,
+              enabled: true,
+              createdAt: liveTask.createdAt,
+              lastFiredAt: liveTask.lastFiredAt,
+              nextRunAt: liveTask.nextRunAt,
+              gate: null,
+              workspaceId: 'secondary-id',
+              task: liveTask,
+            },
+          ],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+    const byLabel = (label: string) =>
+      Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent === label,
+      );
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain(
+        'This workspace may have been removed or the link is no longer valid.',
+      ),
+    );
+    for (const label of ['Edit', 'Enable', 'Disable', 'Delete']) {
+      expect(byLabel(label)).toBeUndefined();
+    }
+  });
+
   it('keeps legacy single-workspace scheduled-task routes unqualified', async () => {
     mockWorkspace.capabilities = {
       workspaceCwd: '/primary',
@@ -2873,6 +2946,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       { enabled: false },
       undefined,
+      'active-session',
     );
 
     const openDelete = Array.from(container.querySelectorAll('button')).find(
@@ -2889,6 +2963,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'cron-secondary',
       undefined,
+      'active-session',
     );
   });
 
@@ -2941,6 +3016,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
           'cron-secondary',
           expect.objectContaining({ prompt: expect.any(String) }),
           'secondary-id',
+          'active-session',
         );
       } else if (mutation === 'toggle') {
         const disable = Array.from(container.querySelectorAll('button')).find(
@@ -3053,6 +3129,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-replacement',
       { enabled: false },
       'secondary-id',
+      'active-session',
     );
   });
 

@@ -810,18 +810,26 @@ export interface DaemonWorkspaceActions
     req: DaemonCreateScheduledTaskRequest,
     workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
+  /** The optional expected owner disambiguates same-id records; null means
+   * unbound, while omitting it retains compatibility for unique ids. */
   updateScheduledTask(
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
     workspaceId?: string,
+    expectedSessionId?: string | null,
   ): Promise<DaemonScheduledTask>;
   /** Run now. Persistent tasks are only recorded here and are executed by the
    * caller; per-run tasks are dispatched into a fresh daemon session. */
   runScheduledTask(
     id: string,
     workspaceId?: string,
+    expectedSessionId?: string | null,
   ): Promise<DaemonScheduledTask>;
-  deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
+  deleteScheduledTask(
+    id: string,
+    workspaceId?: string,
+    expectedSessionId?: string | null,
+  ): Promise<void>;
 
   /** The `/autofix-pr` watches of a workspace's clone; `workspaceId` as for
    * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */

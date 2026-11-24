@@ -183,6 +183,16 @@ interface ScheduledTasksDialogProps {
   /** The daemon advertises `autofix_pr_watches`: the card of an
    * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
   autofixPrWatchesAvailable?: boolean;
+  isTaskDeleted?: (task: {
+    id: string;
+    workspaceId?: string;
+    sessionId?: string | null;
+  }) => boolean;
+  onTaskDeleted?: (task: {
+    id: string;
+    workspaceId?: string;
+    sessionId?: string | null;
+  }) => void;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -207,6 +217,14 @@ function renderWorkspacePill(
  * in the busy/expanded per-card state. */
 function taskKey(task: DaemonScheduledTask): string {
   return `${task.workspaceId ?? ''}:${task.id}`;
+}
+
+function taskDeletionKey(task: DaemonScheduledTask): string {
+  return JSON.stringify([
+    task.workspaceId ?? null,
+    task.sessionId ?? null,
+    task.id,
+  ]);
 }
 
 const FREQUENCIES: Frequency[] = [
@@ -644,6 +662,8 @@ export function ScheduledTasksDialog({
   deliveryAvailable = false,
   observedContactsAvailable = false,
   autofixPrWatchesAvailable = false,
+  isTaskDeleted,
+  onTaskDeleted,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -684,6 +704,7 @@ export function ScheduledTasksDialog({
     : undefined;
 
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
+  const confirmedDeletionsRef = useRef(new Set<string>());
   // The watches of the workspaces whose tasks are listed, read only while a
   // task of an `/autofix-pr` watch is among them.
   const watchWorkspaceIds = useMemo(
@@ -720,6 +741,9 @@ export function ScheduledTasksDialog({
   // task being edited (the form is dual-mode — same fields, different verb).
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<
+    string | null | undefined
+  >(undefined);
   // The workspace the form targets. On create it's the picker's value (undefined
   // = primary); on edit it's pinned to the task's own workspace (a task can't
   // move files, so the picker is read-only). Passed to create/update actions.
@@ -1206,6 +1230,7 @@ export function ScheduledTasksDialog({
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
+    setEditingSessionId(undefined);
     setFormWorkspaceId(lockedWorkspaceId);
     resetReferenceState();
   }, [lockedWorkspaceId, resetReferenceState]);
@@ -1225,6 +1250,7 @@ export function ScheduledTasksDialog({
 
   const openCreate = useCallback(() => {
     setEditingId(null);
+    setEditingSessionId(undefined);
     // Default to the locked workspace, or primary when the page is unlocked.
     // In the latter case the picker can move it to a trusted secondary.
     setFormWorkspaceId(lockedWorkspaceId);
@@ -1248,6 +1274,7 @@ export function ScheduledTasksDialog({
   const openEdit = useCallback(
     (task: DaemonScheduledTask) => {
       setEditingId(task.id);
+      setEditingSessionId(task.sessionId);
       // Pin the edit to the task's own workspace — a PATCH can't move a task
       // between per-workspace files, so the picker is read-only while editing.
       setFormWorkspaceId(task.workspaceId);
@@ -1384,6 +1411,7 @@ export function ScheduledTasksDialog({
               : {}),
           },
           formWorkspaceId,
+          editingSessionId,
         );
       } else {
         await actions.createScheduledTask(
@@ -1425,6 +1453,7 @@ export function ScheduledTasksDialog({
     currentSession,
     currentSessionDisabledReason,
     editingId,
+    editingSessionId,
     delivery,
     editedDelivery,
     deliveryAvailable,
@@ -1456,6 +1485,7 @@ export function ScheduledTasksDialog({
           task.id,
           { enabled: !task.enabled },
           task.workspaceId,
+          task.sessionId,
         );
         await reload();
       } catch (err) {
@@ -1500,12 +1530,15 @@ export function ScheduledTasksDialog({
         await runScheduledTaskManually(task, actions, onRunPrompt, t, {
           reload,
           onError,
+          isStale: () =>
+            confirmedDeletionsRef.current.has(taskDeletionKey(task)) ||
+            isTaskDeleted?.(task) === true,
         });
       } finally {
         setRunningTaskId(null);
       }
     },
-    [actions, onError, onRunPrompt, reload, runningTaskId, t],
+    [actions, isTaskDeleted, onError, onRunPrompt, reload, runningTaskId, t],
   );
 
   const handleDelete = useCallback(
@@ -1519,7 +1552,13 @@ export function ScheduledTasksDialog({
       }
       setBusyId(taskKey(task));
       try {
-        await actions.deleteScheduledTask(task.id, task.workspaceId);
+        await actions.deleteScheduledTask(
+          task.id,
+          task.workspaceId,
+          task.sessionId,
+        );
+        confirmedDeletionsRef.current.add(taskDeletionKey(task));
+        onTaskDeleted?.(task);
         await reload();
       } catch (err) {
         onError(err, t('scheduledTasks.error.deleteFailed'));
@@ -1527,7 +1566,7 @@ export function ScheduledTasksDialog({
         if (mountedRef.current) setBusyId(null);
       }
     },
-    [actions, onError, reload, t],
+    [actions, onError, onTaskDeleted, reload, t],
   );
 
   const referencePicker =

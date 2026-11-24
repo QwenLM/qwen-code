@@ -54,6 +54,9 @@ export interface CronTaskRun {
    * older reader.
    */
   kind?: 'scheduled' | 'catch-up' | 'manual';
+  /** Correlates an in-flight dispatch with this exact run entry. Older entries
+   * without it retain timestamp-selection compatibility. */
+  runId?: string;
   /**
    * Id of the session that owned the schedule when this fire ran — the session
    * whose transcript contains the run. Lets a management UI link a run back to
@@ -231,8 +234,13 @@ export function annotateCronRunSession(
   task: DurableCronTask,
   firedAt: number,
   outcome: CronRunSessionOutcome,
+  runId?: string,
 ): DurableCronTask {
-  const index = task.runs?.findIndex((run) => run.at === firedAt) ?? -1;
+  const index =
+    task.runs?.findIndex(
+      (run) =>
+        run.at === firedAt && (runId === undefined || run.runId === runId),
+    ) ?? -1;
   if (index < 0 || !task.runs) return task;
   const run: CronTaskRun = { ...task.runs[index]! };
   delete run.sessionId;
@@ -753,7 +761,12 @@ export async function addCronTask(
   projectRoot: string,
   task: DurableCronTask,
 ): Promise<void> {
-  await updateCronTasks(projectRoot, (tasks) => [...tasks, task]);
+  await updateCronTasks(projectRoot, (tasks) => {
+    if (tasks.some((candidate) => candidate.id === task.id)) {
+      throw new Error(`scheduled task id already exists: ${task.id}`);
+    }
+    return [...tasks, task];
+  });
 }
 
 /** Returns the number of tasks actually removed. */

@@ -624,9 +624,14 @@ interface ArtifactPanelProps {
   liveSessionScheduledTasksOwnerSessionId?: string;
   liveDurableScheduledTasks?: readonly SessionDurableScheduledTask[];
   confirmedDeletedDurableTaskKeys?: ReadonlySet<string>;
+  confirmedCancelledSessionTaskIds?: ReadonlySet<string>;
   hasLiveDurableScheduledSnapshot?: boolean;
   hasLiveSessionScheduledSnapshot?: boolean;
   onCancelSessionScheduledTask?: (taskId: string) => Promise<boolean>;
+  onSessionScheduledTaskStopped?: (
+    taskId: string,
+    sourceSessionId?: string,
+  ) => void;
   onDurableScheduledTaskDeleted?: (
     id: string,
     workspaceId: string | undefined,
@@ -816,9 +821,11 @@ export function ArtifactPanel({
   liveSessionScheduledTasksOwnerSessionId,
   liveDurableScheduledTasks,
   confirmedDeletedDurableTaskKeys,
+  confirmedCancelledSessionTaskIds,
   hasLiveDurableScheduledSnapshot = false,
   hasLiveSessionScheduledSnapshot = false,
   onCancelSessionScheduledTask,
+  onSessionScheduledTaskStopped,
   onDurableScheduledTaskDeleted,
   onScheduledTasksMutated,
   deferSubagentMount = false,
@@ -2010,8 +2017,14 @@ export function ArtifactPanel({
                 ]),
               )
             }
+            confirmedSessionCancellation={
+              !activeTab.task.durable &&
+              liveSnapshotBelongsToActiveTask &&
+              Boolean(confirmedCancelledSessionTaskIds?.has(activeTab.task.id))
+            }
             sourceSessionId={activeTab.sourceSessionId}
             onCancelSessionTask={onCancelSessionScheduledTask}
+            onSessionTaskStopped={onSessionScheduledTaskStopped}
             onDurableTaskDeleted={onDurableScheduledTaskDeleted}
             onMutated={onScheduledTasksMutated}
           />
@@ -2181,7 +2194,9 @@ function ScheduledTaskDetail({
   hasLiveDurableScheduledSnapshot = false,
   liveDurableTask,
   confirmedDurableDeletion = false,
+  confirmedSessionCancellation = false,
   onCancelSessionTask,
+  onSessionTaskStopped,
   onDurableTaskDeleted,
   onMutated,
 }: {
@@ -2193,7 +2208,9 @@ function ScheduledTaskDetail({
   hasLiveDurableScheduledSnapshot?: boolean;
   liveDurableTask?: DaemonScheduledTask;
   confirmedDurableDeletion?: boolean;
+  confirmedSessionCancellation?: boolean;
   onCancelSessionTask?: (taskId: string) => Promise<boolean>;
+  onSessionTaskStopped?: (taskId: string, sourceSessionId?: string) => void;
   onDurableTaskDeleted?: (
     id: string,
     workspaceId: string | undefined,
@@ -2412,22 +2429,27 @@ function ScheduledTaskDetail({
   }, [stopConfirmed]);
 
   const isSessionScoped = !task.durable;
+  const sessionCancellationConfirmed =
+    isSessionScoped && (stopConfirmed || confirmedSessionCancellation);
   const hasSessionScopedLiveTask = isSessionScoped && Boolean(liveSessionTask);
   const isSessionScopedPaused =
     hasSessionScopedLiveTask &&
-    !stopConfirmed &&
+    !sessionCancellationConfirmed &&
     liveSessionTask?.enabled === false;
   const isSessionScopedCancelled =
-    isSessionScoped && hasLiveSessionSnapshot && stopConfirmed;
+    isSessionScoped && hasLiveSessionSnapshot && sessionCancellationConfirmed;
   const isDeleted =
     task.durable &&
     hasKnownTaskId &&
     (confirmedDurableDeletion || durableDeletionConfirmed);
   const hasUnavailableDurableLiveState =
     task.durable && !isDeleted && !loading && !loadError && !loadedTask;
-  const canEdit = Boolean(loadedTask && sourceSessionId) && !isDeleted;
+  const canEdit =
+    Boolean(loadedTask && actions && sourceSessionId) && !isDeleted;
   const canCancelSession =
-    hasSessionScopedLiveTask && !stopConfirmed && Boolean(onCancelSessionTask);
+    hasSessionScopedLiveTask &&
+    !sessionCancellationConfirmed &&
+    Boolean(onCancelSessionTask);
   const detailTitle = loadedTask?.name || loadedTask?.prompt || task.title;
   const detailPrompt =
     loadedTask?.prompt ?? liveSessionTask?.prompt ?? task.prompt;
@@ -2480,6 +2502,7 @@ function ScheduledTaskDetail({
           name: name.trim() || null,
         },
         workspaceId,
+        loadedTask.sessionId,
       );
       if (
         !isCurrentRequest(
@@ -2549,6 +2572,7 @@ function ScheduledTaskDetail({
           enabled: !loadedTask.enabled,
         },
         workspaceId,
+        loadedTask.sessionId,
       );
       if (
         !isCurrentRequest(
@@ -2605,7 +2629,11 @@ function ScheduledTaskDetail({
     setBusy(true);
     setFormError(null);
     try {
-      await actions.deleteScheduledTask(loadedTask.id, workspaceId);
+      await actions.deleteScheduledTask(
+        loadedTask.id,
+        workspaceId,
+        loadedTask.sessionId,
+      );
       if (
         !isCurrentRequest(
           request,
@@ -2655,13 +2683,20 @@ function ScheduledTaskDetail({
         setFormError(t('scheduledTasks.error.cancelFailed'));
         return;
       }
+      onSessionTaskStopped?.(liveSessionTask.id, sourceSessionId);
       setStopConfirmed(true);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
-  }, [liveSessionTask, onCancelSessionTask, t]);
+  }, [
+    liveSessionTask,
+    onCancelSessionTask,
+    onSessionTaskStopped,
+    sourceSessionId,
+    t,
+  ]);
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;

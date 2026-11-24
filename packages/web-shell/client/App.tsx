@@ -2387,9 +2387,9 @@ type PersistedArtifactPanelTab =
 function resolveScheduledTaskWorkspace(
   capabilities: ReturnType<typeof useWorkspace>['capabilities'],
   workspaceCwd?: string,
-): { workspaceId?: string; resolvable: boolean } {
+): { workspaceId?: string; ownerWorkspaceId?: string; resolvable: boolean } {
   const registeredWorkspaces = capabilities?.workspaces;
-  if (!registeredWorkspaces || registeredWorkspaces.length === 0) {
+  if (!registeredWorkspaces) {
     return {
       workspaceId: undefined,
       resolvable:
@@ -2397,13 +2397,26 @@ function resolveScheduledTaskWorkspace(
         workspaceCwd === capabilities?.workspaceCwd,
     };
   }
-  const matched = registeredWorkspaces.find(
+  const matches = registeredWorkspaces.filter(
     (entry) => entry.cwd === workspaceCwd,
   );
-  if (!matched) return { workspaceId: undefined, resolvable: false };
+  if (matches.length !== 1) {
+    return { workspaceId: undefined, resolvable: false };
+  }
+  const matched = matches[0]!;
+  if (
+    matched.primary !== (matched.cwd === capabilities?.workspaceCwd) ||
+    (!matched.primary && !matched.id) ||
+    registeredWorkspaces.some(
+      (entry) => entry !== matched && entry.id === matched.id,
+    )
+  ) {
+    return { workspaceId: undefined, resolvable: false };
+  }
   // The primary can use the unqualified route when it is trusted.
   return {
     workspaceId: matched.primary ? undefined : matched.id,
+    ownerWorkspaceId: matched.id,
     resolvable: matched.trusted,
   };
 }
@@ -8429,7 +8442,8 @@ export function App({
                         task,
                         sourceSessionId: liveSourceSessionId,
                         workspaceCwd: tab.workspaceCwd,
-                        workspaceId: tab.workspaceId,
+                        workspaceId:
+                          workspaceTarget.ownerWorkspaceId ?? tab.workspaceId,
                       };
                     }
                   }
@@ -9717,6 +9731,16 @@ export function App({
     onError: (error, fallback) => reportError(error, fallback),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
+  const matchesCurrentScheduledTaskScope = useCallback(
+    (
+      task: Parameters<typeof sessionScheduledTasks.confirmDurableDeletion>[0],
+    ) =>
+      scheduledTaskWorkspaceTarget.resolvable &&
+      task.sessionId === connection.sessionId &&
+      (task.workspaceId ?? scheduledTaskWorkspaceTarget.workspaceId ?? null) ===
+        (scheduledTaskWorkspaceTarget.workspaceId ?? null),
+    [scheduledTaskWorkspaceTarget, connection.sessionId, sessionScheduledTasks],
+  );
   const openSessionScheduledTaskDetail = useCallback(
     (entry: SessionScheduledTask) => {
       openScheduledTaskPanel(
@@ -24855,11 +24879,15 @@ export function App({
     ),
     confirmedDeletedDurableTaskKeys:
       sessionScheduledTasks.confirmedDeletedDurableTaskKeys,
+    confirmedCancelledSessionTaskIds:
+      sessionScheduledTasks.confirmedCancelledSessionTaskIds,
     hasLiveDurableScheduledSnapshot:
       sessionScheduledTasks.hasLiveDurableSnapshot,
     hasLiveSessionScheduledSnapshot:
       sessionScheduledTasks.hasLiveSessionSnapshot,
     onCancelSessionScheduledTask: sessionScheduledTasks.cancelSessionTaskById,
+    onSessionScheduledTaskStopped: (id: string, sourceSessionId?: string) =>
+      sessionScheduledTasks.confirmSessionCancellation(id, sourceSessionId),
     onDurableScheduledTaskDeleted: (
       id: string,
       workspaceId: string | undefined,
@@ -26609,6 +26637,22 @@ export function App({
                         'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
+                      isTaskDeleted={(task) =>
+                        matchesCurrentScheduledTaskScope(task) &&
+                        sessionScheduledTasks.isDurableTaskDeletionConfirmed({
+                          ...task,
+                          workspaceId:
+                            scheduledTaskWorkspaceTarget.workspaceId,
+                        })
+                      }
+                      onTaskDeleted={(task) => {
+                        if (!matchesCurrentScheduledTaskScope(task)) return;
+                        sessionScheduledTasks.confirmDurableDeletion({
+                          ...task,
+                          workspaceId:
+                            scheduledTaskWorkspaceTarget.workspaceId,
+                        });
+                      }}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -28528,10 +28572,10 @@ export function App({
                   void sessionScheduledTasks.runDurableTask(entry)
                 }
                 onDeleteScheduledTask={(entry) =>
-                  void sessionScheduledTasks.deleteDurableTask(entry)
+                  sessionScheduledTasks.deleteDurableTask(entry)
                 }
                 onCancelSessionScheduledTask={(entry) =>
-                  void sessionScheduledTasks.cancelSessionTask(entry)
+                  sessionScheduledTasks.cancelSessionTask(entry)
                 }
                 onManageAllScheduledTasks={
                   projectFeaturesAvailable ? openScheduledTasks : undefined

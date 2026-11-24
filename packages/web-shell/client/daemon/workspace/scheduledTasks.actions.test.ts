@@ -139,6 +139,26 @@ describe('scheduled-tasks workspace actions', () => {
       );
     });
 
+    it('sends the expected session on mutation routes, including null', async () => {
+      fetchMock.mockResolvedValue(ok({ id: 'a' }));
+      await makeActions().updateScheduledTask(
+        'a',
+        { enabled: false },
+        undefined,
+        'session-a',
+      );
+      await makeActions().runScheduledTask('unbound', undefined, null);
+      await makeActions().deleteScheduledTask('a', 'ws-2', 'session/b');
+
+      const urls = fetchMock.mock.calls.map(
+        ([url]) => new URL(url, 'http://local'),
+      );
+      expect(urls[0].searchParams.get('expectedSessionId')).toBe('session-a');
+      expect(urls[1].searchParams.get('expectedSessionId')).toBe('');
+      expect(urls[2].pathname).toBe('/workspaces/ws-2/scheduled-tasks/a');
+      expect(urls[2].searchParams.get('expectedSessionId')).toBe('session/b');
+    });
+
     it('url-encodes both the workspace selector and the task id', async () => {
       fetchMock.mockResolvedValue(ok({ id: 'a' }));
       await makeActions().updateScheduledTask(

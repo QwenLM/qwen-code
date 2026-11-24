@@ -20,6 +20,8 @@ export interface ScheduledTaskManualRunErrorHandlers {
   reload: () => void | Promise<void>;
   onError: (err: unknown, fallback: string) => void;
   isCurrent?: () => boolean;
+  /** True once this owner/task deletion has been confirmed. */
+  isStale?: () => boolean;
 }
 
 /** The scheduler runs a gated task's gate before each scheduled fire; a
@@ -53,17 +55,22 @@ export async function runScheduledTaskManually(
   >,
   onRunPrompt: ScheduledTaskRunPrompt,
   t: TranslateFn,
-  { reload, onError, isCurrent }: ScheduledTaskManualRunErrorHandlers,
+  { reload, onError, isCurrent, isStale }: ScheduledTaskManualRunErrorHandlers,
 ): Promise<void> {
-  const current = () => isCurrent?.() !== false;
+  const current = () => isCurrent?.() !== false && !isStale?.();
   try {
     // A bound-session /run only records the fire. Re-read before enqueueing:
     // a stale snapshot could otherwise execute a disabled or deleted task's
     // prompt even if the recording side rejects it afterwards.
     if (!current()) return;
-    const fresh = (await actions.listScheduledTasks(task.workspaceId)).find(
-      (candidate) => candidate.id === task.id,
+    const candidates = (
+      await actions.listScheduledTasks(task.workspaceId)
+    ).filter(
+      (candidate) =>
+        candidate.id === task.id &&
+        (candidate.sessionId ?? null) === (task.sessionId ?? null),
     );
+    const fresh = candidates.length === 1 ? candidates[0] : undefined;
     if (!current()) return;
     if (!fresh || !fresh.enabled) {
       await Promise.resolve(reload()).catch(() => {});
@@ -77,7 +84,11 @@ export async function runScheduledTaskManually(
     if (fresh.sessionMode === 'per_run') {
       // The daemon dispatches a fresh child session and records it on this
       // run. Never also enqueue the prompt into the controller session.
-      await actions.runScheduledTask(fresh.id, task.workspaceId);
+      await actions.runScheduledTask(
+        fresh.id,
+        task.workspaceId,
+        fresh.sessionId,
+      );
       if (current()) await reload();
       return;
     }
@@ -91,7 +102,11 @@ export async function runScheduledTaskManually(
         ...inWorkspace(task),
       );
       try {
-        await actions.runScheduledTask(fresh.id, task.workspaceId);
+        await actions.runScheduledTask(
+          fresh.id,
+          task.workspaceId,
+          fresh.sessionId,
+        );
         if (current()) await reload();
       } catch (err) {
         if (current()) onError(err, t('scheduledTasks.error.runFailed'));
@@ -100,7 +115,11 @@ export async function runScheduledTaskManually(
       // A bound-session one-shot is consumed by /run, preventing a second
       // fire at its scheduled minute. If the session never takes the prompt,
       // surface that the task was consumed rather than a generic failure.
-      await actions.runScheduledTask(fresh.id, task.workspaceId);
+      await actions.runScheduledTask(
+        fresh.id,
+        task.workspaceId,
+        fresh.sessionId,
+      );
       if (current()) await reload();
       if (!current()) {
         // The server has already consumed the one-shot. Do not resume an old

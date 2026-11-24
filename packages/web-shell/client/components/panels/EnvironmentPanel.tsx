@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionAttachmentReference,
@@ -86,8 +86,12 @@ interface EnvironmentPanelProps {
   onOpenScheduledTask?: (task: SessionScheduledTask) => void;
   onToggleScheduledTask?: (task: SessionDurableScheduledTask) => void;
   onRunScheduledTask?: (task: SessionDurableScheduledTask) => void;
-  onDeleteScheduledTask?: (task: SessionDurableScheduledTask) => void;
-  onCancelSessionScheduledTask?: (task: SessionScopedScheduledTask) => void;
+  onDeleteScheduledTask?: (
+    task: SessionDurableScheduledTask,
+  ) => Promise<boolean | void>;
+  onCancelSessionScheduledTask?: (
+    task: SessionScopedScheduledTask,
+  ) => Promise<boolean | void>;
   onManageAllScheduledTasks?: () => void;
   /** Resolve an attachment to a displayable `data:` URL. */
   onReadImage?: (attachmentId: string) => Promise<string>;
@@ -257,7 +261,14 @@ export function EnvironmentPanel({
   const pendingScheduledTaskFocusRef = useRef<{
     removedKey: string;
     nextKey?: string;
+    request: number;
+    confirmed: boolean;
   } | null>(null);
+  const scheduledTaskFocusRequestRef = useRef(0);
+  const [
+    confirmedScheduledTaskFocusRequest,
+    setConfirmedScheduledTaskFocusRequest,
+  ] = useState<number | null>(null);
   const lastFocusScheduledTasksNonceRef = useRef(focusScheduledTasksNonce);
   useEffect(() => {
     pendingScheduledTaskFocusRef.current = null;
@@ -287,30 +298,39 @@ export function EnvironmentPanel({
     }
   }, [focusScheduledTasksNonce]);
 
-  useEffect(() => {
-    const pending = pendingScheduledTaskFocusRef.current;
-    if (
-      !pending ||
-      scheduledTasks?.some(
-        (entry) => scheduledTaskKey(entry) === pending.removedKey,
-      )
-    ) {
-      return;
-    }
-    const nextOpener = pending.nextKey
-      ? scheduledTaskOpenerRefs.current.get(pending.nextKey)
-      : undefined;
-    pendingScheduledTaskFocusRef.current = null;
-    if (scheduledTasksExpanded && nextOpener) {
-      nextOpener.focus();
-    } else if (scheduledSectionHeaderRef.current) {
-      scheduledSectionHeaderRef.current.focus();
-    } else {
-      panelRef.current?.focus();
-    }
-  }, [scheduledTasks, scheduledTasksExpanded]);
+  const restoreScheduledTaskFocus = useCallback(
+    (request: number): void => {
+      const pending = pendingScheduledTaskFocusRef.current;
+      if (
+        !pending?.confirmed ||
+        pending.request !== request ||
+        scheduledTasks?.some(
+          (entry) => scheduledTaskKey(entry) === pending.removedKey,
+        )
+      ) {
+        return;
+      }
+      const nextOpener = pending.nextKey
+        ? scheduledTaskOpenerRefs.current.get(pending.nextKey)
+        : undefined;
+      pendingScheduledTaskFocusRef.current = null;
+      if (scheduledTasksExpanded && nextOpener) {
+        nextOpener.focus();
+      } else if (scheduledSectionHeaderRef.current) {
+        scheduledSectionHeaderRef.current.focus();
+      } else {
+        panelRef.current?.focus();
+      }
+    },
+    [scheduledTasks, scheduledTasksExpanded],
+  );
 
-  const rememberScheduledTaskFocus = (entry: SessionScheduledTask): void => {
+  useEffect(() => {
+    const request = pendingScheduledTaskFocusRef.current?.request;
+    if (request !== undefined) restoreScheduledTaskFocus(request);
+  }, [confirmedScheduledTaskFocusRequest, restoreScheduledTaskFocus]);
+
+  const rememberScheduledTaskFocus = (entry: SessionScheduledTask): number => {
     const removedKey = scheduledTaskKey(entry);
     const removedIndex = scheduledTasks?.findIndex(
       (candidate) => scheduledTaskKey(candidate) === removedKey,
@@ -319,10 +339,48 @@ export function EnvironmentPanel({
       removedIndex === undefined || removedIndex < 0
         ? undefined
         : scheduledTasks?.[removedIndex + 1];
+    const request = ++scheduledTaskFocusRequestRef.current;
     pendingScheduledTaskFocusRef.current = {
       removedKey,
       nextKey: nextEntry ? scheduledTaskKey(nextEntry) : undefined,
+      request,
+      confirmed: false,
     };
+    return request;
+  };
+
+  const trackScheduledTaskFocus = (
+    entry: SessionScheduledTask,
+    action: () => Promise<boolean | void> | boolean | void,
+  ): void => {
+    const request = rememberScheduledTaskFocus(entry);
+    const clearFailedIntent = () => {
+      if (pendingScheduledTaskFocusRef.current?.request === request) {
+        pendingScheduledTaskFocusRef.current = null;
+      }
+    };
+    try {
+      void Promise.resolve(action()).then((succeeded) => {
+        if (succeeded === false) {
+          clearFailedIntent();
+          return;
+        }
+        const pending = pendingScheduledTaskFocusRef.current;
+        // Void resolve-only handlers retain their established semantics;
+        // explicit false and rejected promises remain unconfirmed.
+        if (
+          (succeeded === true || succeeded === undefined) &&
+          pending?.request === request &&
+          !pending.confirmed
+        ) {
+          pending.confirmed = true;
+          setConfirmedScheduledTaskFocusRequest(request);
+          restoreScheduledTaskFocus(request);
+        }
+      }, clearFailedIntent);
+    } catch {
+      clearFailedIntent();
+    }
   };
 
   useEffect(() => {
@@ -775,8 +833,9 @@ export function EnvironmentPanel({
                                       }),
                                     )
                                   ) {
-                                    rememberScheduledTaskFocus(entry);
-                                    onDeleteScheduledTask(entry);
+                                    trackScheduledTaskFocus(entry, () =>
+                                      onDeleteScheduledTask(entry),
+                                    );
                                   }
                                 }}
                               >
@@ -793,8 +852,9 @@ export function EnvironmentPanel({
                               title={t('environment.scheduledTasks.stop')}
                               disabled={busy}
                               onClick={() => {
-                                rememberScheduledTaskFocus(entry);
-                                onCancelSessionScheduledTask(entry);
+                                trackScheduledTaskFocus(entry, () =>
+                                  onCancelSessionScheduledTask(entry),
+                                );
                               }}
                             >
                               <CircleStopIcon />

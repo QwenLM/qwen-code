@@ -76,6 +76,16 @@ export interface SessionScheduledTasksResult {
   taskStatusById: ReadonlyMap<string, SessionScheduledTaskLiveState>;
   liveSessionTaskById: ReadonlyMap<string, DaemonSessionScheduledTaskStatus>;
   confirmedDeletedDurableTaskKeys: ReadonlySet<string>;
+  isDurableTaskDeletionConfirmed: (task: {
+    id: string;
+    workspaceId?: string;
+    sessionId?: string | null;
+  }) => boolean;
+  confirmedCancelledSessionTaskIds: ReadonlySet<string>;
+  confirmSessionCancellation: (
+    taskId: string,
+    expectedSessionId?: string,
+  ) => void;
   confirmDurableDeletion: (task: {
     id: string;
     workspaceId?: string;
@@ -91,7 +101,7 @@ export interface SessionScheduledTasksResult {
   refresh: () => void;
   toggleDurableTask: (task: SessionDurableScheduledTask) => Promise<void>;
   runDurableTask: (task: SessionDurableScheduledTask) => Promise<void>;
-  deleteDurableTask: (task: SessionDurableScheduledTask) => Promise<void>;
+  deleteDurableTask: (task: SessionDurableScheduledTask) => Promise<boolean>;
   cancelSessionTask: (task: SessionScopedScheduledTask) => Promise<boolean>;
   cancelSessionTaskById: (taskId: string) => Promise<boolean>;
 }
@@ -205,12 +215,19 @@ export function useSessionScheduledTasks(options: {
   const durableRevisionRef = useRef(0);
   const scopeGenerationRef = useRef(0);
   const confirmedCancelledIdsRef = useRef(new Set<string>());
+  const [
+    confirmedCancelledSessionTaskIds,
+    setConfirmedCancelledSessionTaskIds,
+  ] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const confirmedDeletedDurableTaskKeysRef = useRef(new Set<string>());
   const manualRefreshSessionRef = useRef<string | undefined>(undefined);
   const observedRefreshTriggerRef = useRef(refreshTrigger);
 
   useLayoutEffect(() => {
     scopeGenerationRef.current += 1;
     confirmedCancelledIdsRef.current.clear();
+    setConfirmedCancelledSessionTaskIds(new Set<string>());
+    confirmedDeletedDurableTaskKeysRef.current.clear();
     setConfirmedDeletedDurableTaskKeys(new Set());
     manualRefreshSessionRef.current = undefined;
     observedRefreshTriggerRef.current = refreshTrigger;
@@ -233,6 +250,7 @@ export function useSessionScheduledTasks(options: {
     durableReqRef.current += 1;
     setDurableTasks([]);
     setHasLiveDurableSnapshot(false);
+    confirmedDeletedDurableTaskKeysRef.current.clear();
     setConfirmedDeletedDurableTaskKeys(new Set());
     manualRunActiveRef.current = false;
     setManualRunActive(false);
@@ -255,7 +273,18 @@ export function useSessionScheduledTasks(options: {
         ) {
           return;
         }
-        setDurableTasks(list.filter((task) => task.sessionId === sessionId));
+        setDurableTasks(
+          list.filter(
+            (task) =>
+              task.sessionId === sessionId &&
+              !confirmedDeletedDurableTaskKeysRef.current.has(
+                JSON.stringify([
+                  task.workspaceId ?? workspaceId ?? null,
+                  task.id,
+                ]),
+              ),
+          ),
+        );
         setHasLiveDurableSnapshot(true);
       })
       .catch((error: unknown) => {
@@ -321,6 +350,8 @@ export function useSessionScheduledTasks(options: {
   );
 
   const refresh = useCallback(() => {
+    // Revoke older reads before React starts the replacement request.
+    durableReqRef.current += 1;
     manualRefreshSessionRef.current = sessionId;
     setManualRefreshTick((n) => n + 1);
   }, [sessionId]);
@@ -350,8 +381,15 @@ export function useSessionScheduledTasks(options: {
           entry.id,
           { enabled: !entry.enabled },
           entry.workspaceId ?? workspaceId,
+          entry.task.sessionId ?? null,
         );
         if (!isCurrent()) return;
+        if (
+          updated.id !== entry.id ||
+          (updated.sessionId ?? null) !== (entry.task.sessionId ?? null)
+        ) {
+          throw new Error(t('scheduledTasks.error.workspaceUnavailable'));
+        }
         durableReqRef.current += 1;
         setDurableTasks((prev) =>
           prev.map((item) => (item.id === updated.id ? updated : item)),
@@ -376,6 +414,10 @@ export function useSessionScheduledTasks(options: {
         durableRevisionRef.current === durableRevision &&
         scopeGenerationRef.current === generation &&
         owner.isCurrent();
+      const deletedTaskKey = JSON.stringify([
+        entry.workspaceId ?? workspaceId ?? null,
+        entry.id,
+      ]);
       // Same-session boundary admits one pending bound run. The ref closes
       // the rapid second-click window before React state renders.
       manualRunActiveRef.current = true;
@@ -387,7 +429,13 @@ export function useSessionScheduledTasks(options: {
           workspaceActions,
           onRunPrompt,
           t,
-          { reload: refresh, onError, isCurrent },
+          {
+            reload: refresh,
+            onError,
+            isCurrent,
+            isStale: () =>
+              confirmedDeletedDurableTaskKeysRef.current.has(deletedTaskKey),
+          },
         );
       } finally {
         if (isCurrent()) {
@@ -414,13 +462,14 @@ export function useSessionScheduledTasks(options: {
       if (!owner.isCurrent() || !durableEnabled || task.sessionId !== sessionId)
         return;
       durableReqRef.current += 1;
-      setConfirmedDeletedDurableTaskKeys((previous) => {
-        const next = new Set(previous);
-        next.add(
-          JSON.stringify([task.workspaceId ?? workspaceId ?? null, task.id]),
-        );
-        return next;
-      });
+      const key = JSON.stringify([
+        task.workspaceId ?? workspaceId ?? null,
+        task.id,
+      ]);
+      confirmedDeletedDurableTaskKeysRef.current.add(key);
+      setConfirmedDeletedDurableTaskKeys(
+        new Set(confirmedDeletedDurableTaskKeysRef.current),
+      );
       setDurableTasks((previous) =>
         previous.filter((item) => item.id !== task.id),
       );
@@ -430,7 +479,7 @@ export function useSessionScheduledTasks(options: {
 
   const deleteDurableTask = useCallback(
     async (entry: SessionDurableScheduledTask) => {
-      if (!workspaceActions?.deleteScheduledTask) return;
+      if (!workspaceActions?.deleteScheduledTask) return false;
       const generation = scopeGenerationRef.current;
       const durableRevision = durableRevisionRef.current;
       const isCurrent = () =>
@@ -443,14 +492,17 @@ export function useSessionScheduledTasks(options: {
         await workspaceActions.deleteScheduledTask(
           entry.id,
           entry.workspaceId ?? workspaceId,
+          entry.task.sessionId ?? null,
         );
-        if (!isCurrent()) return;
+        if (!isCurrent()) return false;
         confirmDurableDeletion({
           ...entry.task,
           workspaceId: entry.workspaceId ?? workspaceId,
         });
+        return true;
       } catch (error) {
         if (isCurrent()) onError(error, t('scheduledTasks.error.deleteFailed'));
+        return false;
       } finally {
         if (isCurrent()) markBusy(entry.id, false);
       }
@@ -466,6 +518,20 @@ export function useSessionScheduledTasks(options: {
     ],
   );
 
+  const confirmSessionCancellation = useCallback(
+    (taskId: string, expectedSessionId = sessionId) => {
+      if (!owner.isCurrent() || expectedSessionId !== sessionId) return;
+      confirmedCancelledIdsRef.current.add(taskId);
+      setConfirmedCancelledSessionTaskIds(
+        new Set(confirmedCancelledIdsRef.current),
+      );
+      setSessionScopedTasks((prev) =>
+        prev.filter((item) => item.id !== taskId),
+      );
+    },
+    [owner, sessionId],
+  );
+
   const cancelSessionTaskById = useCallback(
     async (taskId: string): Promise<boolean> => {
       const generation = scopeGenerationRef.current;
@@ -475,10 +541,7 @@ export function useSessionScheduledTasks(options: {
       try {
         const result = await sessionActions.cancelTask(taskId, 'cron');
         if (result.cancelled && isCurrent()) {
-          confirmedCancelledIdsRef.current.add(taskId);
-          setSessionScopedTasks((prev) =>
-            prev.filter((item) => item.id !== taskId),
-          );
+          confirmSessionCancellation(taskId);
         }
         if (!result.cancelled && isCurrent()) {
           onError(
@@ -494,7 +557,7 @@ export function useSessionScheduledTasks(options: {
         if (isCurrent()) markBusy(taskId, false);
       }
     },
-    [markBusy, onError, owner, sessionActions, t],
+    [confirmSessionCancellation, markBusy, onError, owner, sessionActions, t],
   );
 
   const cancelSessionTask = useCallback(
@@ -585,6 +648,17 @@ export function useSessionScheduledTasks(options: {
     taskStatusById,
     liveSessionTaskById,
     confirmedDeletedDurableTaskKeys,
+    isDurableTaskDeletionConfirmed: (task: {
+      id: string;
+      workspaceId?: string;
+      sessionId?: string | null;
+    }) =>
+      task.sessionId === sessionId &&
+      confirmedDeletedDurableTaskKeysRef.current.has(
+        JSON.stringify([task.workspaceId ?? workspaceId ?? null, task.id]),
+      ),
+    confirmedCancelledSessionTaskIds,
+    confirmSessionCancellation,
     confirmDurableDeletion,
     hasLiveDurableSnapshot,
     hasLiveSessionSnapshot,

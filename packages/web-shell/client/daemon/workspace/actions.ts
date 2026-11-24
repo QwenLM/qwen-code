@@ -930,11 +930,12 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async updateScheduledTask(id, patch, workspaceId) {
+    async updateScheduledTask(id, patch, workspaceId, expectedSessionId) {
       requireClient(getClient, 'Update scheduled task failed');
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -951,11 +952,12 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async runScheduledTask(id, workspaceId) {
+    async runScheduledTask(id, workspaceId, expectedSessionId) {
       requireClient(getClient, 'Run scheduled task failed');
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}/run`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -971,11 +973,12 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async deleteScheduledTask(id, workspaceId) {
+    async deleteScheduledTask(id, workspaceId, expectedSessionId) {
       requireClient(getClient, 'Delete scheduled task failed');
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -1495,11 +1498,21 @@ function requireWorkspaceClient(
 // primary surface. `suffix` appends the task id (and `/run`) for item routes.
 // The aggregated view passes the primary workspace as `undefined`, so the
 // primary keeps its trust-free unqualified surface while secondaries use the
-// (trust-checked) qualified one.
-function scheduledTasksPath(workspaceId?: string, suffix = ''): string {
-  return workspaceId
+// (trust-checked) qualified one; the primary still applies the server-side
+// runtime trust gate.
+function scheduledTasksPath(
+  workspaceId?: string,
+  suffix = '',
+  expectedSessionId?: string | null,
+): string {
+  const path = workspaceId
     ? `/workspaces/${encodeURIComponent(workspaceId)}/scheduled-tasks${suffix}`
     : `/scheduled-tasks${suffix}`;
+  if (expectedSessionId === undefined) return path;
+  const query = new URLSearchParams({
+    expectedSessionId: expectedSessionId ?? '',
+  });
+  return `${path}?${query.toString()}`;
 }
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {

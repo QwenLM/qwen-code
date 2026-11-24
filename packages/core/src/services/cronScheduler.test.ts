@@ -1227,12 +1227,46 @@ describe('CronScheduler', () => {
       expect(fired[0]?.modelServiceId).toBe('qwen-max(openai)');
       expect(fired[0]?.groupId).toBe('group-1');
 
-      await scheduler.annotateRunSession('fresh1', minute, {
-        sessionId: 'child-1',
-      });
+      await scheduler.annotateRunSession(
+        'fresh1',
+        minute,
+        { sessionId: 'child-1' },
+        null,
+      );
       expect((await readCronTasks(tmpDir))[0]?.runs).toEqual([
         { at: minute, kind: 'scheduled', sessionId: 'child-1' },
       ]);
+    });
+
+    it('attributes a same-id natural fire only to the fired task owner', async () => {
+      await load([diskTask('fresh1', { sessionMode: 'per_run' })]);
+      const [fired] = startAndTick();
+      expect(fired?.boundSessionId).toBeUndefined();
+      const owner = fired!.boundSessionId ?? null;
+      const minute = at(10, 30).getTime();
+      await vi.waitFor(async () => {
+        const tasks = await readCronTasks(tmpDir);
+        expect(tasks).toHaveLength(1);
+        expect(tasks[0]?.runs).toEqual([{ at: minute, kind: 'scheduled' }]);
+      });
+
+      const [firedTask] = await readCronTasks(tmpDir);
+      await writeCronTasks(tmpDir, [
+        { ...firedTask!, sessionId: 'other-owner' },
+        firedTask!,
+      ]);
+      await scheduler.annotateRunSession(
+        'fresh1',
+        minute,
+        { sessionId: 'owned-child' },
+        owner,
+      );
+
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks[1]?.runs).toEqual([
+        { at: minute, kind: 'scheduled', sessionId: 'owned-child' },
+      ]);
+      expect(tasks[0]?.runs).toEqual([{ at: minute, kind: 'scheduled' }]);
     });
 
     it('does not accrue run history for a one-shot (deleted on fire)', async () => {
@@ -1831,6 +1865,42 @@ describe('CronScheduler', () => {
         scheduler.createDurable('* * * * *', 'doomed', true),
       ).rejects.toThrow(/Malformed JSON/);
       expect(scheduler.list()).toHaveLength(0);
+    });
+
+    it('preserves the incumbent in-memory job when a duplicate id is rejected', async () => {
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const original = await scheduler.createDurable(
+          '* * * * *',
+          'ORIGINAL_B',
+          true,
+        );
+        await expect(
+          scheduler.createDurable('* * * * *', 'REJECTED_A', true),
+        ).rejects.toThrow('scheduled task id already exists: aaaaaaaa');
+
+        expect(scheduler.list().find((job) => job.id === original.id)).toBe(
+          original,
+        );
+        expect(
+          (await readCronTasks(tmpDir)).map((task) => task.prompt),
+        ).toEqual(['ORIGINAL_B']);
+
+        random.mockReturnValue(1); // zzzzzzzz: a non-colliding control
+        const unique = await scheduler.createDurable(
+          '* * * * *',
+          'UNIQUE_A',
+          true,
+        );
+        expect(jobIds()).toEqual(
+          expect.arrayContaining([original.id, unique.id]),
+        );
+        expect(
+          (await readCronTasks(tmpDir)).map((task) => task.prompt),
+        ).toEqual(['ORIGINAL_B', 'UNIQUE_A']);
+      } finally {
+        random.mockRestore();
+      }
     });
 
     it('reloads durable tasks when the file changes on disk', async () => {
