@@ -30,6 +30,10 @@
    changing the transcript. Submit a prompt while the lock is held, release
    the lock, then submit another prompt. Both records should be persisted in
    order, with the first as the second record's parent.
+6. Stop the recorder and remove the title sidecar from that test conversation.
+   Hold the archive fence while resuming it and submitting a new prompt, then
+   release the fence after about 900 ms. The new prompt should persist and
+   the original first prompt should supply the list title.
 
 The committed core test exercises real storage and a controlled append/archive
 race. A source-based independent subprocess check reproduced the baseline and

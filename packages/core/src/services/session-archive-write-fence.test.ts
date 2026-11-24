@@ -281,7 +281,7 @@ describe('archive fences legacy transcript writers', () => {
     );
   });
 
-  it('seeds a busy resume from its actual first prompt before the next prompt', async () => {
+  it('seeds a resume from its actual first prompt after extended lock contention', async () => {
     const { content } = await seed();
     fs.rmSync(liveTitlePath);
     const records = content
@@ -291,12 +291,14 @@ describe('archive fences legacy transcript writers', () => {
     const lock = await acquireSessionArchiveWriteLock(livePath);
     const resumed = recorder({ records, tail: records.at(-1)!.uuid });
     try {
+      resumed.recordUserMessage([{ text: 'Prompt after resume' }]);
+      await delay(900);
       expect(readSessionTitleSidecar(liveTitlePath)).toBeUndefined();
     } finally {
       await lock.release();
     }
-    resumed.recordUserMessage([{ text: 'Prompt after resume' }]);
     await resumed.flush();
+    expect(fs.readFileSync(livePath, 'utf8')).toContain('Prompt after resume');
     expect(readSessionTitleSidecar(liveTitlePath)?.displayName).toBe(
       'First prompt',
     );

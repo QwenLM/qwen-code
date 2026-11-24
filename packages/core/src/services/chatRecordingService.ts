@@ -1731,7 +1731,9 @@ export class ChatRecordingService {
         this.pendingPromptTitleProjections++;
         this.operationTail = this.operationTail.then(async () => {
           try {
-            const lock = await acquireSessionArchiveWriteLock(filePath);
+            const lock = await acquireSessionArchiveWriteLock(filePath, {
+              retryContention: true,
+            });
             try {
               lock.assertHeld();
               seed();
