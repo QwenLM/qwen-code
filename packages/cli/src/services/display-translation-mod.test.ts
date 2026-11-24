@@ -213,6 +213,18 @@ describe('translateDisplayText', () => {
     },
   );
 
+  it.each([
+    ['The cost is $O(n^2)$.', '代价是 $O(n)$。'],
+    ['Line one<br>line two.', '第一行<br onclick="x">第二行。'],
+  ])(
+    'keeps the original when the translation changes math or HTML in %s',
+    async (original, translated) => {
+      await expect(
+        translateDisplayText(original, 'zh-CN', answer(translated), signal),
+      ).resolves.toBeUndefined();
+    },
+  );
+
   it('keeps terminal code that is fenced inside a Markdown paragraph', async () => {
     const original = 'Run this command:\n    ~~~sh\n    npm test\n    ~~~';
     const translated = '运行以下命令：\n    ~~~sh\n    npm test\n    ~~~';
@@ -230,6 +242,35 @@ describe('translateDisplayText', () => {
         'terminal',
       ),
     ).resolves.toBe(translated);
+  });
+
+  it.each([
+    ['See the docs.', '参见\\[文档](https://attacker.example)。'],
+    ['See the docs.', '<div>\n[文档](https://attacker.example)\n</div>'],
+  ])(
+    'keeps the original when a terminal link target changes: %s -> %j',
+    async (original, translated) => {
+      await expect(
+        translateDisplayText(
+          original,
+          'zh-CN',
+          answer(translated),
+          signal,
+          'terminal',
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  it('keeps the original when a translation adds a non-web bare link', async () => {
+    await expect(
+      translateDisplayText(
+        'See the session.',
+        'zh-CN',
+        answer('参见 <qwen-session://abc>。'),
+        signal,
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it('keeps the original when the call is unanswered or throws', async () => {

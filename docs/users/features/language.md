@@ -116,7 +116,7 @@ Display translation leaves the model's language alone and translates what you re
 You can also set **Language: Display Translation** on the **User** tab in `/settings` or in the Web Shell's settings. User and system settings can enable it for new sessions, including sessions in an untrusted workspace.
 
 - **Only the display changes.** The model still works in its own language. The stored conversation, what the model reads in later turns, `/copy` and the Web Shell's copy buttons keep the original.
-- **Some blocks are left as they are.** A block that is already in the target language, or that is only code, is not translated.
+- **Some blocks are left as they are.** A block that is already in the target language, or that is only code, is not translated. With English as the target, a block written mostly in Latin script counts as English, so French or German replies are not translated.
 - **Translation waits for a block to finish.** A reply block shows its original text while it streams and switches to the translation once it is complete. A thought is translated when you open it, so a thought that stays collapsed costs nothing.
 - **Each translation is a model call.** Every translated block and opened thought costs one call to the [fast model](../configuration/settings.md#fastmodel), or to the session's model when none is set. A fast model without thinking keeps each translation inside the 30 seconds a row may take. A block whose call runs out of time, fails or returns an incomplete translation keeps its original text. A reload or a second Web Shell tab reuses the translations, but a resumed session translates the rows it shows again.
 - **The text goes to the fast model's provider.** Each translated block is sent to the fast model's endpoint. If your fast model uses a different provider than your session model, that provider receives the text.
@@ -124,7 +124,7 @@ You can also set **Language: Display Translation** on the **User** tab in `/sett
 - **Some sessions turn it off.** Like installed Mods, it does not run with `disableAllHooks`, managed hooks, bare mode, safe mode, a sandbox, an execution environment or in a session run by a workspace agent.
 - **The thought translate button goes away.** In the Web Shell, a translated thought no longer shows its translate button.
 
-Display translation runs after any installed [Mods](../extension/mods.md) finish rewriting a reply or thought. The row keeps its original code when translation changes the surrounding prose.
+Display translation runs after any installed [Mods](../extension/mods.md) finish rewriting a reply or thought. A translation that changes any code, math, link target or image is discarded, and the whole block keeps its original text.
 
 ## Configuration
 

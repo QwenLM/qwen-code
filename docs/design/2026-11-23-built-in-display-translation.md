@@ -76,7 +76,7 @@ This compares characters with words because a Chinese sentence often carries Eng
 
 ### The model call
 
-Translation uses the Mod model service with the `haiku` alias, which selects the session's fast model or falls back to the session model. The call requests no thinking, has a 25-second timeout inside the row's 30-second deadline and has a limit of 8,192 output tokens. The prompt asks for a complete translation ending with a fixed line. If the answer is empty, lacks the end line, carries the host's truncation marker or changes the displayed code, the row keeps its previous text. Code blocks must stay in order. Inline code and link and image targets may move with the translated word order, but each one must stay unchanged.
+Translation uses the Mod model service with the `haiku` alias, which selects the session's fast model or falls back to the session model. The call requests no thinking, has a 25-second timeout inside the row's 30-second deadline and has a limit of 8,192 output tokens. The prompt asks for a complete translation ending with a fixed line. If the answer is empty, lacks the end line, carries the host's truncation marker or changes the displayed code, the row keeps its previous text. Code blocks must stay in order. Inline code, math, inline HTML and link and image targets may move with the translated word order, but each one must stay unchanged. A bare `http`, `https` or `mailto` URL shows its own target and is not compared. In the terminals, the links Ink draws from raw text, which CommonMark may read as escaped text or HTML, must keep their targets too.
 
 The call sends the text of each translated block to the fast model's endpoint. When the fast model uses another provider than the session model, that provider receives the text.
 

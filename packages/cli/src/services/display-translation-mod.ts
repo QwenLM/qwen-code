@@ -56,6 +56,8 @@ async function inspectMarkdown(text: string) {
     if (type === 'text' && value) words.push(value);
     else if (type === 'code') fences.push({ value, lang, meta });
     else if (type === 'inlineCode') spans.push(`code:${value}`);
+    else if (type === 'math' || type === 'inlineMath' || type === 'html')
+      spans.push(`${type}:${value}`);
     else if (url !== undefined) {
       // A bare URL shows its own target, and CJK punctuation after it
       // parses as part of it.
@@ -63,11 +65,28 @@ async function inspectMarkdown(text: string) {
       const bare =
         type === 'link' &&
         shown !== undefined &&
+        /^(?:https?|mailto):/i.test(url) &&
         [shown, `mailto:${shown}`, `http://${shown}`].includes(url);
       if (!bare) spans.push(`url:${url}`);
     }
   });
   return { prose: words.join(' '), code: { fences, spans: spans.sort() } };
+}
+
+async function terminalMarkdown() {
+  const [{ getFencedCodeBlocks }, { MD_LINK_PATTERN, MD_LINK_CAPTURE }] =
+    await Promise.all([
+      import('../ui/utils/markdown-utilities.js'),
+      import('../ui/utils/osc8.js'),
+    ]);
+  const link = new RegExp(MD_LINK_PATTERN, 'g');
+  return (text: string) => ({
+    fences: getFencedCodeBlocks(text),
+    urls: Array.from(
+      text.matchAll(link),
+      ([token]) => token.match(MD_LINK_CAPTURE)?.[2],
+    ).sort(),
+  });
 }
 
 async function needsTranslation(
@@ -134,18 +153,15 @@ export async function translateDisplayText(
       return undefined;
     }
     // The Web Shell copies the displayed code. Ink also draws fences that
-    // CommonMark treats as part of a paragraph.
+    // CommonMark treats as part of a paragraph, and links that CommonMark
+    // treats as escaped text or raw HTML.
     const translated = await inspectMarkdown(text);
-    const terminalFences =
-      surface === 'terminal'
-        ? (await import('../ui/utils/markdown-utilities.js'))
-            .getFencedCodeBlocks
-        : undefined;
+    const terminal =
+      surface === 'terminal' ? await terminalMarkdown() : undefined;
     if (
       !translated ||
       !isDeepStrictEqual(source.code, translated.code) ||
-      (terminalFences &&
-        !isDeepStrictEqual(terminalFences(original), terminalFences(text)))
+      (terminal && !isDeepStrictEqual(terminal(original), terminal(text)))
     ) {
       logger.debug('Left untranslated: code changed');
       return undefined;
