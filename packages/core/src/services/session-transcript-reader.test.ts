@@ -2653,9 +2653,12 @@ describe('SessionTranscriptReader', () => {
     let calls = 0;
     const spy = vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
       calls += 1;
-      return calls === 1
-        ? baseline
-        : { ...baseline, heapUsed: baseline.heapUsed + 128 * 1024 };
+      // Call 1 is buildHeapUsedStart; call 2 is the first in-loop sample at
+      // sequence 1 and must trip the mid-scan guard; call 3 (final check)
+      // returns to baseline so only the loop guard can reject this fixture.
+      return calls === 2
+        ? { ...baseline, heapUsed: baseline.heapUsed + 128 * 1024 }
+        : baseline;
     });
     const reader = newReader();
     try {
@@ -2665,6 +2668,7 @@ describe('SessionTranscriptReader', () => {
           retryable: true,
         },
       );
+      expect(calls).toBe(2);
     } finally {
       spy.mockRestore();
       setSessionTranscriptAvailableHeapBudgetForTest(undefined);
