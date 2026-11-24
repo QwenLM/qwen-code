@@ -73,8 +73,11 @@ import {
   containerName,
   containerPathFor,
   describeExecutionBoundary,
+  executeViaGuestBridgeSync,
+  guestCommandEnv,
   mountRootFor,
   reapContainer,
+  reapVmWorker,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
@@ -1815,6 +1818,63 @@ function runProbeSuite(
       // Unresolvable: the farm below reports what it could not link.
     }
   }
+  const probeVerdict = sandboxVerdict(
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
+  if (probeVerdict.kind === 'microvm') {
+    // Content-only sync into the microVM — never expose host node_modules
+    // symlinks across a host mount boundary.
+    const guestSuite = `npx --no-install vitest run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
+    const bridgeResult = executeViaGuestBridgeSync(probeVerdict.socketPath, {
+      command: guestSuite,
+      kind: 'test',
+      timeoutMs: timeout,
+      env: guestCommandEnv('test'),
+      workspaceDir: probeTree,
+    });
+    if (bridgeResult.timedOut || bridgeResult.protocolError) {
+      if (probeVerdict.workerPidFile) {
+        const reap = reapVmWorker({
+          pidFile: probeVerdict.workerPidFile,
+          expectedExeTokens: [probeVerdict.backend],
+        });
+        onTeardown?.(reap.status);
+      } else {
+        onTeardown?.('partial');
+      }
+    }
+    if (bridgeResult.timedOut) {
+      throw new ProbeRunFailure(
+        `microVM probe timed out after ${Math.round(timeout / 1000)}s`,
+        'runner-died',
+      );
+    }
+    if (bridgeResult.protocolError) {
+      throw new ProbeRunFailure(
+        `microVM bridge (${probeVerdict.backend}) error: ${bridgeResult.protocolError}`,
+        'not-run',
+      );
+    }
+    if (bridgeResult.signal) {
+      throw new ProbeRunFailure(
+        `microVM runner killed by ${bridgeResult.signal}`,
+        'runner-died',
+      );
+    }
+    return {
+      perFile: classifyProbeRun(
+        bridgeResult.exitCode ?? 1,
+        bridgeResult.stdout,
+        probes,
+        bridgeResult.stderr,
+      ),
+      ms: now() - started,
+      exposed: { linked: 0, failed: 0 },
+    };
+  }
   const exposed = exposeDependencies(probeTree, farmRoot, {
     rebuild: true,
   });
@@ -3444,15 +3504,21 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       const effectiveBackend =
         verdict.kind === 'refused'
           ? 'refused'
-          : verdict.kind === 'container' && mountable
-            ? 'container'
-            : 'direct';
+          : verdict.kind === 'microvm'
+            ? verdict.backend
+            : verdict.kind === 'container' && mountable
+              ? 'container'
+              : 'direct';
       const boundaryNote =
         teardownState.status === 'failed'
-          ? 'container teardown verification failed — a timed-out probe container may still be running'
-          : verdict.kind === 'container' && !mountable
-            ? 'probe tree is not under a review temp dir, so probes ran directly rather than in a container'
-            : undefined;
+          ? verdict.kind === 'microvm'
+            ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
+            : 'container teardown verification failed — a timed-out probe container may still be running'
+          : teardownState.status === 'partial' && verdict.kind === 'microvm'
+            ? `microVM (${verdict.backend}) timed out or faulted without QWEN_REVIEW_VM_PID_FILE — worker teardown could not be verified`
+            : verdict.kind === 'container' && !mountable
+              ? 'probe tree is not under a review temp dir, so probes ran directly rather than in a container'
+              : undefined;
       return describeExecutionBoundary({
         backend: effectiveBackend,
         trustContext,

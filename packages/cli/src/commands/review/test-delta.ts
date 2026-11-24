@@ -480,7 +480,31 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   const verdict = sandboxVerdict(policy, undefined, undefined, trustContext);
   const mountable = mountRootFor(baseline) !== null;
   const effectiveBackend =
-    verdict.kind === 'container' && mountable ? 'container' : 'direct';
+    verdict.kind === 'microvm'
+      ? verdict.backend
+      : verdict.kind === 'container' && mountable
+        ? 'container'
+        : 'direct';
+  const teardownStatuses = entries
+    .map((e) => e.base.teardownStatus)
+    .filter((s): s is NonNullable<typeof s> => s !== undefined);
+  const teardownStatus = teardownStatuses.includes('failed')
+    ? ('failed' as const)
+    : teardownStatuses.includes('partial')
+      ? ('partial' as const)
+      : teardownStatuses.includes('clean')
+        ? ('clean' as const)
+        : ('not-applicable' as const);
+  const boundaryNote =
+    teardownStatus === 'failed'
+      ? verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
+        : 'container teardown verification failed — a timed-out container may still be running'
+      : teardownStatus === 'partial' && verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) timed out or faulted without QWEN_REVIEW_VM_PID_FILE — worker teardown could not be verified`
+        : verdict.kind === 'container' && !mountable
+          ? 'baseline tree is not under a review temp dir, so reruns executed directly rather than in a container'
+          : undefined;
   return {
     entries,
     netNew,
@@ -491,11 +515,8 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       policy,
       backend: effectiveBackend,
       trustContext,
-      ...(verdict.kind === 'container' && !mountable
-        ? {
-            note: 'baseline tree is not under a review temp dir, so reruns executed directly rather than in a container',
-          }
-        : {}),
+      teardownStatus,
+      ...(boundaryNote !== undefined ? { note: boundaryNote } : {}),
     }),
   };
 }

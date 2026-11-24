@@ -2,7 +2,7 @@
 
 [English](2026-11-24-review-tiered-sandbox.md) | [简体中文](2026-11-24-review-tiered-sandbox.zh-CN.md)
 
-**Status:** Phase 1 implemented (trust classification, hardened containers, tiered fail-closed backend selection & launch planners, bypass phase gates, structured boundary disclosure); CI workflow cutover and live guest execution bridge remain Phase 2.
+**Status:** Phase 1 & Phase 2-B implemented (trust classification, hardened containers, tiered fail-closed backend selection & launch planners, `guest-exec-v1` UDS/vsock live microVM execution bridge with content-only workspace packing and identity-checked VMM worker teardown, bypass phase gates, structured boundary disclosure); CI workflow cutover (Phase 2-A) and cloud `provider-vm` HTTP/SDK data plane remain follow-up work.
 **Date:** 2026-11-24
 **Related:** [Tiered MicroVM Isolation for `/verify-pr`](2026-11-23-verify-pr-tiered-microvm.md), [Review CPU for Tokens](review-cpu-for-tokens.md)
 
@@ -26,11 +26,11 @@
 - Gate `drive`, `ab-drive`, and `capture-tui` behind the same fail-closed sandbox policy so they never silently execute untrusted scripts on the host under `required`, `tiered`, or `QWEN_REVIEW_FORCE_HARDWARE=1`.
 - Attach structured `executionBoundary` metadata to execution reports and capture PR trust inputs (`isCrossRepository`, `authorAssociation`) in `fetch-pr` plans with zero extra GitHub API calls.
 
-### Non-Goals (Phase 1)
+### Non-Goals (Phase 1 / 2-B)
 
 - Putting the entire `/review` orchestrator LLM agent inside a microVM (per `/verify-pr` §3.5, `/review` keeps its orchestrator, `working_dir`, fan-out, coverage ledger, and `--fix` host target unchanged, isolating only code-execution adapters).
-- Modifying `.github/workflows/qwen-code-pr-review.yml` or provisioning production cloud VM credentials in this change (Phase 2).
-- Shipping a live guest-agent RPC transport for inline `firecracker` / `vfkit` / `provider-vm` command streaming inside `packages/cli` (Phase 2 builds on the backend contract and planners defined here; until connected, `hardware-isolated` refuses fail-closed rather than downgrading).
+- Modifying `.github/workflows/qwen-code-pr-review.yml` or provisioning production cloud VM credentials in this change (Phase 2-A).
+- Shipping a cloud HTTP/SDK data plane for `provider-vm` (`fcsandbox` / `aliyun-ecs`) inside `packages/cli` (remains follow-up; local microVM backends `firecracker` and `vfkit` now execute live over the `guest-exec-v1` UDS/vsock bridge when prerequisites and `QWEN_REVIEW_VM_BRIDGE_SOCKET` are ready, and refuse fail-closed otherwise).
 
 ## 3. Architecture and Design Decisions
 
@@ -92,7 +92,12 @@ Defines a clean adapter boundary aligned with `scripts/verify-pr-vm-runner.mjs`:
   1. If `QWEN_REVIEW_SANDBOX_BACKEND` explicitly names a hardware backend (`firecracker`, `vfkit`, or `provider-vm`), validate only that backend (fail-closed if unavailable or if `container` was requested for a `hardware-isolated` run).
   2. Otherwise probe in host-native priority order: `firecracker` (Linux) -> `vfkit` (macOS arm64) -> `provider-vm` (cloud fallback).
 - Each hardware backend has a pure launch-plan builder (`buildReviewBackendPlan`) validating prerequisites without spawning untrusted code.
-- **Fail-closed guarantee in Phase 1:** Because the inline guest command-streaming bridge for microVMs is Phase 2 work, `sandboxVerdict()` / `refuseUnsandboxedPhase()` never downgrade a `hardware-isolated` classification to `container` or `direct`. They return a structured `refused` verdict naming `prTrust`, `escalationReasons`, and the resolved hardware backend readiness/blocker so reviewers and CI see an explicit, auditable refusal.
+- **Live microVM `guest-exec-v1` bridge (`lib/guest-exec-bridge.ts`, Phase 2-B):**
+  - When a local microVM backend (`firecracker` or `vfkit`) satisfies all host prerequisites AND the operator provides a valid non-symlinked Unix domain socket via `QWEN_REVIEW_VM_BRIDGE_SOCKET` (checked against OS `sun_path` byte limits and `lstatSync().isSocket()`, excluded from repository `.env` via `PROJECT_ENV_HARDCODED_EXCLUSIONS`), `selectReviewSandboxBackend()` returns `kind: 'hardware-bridge'` and `sandboxVerdict()` returns `kind: 'microvm'`.
+  - **No RW host mount (D5):** `packWorkspaceFiles()` uploads regular files by content (`F`/`D`/`V` frames) under strict count, per-file, and aggregate byte caps, refusing symlinks, FIFOs, sockets, device nodes, and traversal paths.
+  - **Framed transport & anti-truncation:** Uses `1B ASCII kind + 4B uint32 BE length + payload` (`H`/`A` handshake, `X` exec with allowlisted `containerCommandEnv()`, `O`/`E` bounded stdout/stderr chunks, `Z` end frame with independent SHA-256 verification of stdout/stderr, `R` refusal). Missing `Z` frames, trailing partial bytes, frame/output overruns, or SHA-256 mismatches fail closed with `EPROTO` rather than reporting exit 0.
+  - **Synchronous adapter & identity-checked teardown:** `executeViaGuestBridgeSync()` drives a minimal raw UDS byte pump child under `spawnSync` timeout so `build-test`, `test-efficacy`, and `test-delta` execute inside the microVM while keeping all protocol verification in the parent. On timeout or protocol fault, `reapVmWorker()` validates the PID file (refusing symlinks) and executable identity via `ps` before sending `SIGTERM` -> `SIGKILL` -> confirmed absence, reporting verifiable `teardownStatus` (`'clean' | 'failed'`).
+  - **Fail-closed fallback:** If prerequisites are missing, `QWEN_REVIEW_VM_BRIDGE_SOCKET` is unset/invalid, or `provider-vm` is selected without an attached data plane, `sandboxVerdict()` / `refuseUnsandboxedPhase()` refuse fail-closed without downgrading to a shared-kernel container or the host.
 
 ### 3.5 Execution Surface Coverage and Bypass Closure
 
@@ -128,9 +133,10 @@ Defines a clean adapter boundary aligned with `scripts/verify-pr-vm-runner.mjs`:
    - `sandbox-backends.test.ts`: covers backend selection priority per platform, explicit `QWEN_REVIEW_SANDBOX_BACKEND` override, rejection of `container` for `hardware-isolated`, fail-closed when prerequisites are missing, and launch-plan validation for `firecracker`, `vfkit`, and `provider-vm` (`fcsandbox` / `aliyun-ecs`).
    - `sandboxed-exec.test.ts`: covers `tiered` policy precedence, repo `.env` rejection for new env keys, hardened container flags (`--cap-drop=ALL`, `--security-opt=no-new-privileges:true`, `--pids-limit=512`), `reapContainer()` clean vs. failed verification, and `refuseHostExecutionPhase()`.
    - `build-test` / `test-efficacy` / `test-delta` / `drive` / `ab-drive` / `capture-tui` tests: verify `executionBoundary` attachment, plan-derived trust enforcement, and fail-closed refusal on bypass subcommands.
+   - `guest-exec-bridge.test.ts`: covers `guest-exec-v1` frame encoding/decoding, UDS path length and symlink socket rejection, content-only workspace packing (refusing symlinks, non-regular files, and budget overruns), truncated/forged-digest rejection, identity-checked `reapVmWorker()` (refusing mismatched PIDs, killing live TERM-ignoring targets, preserving innocent canaries), and end-to-end real Unix domain socket child guest-agent execution through `runBuildTest` and `runTestDelta` under `tiered` + external fork PRs.
 2. **Build & static checks**: `npm run build && npm run typecheck` and targeted Vitest suites in `packages/cli`.
 
-## 6. Follow-up Work (Phase 2)
+## 6. Follow-up Work
 
-- Connect a live guest execution transport (vsock / provider SDK) to run `build-test`, `test-efficacy`, and `drive` inside `firecracker`, `vfkit`, and `provider-vm` (`fcsandbox`) without RW-mounting host `.qwen/tmp`.
-- Update `.github/workflows/qwen-code-pr-review.yml` (and workflow meta-tests) to remove the fallback to `policy=off` on external PRs when container/VM runtime is unavailable, switching CI to `QWEN_REVIEW_SANDBOX=tiered`.
+- Update `.github/workflows/qwen-code-pr-review.yml` (and workflow meta-tests) to remove the fallback to `policy=off` on external PRs when container/VM runtime is unavailable, switching CI to `QWEN_REVIEW_SANDBOX=tiered` (Phase 2-A).
+- Connect a cloud HTTP/SDK data plane for `provider-vm` (`fcsandbox` / `aliyun-ecs`) and optional microVM-wrapped `drive` execution.

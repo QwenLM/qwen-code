@@ -56,9 +56,12 @@ import {
   containerName,
   containerPathFor,
   describeExecutionBoundary,
+  executeViaGuestBridgeSync,
+  guestCommandEnv,
   handOffRefused,
   mountRootFor,
   reapContainer,
+  reapVmWorker,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
@@ -707,6 +710,51 @@ export function run(
   // because `npm ci` runs `prepare`, which is the whole-project build on many
   // repos.
   const heapMb = kind === 'test' ? undefined : declaredBuildHeapMb(cwd);
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  if (verdict.kind === 'microvm') {
+    const guestEnv = guestCommandEnv(kind, heapMb);
+    const bridgeResult = executeViaGuestBridgeSync(verdict.socketPath, {
+      command,
+      kind,
+      timeoutMs: deadlineMs,
+      env: guestEnv,
+      workspaceDir: cwd,
+    });
+    let teardownStatus: ReviewTeardownStatus | undefined;
+    if (bridgeResult.timedOut || bridgeResult.protocolError) {
+      teardownStatus = verdict.workerPidFile
+        ? reapVmWorker({
+            pidFile: verdict.workerPidFile,
+            expectedExeTokens: [verdict.backend],
+          }).status
+        : 'partial';
+    }
+    const raw =
+      `${bridgeResult.stdout}${bridgeResult.stderr}` +
+      (bridgeResult.protocolError
+        ? `${bridgeResult.stdout || bridgeResult.stderr ? '\n' : ''}[microvm-bridge ${verdict.backend}] ${bridgeResult.protocolError}\n`
+        : '');
+    const failingFiles = failingFilesOf(raw, cwd);
+    const heapExhausted = bridgeResult.exitCode !== 0 && heapBannerIn(raw);
+    const spawnError = bridgeResult.timedOut
+      ? undefined
+      : bridgeResult.protocolError
+        ? 'EPROTO'
+        : undefined;
+    return {
+      command,
+      exitCode: bridgeResult.protocolError ? null : bridgeResult.exitCode,
+      seconds: Math.round((Date.now() - started) / 1000),
+      timedOut: bridgeResult.timedOut,
+      output: trimOutput(raw),
+      deadlineMs,
+      ...(failingFiles.length > 0 ? { failingFiles } : {}),
+      ...(heapExhausted ? { heapExhausted } : {}),
+      ...(bridgeResult.signal ? { signal: bridgeResult.signal } : {}),
+      ...(spawnError ? { spawnError } : {}),
+      ...(teardownStatus !== undefined ? { teardownStatus } : {}),
+    };
+  }
   const boxed = containerised(command, cwd, kind, heapMb, trustContext);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
@@ -1555,15 +1603,21 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const effectiveBackend =
     finalReport.toolchain === 'refused'
       ? 'refused'
-      : verdict.kind === 'container' && mountable
-        ? 'container'
-        : 'direct';
+      : verdict.kind === 'microvm'
+        ? verdict.backend
+        : verdict.kind === 'container' && mountable
+          ? 'container'
+          : 'direct';
   const boundaryNote =
     teardownStatus === 'failed'
-      ? 'container teardown verification failed — a timed-out container may still be running'
-      : verdict.kind === 'container' && !mountable
-        ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
-        : undefined;
+      ? verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
+        : 'container teardown verification failed — a timed-out container may still be running'
+      : teardownStatus === 'partial' && verdict.kind === 'microvm'
+        ? `microVM (${verdict.backend}) timed out or faulted without QWEN_REVIEW_VM_PID_FILE — worker teardown could not be verified`
+        : verdict.kind === 'container' && !mountable
+          ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
+          : undefined;
   const executionBoundary = describeExecutionBoundary({
     backend: effectiveBackend,
     trustContext,
