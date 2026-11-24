@@ -392,8 +392,6 @@ export interface ServeOptions {
   managedRuntimeBrokerToken?: string;
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
-  /** Trusted startup URL for the operator-only original CSI attachment. */
-  hostedCsiSessionStoreUrl?: string;
   /**
    * Per-SSE-connection writer stall budget (ms). A stream whose write is
    * stuck waiting for `drain` (the consumer stopped reading) for longer

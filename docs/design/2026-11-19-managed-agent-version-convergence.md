@@ -27,6 +27,12 @@ mechanisms are kept as the historical record and marked superseded. The
 archive did not touch TypeScript, so worker-side CSI session code still
 exists, but its server-side admission counterparts are archived.
 
+Revision (2026-11-22) — #17427 retired the worker-side private CSI session
+client (the `hosted-csi-*` session routes, tool turns, and batch recovery) and
+removed the `QWEN_HOSTED_CSI_SESSION_STORE_URL` attachment option; the
+`managed-csi-*` worker protocol family remains live. The statement above that
+worker-side CSI session code still exists describes the state at #17415 only.
+
 ## Problem
 
 The managed server carries several independent "version" mechanisms. They look

@@ -1,3 +1,4 @@
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import { extractRecentFilePaths } from './postCompactAttachments.js';
@@ -1276,6 +1277,30 @@ describe('composePostCompactHistory', () => {
 });
 
 describe('postProcessSummary', () => {
+  it('replaces copied hints and keeps the path on one exact, escaped line before the trailer', () => {
+    const stale = buildCompactionTranscriptHint('/old/session.jsonl');
+    const directory = '/new/space "quote"\n<line>\u0085\u2028\u202e\u2066';
+    const path = directory + '/file.jsonl';
+    const hint = buildCompactionTranscriptHint(path);
+    const result = postProcessSummary(`Summary\n\n${stale}`, hint);
+
+    const lines = result.split('\n');
+    expect(
+      lines.filter((line) => line.includes('<compaction-transcript-hint>')),
+    ).toEqual([hint]);
+    const literal = /grep_search: (\{.*\})\. Supply a regex/.exec(hint)?.[1];
+    expect(JSON.parse(literal!)).toEqual({
+      path: directory,
+      glob: 'file.jsonl',
+    });
+    expect(hint).not.toContain('<line>');
+    expect(hint).not.toMatch(/[\u0085\u2028\u202e\u2066]/);
+    expect(lines.at(-1)).toMatch(/^Resume the prior task/);
+    expect(postProcessSummary(`Summary\n\n${stale}`)).toBe(
+      postProcessSummary('Summary'),
+    );
+  });
+
   it('returns body + trailer when no <analysis> block is present', () => {
     const out = postProcessSummary('<state_snapshot>body</state_snapshot>');
     expect(out).toContain('<state_snapshot>body</state_snapshot>');

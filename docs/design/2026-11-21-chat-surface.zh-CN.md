@@ -52,8 +52,9 @@
 - **审批/提问。** 表面渲染第一个 `pending` 审批（跳过被取代项）与第一个待处理提问。
   `ToolApproval` 确认路由到 `respondApproval(id, optionId)`，并在非 accepted 准入时
   **reject**（经 `onError` 上报），因为 `ToolApproval` 仅经 rejection 重新解锁——resolve
-  会把卡片闩死失效。`AskUserQuestion` 确认按所选选项路由：提交（`allow_once`）选项把
-  按索引键控的答案记录规范化为 `QuestionAnswer[]` 走 `respondQuestion`；拒绝选项是决策
+  会把卡片闩死失效。`AskUserQuestion` 确认按所选选项路由：提交（`allow_once`）选项在
+  每个问题及其全部选项携带后端 id 时直接转发结构化 `QuestionAnswer[]`，否则把旧
+  索引键控的答案记录规范化为该结构再走 `respondQuestion`；拒绝选项是决策
   投票，走 `respondApproval`（`respondQuestion` 总是投提交选项、无法表达拒绝）。两者均以
   `admission === 'accepted'` 作为组件的成功布尔返回。
 - **在流决策卡片。** 待处理卡片在输入框之前以在流方式渲染并替换它（输入框被隐藏并收到
@@ -64,9 +65,14 @@
   转录不可用 UI 均以槽位传入（`header`、`panels`、`composerStatus`、`transcriptError`）。
   状态栈与用量统计需要比当前保守 `statusFacts`（`queueLength`/`goalActive`）更丰富的
   事实，故由宿主页提供，直至 parity 落地。
-- **页面提供的事实与门控。** 历史分页转发 `hasOlderHistory`、`onLoadOlderHistory`
-  （默认取 `controller.loadOlder`）与成对的 `historyPaginationError`（缺它则更早历史页
-  加载失败不可见、且每次顶部滚动都重发）。计划事实与焦点/通知门控以 props 传入
+- **控制器默认分页与页面提供的门控。** 历史分页转发 `hasOlderHistory`、
+  `loadingOlderHistory`、`historyCapacityReached`、`historyPaginationError` 与
+  `onLoadOlderHistory`：四项事实与加载器均默认取自控制器
+  （`controller.hasOlderHistory`、`controller.loadingOlderHistory`、
+  `controller.historyCapacityReached`、`controller.historyPaginationError`、
+  `controller.loadOlder`），宿主页可通过 props 覆盖其中任意一项（缺
+  `historyPaginationError` 则更早历史页加载失败不可见、且每次顶部滚动都重发）。计划
+  事实与焦点/通知门控仍由宿主页以 props 传入
   （`planTodos`、`planExecutionMode`、`approvalDisabled`、`approvalKeyboardActive`、
   `showBrowserNotifications`），因由宿主页计算；分屏面板传 `approvalKeyboardActive={false}`
   以免抢焦点（审批卡与提问卡都收到）。提问卡还接收宿主的 `askUserFreeTextLabel` /

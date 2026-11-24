@@ -19,6 +19,7 @@ import {
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
 import { getBuiltinGeminiReasoning } from './gemini-reasoning.js';
+import { getBuiltinKimiK3Reasoning } from './kimi-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 import {
@@ -28,6 +29,7 @@ import {
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
   parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   type ReasoningEffort,
@@ -160,7 +162,9 @@ export function validateReasoningCapabilities(
       };
     }
     return (
-      getBuiltinDeepSeekReasoning(route) ?? getBuiltinGeminiReasoning(route)
+      getBuiltinDeepSeekReasoning(route) ??
+      getBuiltinGeminiReasoning(route) ??
+      getBuiltinKimiK3Reasoning(route)
     );
   }
   const input = validateReasoningDeclaration(route, declaration);
@@ -177,7 +181,8 @@ export function validateReasoningCapabilities(
     provider?.models?.find((candidate) => candidate.id === route.model) ??
     provider?.models?.find((candidate) => candidate.id === model)
   )?.capabilities?.reasoning;
-  const inherited = parseModelReasoningCapabilities(known);
+  const builtinKimi = getBuiltinKimiK3Reasoning(route);
+  const inherited = parseModelReasoningCapabilities(known ?? builtinKimi);
   if (!input.profile && inherited?.toggleOnly) {
     if (input.efforts || input.defaultEffort) return invalidReasoning(route);
     return parseModelReasoningCapabilities({ ...inherited, ...input });
@@ -258,6 +263,11 @@ export function validateReasoningCapabilities(
     return invalidReasoning(route);
   const toggleOnly =
     profile === 'dashscope-thinking' || profile === 'qwen-chat-template';
+  const hasCompleteCustomKimiDeclaration =
+    known === undefined &&
+    builtinKimi !== undefined &&
+    (toggleOnly ||
+      (input.efforts !== undefined && input.defaultEffort !== undefined));
   const disableField =
     (!input.profile && inherited?.disableField) ||
     (toggleOnly
@@ -277,17 +287,21 @@ export function validateReasoningCapabilities(
     inherited && !inherited.toggleOnly
       ? inherited.defaultEffort
       : (gpt?.defaultEffort ?? tieredGemini?.defaultEffort);
+  const requestedDefault = input.defaultEffort ?? inheritedDefault;
+  const shouldClampDefault =
+    input.defaultEffort === undefined ||
+    (known === undefined &&
+      builtinKimi !== undefined &&
+      input.profile === undefined);
   const defaultEffort =
-    input.defaultEffort ??
-    (inheritedDefault && efforts
-      ? clampReasoningEffort(inheritedDefault, efforts)
-      : undefined);
+    requestedDefault && efforts && shouldClampDefault
+      ? clampReasoningEffort(requestedDefault, efforts)
+      : requestedDefault;
   if (
     (toggleOnly &&
       (input.efforts !== undefined || input.defaultEffort !== undefined)) ||
     (!toggleOnly && (!efforts || !defaultEffort)) ||
-    (profile === 'gemini' &&
-      efforts?.some((tier) => tier === 'xhigh' || tier === 'max'))
+    (profile === 'gemini' && efforts?.includes('max'))
   )
     return invalidReasoning(route);
   const result = {
@@ -298,7 +312,7 @@ export function validateReasoningCapabilities(
     disableField,
     ...(toggleOnly ? {} : { efforts, defaultEffort }),
     ...(route.thinkingMandatory ||
-    inherited?.canDisable === false ||
+    (inherited?.canDisable === false && !hasCompleteCustomKimiDeclaration) ||
     gpt?.thinkingMandatory
       ? { canDisable: false }
       : {}),
@@ -383,6 +397,28 @@ export function resolveReasoningDeclaration(
         generation.baseUrl,
       )?.capabilities?.reasoning
     : undefined;
+}
+
+export function hasOpenRouterReasoningEffortOverride(
+  config: Pick<Config, 'getResolvedModelConfig'> | undefined,
+  generation: ContentGeneratorConfig,
+  model = generation.model,
+): boolean {
+  const flatEffort = {
+    ...generation.samplingParams,
+    ...generation.extra_body,
+  }['reasoning_effort'];
+  const declaration = resolveReasoningDeclaration(config, generation, model);
+  const hasDeclaredProfile =
+    typeof declaration === 'object' &&
+    declaration !== null &&
+    'profile' in declaration &&
+    declaration.profile !== undefined;
+  return (
+    isOpenRouterHostname(generation) &&
+    !hasDeclaredProfile &&
+    !isReasoningEffortPlaceholder(flatEffort)
+  );
 }
 
 export function resolveReasoningForModel(

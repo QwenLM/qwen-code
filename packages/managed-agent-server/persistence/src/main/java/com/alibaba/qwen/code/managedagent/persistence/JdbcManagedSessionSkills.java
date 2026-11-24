@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -70,8 +69,8 @@ public class JdbcManagedSessionSkills
 
     private String creationJson(String tenant, String session) {
         var rows = jdbc.query("SELECT result_json FROM ma_request_receipt WHERE namespace = 'SESSION_CREATE_ACTOR'"
-                        + " AND tenant_key = ? AND tenant_id = ? AND session_id = ?",
-                (row, index) -> row.getString("result_json"), ManagedSchemaKeys.key(tenant), tenant, session);
+                        + " AND tenant_id = ? AND session_id = ?",
+                (row, index) -> row.getString("result_json"), tenant, session);
         if (rows.isEmpty()) {
             return null;
         }
@@ -196,8 +195,8 @@ public class JdbcManagedSessionSkills
         try {
             String value = json.writeValueAsString(snapshot);
             if (jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE namespace='SESSION_CREATE_ACTOR'"
-                            + " AND tenant_key=? AND tenant_id=? AND session_id=? AND (result_json IS NULL OR result_json=?)",
-                    value, ManagedSchemaKeys.key(tenant), tenant, session, previous) != 1) {
+                            + " AND tenant_id=? AND session_id=? AND (result_json IS NULL OR result_json=?)",
+                    value, tenant, session, previous) != 1) {
                 throw conflict();
             }
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
@@ -262,8 +261,8 @@ public class JdbcManagedSessionSkills
                         "digest", digests.digest(skills)));
             }
             if (jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE namespace = 'SESSION_CREATE_ACTOR'"
-                            + " AND tenant_key = ? AND tenant_id = ? AND session_id = ? AND result_json IS NULL",
-                    value, ManagedSchemaKeys.key(tenant), tenant, session) != 1) {
+                            + " AND tenant_id = ? AND session_id = ? AND result_json IS NULL",
+                    value, tenant, session) != 1) {
                 throw conflict();
             }
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {

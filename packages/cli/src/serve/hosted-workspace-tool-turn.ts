@@ -165,6 +165,10 @@ import type {
   RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import {
+  type HostedContinuationCaptureRefusal,
+  registerHostedActionPark,
+} from './hosted-action-parking.js';
+import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
 } from './managed-workspace-binding.js';
@@ -2204,7 +2208,7 @@ export class HostedWorkspaceToolTurn {
     definitionRefs: Map<number, ManagedSessionDurableRef>;
     actionIds: Map<number, string>;
     releaseQuestionMount: boolean;
-    uncaptured?: boolean;
+    uncaptured?: HostedContinuationCaptureRefusal;
   };
   hookStopReason?: string;
   private readonly runtimeBroker?: HostedWorkspaceBroker;
@@ -4499,7 +4503,7 @@ export class HostedWorkspaceToolTurn {
     actionId: string | null,
     approvalOrdinal: number,
     commandStep?: HostedApprovalContinuation['commandStep'],
-  ): Promise<ManagedSessionDurableRef | undefined> {
+  ): Promise<ManagedSessionDurableRef | HostedContinuationCaptureRefusal> {
     const batch = this.nativeBatch;
     const memoryBatch =
       this.memory !== undefined &&
@@ -4513,18 +4517,22 @@ export class HostedWorkspaceToolTurn {
       batch.requests[0].planExit === true;
     const singleQuestion =
       batch?.requests.length === 1 && batch.requests[0].question === true;
+    if (!batch) return 'not_native_batch';
+    if (batch.uncaptured) return batch.uncaptured;
+    if (batch.requests.some((request) => request.todo)) return 'todo_batch';
+    if (!runtime && !memoryBatch) return 'no_runtime';
     if (
-      !batch ||
-      batch.uncaptured ||
-      batch.requests.some((request) => request.todo) ||
-      (!runtime && !memoryBatch) ||
-      (!commandStep &&
-        isHostedWorkspaceShellProfile(this.profile) &&
-        !singlePlanExit &&
-        !singleQuestion &&
-        !memoryBatch &&
-        !this.publicChildren) ||
-      (!commandStep && (this.hooks || this.mcp)) ||
+      !commandStep &&
+      isHostedWorkspaceShellProfile(this.profile) &&
+      !singlePlanExit &&
+      !singleQuestion &&
+      !memoryBatch &&
+      !this.publicChildren
+    )
+      return 'shell_profile';
+    if (!commandStep && this.hooks) return 'hooks';
+    if (!commandStep && this.mcp) return 'mcp';
+    if (
       batch.requests.some(
         (request) =>
           !(
@@ -4542,15 +4550,20 @@ export class HostedWorkspaceToolTurn {
               'todo_write',
               'web_fetch',
             ].includes(request.call.name)
-          ) ||
+          ),
+      )
+    )
+      return 'unsupported_tool';
+    if (
+      batch.requests.some(
+        (request) =>
           // A call refused at the canonical-digest ceiling (#13803 D1) has
           // no argument digest a restore could re-verify, and one refused
           // past the inline limit has no encoding to publish.
-          request.argsDigest === undefined ||
-          request.inputBytes.length === 0,
+          request.argsDigest === undefined || request.inputBytes.length === 0,
       )
     )
-      return undefined;
+      return 'undigested_call';
     const authority = this.session.authority;
     const header = authority.sessionHeader;
     const assistant = authority
@@ -4646,7 +4659,7 @@ export class HostedWorkspaceToolTurn {
       planBytes.byteLength >
       HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
     )
-      return undefined;
+      return 'plan_oversize';
     const planRef = await this.session.resources.publish(
       'hosted-approval-continuation',
       planBytes,
@@ -10358,7 +10371,7 @@ export class HostedWorkspaceToolTurn {
               configRevision: this.extensionConfig!.revision,
             },
           );
-          if (!continuationRef)
+          if (typeof continuationRef === 'string')
             throw new HostedToolRecoveryRequiredError(
               'Command approval continuation is unavailable.',
             );
@@ -10397,25 +10410,39 @@ export class HostedWorkspaceToolTurn {
             { turnId: this.promptId, promptId: this.promptId },
           );
         }
-        await this.approval.waiters.wait(
-          actionRequestId,
-          options.expiresAt,
-          signal,
-          () =>
-            authority.action(actionRequestId!)?.state !== 'requested' ||
-            authority.writesStopped,
-          this.approval.readSettings
-            ? hostedLiveApprovalPoll(
-                this.session,
-                this.approval.waiters,
-                options,
-                () => this.readApprovalSettings(),
-                signal,
-                this.globProfile,
-                this.approval.isBlocked,
-              )
-            : undefined,
-        );
+        const waiters = this.approval.waiters;
+        const requestId = actionRequestId;
+        registerHostedActionPark(this.session, {
+          promptId: this.promptId,
+          options,
+          settings,
+          livePoll: this.approval.readSettings !== undefined,
+          globProfile: this.globProfile,
+          freeze: () => waiters.park(requestId),
+        });
+        try {
+          await this.approval.waiters.wait(
+            actionRequestId,
+            options.expiresAt,
+            signal,
+            () =>
+              authority.action(actionRequestId!)?.state !== 'requested' ||
+              authority.writesStopped,
+            this.approval.readSettings
+              ? hostedLiveApprovalPoll(
+                  this.session,
+                  this.approval.waiters,
+                  options,
+                  () => this.readApprovalSettings(),
+                  signal,
+                  this.globProfile,
+                  this.approval.isBlocked,
+                )
+              : undefined,
+          );
+        } finally {
+          registerHostedActionPark(this.session, undefined);
+        }
         if (authority.action(actionRequestId)?.state === 'requested')
           await endHostedAction(
             this.session,
@@ -10477,11 +10504,13 @@ export class HostedWorkspaceToolTurn {
         (request) => request.call.callId === call.callId,
       ) ?? -1;
     if (ordinal >= 0) this.nativeBatch!.actionIds.set(ordinal, requestId);
-    const continuationRef =
+    const captured =
       ordinal < 0
-        ? undefined
+        ? 'not_native_batch'
         : await this.captureNativeBatch('approval', requestId, ordinal);
-    if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
+    const continuationRef = typeof captured === 'string' ? undefined : captured;
+    if (ordinal >= 0 && typeof captured === 'string')
+      this.nativeBatch!.uncaptured = captured;
     if (question && !continuationRef)
       throw new HostedToolRecoveryRequiredError(
         'Question continuation is unavailable.',
@@ -10554,43 +10583,64 @@ export class HostedWorkspaceToolTurn {
         else signal.addEventListener('abort', release, { once: true });
       });
     }
-    if (originalRuntime) {
-      try {
-        await waitForHostedQuestion({
-          session: this.session,
-          broker: this.broker,
-          brokerOptions: this.options,
-          waiters: approval.waiters,
+    // Every durable wait registers; one that can never park carries the
+    // reason, so a suspension attempt counts why the Session stays resident.
+    const refusal =
+      typeof captured === 'string' ? captured : this.nativeBatch?.uncaptured;
+    const parkRegistration = {
+      promptId: this.promptId,
+      options,
+      settings: approval.settings,
+      livePoll: liveApproval && approval.readSettings !== undefined,
+      globProfile: this.globProfile,
+      ...(refusal ? { refusal } : {}),
+      freeze: refusal ? () => false : () => approval.waiters.park(requestId),
+    };
+    registerHostedActionPark(this.session, parkRegistration);
+    try {
+      if (originalRuntime) {
+        try {
+          await waitForHostedQuestion({
+            session: this.session,
+            broker: this.broker,
+            brokerOptions: this.options,
+            waiters: approval.waiters,
+            requestId,
+            expiresAt: options.expiresAt,
+            signal,
+            released: () => {
+              this.acquired = false;
+            },
+            registerFreeze: (freeze) => {
+              if (!parkRegistration.refusal) parkRegistration.freeze = freeze;
+            },
+          });
+        } catch (cause) {
+          throw new HostedToolRecoveryRequiredError(cause);
+        }
+      } else
+        await approval.waiters.wait(
           requestId,
-          expiresAt: options.expiresAt,
+          options.expiresAt,
           signal,
-          released: () => {
-            this.acquired = false;
-          },
-        });
-      } catch (cause) {
-        throw new HostedToolRecoveryRequiredError(cause);
-      }
-    } else
-      await approval.waiters.wait(
-        requestId,
-        options.expiresAt,
-        signal,
-        () =>
-          authority.action(requestId)?.state !== 'requested' ||
-          authority.writesStopped,
-        liveApproval && approval.readSettings
-          ? hostedLiveApprovalPoll(
-              this.session,
-              approval.waiters,
-              options,
-              () => this.readApprovalSettings(),
-              signal,
-              this.globProfile,
-              approval.isBlocked,
-            )
-          : undefined,
-      );
+          () =>
+            authority.action(requestId)?.state !== 'requested' ||
+            authority.writesStopped,
+          liveApproval && approval.readSettings
+            ? hostedLiveApprovalPoll(
+                this.session,
+                approval.waiters,
+                options,
+                () => this.readApprovalSettings(),
+                signal,
+                this.globProfile,
+                approval.isBlocked,
+              )
+            : undefined,
+        );
+    } finally {
+      registerHostedActionPark(this.session, undefined);
+    }
     if (authority.action(requestId)?.state === 'requested')
       await endHostedAction(
         this.session,
