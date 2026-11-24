@@ -9,6 +9,7 @@ import {
   hostedApprovalResumeShapeRefusal,
   hostedCommandStepResumeShapeRefusal,
 } from './hosted-action-parking.js';
+import { hostedConfigScopedOwnerId } from './hosted-hook-session.js';
 
 describe('hostedApprovalResumeShapeRefusal', () => {
   const broker = {};
@@ -21,13 +22,43 @@ describe('hostedApprovalResumeShapeRefusal', () => {
     ).toBeUndefined();
   });
 
-  it('names Hooks before MCP, and both before the tool owner', () => {
+  const configOwner = {
+    broker: {
+      runtimeSessionId: hostedConfigScopedOwnerId(
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: 'session' },
+        1,
+      ),
+    },
+  };
+  const activationOwner = {
+    broker: { runtimeSessionId: 'hooks-activation-0' },
+  };
+
+  it('admits Hooks only on a config-scoped Hook owner', () => {
     expect(
-      hostedApprovalResumeShapeRefusal({ hooks: {}, mcp: {} }, undefined),
-    ).toBe('hooks');
+      hostedApprovalResumeShapeRefusal(
+        { ...files, hooks: configOwner },
+        broker,
+      ),
+    ).toBeUndefined();
     expect(
-      hostedApprovalResumeShapeRefusal({ ...files, mcp: {} }, broker),
+      hostedApprovalResumeShapeRefusal(
+        { ...files, hooks: activationOwner },
+        broker,
+      ),
+    ).toBe('hooks_activation_owner');
+  });
+
+  it('names MCP before the Hook owner, and both before the tool owner', () => {
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { hooks: activationOwner, mcp: {} },
+        undefined,
+      ),
     ).toBe('mcp');
+    expect(
+      hostedApprovalResumeShapeRefusal({ hooks: activationOwner }, undefined),
+    ).toBe('hooks_activation_owner');
   });
 
   it('refuses a Session with no tool owner to resume through', () => {

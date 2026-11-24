@@ -5,6 +5,7 @@
  */
 
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { isHostedConfigScopedOwner } from './hosted-hook-session.js';
 import type {
   HostedActionOptions,
   HostedApprovalSettings,
@@ -16,7 +17,9 @@ export type HostedContinuationCaptureRefusal =
   | 'todo_batch'
   | 'no_runtime'
   | 'shell_profile'
-  | 'hooks'
+  | 'hooks_activation_owner'
+  | 'hooks_memory_batch'
+  | 'hook_unsettled'
   | 'mcp'
   | 'unsupported_tool'
   | 'undigested_call'
@@ -24,8 +27,8 @@ export type HostedContinuationCaptureRefusal =
 
 /** Why cold recovery cannot resume an approval wait on this Session shape. */
 export type HostedApprovalResumeShapeRefusal =
-  | 'hooks'
   | 'mcp'
+  | 'hooks_activation_owner'
   | 'no_tool_owner';
 
 /** Why cold recovery cannot resume a command-step wait on this Session shape. */
@@ -63,19 +66,25 @@ export interface HostedActionParkRegistration {
 /**
  * The Session-shape terms cold recovery requires before it resumes an
  * approval continuation. Park eligibility reads the same terms, so a wait
- * never parks on a shape whose recovery would refuse it.
+ * never parks on a shape whose recovery would refuse it. A Hooks Session
+ * resumes only on a config-scoped Hook owner: park teardown releases any
+ * other owner's Runtime session, and the next load may not recompute its id.
  */
 export function hostedApprovalResumeShapeRefusal(
   session: {
-    readonly hooks?: unknown;
+    readonly hooks?: { readonly broker: { readonly runtimeSessionId: string } };
     readonly mcp?: unknown;
     readonly toolProfile?: string;
     readonly memory?: unknown;
   },
   brokerOptions: unknown,
 ): HostedApprovalResumeShapeRefusal | undefined {
-  if (session.hooks) return 'hooks';
   if (session.mcp) return 'mcp';
+  if (
+    session.hooks &&
+    !isHostedConfigScopedOwner(session.hooks.broker.runtimeSessionId)
+  )
+    return 'hooks_activation_owner';
   if (!((session.toolProfile && brokerOptions) || session.memory))
     return 'no_tool_owner';
   return undefined;

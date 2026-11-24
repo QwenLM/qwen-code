@@ -48564,6 +48564,397 @@ describe('idle suspension', () => {
     }
   });
 
+  // S5 (#18149 Stage 4): a two-call native batch on an extension's
+  // config-scoped Hook owner. PreToolUse rewrites the first call's input, and
+  // PermissionRequest allows the second with a rewrite of its own, so only the
+  // first asks. Returns each Hook execution and the Session definition.
+  async function mockHooksNativeTurn(): Promise<{
+    executions: Array<{ event: unknown; input: unknown; owner: string }>;
+    handbacks: string[];
+    definition: Record<string, unknown>;
+  }> {
+    const fixture = await mockCommandStepTurn(true);
+    const executions: Array<{ event: unknown; input: unknown; owner: string }> =
+      [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async function (this: HostedWorkspaceBroker, operation) {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: {
+              ...operation.pin,
+              hooks: [
+                HookEventName.PreToolUse,
+                HookEventName.PermissionRequest,
+                HookEventName.PostToolUse,
+              ].map((eventName) => ({
+                hookId: eventName,
+                eventName,
+                sequential: false,
+                async: false,
+                failClosed: true,
+                onceKey: null,
+                config: { type: 'command' as const },
+              })),
+            },
+          };
+        const settled = {
+          operationId: operation.operationId,
+          state: 'settled' as const,
+          result: { success: true, outcome: 'success' as const, duration: 0 },
+        };
+        if (operation.kind !== 'hook-execute') return settled;
+        const event = operation.input['hook_event_name'];
+        const input = Reflect.get(operation.input, 'tool_input') as
+          | Record<string, unknown>
+          | undefined;
+        executions.push({ event, input, owner: this.runtimeSessionId });
+        const output =
+          event === HookEventName.PreToolUse &&
+          input?.['file_path'] === 'notes.txt'
+            ? {
+                hookSpecificOutput: {
+                  hookEventName: HookEventName.PreToolUse,
+                  updatedInput: { file_path: 'notes.txt', content: 'hooked' },
+                },
+              }
+            : event === HookEventName.PermissionRequest &&
+                input?.['file_path'] === 'other.txt'
+              ? {
+                  hookSpecificOutput: {
+                    hookEventName: HookEventName.PermissionRequest,
+                    decision: {
+                      behavior: 'allow',
+                      updatedInput: {
+                        file_path: 'other.txt',
+                        content: 'permitted',
+                      },
+                    },
+                  },
+                }
+              : undefined;
+        if (!output) return settled;
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { ...settled.result, output },
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'hook-owner-claim',
+    );
+    const handbacks: string[] = [];
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockImplementation(async function (this: HostedWorkspaceBroker) {
+      handbacks.push(this.runtimeSessionId);
+    });
+    // As the model driver does, a resumed round first completes the batch's
+    // tool Hooks.
+    state.model.mockImplementation(
+      async ({ toolTurn, resumeFromToolResults, signal }) => {
+        if (resumeFromToolResults) {
+          await toolTurn!.resumeHookResults(
+            resumeFromToolResults as Part[],
+            'test-model',
+            signal,
+          );
+          return { text: 'resumed', model: 'test-model' };
+        }
+        const calls = ['notes.txt', 'other.txt'].map((file) => ({
+          name: 'write_file',
+          callId: `call-${file}`,
+          args: { file_path: file, content: 'hello' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        }));
+        await toolTurn!.execute(
+          calls,
+          calls.map((call) => ({
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          })),
+          'test-model',
+          signal,
+        );
+        throw new Error('The waiting Turn unexpectedly continued.');
+      },
+    );
+    return {
+      executions,
+      handbacks,
+      definition: {
+        managedSessionStore: store(),
+        // Extensions run only on the Shell and MCP profiles, and a Shell
+        // profile's native batch never captures (S8a).
+        toolProfile: 'hosted-workspace-mcp/1',
+        // The active extension set replaces these with its own, none here.
+        mcpServers: [
+          {
+            serverId: 'demo',
+            serverRevision: 1,
+            definitionDigest: 'a'.repeat(64),
+          },
+        ],
+        initialSelection: fixture.selection,
+      },
+    };
+  }
+
+  async function createHooksNativeSession(
+    server: Server,
+    definition: Record<string, unknown>,
+  ): Promise<string> {
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        ...definition,
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        approvalMode: 'default',
+        approvalTimeoutMs: 60_000,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'write both' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    return clientId;
+  }
+
+  const readJournal = () =>
+    LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+
+  async function allowHooksNativeWait(
+    server: Server,
+    clientId: string,
+  ): Promise<void> {
+    const requestId = (await readJournal()).events.findLast(
+      (event) =>
+        event.kind === 'action.changed' &&
+        event.payload['state'] === 'requested',
+    )!.payload['requestId'] as string;
+    await headers(
+      supertest(server).post(
+        `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+      ),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        optionId: 'allow',
+        inputRevision: 1,
+        policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+      })
+      .expect(200);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      },
+      { timeout: 5000 },
+    );
+  }
+
+  // The resumed batch reads every PreToolUse and PermissionRequest decision
+  // back, runs each call once with the input its Hooks left, and fires each
+  // call's PostToolUse once on the same owner.
+  function expectHooksNativeResumed(
+    executions: Array<{ event: unknown; input: unknown; owner: string }>,
+  ): void {
+    const owner = executions[0]?.owner;
+    expect(isHostedConfigScopedOwner(owner)).toBe(true);
+    const notes = { file_path: 'notes.txt', content: 'hello' };
+    const hooked = { file_path: 'notes.txt', content: 'hooked' };
+    const other = { file_path: 'other.txt', content: 'hello' };
+    const permitted = { file_path: 'other.txt', content: 'permitted' };
+    expect(executions).toEqual([
+      { event: HookEventName.PreToolUse, input: notes, owner },
+      { event: HookEventName.PreToolUse, input: other, owner },
+      { event: HookEventName.PermissionRequest, input: hooked, owner },
+      { event: HookEventName.PermissionRequest, input: other, owner },
+      { event: HookEventName.PostToolUse, input: hooked, owner },
+      { event: HookEventName.PostToolUse, input: permitted, owner },
+    ]);
+    expect(
+      vi
+        .mocked(HostedWorkspaceBroker.prototype.execute)
+        .mock.calls.map(
+          ([, payloadJson]) =>
+            (JSON.parse(payloadJson) as { input: unknown }).input,
+        ),
+    ).toEqual([hooked, permitted]);
+  }
+
+  it('parks a Hooks native approval on a config-scoped owner and resumes it without rerunning its Hooks', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const fixture = await mockHooksNativeTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await createHooksNativeSession(
+        server,
+        fixture.definition,
+      );
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      expect(statsOf(server).parkRefusals).toEqual({});
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      const owner = fixture.executions[0]?.owner;
+      expect(fixture.executions).toHaveLength(4);
+      expect(fixture.handbacks).toEqual([owner]);
+      expect(
+        vi
+          .mocked(HostedWorkspaceBroker.prototype.release)
+          .mock.contexts.map(
+            (context) => (context as HostedWorkspaceBroker).runtimeSessionId,
+          ),
+      ).not.toContain(owner);
+      // A bare load must not answer the parked batch, which would destroy its
+      // continuation (R9-1).
+      const parked = await readJournal();
+      const bare = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send(fixture.definition)
+        .expect(409);
+      expect(bare.body).toMatchObject({
+        code: 'hosted_turn_recovery_required',
+        reason: 'turn_unsettled',
+      });
+      expect(
+        (await readJournal()).events
+          .slice(parked.events.length)
+          .filter((event) =>
+            ['message.committed', 'action.changed', 'turn.settled'].includes(
+              event.kind,
+            ),
+          ),
+      ).toEqual([]);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ ...fixture.definition, passiveManagedRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      await allowHooksNativeWait(server, resumedClient);
+      expectHooksNativeResumed(fixture.executions);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // A park is a crash at the wait point to the journal, so the same wait must
+  // also survive its Harness dying in it.
+  it('takes a Hooks native approval over after its Harness dies in the wait', async () => {
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const fixture = await mockHooksNativeTurn();
+    const wait = vi
+      .spyOn(HostedApprovalWaiters.prototype, 'wait')
+      .mockRejectedValueOnce(
+        new HostedToolRecoveryRequiredError('approval writer interrupted'),
+      );
+    try {
+      const original = await app(true);
+      const clientId = await createHooksNativeSession(
+        original,
+        fixture.definition,
+      );
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(original, clientId)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      await (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed.close();
+      wait.mockRestore();
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ ...fixture.definition, driveRuntimeRecovery: true })
+        .expect(200);
+      await allowHooksNativeWait(replacement, loaded.body.clientId as string);
+      expectHooksNativeResumed(fixture.executions);
+    } finally {
+      wait.mockRestore();
+      state.approvalSelections.clear();
+    }
+  });
+
+  // Park teardown releases a Session-definition catalog's activation-scoped
+  // owner, so its wait stays resident and is counted.
+  it('counts a Session-definition Hook catalog as hooks_activation_owner and keeps the wait resident', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const fixture = await mockHooksNativeTurn();
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await createHooksNativeSession(server, {
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        hookCatalog: hookPin,
+      });
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(fixture.executions[0]?.owner).toMatch(/^hooks-activation-/);
+      expect(state.wakeStamps).not.toContainEqual(
+        expect.objectContaining({ parkedTurn: expect.anything() }),
+      );
+      expect(statsOf(server).parkRefusals).toEqual({
+        hooks_activation_owner: 1,
+      });
+      await endResidentApproval(server, clientId);
+    } finally {
+      waiting.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
   it('parks a recoverable approval and resumes it through cold recovery', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
