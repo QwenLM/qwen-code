@@ -10,7 +10,6 @@ import {
   closeSync,
   readdirSync,
   readFileSync,
-  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -18,7 +17,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { constants as fsConstants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { globSync } from 'glob';
@@ -67,47 +65,111 @@ function inlineMavenCacheHelper(run) {
   );
 }
 
-const canDenyRemoval = (() => {
+function canDenyRemoval() {
   const dir = mkdtempSync(join(tmpdir(), 'sdk-java-deny-removal-'));
   const probe = join(dir, 'probe');
+  let denied = false;
+  let probeError;
+  let cleanupError;
   try {
     writeFileSync(probe, 'probe');
     chmodSync(dir, 0o555);
     try {
       rmSync(probe);
-      return false;
     } catch (error) {
       if (!['EACCES', 'EPERM'].includes(error?.code)) throw error;
-      return true;
+      denied = true;
     }
+  } catch (error) {
+    probeError = error;
   } finally {
-    chmodSync(dir, 0o700);
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      chmodSync(dir, 0o700);
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      cleanupError ??= error;
+    }
   }
-})();
+  if (probeError) throw probeError;
+  if (cleanupError) throw cleanupError;
+  return denied;
+}
 
-const readCleanupTraps = () =>
-  workflow.match(/trap '[^\n]*seed_helper_status=[^\n]*\n/g) ?? [];
+const readSeedHelperSteps = () =>
+  Object.values(parse(workflow).jobs)
+    .flatMap((entry) => entry.steps ?? [])
+    .filter((candidate) => candidate.run?.includes('seed_helper'));
 
-function assertReferenceSeedHelperContract(referenceRun) {
-  const assignment =
-    'seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"';
-  const source = 'source "${seed_helper}"';
-  expect(referenceRun.match(/^\s*seed_helper=/gm)).toHaveLength(1);
-  expect(referenceRun).toContain(assignment);
-  expect(
-    (referenceRun.match(/^\s*source[^\n]*$/gm) ?? []).map((line) =>
-      line.trim(),
-    ),
-  ).toEqual([source]);
-  const assignmentAt = referenceRun.indexOf(assignment);
-  const sourceAt = referenceRun.indexOf(source, assignmentAt);
-  expect(assignmentAt).toBeGreaterThanOrEqual(0);
-  expect(sourceAt).toBeGreaterThan(assignmentAt);
-  expect(
-    referenceRun.slice(assignmentAt + assignment.length, sourceAt).trim(),
-  ).toBe('');
-  expect(referenceRun).not.toMatch(/\b(?:curl|wget|aria2c|fetch|mktemp)\b/);
+const hasLineContinuation = (line) =>
+  ((line.match(/\\+$/)?.[0].length ?? 0) & 1) === 1;
+
+function readBashCodeLines(run) {
+  const lines = [];
+  let current = '';
+  let continuing = false;
+  for (const rawLine of run.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    const trimmedStart = line.trimStart();
+    if (!continuing) {
+      if (!trimmedStart || trimmedStart.startsWith('#')) continue;
+      current = trimmedStart;
+    } else {
+      const hadSpace = /\s$/.test(current) || /^\s/.test(line);
+      if (hadSpace && trimmedStart.startsWith('#')) {
+        lines.push(`${current.trimEnd()} ${trimmedStart}`.trim());
+        current = '';
+        continuing = false;
+        continue;
+      }
+      current = hadSpace
+        ? `${current.trimEnd()} ${trimmedStart}`
+        : `${current}${line}`;
+    }
+    if (hasLineContinuation(line)) {
+      current = current.slice(0, -1);
+      continuing = true;
+    } else {
+      lines.push(current.trim());
+      current = '';
+      continuing = false;
+    }
+  }
+  if (continuing && current.trim()) lines.push(current.trim());
+  return lines;
+}
+
+const readStepTraps = (run) =>
+  readBashCodeLines(run).filter((line) => /\btrap\b/.test(line));
+
+function assertReferenceSeedHelperContract(referenceStep) {
+  expect(referenceStep['continue-on-error']).toBeUndefined();
+  expect(referenceStep.if).toBeUndefined();
+  expect(referenceStep.env).toBeUndefined();
+  expect(referenceStep.shell).toBeUndefined();
+  const codeLines = readBashCodeLines(referenceStep.run);
+  expect(codeLines.slice(0, 8)).toEqual([
+    'set -euo pipefail',
+    'export MAVEN_ARGS="--settings ${RUNNER_TEMP}/setup-java-m2/settings.xml --toolchains ${RUNNER_TEMP}/setup-java-m2/toolchains.xml"',
+    'if [[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]; then',
+    'repo="${RUNNER_TEMP}/m2-repo"',
+    'seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"',
+    'source "${seed_helper}"',
+    'MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"',
+    'fi',
+  ]);
+  const mavenLines = codeLines.slice(8);
+  expect(mavenLines.length).toBeGreaterThan(0);
+  for (const line of mavenLines) {
+    expect(line).toMatch(/^mvn\s/);
+  }
+  const mavenBody = mavenLines.join('\n');
+  expect(mavenBody).not.toMatch(
+    /\b(?:seed_helper|maven-cache-seed\.sh|source|shopt|curl|wget|aria2c|fetch|mktemp)\b|\bset\s|[;&|{}<>()$#`]|(?:^|\s)\.\s/m,
+  );
 }
 
 const step = (block, name) => {
@@ -2010,10 +2072,11 @@ describe('SDK Java self-hosted workflow guards', () => {
       candidate.uses?.startsWith('actions/checkout@'),
     );
     expect(referenceCheckout.with.ref).toBeUndefined();
-    const referenceRun = referenceJob.steps.find(
+    const referenceStep = referenceJob.steps.find(
       (candidate) => candidate.name === 'Build Java components',
-    ).run;
-    assertReferenceSeedHelperContract(referenceRun);
+    );
+    const referenceRun = referenceStep.run;
+    assertReferenceSeedHelperContract(referenceStep);
     expect(referenceRun).not.toContain('seed_mount_guard() {');
     expect(referenceRun).toContain(
       'MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"',
@@ -2034,21 +2097,53 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('pins cleanup to the downloaded helper only', () => {
-    const traps = readCleanupTraps();
-    expect(traps).toHaveLength(4);
-    expect(new Set(traps.map((trap) => trap.trim())).size).toBe(1);
-    const [trap] = traps;
-    expect(trap).toContain('rm -f -- "${seed_helper}"');
-    expect(trap).toContain('|| (echo ');
-    expect(trap.match(/\brm -f --/g)).toHaveLength(1);
-    expect(trap).not.toContain('GITHUB_WORKSPACE');
-    expect(trap).not.toMatch(/\$(?:\{PWD\}|PWD)/);
+    const seedSteps = readSeedHelperSteps();
+    expect(seedSteps).toHaveLength(4);
+    const traps = seedSteps.map(({ run }) => {
+      const codeLines = readBashCodeLines(run);
+      const stepTraps = readStepTraps(run);
+      expect(stepTraps).toHaveLength(1);
+      const [trap] = stepTraps;
+      expect(trap).toMatch(
+        /^trap 'seed_helper_status=\$\?; rm -f -- "\$\{seed_helper\}" \|\| \(echo "::warning::[^'"$`\\]*\$\{seed_helper\}[^'"$`\\]*"\) \|\| true; exit "\$\{seed_helper_status\}"' EXIT$/,
+      );
+      const guardAt = codeLines.indexOf('if [ ! -f "${seed_helper}" ]; then');
+      const sourceAt = codeLines.indexOf('source "${seed_helper}"', guardAt);
+      expect(guardAt).toBeGreaterThanOrEqual(0);
+      expect(sourceAt).toBeGreaterThan(guardAt);
+      const guardLines = codeLines.slice(guardAt + 1, sourceAt);
+      expect(guardLines.at(-1)).toBe('fi');
+      const guardBody = guardLines.slice(0, -1);
+      expect(
+        guardBody.some((line) => /\b(?:if|fi|else|elif)\b/.test(line)),
+      ).toBe(false);
+      const mktempAt = guardBody.indexOf(
+        'seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1',
+      );
+      const trapAt = guardBody.indexOf(trap);
+      const curlAt = guardBody.findIndex((line) =>
+        line.startsWith('curl --fail '),
+      );
+      expect(mktempAt).toBeGreaterThanOrEqual(0);
+      expect(trapAt).toBeGreaterThan(mktempAt);
+      expect(curlAt).toBeGreaterThan(trapAt);
+      const nonTrapLines = codeLines.filter((line) => line !== trap);
+      expect(
+        nonTrapLines.some(
+          (line) =>
+            /\b(?:rm|unlink)\b/.test(line) &&
+            /(?:seed_helper|maven-cache-seed\.sh)/.test(line),
+        ),
+      ).toBe(false);
+      return trap;
+    });
+    expect(new Set(traps).size).toBe(1);
   });
 
   it.skipIf(process.platform === 'win32')(
     'stops the reference build when the checkout helper is missing',
     () => {
-      const referenceRun = Object.values(
+      const referenceStep = Object.values(
         parse(
           readFileSync(
             '.github/workflows/release-managed-agent-reference.yml',
@@ -2057,30 +2152,38 @@ describe('SDK Java self-hosted workflow guards', () => {
         ).jobs,
       )
         .flatMap((entry) => entry.steps ?? [])
-        .find((candidate) => candidate.name === 'Build Java components').run;
-      assertReferenceSeedHelperContract(referenceRun);
-      const branchAt = referenceRun.indexOf(
-        'if [[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]',
-      );
-      expect(branchAt).toBeGreaterThanOrEqual(0);
+        .find((candidate) => candidate.name === 'Build Java components');
+      assertReferenceSeedHelperContract(referenceStep);
+      const referenceRun = referenceStep.run;
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reference-missing-'));
-      const runnerTemp = join(dir, 'runner-temp');
-      const workspace = join(dir, 'workspace');
-      mkdirSync(workspace, { recursive: true });
-      mkdirSync(runnerTemp, { recursive: true });
-      const fetchAttempt = join(runnerTemp, 'helper-fetch-attempted');
-      for (const command of ['curl', 'wget', 'aria2c', 'fetch']) {
-        const executable = join(dir, 'bin', command);
-        mkdirSync(dirname(executable), { recursive: true });
-        writeFileSync(
-          executable,
-          `#!/bin/sh\nprintf '%s\\n' "$0" > ${JSON.stringify(fetchAttempt)}\nexit 97\n`,
-          { mode: 0o755 },
-        );
-      }
-      const invocation = `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${referenceRun.slice(branchAt)}`;
       try {
-        const result = spawnSync('bash', ['-e', '-c', invocation], {
+        const runnerTemp = join(dir, 'runner-temp');
+        const workspace = join(dir, 'workspace');
+        const missingHelper = join(
+          workspace,
+          '.github',
+          'scripts',
+          'maven-cache-seed.sh',
+        );
+        // Pre-create .github/scripts so only the helper file itself is missing.
+        mkdirSync(dirname(missingHelper), { recursive: true });
+        mkdirSync(runnerTemp, { recursive: true });
+        const commandLog = join(runnerTemp, 'commands.log');
+        const fetchAttempt = join(runnerTemp, 'helper-fetch-attempted');
+        for (const command of ['curl', 'wget', 'aria2c', 'fetch']) {
+          const executable = join(dir, 'bin', command);
+          mkdirSync(dirname(executable), { recursive: true });
+          writeFileSync(
+            executable,
+            '#!/bin/sh\nprintf \'%s\\n\' "$0" > "${FETCH_ATTEMPT}"\nexit 97\n',
+            { mode: 0o755 },
+          );
+        }
+        const invocation = `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }
+trap 'printf "%s\\n" "$BASH_COMMAND" >> "\${RUNNER_TEMP}/commands.log"' DEBUG
+${referenceRun}`;
+        // Run the full step without forcing -e externally so its own set -euo pipefail is tested.
+        const result = spawnSync('bash', ['-c', invocation], {
           cwd: workspace,
           encoding: 'utf8',
           timeout: 15000,
@@ -2091,13 +2194,25 @@ describe('SDK Java self-hosted workflow guards', () => {
             RUNNER_TEMP: runnerTemp,
             GITHUB_WORKSPACE: workspace,
             RUNNER_ENVIRONMENT: 'self-hosted',
+            FETCH_ATTEMPT: fetchAttempt,
             LC_ALL: 'C',
           },
         });
         expect(result.error).toBeUndefined();
         expect(result.signal).toBeNull();
         expect(result.status, result.stderr).not.toBe(0);
-        expect(result.stderr).toContain('No such file or directory');
+        expect(result.stderr).toContain(
+          `${missingHelper}: No such file or directory`,
+        );
+        expect(readFileSync(commandLog, 'utf8').trim().split('\n')).toEqual([
+          'set -euo pipefail',
+          'export MAVEN_ARGS="--settings ${RUNNER_TEMP}/setup-java-m2/settings.xml --toolchains ${RUNNER_TEMP}/setup-java-m2/toolchains.xml"',
+          '[[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]',
+          'repo="${RUNNER_TEMP}/m2-repo"',
+          'seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"',
+          'source "${seed_helper}"',
+        ]);
+        expect(existsSync(missingHelper)).toBe(false);
         expect(existsSync(fetchAttempt)).toBe(false);
         expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
         expect(existsSync(join(runnerTemp, 'm2-repo'))).toBe(false);
@@ -2126,6 +2241,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(body).not.toContain('${{');
       expect(body).toContain('source "${seed_helper}"');
       expect(body).not.toContain('seed_mount_guard() {');
+      const removalDenied = canDenyRemoval();
       for (const [
         helperExists,
         curlFailure,
@@ -2154,7 +2270,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           'rm-denied-nonzero',
           'rm-denied-closed-stdout-nonzero',
         ].includes(mutation);
-        if (cleanupDenied && !canDenyRemoval) continue;
+        if (cleanupDenied && !removalDenied) continue;
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-helper-'));
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
@@ -2416,28 +2532,15 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
   it.skipIf(process.platform !== 'linux')(
     'preserves step status when the cleanup log pipe closes',
     async () => {
-      const [trap] = readCleanupTraps();
+      const traps = readSeedHelperSteps().flatMap(({ run }) =>
+        readStepTraps(run),
+      );
+      expect(traps).toHaveLength(4);
+      expect(new Set(traps.map((entry) => entry.trim())).size).toBe(1);
+      const [trap] = traps;
       for (const expected of [0, 37]) {
         for (const closingPipe of [false, true]) {
           const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-log-pipe-'));
-          const fifo = join(dir, 'warning.fifo');
-          const helper = join(dir, 'maven-cache-seed.fixture');
-          // rm -f fails on a directory regardless of DAC capabilities.
-          mkdirSync(helper, { recursive: true });
-          const workspace = join(dir, 'workspace');
-          const workspaceHelper = join(
-            workspace,
-            '.github',
-            'scripts',
-            'maven-cache-seed.sh',
-          );
-          mkdirSync(dirname(workspaceHelper), { recursive: true });
-          const workspaceHelperContents = readFileSync(
-            '.github/scripts/maven-cache-seed.sh',
-            'utf8',
-          );
-          // The armed trap must leave the checked-out helper untouched.
-          writeFileSync(workspaceHelper, workspaceHelperContents);
           let reader;
           let writer;
           let closed = false;
@@ -2448,7 +2551,25 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             if (writer !== undefined) closeSync(writer);
           };
           try {
+            const helper = join(dir, 'maven-cache-seed.fixture');
+            // rm -f fails on a directory regardless of DAC capabilities.
+            mkdirSync(helper, { recursive: true });
+            const workspace = join(dir, 'workspace');
+            const workspaceHelper = join(
+              workspace,
+              '.github',
+              'scripts',
+              'maven-cache-seed.sh',
+            );
+            mkdirSync(dirname(workspaceHelper), { recursive: true });
+            const workspaceHelperContents = readFileSync(
+              '.github/scripts/maven-cache-seed.sh',
+              'utf8',
+            );
+            // The armed trap must leave the fixture workspace helper untouched.
+            writeFileSync(workspaceHelper, workspaceHelperContents);
             if (closingPipe) {
+              const fifo = join(dir, 'warning.fifo');
               execFileSync('mkfifo', [fifo]);
               reader = openSync(fifo, 'r+');
               writer = openSync(fifo, 'w');
@@ -2459,7 +2580,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
                 [
                   '-e',
                   '-c',
-                  `seed_helper=${JSON.stringify(helper)}\n${trap}\nIFS= read -r _ || true\nexit ${expected}`,
+                  `seed_helper="\${HELPER_PATH}"\n${trap}\nIFS= read -r _ || true\nexit ${expected}`,
                 ],
                 {
                   cwd: workspace,
@@ -2468,6 +2589,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
                     ...process.env,
                     RUNNER_TEMP: dir,
                     GITHUB_WORKSPACE: workspace,
+                    HELPER_PATH: helper,
                     LC_ALL: 'C',
                   },
                 },
@@ -2504,20 +2626,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             expect(result.signal, result.stderr).toBeNull();
             expect(result.status, result.stderr).toBe(expected);
             expect(result.stderr).toContain('Is a directory');
-            if (closingPipe) {
-              const observer = openSync(
-                fifo,
-                fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
-              );
-              try {
-                const bytes = Buffer.alloc(4096);
-                expect(readSync(observer, bytes, 0, bytes.length, null)).toBe(
-                  0,
-                );
-              } finally {
-                closeSync(observer);
-              }
-            } else {
+            if (!closingPipe) {
               expect(
                 result.stdout
                   .split('\n')

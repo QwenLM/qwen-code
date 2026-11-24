@@ -378,18 +378,29 @@ order this section exists to prevent.
   Permission-denial cleanup cases are gated by an actual removal probe rather
   than uid alone, so root CI lanes without DAC bypass still run them. Probe
   setup errors and unexpected unlink errors raise failures instead of silently
-  removing coverage. The trap is pinned to one downloaded-helper removal, with
-  no workspace-helper target, and the real workspace helper's bytes are checked
-  unchanged. These new cleanup and missing-helper probes set both cwd and
-  GITHUB_WORKSPACE to that private fixture, so a `$PWD`-based deletion targets
-  only the fixture copy, not the source checkout. A directory operand makes its
-  cleanup fail independently of DAC
-  privileges; an unread pipe's drained byte count is checked separately from
-  the ordinary pipe's single annotated warning.
+  removing coverage. Each `seed_helper` step's sole trap must sit inside the
+  unbroken missing-helper guard (`if ... fi`) after `mktemp` and before `curl`,
+  pinned to a single single-operand `${seed_helper}` removal with the warning
+  subshell and saved status restoration — rejecting extra operands, extra
+  traps, or explicit helper-targeted `rm`/`unlink` commands elsewhere in the
+  step (including workspace/`$PWD` targets). These cleanup and missing-helper
+  probes set both `cwd` and `GITHUB_WORKSPACE` to a private fixture workspace
+  so a `$PWD`-based deletion cannot touch the source checkout; the log-pipe
+  cleanup probe initializes a fixture workspace helper from the checkout
+  helper's bytes and checks that copy stays unchanged. A directory operand
+  makes its cleanup fail independently of DAC privileges; the closed-pipe FIFO
+  arm checks that `SIGPIPE` does not kill the enclosing shell and that the
+  saved status is preserved, while the ordinary pipe arm checks the single
+  annotated warning and residual path.
   The reference build directly sources its checked-out helper and never
-  requires a fallback fetch. Tests pin its unique helper assignment and exact
-  source statement, reject common downloaders, and execute an empty workspace
-  to assert that source fails before Maven and no fetcher is invoked. A
+  requires a fallback fetch. Tests pin the step's YAML attributes (no
+  `continue-on-error`, `if`, `env`, or `shell` override), `set -euo pipefail`,
+  the exact `self-hosted` helper block, and `mvn`-only follow-up lines with no
+  downloaders or extra shell chaining; they also run the full step without
+  forcing `-e` externally in a private workspace containing `.github/scripts`
+  with only `maven-cache-seed.sh` absent to assert via executed-command
+  tracing that failure occurs specifically at `source "${seed_helper}"` before
+  Maven, leaving the helper absent and invoking no fetcher. A
   host-source mount or mount-inspection failure skips the optional copy and
   uses a clean repository; required job-local guards still stop Maven. It then
   also pins the sourced helper, the
