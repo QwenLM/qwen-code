@@ -10,6 +10,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { requestToast } from '../components/ToastHost';
+import { ReportedArtifactRegistration } from '../components/ReportedArtifactRegistration';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
@@ -91,7 +93,13 @@ function artifact(id: string): DaemonSessionArtifact {
 
 function TestHost() {
   latestState = useSessionArtifacts();
-  return null;
+  // Mirrors App's composition: the registration runs in a child rendered
+  // inside the portal-root provider, not in the hook above it.
+  return React.createElement(ReportedArtifactRegistration, {
+    registered: latestState.artifacts,
+    hydrated: latestState.hydrated,
+    refresh: latestState.refresh,
+  });
 }
 
 async function renderHookHost() {
@@ -218,6 +226,67 @@ describe('useSessionArtifacts', () => {
     expect(sdkMock.actions.addArtifact).toHaveBeenCalledTimes(1);
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
     expect(requestToast).not.toHaveBeenCalled();
+  });
+
+  it('scopes the registration failure toast to the shell root in the App composition (F1)', async () => {
+    // App calls useSessionArtifacts in its body, ABOVE the portal-root
+    // provider it returns; the registration must run in a child inside the
+    // provider or its failure toast reads an unpopulated context. Moving the
+    // registration back into the hook nulls the third argument here.
+    const shellRoot = document.createElement('div');
+    shellRoot.setAttribute('data-web-shell-root', '');
+    document.body.appendChild(shellRoot);
+    try {
+      sdkMock.actions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+      sdkMock.actions.addArtifact.mockRejectedValue(new Error('offline'));
+      sdkMock.blocks = [
+        {
+          id: 'export-result',
+          kind: 'assistant',
+          text: 'Exported',
+          meta: {
+            source: 'slash_command',
+            sessionArtifacts: [
+              {
+                kind: 'html',
+                storage: 'workspace',
+                title: 'first',
+                workspacePath: 'first.html',
+              },
+            ],
+          },
+        },
+      ];
+      function AppShapeHost() {
+        const state = useSessionArtifacts();
+        return React.createElement(
+          WebShellPortalRootContext.Provider,
+          { value: shellRoot },
+          React.createElement(ReportedArtifactRegistration, {
+            registered: state.artifacts,
+            hydrated: state.hydrated,
+            refresh: state.refresh,
+          }),
+        );
+      }
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root?.render(React.createElement(AppShapeHost));
+      });
+      // Exactly one registration instance: re-adding the registration inside
+      // useSessionArtifacts (above the provider) would fire a second, unscoped
+      // toast alongside this one.
+      expect(requestToast).toHaveBeenCalledTimes(1);
+      expect(requestToast).toHaveBeenCalledWith(
+        'error',
+        'artifact.registrationFailed',
+        shellRoot,
+      );
+    } finally {
+      shellRoot.remove();
+    }
   });
 
   it('loads new sessions and reuses a previous session result', async () => {

@@ -45,6 +45,7 @@ import {
   readPrWatchStateSync,
   writePrWatchStateSync,
   PR_WATCH_PENDING_CAP,
+  type PrTransitionType,
   type PrWatchIdentity,
 } from './pr-watch-store.js';
 import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
@@ -54,6 +55,7 @@ import {
   prWatchIdentityFromUrl,
   detectPrTransitions,
   normalizeWatchHost,
+  type PrWatchViewFailureStreak,
 } from './pr-watch-observation.js';
 import {
   scanWorkspaceBindings,
@@ -68,18 +70,6 @@ import {
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
-
-/**
- * Internal switch for the daemon PR-state watch observation (master design
- * §7, PR A). It stays off: the refresh runs no `gh pr view`, writes no watch
- * file and claims no ownership, and the `sessionPrWatch` setting is not read.
- * A later increment turns it on; tests exercise the observation functions
- * directly rather than through this gated timer hook. The explicit `boolean`
- * annotation keeps the literal `false` from narrowing the gated block to
- * unreachable dead code (hence the no-inferrable-types exemption).
- */
-// eslint-disable-next-line @typescript-eslint/no-inferrable-types
-export const SESSION_PR_WATCH_OBSERVATION_ENABLED: boolean = false;
 
 /**
  * Aggregate deadline for one workspace's capped `mr view` loop. The
@@ -138,6 +128,15 @@ export interface SessionPrRefreshOptions {
      * without any host check of its own.
      */
     allowedHosts: ReadonlySet<string>;
+    /**
+     * The same subscription the observation filters on. The listing write is
+     * the second producer of transitions, so it must filter identically —
+     * otherwise an operator who did not subscribe `state_change` would still
+     * receive it from a closure the listing observed first.
+     */
+    events?: ReadonlySet<PrTransitionType>;
+    /** Per-host subscription when the deprecated channel alias is in effect. */
+    eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
     log?: (message: string) => void;
   };
 }
@@ -222,6 +221,7 @@ async function recordListedPrStates(
   const rows: Array<{
     identity: PrWatchIdentity;
     state: 'open' | 'merged' | 'closed';
+    events?: ReadonlySet<PrTransitionType>;
   }> = [];
   for (const pr of listed) {
     const identity = prWatchIdentityFromUrl(pr.url);
@@ -236,9 +236,15 @@ async function recordListedPrStates(
     // delivers `pending` with no host check of its own — so writing a
     // transition for one would deliver an event the watch may not observe.
     if (!prWatch.allowedHosts.has(normalizeWatchHost(identity.host))) continue;
+    const events =
+      prWatch.eventsForHost?.(normalizeWatchHost(identity.host)) ??
+      prWatch.events;
+    // Under the alias, a host no channel covers subscribes nothing: record
+    // no baseline at all rather than advancing one for an unwatched PR.
+    if (events !== undefined && events.size === 0) continue;
     // The watch snapshot has no 'draft' variant — a draft is still open.
     const state = pr.state === 'draft' ? 'open' : pr.state;
-    rows.push({ identity, state });
+    rows.push({ identity, state, events });
   }
   if (rows.length === 0) return keys;
   const log = prWatch.log ?? (() => {});
@@ -249,7 +255,7 @@ async function recordListedPrStates(
   // Safe because the listing runs after the observation within a tick and
   // ticks never overlap, so it is always the newer observation of the two.
   const observedAt = new Date(now()).toISOString();
-  for (const { identity, state } of rows) {
+  for (const { identity, state, events } of rows) {
     try {
       assertGenerationOpen();
       // This ladder mirrors the one in observeWorkspacePrBindings, which owns
@@ -300,6 +306,7 @@ async function recordListedPrStates(
                     checks: base.checks ?? 'none',
                   },
                   observedAt,
+                  events,
                 )
               : undefined;
           // Same diagnostic the view path emits: an evicted entry is a lost
@@ -720,22 +727,23 @@ export function startSessionPrRefreshTimer(deps: {
    */
   now?: () => number;
   /**
-   * Resolved per tick for the daemon PR-state watch observation. Only read
-   * when the observation switch is on; the daemon parks the watch dir, lock
-   * registry and allowed hosts on the serve app.
+   * Resolved per tick for the daemon PR-state watch observation. The daemon
+   * parks the watch dir, lock registry, allowed hosts and the operator's
+   * subscription on the serve app, and returns nothing when no event is
+   * subscribed — so deps presence IS the enablement gate (master §6).
    */
   getPrWatchDeps?: () => PrWatchObservationTickDeps | undefined;
   /**
    * Resolved per tick for the daemon PR-state watch delivery drain (master
-   * §4/§5). Only read when the observation switch is on; the daemon parks the
-   * admission, restore, bindings-scan and self-push access on the serve app
-   * with the enablement increment. Unpopulated, the drain is inert.
+   * §4/§5). The daemon parks the admission, restore, bindings-scan and
+   * self-push access on the serve app. Unpopulated, the drain is inert.
    */
   getPrDrainDeps?: () => PrWatchDrainDeps | undefined;
   /**
-   * Test seam overriding {@link SESSION_PR_WATCH_OBSERVATION_ENABLED} so a
-   * fixture can exercise the on path. The daemon omits it, so production
-   * stays governed by the internal constant (off).
+   * Test seam forcing the watch off (`false`). Absent or `true` leaves
+   * enablement to deps presence, which the daemon derives from the operator's
+   * subscription: an empty subscription builds no deps, so the watch stays
+   * inert without a second gate that could drift from the first.
    */
   observationEnabled?: boolean;
 }):
@@ -763,6 +771,10 @@ export function startSessionPrRefreshTimer(deps: {
   // produced are consumed by the next tick's observation. Kept per workspace
   // for the same reason the view offsets are.
   const listedKeysByWorkspace = new Map<string, ReadonlySet<string>>();
+  // Consecutive failed-view streaks, kept across ticks so a PR the daemon's
+  // gh cannot read warns once after two failures and again only after a
+  // successful view resets the streak.
+  const prWatchViewFailures = new Map<string, PrWatchViewFailureStreak>();
   let watchSeam: NonNullable<SessionPrRefreshOptions['prWatch']> | undefined;
   let watchTickCount = 0;
   // Retained binding rows, in-flight marks and restore slots for the delivery
@@ -799,17 +811,18 @@ export function startSessionPrRefreshTimer(deps: {
       const archiveCoordinator = deps.getArchiveCoordinator?.();
       const live = deps.workspaceRegistry.listAll();
       const liveCwds = new Set(live.map((r) => r.workspaceCwd));
-      // Daemon PR-state watch observation (master design §1), gated off in
-      // this increment. It runs BEFORE the state refresh so the observation
-      // gets the tick-start deadline window even when the refresh is slow:
-      // a refresh that outruns half the interval would otherwise leave the
-      // observation no time and starve every workspace's views. With the
-      // switch off this block is inert — no gh pr view, no watch-file write,
-      // no ownership claim — and the refresh below is unchanged. The
-      // workspace order rotates per tick so a persistent deadline overrun
-      // starves no workspace; the untrusted primary is included for views
-      // only (its env resolver runs no gh in the checkout).
-      if (deps.observationEnabled ?? SESSION_PR_WATCH_OBSERVATION_ENABLED) {
+      // Daemon PR-state watch observation (master design §1). It runs BEFORE
+      // the state refresh so the observation gets the tick-start deadline
+      // window even when the refresh is slow: a refresh that outruns half the
+      // interval would otherwise leave the observation no time and starve
+      // every workspace's views. Enablement is deps presence: the daemon
+      // builds no deps when the operator subscribes no event, so this block
+      // is then inert — no gh pr view, no watch-file write, no ownership
+      // claim — and the refresh below is unchanged. The workspace order
+      // rotates per tick so a persistent deadline overrun starves no
+      // workspace; the untrusted primary is included for views only (its env
+      // resolver runs no gh in the checkout).
+      if (deps.observationEnabled !== false) {
         const watchDeps = deps.getPrWatchDeps?.();
         if (watchDeps) {
           activeWatchDir = watchDeps.watchDir;
@@ -817,6 +830,7 @@ export function startSessionPrRefreshTimer(deps: {
             watchDir: watchDeps.watchDir,
             locks: watchDeps.locks,
             allowedHosts: watchDeps.allowedHosts,
+            eventsForHost: watchDeps.eventsForHost,
             // Without this the seam's `log` is a declared-and-read field with
             // no setter, and every listing-write refusal stays silent — the
             // claim's contract is that a blocked outcome is always logged.
@@ -834,6 +848,7 @@ export function startSessionPrRefreshTimer(deps: {
               intervalMs,
               sweepOffsets: githubSweepOffsets,
               listedKeysByWorkspace,
+              viewFailures: prWatchViewFailures,
               deadline: tickStart + intervalMs / 2,
             });
           } catch (error) {
@@ -968,19 +983,20 @@ export function startSessionPrRefreshTimer(deps: {
      * the next tick (design §2). Runs on this timer's own drain state: a second
      * state would not see the in-flight marks and could deliver twice.
      *
-     * Coverage is declared partial on purpose. Only one workspace is scanned,
-     * so every other workspace's bindings are absent from the rows — a complete
-     * scan would let the drain delete their watch files as unbound. Partial
-     * suppresses that unbound-delete branch only: the stale age-out still runs,
-     * but its window is seven days while the full tick refreshes `lastBoundAt`
-     * every interval, so it cannot fire for a workspace the tick still sees.
+     * Coverage is declared partial on purpose. Every watched workspace the
+     * registry lists is scanned, but `listAll()` omits non-active entries, so a
+     * draining or transitioning workspace's bindings are unknown rather than
+     * absent — a complete-looking scan would delete the watch file of a PR
+     * whose only binder lives there. Partial suppresses that unbound-delete
+     * branch only: the stale age-out still runs, but its window is seven days
+     * while the full tick refreshes `lastBoundAt` every interval, so it cannot
+     * fire for a workspace the tick still sees.
      */
     async drainNow(workspaceCwd: string, sessionId?: string): Promise<void> {
-      // Same gate as the tick: with the switch off the watch is inert, and a
-      // resume must not deliver from watch files a previous owner left behind.
-      if (!(deps.observationEnabled ?? SESSION_PR_WATCH_OBSERVATION_ENABLED)) {
-        return;
-      }
+      // Same gate as the tick: enablement is deps presence, so with no
+      // subscription the watch is inert and a resume must not deliver from
+      // watch files a previous owner left behind.
+      if (deps.observationEnabled === false) return;
       const drainDeps = deps.getPrDrainDeps?.();
       if (!drainDeps) return;
       const runtime = deps.workspaceRegistry

@@ -10,9 +10,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import type { ManagedReceipt } from '@qwen-code/channel-base';
 import type { EmailSettings } from './config.js';
 import { EmailStateStore, isMessageId, validState } from './state.js';
 import type { ReplyRoute } from './state.js';
+
+export type { ManagedReceipt };
 
 // H5b/H5c: the managed email adapter's own locked state. It keeps what the
 // Legacy state keeps for the same reasons — the mailbox generation, the
@@ -32,16 +35,6 @@ export interface ManagedPendingEvent {
    */
   held?: boolean;
 }
-
-/** The outcome one segment's send proved, persisted before its receipt. */
-export type ManagedReceipt =
-  | {
-      outcome: 'accepted';
-      ordinal: number;
-      providerMessageId: string;
-      acceptedAt: number;
-    }
-  | { outcome: 'unknown' | 'rejected' };
 
 export interface ManagedOutboundSegment {
   deliveryId: string;

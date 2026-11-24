@@ -489,10 +489,31 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             return doCreateOrLoad(tenantId, sessionId, loadExisting,
                     passiveManagedRuntimeRecovery, false);
+        } catch (DaemonHttpException error) {
+            // The daemon decides this decline from the saved continuation's
+            // own profile, which the capability probe above cannot see, so
+            // the open/load route needs the same code-keyed mapping the
+            // recovery loads carry. Keyed on the code, not the status: a
+            // bare 409 still means "the Harness already holds the Session"
+            // for the attachment fallbacks.
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
         }
+    }
+
+    // The one translation of the daemon's terminal decline: a takeover
+    // refusal that can never change under retry is terminal, not retriable.
+    // Every other failure keeps its own classification.
+    private static RuntimeException recoveryDecline(DaemonHttpException error) {
+        if (error.getStatusCode() == 409
+                && HostedHarnessRecoveryDeclinedException.CODE.equals(
+                        error.getErrorCode())) {
+            return new HostedHarnessRecoveryDeclinedException(
+                    error.getBodyField("reason"));
+        }
+        return error;
     }
 
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
@@ -507,7 +528,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         if (session.publicChildAgentsVersion() == 1 && !supportsPublicChildAgents()) {
-            throw new IllegalStateException("Hosted Harness public child recovery is unsupported");
+            throw publicChildRecoveryUnavailable();
         }
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -1869,15 +1890,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return doRecoverManagedRuntime(tenantId, sessionId,
                     cancellation);
         } catch (DaemonHttpException error) {
-            // The one place a daemon error code is read: a takeover refusal
-            // that can never change under retry is terminal, not retriable.
-            if (error.getStatusCode() == 409
-                    && HostedHarnessRecoveryDeclinedException.CODE.equals(
-                            error.getErrorCode())) {
-                throw new HostedHarnessRecoveryDeclinedException(
-                        error.getBodyField("reason"));
-            }
-            throw error;
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1902,14 +1915,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             return doRecoverManagedCancellation(tenantId, sessionId, promptId);
         } catch (DaemonHttpException error) {
-            // The same takeover-refusal mapping as recoverManagedRuntime.
-            if (error.getStatusCode() == 409
-                    && HostedHarnessRecoveryDeclinedException.CODE.equals(
-                            error.getErrorCode())) {
-                throw new HostedHarnessRecoveryDeclinedException(
-                        error.getBodyField("reason"));
-            }
-            throw error;
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1942,11 +1948,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             return loadCancellationTakeover(session, promptId);
         } catch (DaemonHttpException error) {
-            if (error.getStatusCode() == 409
-                    && HostedHarnessRecoveryDeclinedException.CODE.equals(error.getErrorCode())) {
-                throw new HostedHarnessRecoveryDeclinedException(error.getBodyField("reason"));
-            }
-            throw error;
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -2247,7 +2249,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return null;
         }
         if (!supportsPublicChildAgents()) {
-            throw new IllegalStateException("Hosted Harness public child recovery is unsupported");
+            throw publicChildRecoveryUnavailable();
         }
         var lineage = sessions.findChildLineage(session.tenantId(), session.sessionId());
         if (lineage == null) {
@@ -2266,6 +2268,32 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     "providerPin", origin.required("providerPin").textValue()));
         }
         return result;
+    }
+
+    // #17260: a Session persisted under the public-child (shell) topology
+    // cannot be opened by a Harness without public child agents. That is a
+    // property of the Session's durable shape, not a transient outage, so
+    // the typed decline ends the recovery instead of the generic
+    // IllegalStateException feeding the coordinator's retry lane forever.
+    // The decline demands positive evidence: supportsPublicChildAgents()
+    // folds an unreachable daemon (and a pooled placement) into false,
+    // which is safe for admission but here would terminally fail Turns on
+    // a transient outage. Only a completed capabilities read that proves
+    // the feature absent declines; anything else keeps the ordinary
+    // transient refusal.
+    private RuntimeException publicChildRecoveryUnavailable() {
+        try {
+            var capabilities = client().capabilities();
+            boolean advertised = HarnessFeature.PUBLIC_CHILD_AGENTS.in(capabilities.getFeatures())
+                    && capabilities.getLifecycleV2Profiles().contains(WorkspaceToolProfiles.SHELL);
+            if (poolEndpoint == null && !advertised) {
+                return new HostedHarnessRecoveryDeclinedException(
+                        HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED);
+            }
+        } catch (DaemonException | IllegalStateException unreachable) {
+            // Fall through to the transient refusal below.
+        }
+        return new IllegalStateException("Hosted Harness public child recovery is unsupported");
     }
 
     private Map<String, Object> publicChildExtensionAgent(SessionRecord session) {

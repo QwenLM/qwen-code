@@ -1,3 +1,4 @@
+import { randomUUID } from './utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
 import {
   filterWorkspaceFileChanges,
@@ -236,10 +237,13 @@ import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
+  createWebShellToast,
+  appendToastDeduped,
   type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
 } from './components/ToastHost';
+import { ReportedArtifactRegistration } from './components/ReportedArtifactRegistration';
 import { TodoPanel } from './components/panels/TodoPanel';
 import {
   EnvironmentPanel,
@@ -648,8 +652,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MAX_TOASTS = 4;
-const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
@@ -5073,21 +5075,8 @@ export function App({
       onToastRef.current(tone, message);
       return;
     }
-    const toast: WebShellToast = {
-      id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
-      tone,
-      message,
-      // Deadline instead of duration: the host remounts its items when the
-      // elevated portal moves, and a fresh timer per remount would keep a
-      // toast on screen indefinitely across repeated fullscreen toggles.
-      dismissAt: Date.now() + TOAST_AUTO_DISMISS_MS,
-    };
-    setToasts((current) => {
-      const withoutDuplicate = current.filter(
-        (item) => item.tone !== tone || item.message !== message,
-      );
-      return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
-    });
+    const toast = createWebShellToast(tone, message, ++toastIdRef.current);
+    setToasts((current) => appendToastDeduped(current, toast));
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
@@ -5249,7 +5238,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
-  } = useSessionArtifacts(t);
+  } = useSessionArtifacts();
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
   const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
@@ -6030,7 +6019,7 @@ export function App({
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
   const openWebPreviewTab = useCallback(() => {
-    const id = `web-preview:${crypto.randomUUID()}`;
+    const id = `web-preview:${randomUUID()}`;
     setArtifactPanelTabs((tabs) => [
       ...tabs,
       {
@@ -6063,7 +6052,7 @@ export function App({
     [],
   );
   const openTerminalTab = useCallback(() => {
-    const id = `terminal:${crypto.randomUUID()}`;
+    const id = `terminal:${randomUUID()}`;
     const count = artifactPanelTabsRef.current.filter(
       (tab) => tab.kind === 'terminal',
     ).length;
@@ -12078,7 +12067,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
-            promptId: `local-command:${crypto.randomUUID()}`,
+            promptId: `local-command:${randomUUID()}`,
             text: change.version
               ? t('extensions.install.installedWithVersion', {
                   name,
@@ -12096,7 +12085,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
-            promptId: `local-command:${crypto.randomUUID()}`,
+            promptId: `local-command:${randomUUID()}`,
             text: t(key, { name, version: change.version ?? '' }),
           },
         ]);
@@ -14652,7 +14641,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      localCommandId = `local-command:echo:${crypto.randomUUID()}`,
+      localCommandId = `local-command:echo:${randomUUID()}`,
     ): boolean =>
       appendOrDeferLocalUserMessage(
         streamingStateRef.current !== 'idle',
@@ -14676,7 +14665,7 @@ export function App({
   // mid-turn with only the echo skipped.
   const echoLocalCommandIfIdle = useCallback(
     (text: string): string => {
-      const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+      const localCommandId = `local-command:echo:${randomUUID()}`;
       beginLocalCommand(store, localCommandId);
       if (streamingStateRef.current === 'idle') {
         store.appendLocalUserMessage(text, undefined, {
@@ -14699,7 +14688,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: localCommandId ?? `local-command:${crypto.randomUUID()}`,
+          promptId: localCommandId ?? `local-command:${randomUUID()}`,
           text,
           ...(data !== undefined ? { data } : {}),
           clearActiveText: false,
@@ -15556,7 +15545,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: t('clear.blocked'),
         },
       ]);
@@ -15651,7 +15640,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('mode.autoApproved', { tool: approval.title || '' }),
               },
             ]);
@@ -16398,7 +16387,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
-              promptId: `local-command:${crypto.randomUUID()}`,
+              promptId: `local-command:${randomUUID()}`,
               text: t('branch.success', {
                 name: result.displayName,
               }),
@@ -19199,7 +19188,7 @@ export function App({
         // transcript belongs to the session the user navigated to.
         if (!detachedGoalSession) {
           store.appendLocalUserMessage(text, undefined, {
-            localCommandId: `local-command:${crypto.randomUUID()}`,
+            localCommandId: `local-command:${randomUUID()}`,
           });
         }
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
@@ -19669,7 +19658,7 @@ export function App({
               store.dispatch([
                 {
                   type: 'status',
-                  promptId: `local-command:${crypto.randomUUID()}`,
+                  promptId: `local-command:${randomUUID()}`,
                   text: [
                     t('language.current', {
                       language: languageLabel(selectedLanguage),
@@ -19700,7 +19689,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: [
                       t('language.set'),
                       '',
@@ -19740,7 +19729,7 @@ export function App({
                 store.dispatch([
                   {
                     type: result.status === 'error' ? 'error' : 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: translateCopyMessage(result.message, t),
                   },
                 ]);
@@ -20018,7 +20007,7 @@ export function App({
             if (toolsArg === 'desc' || toolsArg === 'descriptions') {
               setShowToolsDialog(true);
             } else {
-              const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+              const localCommandId = `local-command:echo:${randomUUID()}`;
               if (echoOrDeferLocalCommand(text, images, localCommandId))
                 return true;
               const owner = sessionOwnerGuard.capture();
@@ -20164,7 +20153,7 @@ export function App({
                   break;
                 }
               }
-              const localCommandId = `local-command:${crypto.randomUUID()}`;
+              const localCommandId = `local-command:${randomUUID()}`;
               if (parseError) {
                 store.appendLocalUserMessage(text, undefined, {
                   localCommandId,
@@ -20220,7 +20209,7 @@ export function App({
                 });
               return true;
             }
-            const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+            const localCommandId = `local-command:echo:${randomUUID()}`;
             if (echoOrDeferLocalCommand(text, images, localCommandId))
               return true;
             store.dispatch([
@@ -20303,7 +20292,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: t('rename.success', { name: displayName }),
                   },
                 ]);
@@ -20485,7 +20474,7 @@ export function App({
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
-            const localCommandId = `local-command:${crypto.randomUUID()}`;
+            const localCommandId = `local-command:${randomUUID()}`;
             if (echoOrDeferLocalCommand(text, images, localCommandId))
               return true;
             const owner = sessionOwnerGuard.capture();
@@ -21281,7 +21270,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: t('retry.none'),
         },
       ]);
@@ -21863,7 +21852,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.models.runtimeSyncFailed'),
               },
             ]);
@@ -21874,7 +21863,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.requiresRestart'),
               },
             ]);
@@ -21957,7 +21946,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.requiresRestart'),
               },
             ]);
@@ -22138,7 +22127,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
-              promptId: `local-command:${crypto.randomUUID()}`,
+              promptId: `local-command:${randomUUID()}`,
               text: t('settings.requiresRestart'),
             },
           ]);
@@ -23348,6 +23337,15 @@ export function App({
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
+          {/* Rendered inside the portal-root provider so the registration
+              failure toast is scoped to this shell; App's own body runs
+              above the provider it returns. */}
+          <ReportedArtifactRegistration
+            registered={artifacts}
+            hydrated={artifactsHydrated}
+            refresh={refreshArtifacts}
+            translateError={t}
+          />
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
@@ -23589,7 +23587,7 @@ export function App({
                 store.dispatch([
                   type === 'error'
                     ? { type: 'error', text }
-                    : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
+                    : { type: 'status', promptId: `local-command:${randomUUID()}`, text },
                 ]);
               }}
               onClose={handleCloseAuthDialog}
@@ -23643,7 +23641,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
-                      promptId: `local-command:${crypto.randomUUID()}`,
+                      promptId: `local-command:${randomUUID()}`,
                       text:
                         sessionIds.length === 1
                           ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
@@ -23676,7 +23674,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
-                      promptId: `local-command:${crypto.randomUUID()}`,
+                      promptId: `local-command:${randomUUID()}`,
                       text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
                     },
                   ]);
@@ -25106,14 +25104,54 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <GoalsDialog
-                      onCreateGoal={async (condition) => {
+                      // Registered workspaces (multi-workspace daemons only) so
+                      // the page aggregates every project's goals and the New
+                      // form can target one; absent/single → primary-only view.
+                      workspaces={
+                        lockedWorkspaceCwd
+                          ? visibleWorkspaces
+                          : ordinaryWorkspaces
+                      }
+                      lockedWorkspace={lockedWorkspaceCapability}
+                      defaultWorkspaceCwd={resolveWorkspaceMaintenanceTargetCwd()}
+                      onCreateGoal={async (condition, workspaceCwd) => {
                         const stranded = strandedGoalSessionRef.current;
+                        // Reuse the stranded session only when the picker still
+                        // targets its workspace; otherwise a retry after a failed
+                        // attempt would silently create the goal in the previous
+                        // workspace while the picker displays the new one.
                         const canReuseStranded =
                           stranded !== undefined &&
-                          connectionRef.current.sessionId === stranded;
+                          connectionRef.current.sessionId === stranded &&
+                          (workspaceCwd === undefined ||
+                            workspaceCwd ===
+                              connectionRef.current.workspaceCwd);
                         if (!canReuseStranded) {
+                          // The picker can outlive a trust change or workspace
+                          // removal: re-validate its cwd before createNewSession,
+                          // which clears the current session before allocation
+                          // would refuse an untrusted target.
+                          const pickedCwd =
+                            workspaceCwd === undefined
+                              ? undefined
+                              : ordinaryWorkspaces.find(
+                                  (entry) =>
+                                    entry.cwd === workspaceCwd &&
+                                    entry.trusted !== false,
+                                )?.cwd;
+                          if (workspaceCwd !== undefined && !pickedCwd) {
+                            reportError(
+                              new Error(t('goals.error.workspaceUnavailable')),
+                              'Failed to create the goal',
+                            );
+                            return false;
+                          }
+                          // Only forget the stranded session once the retry
+                          // actually proceeds; a refused target must leave the
+                          // recovery handle intact for a later retry.
                           strandedGoalSessionRef.current = undefined;
                           const targetCwd =
+                            pickedCwd ??
                             resolveWorkspaceMaintenanceTargetCwd();
                           if (!targetCwd) return false;
                           const created = await createNewSession(
@@ -25195,10 +25233,11 @@ export function App({
                         strandedGoalSessionRef.current = undefined;
                         showChat();
                       }}
-                      onOpenSession={(sessionId) => {
-                        // The goal's session transcript IS its history.
+                      onOpenSession={(sessionId, workspaceCwd) => {
+                        // The goal's session transcript IS its history — load
+                        // it in the goal's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },

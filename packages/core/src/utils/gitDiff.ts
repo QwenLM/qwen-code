@@ -9,7 +9,7 @@ import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import type { Hunk } from 'diff';
+import type { StructuredPatchHunk as Hunk } from 'diff';
 import {
   findGitRoot,
   NO_EXEC_CONFIG,

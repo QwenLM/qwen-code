@@ -7,10 +7,6 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { setBoundedMapEntry } from '../utils/bounded-map';
-import {
-  useReportedArtifactRegistration,
-  type RegistrationErrorTranslator,
-} from './useReportedArtifactRegistration';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
 const MAX_CACHED_SESSIONS = 20;
@@ -47,9 +43,7 @@ export interface SessionArtifactsState {
   refresh: () => Promise<void>;
 }
 
-export function useSessionArtifacts(
-  translateError?: RegistrationErrorTranslator,
-): SessionArtifactsState {
+export function useSessionArtifacts(): SessionArtifactsState {
   const actions = useActions();
   const connection = useConnection();
   const ownerGuard = useDaemonSessionOwnerGuard();
@@ -150,12 +144,6 @@ export function useSessionArtifacts(
   const hydrated = Boolean(
     sessionKey &&
       artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
-  );
-  useReportedArtifactRegistration(
-    visibleArtifacts,
-    hydrated,
-    refresh,
-    translateError,
   );
   return {
     artifacts: visibleArtifacts,

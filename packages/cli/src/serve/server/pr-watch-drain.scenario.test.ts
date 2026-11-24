@@ -471,10 +471,11 @@ describe.skipIf(process.platform === 'win32')(
     it('fans out to real role bindings under group-suffixed keys', async () => {
       const reviewer = await seedSession({ role: 'review' });
       const fixer = await seedSession({ role: 'fix' });
-      drainDeps.actions = new Map([
-        ['review:ci_failure', 'Review %repo% #%pr%'],
-        ['fix:ci_failure', 'Fix %repo% #%pr%'],
-      ]);
+      drainDeps.actionsForEvent = () =>
+        new Map([
+          ['review:ci_failure', 'Review %repo% #%pr%'],
+          ['fix:ci_failure', 'Fix %repo% #%pr%'],
+        ]);
       writeView(HEAD_A, { checks: 'passing' });
       await observe();
       await drain();
@@ -818,7 +819,8 @@ describe.skipIf(process.platform === 'win32')(
       const longRepo = `${'a'.repeat(39)}/${'b'.repeat(60)}`;
       const longUrl = `https://github.com/${longRepo}/pull/${PR}`;
       await seedSession({ url: longUrl });
-      drainDeps.actions = new Map([['default', 'Handle %repo% #%pr%']]);
+      drainDeps.actionsForEvent = () =>
+        new Map([['default', 'Handle %repo% #%pr%']]);
       writeView(HEAD_A, { checks: 'passing', url: longUrl });
       await observe();
       await drain();

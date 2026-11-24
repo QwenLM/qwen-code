@@ -325,13 +325,29 @@ public class HarnessCoordinator {
             terminal = failTerminally(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.", error);
         } catch (HostedHarnessRecoveryDeclinedException error) {
-            // An approval wait is not a durable verdict: the decision is
-            // still deliverable through the attached Session, so the Turn
-            // must never die while the Action is requested — the approval
-            // timeout bounds the retry like the predecessor's lease does.
-            // The daemon itself now answers await_action plain, so this
-            // guard only catches a Harness that still declines it.
-            if ("await_action".equals(error.getReason())) {
+            // #17260: a Session shape this Harness can never open (a
+            // public-child Session on a topology without public child
+            // agents) is terminal on the FIRST drive, cancellation
+            // included. The journal-state declines below keep their
+            // settlement lanes because a live or later Harness can still
+            // pay them; nothing can pay this one, so neither the
+            // approval-timeout wait, the CANCELLING retry lane nor the
+            // unproven-execution park may re-offer it. The turn settles
+            // FAILED with the decline recorded, leaving the dispatchable
+            // and parked recovery sets for good.
+            if (HostedHarnessRecoveryDeclinedException
+                    .REASON_PUBLIC_CHILD_UNSUPPORTED.equals(
+                            error.getReason())) {
+                terminal = abandonUnsupportedRecovery(claimed, leaseLost,
+                        recoveryPath.get(), error);
+            } else if ("await_action".equals(error.getReason())) {
+                // An approval wait is not a durable verdict: the decision
+                // is still deliverable through the attached Session, so
+                // the Turn must never die while the Action is requested —
+                // the approval timeout bounds the retry like the
+                // predecessor's lease does. The daemon itself now answers
+                // await_action plain, so this guard only catches a Harness
+                // that still declines it.
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error, true);
             } else if (recoveryPath.get()
@@ -1534,6 +1550,55 @@ public class HarnessCoordinator {
     private boolean failTerminally(TurnRecord turn, String code,
             String message, RuntimeException error) {
         return fail(turn, code, message, error);
+    }
+
+    // #17260: the Session's durable shape cannot be opened by this Harness
+    // at all. Unlike fail(), no cancel settlement is attempted first: every
+    // settlement route re-opens the same Session through the same
+    // connector and meets the same typed decline, so the reconcile would
+    // only re-enter the park/retry lanes this abandonment exists to close.
+    // The Turn settles FAILED (a CANCELLED write would claim a cancel this
+    // Harness never observed) under managed_runtime_recovery_blocked, whose
+    // command settlement already parks unconfirmed inputs and cancels for
+    // reconciliation from the retained journal instead of redelivery. The
+    // terminal row leaves findDispatchable and findRuntimeRecoveryParked,
+    // so neither the sweep nor a restart's SessionRecoveryService scan
+    // re-offers it.
+    private boolean abandonUnsupportedRecovery(TurnRecord turn,
+            AtomicBoolean leaseLost,
+            boolean recoveryPath,
+            HostedHarnessRecoveryDeclinedException error) {
+        requireLease(leaseLost);
+        // The durable verdict is already decided, so only the terminal
+        // write is fenced. A cache eviction failure must not hold the
+        // terminal back: the next process drops the attachment anyway,
+        // and the terminal row keeps every sweep from re-offering the
+        // Turn meanwhile.
+        // The wording follows what was actually established: a boot-less
+        // Session drives createOrLoad, where nothing was parked and the
+        // Turn may never have been submitted. Claiming an abandoned park
+        // there sends an on-call engineer after a row that never existed.
+        store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
+                owner, "managed_runtime_recovery_blocked",
+                "The Hosted Harness can no longer open this Session's"
+                        + " public child topology; "
+                        + (recoveryPath
+                                ? "the parked Turn was abandoned without"
+                                        + " replay."
+                                : "the Turn was settled without dispatch."));
+        try {
+            harness.discardManagedRecovery(turn.tenantId(), turn.sessionId());
+        } catch (RuntimeException unavailable) {
+            LOG.warn("Managed unsupported recovery cache discard deferred"
+                            + " tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    unavailable);
+        }
+        LOG.warn("Managed Turn recovery abandoned as unsupported tenant={}"
+                        + " session={} turn={} reason={}",
+                turn.tenantId(), turn.sessionId(), turn.turnId(),
+                error.getReason(), error);
+        return true;
     }
 
     private boolean transientFailure(TurnRecord turn,

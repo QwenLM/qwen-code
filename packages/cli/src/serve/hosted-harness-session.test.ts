@@ -30,6 +30,7 @@ import {
 } from 'vitest';
 import * as hostedHistory from './hosted-file-history.js';
 import * as modelRecovery from './hosted-model-recovery.js';
+import * as approvalContinuation from './hosted-approval-continuation.js';
 import type { HostedFileHistoryState } from './hosted-file-history-protocol.js';
 import {
   LocalJsonlManagedSessionJournalHandle,
@@ -165,7 +166,10 @@ import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runti
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
 import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
-import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
+import {
+  findHostedApprovalContinuation,
+  HostedPublicChildRecoveryProfileChanged,
+} from './hosted-approval-continuation.js';
 import { HOSTED_QUESTION_POLICY } from './hosted-user-question.js';
 
 const wakeDeps = vi.hoisted(() => ({
@@ -35431,6 +35435,53 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(declined.status).toBe(409);
     expect(declined.body.code).toBe('hosted_turn_recovery_declined');
     expect(declined.body.reason).toBe('checkpoint_blocked');
+  });
+
+  // #17260: the reason literal is the cross-language contract with
+  // HarnessCoordinator's REASON_PUBLIC_CHILD_UNSUPPORTED. Deleting the
+  // branch drops the cause into the retriable refusal — the once-a-minute
+  // loop — and renaming the literal silently stops matching, both with a
+  // green suite unless these route answers are pinned.
+  it('declines a resident redrive whose saved public-child profile changed', async () => {
+    const { server } = await parkToolTurn(true);
+    vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+    ).mockRejectedValue(new HostedPublicChildRecoveryProfileChanged());
+    const declined = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(declined.status).toBe(409);
+    expect(declined.body.code).toBe('hosted_turn_recovery_declined');
+    expect(declined.body.reason).toBe('public_child_recovery_unsupported');
+  });
+
+  it('declines a cold takeover load whose saved public-child profile changed', async () => {
+    await parkToolTurn();
+    // The saved continuation is only read at a continuation phase; the
+    // parked tool wait itself sits at await_runtime.
+    mockAuthorizationWithPhase('await_action', { state: 'requested' });
+    vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+      // The park that produced the continuation ran on the healthy
+      // topology; only the load's own read meets the stale profile.
+    ).mockRejectedValue(new HostedPublicChildRecoveryProfileChanged());
+    const server = await replacementApp();
+    const declined = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(declined.status).toBe(409);
+    expect(declined.body.code).toBe('hosted_turn_recovery_declined');
+    expect(declined.body.reason).toBe('public_child_recovery_unsupported');
   });
 
   it.each([false, true])(

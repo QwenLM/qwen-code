@@ -127,6 +127,7 @@ import {
   type IndividualToolCallDisplay,
 } from '../types.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import type { OpenTuiInputSubmission } from './input-submission.js';
 
 const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
@@ -1109,7 +1110,9 @@ export async function* livePromptEvents(
       try {
         // On the shared agent loop (`experimental.unifiedAgentLoop`), the
         // round and its batch run in one `runAgentLoop` call.
-        const onSharedLoop = config.isUnifiedAgentLoopEnabled?.() === true;
+        const onSharedLoop =
+          config.isUnifiedAgentLoopEnabled?.('opentui') === true;
+        logAgentLoopEntry(config, 'opentui');
         // Seeded before the turn's first round is sent, so the calls it
         // makes are not taken for replays.
         if (onSharedLoop && !duplicates)
@@ -1118,7 +1121,8 @@ export async function* livePromptEvents(
             responded: new Set<string>(),
           };
         const roundDuplicates = duplicates;
-        const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
+        const useEventBus =
+          config.isEventBusAgentLoopEnabled?.('opentui') === true;
         sharedRound =
           onSharedLoop && roundDuplicates
             ? sharedModelRound(

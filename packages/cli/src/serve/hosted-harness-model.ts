@@ -5,6 +5,10 @@
  */
 
 import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  runModelRound,
+  type ModelRoundSource,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import { getErrorStatus } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
@@ -1328,114 +1332,236 @@ async function runPreparedHostedHarnessTextTurn(
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {
-        const stream = preparedRecovery
-          ? new Turn(
-              client.getChat(),
-              input.promptId,
-              undefined,
-              undefined,
-              true,
-              prepare,
-            ).run(
-              preparedRecovery.request.model,
-              [],
-              input.signal,
-              preparedRecovery,
-            )
-          : client.sendMessageStream(request, input.signal, input.promptId, {
-              type:
-                guidanceRequest || (round === 0 && !pendingToolResults)
-                  ? SendMessageType.UserQuery
-                  : SendMessageType.ToolResult,
-              // Published deltas cannot be un-glued after the fact: a cut that
-              // already delivered content replays the request, and the RETRY
-              // handling below retracts the orphaned prefix (#13319).
-              retractDeliveredOutputOnRetry: true,
-              ...(input.prepareModel ||
-              input.modelScope?.diagnosticsEnabled ||
-              input.publicChildModelRoute ||
-              input.toolTurn?.capturesChildModelRoute?.()
-                ? { onPreparedRequest: prepare }
-                : {}),
-            });
-        preparedRecovery = undefined;
-        guidanceRequest = false;
-        for await (const event of stream) {
-          if (event.type === LlmEventType.Content) {
-            text += event.value;
-            await textDeltas?.delta(event.value);
-          } else if (event.type === LlmEventType.Finished) {
-            finished = true;
-            const reported = event.value?.usageMetadata;
-            if (reported) {
-              const snapshot: Record<string, unknown> = { ...reported };
-              delete snapshot['contextWindowSize'];
-              if (
-                typeof contextWindowSize === 'number' &&
-                Number.isSafeInteger(contextWindowSize) &&
-                contextWindowSize > 0
+        const sendOptions = {
+          type:
+            guidanceRequest || (round === 0 && !pendingToolResults)
+              ? SendMessageType.UserQuery
+              : SendMessageType.ToolResult,
+          // Published deltas cannot be un-glued after the fact: a cut that
+          // already delivered content replays the request, and the RETRY
+          // handling below retracts the orphaned prefix (#13319).
+          retractDeliveredOutputOnRetry: true,
+          ...(input.prepareModel ||
+          input.modelScope?.diagnosticsEnabled ||
+          input.publicChildModelRoute ||
+          input.toolTurn?.capturesChildModelRoute?.()
+            ? { onPreparedRequest: prepare }
+            : {}),
+        };
+        if (config.isUnifiedAgentLoopEnabled('hosted')) {
+          // Model-round-only migration (#17248): the shared round forwards the
+          // events and collects the calls; the Hosted-specific side effects
+          // (durable-feed retraction, usage, model-scope attempts) stay here in
+          // onModelEvent. The outer loop keeps its cap, hooks and tool turn.
+          const recovery = preparedRecovery;
+          const source: ModelRoundSource | typeof client = recovery
+            ? {
+                sendRound: (_round, signal) => {
+                  const turn = new Turn(
+                    client.getChat(),
+                    input.promptId,
+                    undefined,
+                    undefined,
+                    true,
+                    prepare,
+                  );
+                  return (async function* () {
+                    yield* turn.run(
+                      recovery.request.model,
+                      [],
+                      signal,
+                      recovery,
+                    );
+                    return turn;
+                  })();
+                },
+              }
+            : client;
+          const result = await runModelRound(
+            source,
+            { parts: request, promptId: input.promptId, options: sendOptions },
+            input.signal,
+            {
+              onModelEvent: async (event) => {
+                if (event.type === LlmEventType.Content) {
+                  text += event.value;
+                  await textDeltas?.delta(event.value);
+                } else if (event.type === LlmEventType.Finished) {
+                  finished = true;
+                  const reported = event.value?.usageMetadata;
+                  if (reported) {
+                    const snapshot: Record<string, unknown> = { ...reported };
+                    delete snapshot['contextWindowSize'];
+                    if (
+                      typeof contextWindowSize === 'number' &&
+                      Number.isSafeInteger(contextWindowSize) &&
+                      contextWindowSize > 0
+                    )
+                      snapshot['contextWindowSize'] = contextWindowSize;
+                    usage.push(snapshot);
+                  } else usage.push(null);
+                } else if (event.type === LlmEventType.Retry) {
+                  if (!event.isContinuation) {
+                    await textDeltas?.retract();
+                    text = '';
+                  }
+                } else if (event.type === LlmEventType.ModelFallback) {
+                  contextWindowSize = undefined;
+                  if (!input.prepareModel && input.modelScope) {
+                    const previous = completeAttempt;
+                    completeAttempt = undefined;
+                    await previous?.(false, usage);
+                    finished = false;
+                    usage.length = 0;
+                    completeAttempt = await input.modelScope.beginMainAttempt(
+                      event.toModel,
+                    );
+                    modelOccurrence =
+                      completeAttempt.attemptId ?? modelOccurrence;
+                  }
+                  await textDeltas?.retract();
+                  text = '';
+                } else if (event.type === LlmEventType.ToolCallRequest) {
+                  if (!input.toolTurn) {
+                    modelFailure = false;
+                    throw new Error(
+                      'Hosted Harness no-tool turn refused a tool call.',
+                    );
+                  }
+                } else if (
+                  event.type === LlmEventType.ToolCallConfirmation ||
+                  event.type === LlmEventType.ToolCallResponse
+                ) {
+                  modelFailure = false;
+                  throw new Error(
+                    'Hosted Harness no-tool turn refused a tool call.',
+                  );
+                } else if (event.type === LlmEventType.Error) {
+                  throw new HostedModelApiError(event.value.error);
+                } else if (event.type === LlmEventType.UserCancelled) {
+                  modelFailure = false;
+                  throw new Error('Hosted Harness turn was cancelled.');
+                } else if (event.type === LlmEventType.MaxSessionTurns) {
+                  modelFailure = false;
+                  throw new HostedModelRoundLimitError();
+                } else if (
+                  event.type !== LlmEventType.ChatCompressed &&
+                  event.type !== LlmEventType.Thought &&
+                  event.type !== LlmEventType.Citation
+                ) {
+                  modelFailure = false;
+                  throw new Error(
+                    'Hosted Harness model returned an unsupported continuation.',
+                  );
+                }
+              },
+            },
+          );
+          calls = result.calls;
+          preparedRecovery = undefined;
+          guidanceRequest = false;
+        } else {
+          const stream = preparedRecovery
+            ? new Turn(
+                client.getChat(),
+                input.promptId,
+                undefined,
+                undefined,
+                true,
+                prepare,
+              ).run(
+                preparedRecovery.request.model,
+                [],
+                input.signal,
+                preparedRecovery,
               )
-                snapshot['contextWindowSize'] = contextWindowSize;
-              usage.push(snapshot);
-            } else usage.push(null);
-          } else if (event.type === LlmEventType.Retry) {
-            calls = [];
-            if (!event.isContinuation) {
-              // A restarted attempt replaces what the failed one published:
-              // retract the orphaned prefix from the durable feed before the
-              // replay's own deltas arrive (#13319).
-              await textDeltas?.retract();
-              text = '';
-            }
-          } else if (event.type === LlmEventType.ModelFallback) {
-            contextWindowSize = undefined;
-            if (!input.prepareModel && input.modelScope) {
-              const previous = completeAttempt;
-              completeAttempt = undefined;
-              await previous?.(false, usage);
-              finished = false;
-              usage.length = 0;
-              completeAttempt = await input.modelScope.beginMainAttempt(
-                event.toModel,
+            : client.sendMessageStream(
+                request,
+                input.signal,
+                input.promptId,
+                sendOptions,
               );
-              modelOccurrence = completeAttempt.attemptId ?? modelOccurrence;
+          preparedRecovery = undefined;
+          guidanceRequest = false;
+          for await (const event of stream) {
+            if (event.type === LlmEventType.Content) {
+              text += event.value;
+              await textDeltas?.delta(event.value);
+            } else if (event.type === LlmEventType.Finished) {
+              finished = true;
+              const reported = event.value?.usageMetadata;
+              if (reported) {
+                const snapshot: Record<string, unknown> = { ...reported };
+                delete snapshot['contextWindowSize'];
+                if (
+                  typeof contextWindowSize === 'number' &&
+                  Number.isSafeInteger(contextWindowSize) &&
+                  contextWindowSize > 0
+                )
+                  snapshot['contextWindowSize'] = contextWindowSize;
+                usage.push(snapshot);
+              } else usage.push(null);
+            } else if (event.type === LlmEventType.Retry) {
+              calls = [];
+              if (!event.isContinuation) {
+                // A restarted attempt replaces what the failed one published:
+                // retract the orphaned prefix from the durable feed before the
+                // replay's own deltas arrive (#13319).
+                await textDeltas?.retract();
+                text = '';
+              }
+            } else if (event.type === LlmEventType.ModelFallback) {
+              contextWindowSize = undefined;
+              if (!input.prepareModel && input.modelScope) {
+                const previous = completeAttempt;
+                completeAttempt = undefined;
+                await previous?.(false, usage);
+                finished = false;
+                usage.length = 0;
+                completeAttempt = await input.modelScope.beginMainAttempt(
+                  event.toModel,
+                );
+                modelOccurrence = completeAttempt.attemptId ?? modelOccurrence;
+              }
+              await textDeltas?.retract();
+              calls = [];
+              text = '';
+            } else if (
+              event.type === LlmEventType.ToolCallRequest &&
+              input.toolTurn
+            ) {
+              calls.push(event.value);
+            } else if (
+              event.type === LlmEventType.ToolCallRequest ||
+              event.type === LlmEventType.ToolCallConfirmation ||
+              event.type === LlmEventType.ToolCallResponse
+            ) {
+              modelFailure = false;
+              throw new Error(
+                'Hosted Harness no-tool turn refused a tool call.',
+              );
+            } else if (event.type === LlmEventType.Error) {
+              // Format rather than flatten: the formatter keeps a resolved provider
+              // request id on the message, so the daemon stderr line and the
+              // StopFailure hook's error_details keep an id the operator can
+              // quote to their provider.
+              throw new HostedModelApiError(event.value.error);
+            } else if (event.type === LlmEventType.UserCancelled) {
+              modelFailure = false;
+              throw new Error('Hosted Harness turn was cancelled.');
+            } else if (event.type === LlmEventType.MaxSessionTurns) {
+              modelFailure = false;
+              throw new HostedModelRoundLimitError();
+            } else if (
+              event.type !== LlmEventType.ChatCompressed &&
+              event.type !== LlmEventType.Thought &&
+              event.type !== LlmEventType.Citation
+            ) {
+              modelFailure = false;
+              throw new Error(
+                'Hosted Harness model returned an unsupported continuation.',
+              );
             }
-            await textDeltas?.retract();
-            calls = [];
-            text = '';
-          } else if (
-            event.type === LlmEventType.ToolCallRequest &&
-            input.toolTurn
-          ) {
-            calls.push(event.value);
-          } else if (
-            event.type === LlmEventType.ToolCallRequest ||
-            event.type === LlmEventType.ToolCallConfirmation ||
-            event.type === LlmEventType.ToolCallResponse
-          ) {
-            modelFailure = false;
-            throw new Error('Hosted Harness no-tool turn refused a tool call.');
-          } else if (event.type === LlmEventType.Error) {
-            // Format rather than flatten: the formatter keeps a resolved provider
-            // request id on the message, so the daemon stderr line and the
-            // StopFailure hook's error_details keep an id the operator can
-            // quote to their provider.
-            throw new HostedModelApiError(event.value.error);
-          } else if (event.type === LlmEventType.UserCancelled) {
-            modelFailure = false;
-            throw new Error('Hosted Harness turn was cancelled.');
-          } else if (event.type === LlmEventType.MaxSessionTurns) {
-            modelFailure = false;
-            throw new HostedModelRoundLimitError();
-          } else if (
-            event.type !== LlmEventType.ChatCompressed &&
-            event.type !== LlmEventType.Thought &&
-            event.type !== LlmEventType.Citation
-          ) {
-            modelFailure = false;
-            throw new Error(
-              'Hosted Harness model returned an unsupported continuation.',
-            );
           }
         }
         if (!finished)

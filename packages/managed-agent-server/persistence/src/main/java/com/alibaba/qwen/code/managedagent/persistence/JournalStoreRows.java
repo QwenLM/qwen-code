@@ -66,24 +66,30 @@ final class JournalStoreRows {
                         result.getObject("activation_expires_at", Long.class),
                         result.getObject("activation_head_revision", Long.class));
         this.transactionMapper = (result, row) -> transactionRow(result);
-        this.resourceMapper = (result, row) ->
-                        new ResourceRow(
-                                result.getString("tenant_id"),
-                                result.getString("workspace_id"),
-                                result.getString("session_id"),
-                                result.getString("resource_id"),
-                                result.getString("kind"),
-                                result.getInt("schema_version"),
-                                result.getLong("byte_length"),
-                                result.getString("sha256"),
-                                result.getString("storage_kind"),
-                                result.getBytes("inline_bytes"),
-                                result.getString("object_key"),
-                                result.getString("object_version_id"),
-                                result.getString("encryption_key_id"),
-                                result.getString("state"),
-                                result.getString("capture_state"),
-                                result.getString("deletion_operation_key"));
+        this.resourceMapper = (result, row) -> resourceRow(result);
+    }
+
+    /** The RESOURCE projection's row, shared by every reader of ma_resource so
+     * the committed-state predicate sees the same columns everywhere. */
+    static ResourceRow resourceRow(java.sql.ResultSet result)
+            throws java.sql.SQLException {
+        return new ResourceRow(
+                result.getString("tenant_id"),
+                result.getString("workspace_id"),
+                result.getString("session_id"),
+                result.getString("resource_id"),
+                result.getString("kind"),
+                result.getInt("schema_version"),
+                result.getLong("byte_length"),
+                result.getString("sha256"),
+                result.getString("storage_kind"),
+                result.getBytes("inline_bytes"),
+                result.getString("object_key"),
+                result.getString("object_version_id"),
+                result.getString("encryption_key_id"),
+                result.getString("state"),
+                result.getString("capture_state"),
+                result.getString("deletion_operation_key"));
     }
 
     static final int STORAGE_VERSION = 1;
@@ -230,8 +236,7 @@ final class JournalStoreRows {
         requireResourceScope(resource, tenantId, workspaceId, sessionId,
                 resourceId);
         if (!"REFERENCED".equals(resource.state())
-                && !("PUBLISHED".equals(resource.state())
-                    && Set.of("managed-agent-instructions", "managed-agent-skills").contains(resource.kind()))) {
+                && !settledPublishedConfiguration(resource)) {
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
         }
@@ -239,6 +244,26 @@ final class JournalStoreRows {
         return new StoredResource(resource.resourceId(), resource.kind(),
                 resource.schemaVersion(), resource.byteLength(),
                 resource.digest(), resource.bytes());
+    }
+
+    /**
+     * Whether this row is a configuration or inherited-extension resource
+     * sitting at its committed terminal PUBLISHED state, within the bounds
+     * {@link ManagedSessionStoreModels#publishedConfigurationByteLimit} names
+     * for its kind. Empty bytes stay legal only for the kinds whose publisher
+     * may write them: instructions can be empty, every other one cannot.
+     */
+    static boolean settledPublishedConfiguration(ResourceRow resource) {
+        Integer limit = ManagedSessionStoreModels
+                .publishedConfigurationByteLimit(resource.kind());
+        if (limit == null || !"PUBLISHED".equals(resource.state())
+                || resource.schemaVersion() != 1) {
+            return false;
+        }
+        long minimum = "managed-agent-instructions".equals(resource.kind())
+                ? 0 : 1;
+        return resource.byteLength() >= minimum
+                && resource.byteLength() <= limit;
     }
 
     HeadRow findHeadForUpdate(String tenantId, String sessionId) {
@@ -508,14 +533,10 @@ final class JournalStoreRows {
         }
         if (!"MYSQL_INLINE".equals(resource.storageKind())
                 || !("REFERENCED".equals(resource.state())
-                    || "PUBLISHED".equals(resource.state()) && resource.schemaVersion() == 1
-                        && (resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind())
-                            || "managed-agent-instructions".equals(resource.kind())
-                                && resource.byteLength() >= 0
-                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES
-                            || "managed-agent-skills".equals(resource.kind())
-                                && resource.byteLength() > 0
-                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES))
+                    || "PUBLISHED".equals(resource.state())
+                        && (resource.schemaVersion() == 1 && resource.byteLength() > 0
+                                && resource.byteLength() <= toolResultLimit(resource.kind())
+                            || settledPublishedConfiguration(resource)))
                 || resource.bytes() == null
                 || resource.objectKey() != null
                 || resource.objectVersionId() != null

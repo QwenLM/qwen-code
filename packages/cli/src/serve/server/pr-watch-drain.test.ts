@@ -41,8 +41,8 @@ const identity: PrWatchIdentity = {
 };
 const T0 = '2026-11-08T00:00:00.000Z';
 
-function prUrl(number = 42, repo = 'owner/repo'): string {
-  return `https://github.com/${repo}/pull/${number}`;
+function prUrl(number = 42, repo = 'owner/repo', host = 'github.com'): string {
+  return `https://${host}/${repo}/pull/${number}`;
 }
 
 function summary(
@@ -52,6 +52,7 @@ function summary(
     sourceType?: string;
     number?: number;
     repo?: string;
+    host?: string;
     role?: 'review' | 'verify' | 'fix';
     workspaceCwd?: string;
   } = {},
@@ -64,7 +65,7 @@ function summary(
     prs: [
       {
         number: opts.number ?? 42,
-        url: prUrl(opts.number ?? 42, opts.repo ?? 'owner/repo'),
+        url: prUrl(opts.number ?? 42, opts.repo ?? 'owner/repo', opts.host),
         ...(opts.role !== undefined ? { role: opts.role } : {}),
       },
     ],
@@ -589,10 +590,11 @@ describe('runPrWatchDrainTick', () => {
         ],
         partial: false,
       }),
-      actions: new Map([
-        ['review:ci_failure', 'review it'],
-        ['fix:ci_failure', 'fix it'],
-      ]),
+      actionsForEvent: () =>
+        new Map([
+          ['review:ci_failure', 'review it'],
+          ['fix:ci_failure', 'fix it'],
+        ]),
       admitPrompt: admit,
     });
     const result = await runPrWatchDrainTick([runtime()], deps, state);
@@ -896,7 +898,7 @@ describe('runPrWatchDrainTick', () => {
         bindings: [summary('rev', { role: 'review' })],
         partial: false,
       }),
-      actions: new Map([['review:ci_failure', 'review it']]),
+      actionsForEvent: () => new Map([['review:ci_failure', 'review it']]),
       log: (message) => logs.push(message),
     });
     const result = await runPrWatchDrainTick([runtime()], deps, state);
@@ -908,12 +910,48 @@ describe('runPrWatchDrainTick', () => {
     expect(logs.some((l) => l.includes('no template for k-head'))).toBe(true);
   });
 
-  it('treats an empty actions map as no actions', async () => {
+  it('treats an empty per-type map as role-aware with no subscription', async () => {
+    // The explicit setting normalises an empty template map to the single
+    // winner before this seam; an empty map here is the alias's role-aware
+    // channel, which subscribed no role to this type and so delivers to none.
+    const logs: string[] = [];
     writePrWatchStateSync(dir, identity, pendingState());
-    const deps = makeDeps({ actions: new Map() });
+    const deps = makeDeps({
+      actionsForEvent: () => new Map(),
+      log: (message) => logs.push(message),
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.includes('no template'))).toBe(true);
+    const stored = readPrWatchStateSync(dir, identity);
+    if (stored.kind === 'state') expect(stored.state.pending).toBeUndefined();
+  });
+
+  it('asks for the templates of the entry host', async () => {
+    // The alias resolves templates per host, so the drain must pass the PR's
+    // own host. A hard-coded github.com would deliver a GHE PR with another
+    // host's instructions.
+    const ghe: PrWatchIdentity = {
+      host: 'ghe.example.com',
+      repo: 'owner/repo',
+      number: 42,
+    };
+    writePrWatchStateSync(dir, ghe, pendingState({ pr: ghe }));
+    const seen: Array<[string, string]> = [];
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [summary('s1', { host: 'ghe.example.com' })],
+        partial: false,
+      }),
+      actionsForEvent: (type, host) => {
+        seen.push([type, host]);
+        return new Map([['default', 'handle it']]);
+      },
+    });
     const result = await runPrWatchDrainTick([runtime()], deps, state);
     expect(result.delivered).toBe(1);
-    expect(deps.admitPrompt).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([['ci_failure', 'ghe.example.com']]);
   });
 
   it('contains a per-PR failure so the next PR still delivers', async () => {
@@ -1053,10 +1091,11 @@ describe('runPrWatchDrainTick', () => {
         ],
         partial: false,
       }),
-      actions: new Map([
-        ['review:ci_failure', 'review it'],
-        ['fix:ci_failure', 'fix it'],
-      ]),
+      actionsForEvent: () =>
+        new Map([
+          ['review:ci_failure', 'review it'],
+          ['fix:ci_failure', 'fix it'],
+        ]),
       isSessionLive: (_runtime, sessionId) => sessionId === 'rev',
       wakeSession: () =>
         gate.then(() => ({
@@ -1117,10 +1156,11 @@ describe('runPrWatchDrainTick', () => {
         bindings: [summary('rev', { role: 'review' })],
         partial: false,
       }),
-      actions: new Map([
-        ['review:ci_failure', 'review it'],
-        ['fix:ci_failure', 'fix it'],
-      ]),
+      actionsForEvent: () =>
+        new Map([
+          ['review:ci_failure', 'review it'],
+          ['fix:ci_failure', 'fix it'],
+        ]),
     });
     const result = await runPrWatchDrainTick([runtime()], deps, state);
     expect(result.delivered).toBe(1);
@@ -1162,10 +1202,11 @@ describe('runPrWatchDrainTick', () => {
         ],
         partial: false,
       }),
-      actions: new Map([
-        ['review:ci_failure', 'review it'],
-        ['fix:ci_failure', 'fix it'],
-      ]),
+      actionsForEvent: () =>
+        new Map([
+          ['review:ci_failure', 'review it'],
+          ['fix:ci_failure', 'fix it'],
+        ]),
       admitPrompt: admit,
     });
     const result = await runPrWatchDrainTick([runtime()], deps, state);

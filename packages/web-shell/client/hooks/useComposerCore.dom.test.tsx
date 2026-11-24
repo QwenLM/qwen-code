@@ -31,6 +31,8 @@ let latest: UseComposerCoreReturn | null = null;
 function Harness({
   composerInput,
   onSubmit,
+  prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
@@ -55,6 +57,8 @@ function Harness({
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -83,6 +87,8 @@ function Harness({
 }) {
   const composer = useComposerCore({
     onSubmit,
+    prepareSubmit,
+    submitDisabled,
     commands: commands ?? [],
     allowEmptySlashMenu,
     cycleModeOnTab,
@@ -121,6 +127,8 @@ function Harness({
 async function mount({
   composerInput,
   onSubmit = vi.fn(),
+  prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
@@ -145,6 +153,8 @@ async function mount({
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -189,6 +199,8 @@ async function mount({
           <Harness
             composerInput={composerInput}
             onSubmit={onSubmit}
+            prepareSubmit={prepareSubmit}
+            submitDisabled={submitDisabled}
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
             onFileTagClick={onFileTagClick}
@@ -4896,5 +4908,287 @@ describe('composer draft attachment races', () => {
       images: [image],
       files: [],
     });
+  });
+});
+
+describe('useComposerCore prepareSubmit gate', () => {
+  function pressEnter() {
+    container!.querySelector('.cm-content')!.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  function deferredPrepare() {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prepareSubmit = vi.fn(() => gate);
+    return { prepareSubmit, release };
+  }
+
+  it('submitText waits for prepareSubmit and sends text inserted during it', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(true);
+
+    await act(async () => {
+      latest!.insertText(' dictated');
+      release();
+    });
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed dictated');
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('');
+  });
+
+  it('Enter waits for prepareSubmit before submitting', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => pressEnter());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(true);
+
+    await act(async () => {
+      latest!.insertText(' dictated');
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed dictated');
+  });
+
+  it('drops reentrant submits while preparation is in flight', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('once'));
+
+    act(() => latest!.submitText());
+    act(() => latest!.submitText());
+    act(() => pressEnter());
+    await act(async () => {
+      release();
+    });
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('once');
+  });
+
+  it('cancels the submit when the session switches during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    // The incoming draft must have content: an empty one would be rejected
+    // by the submit itself, letting a missing identity guard pass unnoticed.
+    localStorage.setItem(getSessionDraftKey('session-b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => latest!.submitText());
+    switchSession('session-b', '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('cancels the submit when the composer unmounts during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('draft'));
+
+    act(() => latest!.submitText());
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('recomputes the follow-up completion after preparation inserts text', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { onSubmit } = await mount({
+      prepareSubmit: async () => {
+        await gate;
+        latest!.insertText('dictated');
+      },
+      followupState: {
+        isVisible: true,
+        shownAt: 0,
+        suggestion: 'suggested prompt',
+      },
+    });
+
+    act(() => pressEnter());
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('dictated');
+  });
+
+  it('cancels the submit when the workspace switches without a session', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    // Both drafts are session-less: only the workspace-derived identity
+    // fields change, so a sessionId-only guard would let this submit through.
+    localStorage.setItem(getPendingTaskDraftKey('/workspace/b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => latest!.submitText());
+    switchSession(undefined, '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('cancels an Enter submit when the session switches during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    localStorage.setItem(getSessionDraftKey('session-b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => pressEnter());
+    switchSession('session-b', '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('does not submit or throw when an Enter submit unmounts during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('draft'));
+
+    // After unmount the view ref is null: without the Enter-path guards the
+    // continuation throws on the dead view instead of submitting, so the
+    // witness is "no unhandled rejection", not just "no submit".
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      act(() => pressEnter());
+      act(() => root?.unmount());
+      root = null;
+      await act(async () => {
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('keeps submits synchronous and never preparing without a finalizer', async () => {
+    const { onSubmit } = await mount();
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed');
+    expect(latest!.submitPreparing).toBe(false);
+  });
+
+  it('refuses a guarded Enter submit before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => pressEnter());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('refuses a guarded submitText before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('drops a programmatic submit landing inside the finalization window', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['earlier prompt']),
+    );
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(latest!.submitPreparing).toBe(true);
+    // History-search Enter submits programmatically while the flush is in
+    // flight; it must be dropped, not race the flush continuation.
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.submitSearchMatch('earlier prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('cancels the submit without an unhandled rejection when prepareSubmit rejects', async () => {
+    const prepareSubmit = vi.fn(async () => {
+      throw new Error('prepare failed');
+    });
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await act(async () => {
+        latest!.submitText();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(latest!.submitPreparing).toBe(false);
+      expect(latest!.getText()).toBe('typed');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });

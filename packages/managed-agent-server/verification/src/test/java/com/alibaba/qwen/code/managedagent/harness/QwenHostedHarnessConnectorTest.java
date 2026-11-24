@@ -22,6 +22,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecover
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -3686,6 +3687,205 @@ class QwenHostedHarnessConnectorTest {
                         error -> assertThat(error.getReason())
                                 .isEqualTo("shell_in_flight"));
         verify(client, never()).close();
+    }
+
+    // #17260: a public-child Session left over from the shell topology
+    // cannot be opened by a Harness without public child agents. Both the
+    // cancellation takeover and the plain recovery load surface the typed
+    // structural decline — never the generic IllegalStateException the
+    // coordinator's retry lane used to re-drive once a minute forever —
+    // and neither sends a load the daemon can only refuse.
+    @Test
+    void unsupportedPublicChildRecoveryDeclinesTerminallyWithoutLoading() {
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                null, null, "ACTIVE", BOOT_ID, "epoch-old", 4, 4, 0, 1, 1,
+                null, 1, new ContextBinding("tenant-a", "ws-a", 1, "storage-a",
+                        ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
+                "default", "hosted-workspace-shell/1", null, 1);
+        var sessions = sessions();
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var actions = mock(JdbcManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        // The external-files topology as a real daemon advertises it: the
+        // public-child feature token is unconditional, so the absent Shell
+        // lifecycle v2 profile is what makes the shape unopenable.
+        when(capabilities.getFeatures())
+                .thenReturn(List.of("approval-selection/1",
+                        "public-child-agents/1", "targeted-cancel/1"));
+        when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of());
+        var settings = properties();
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(settings, sessions,
+                execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        assertThatThrownBy(() -> connector.recoverManagedCancellation(
+                "tenant-a", SESSION_ID, SUBMIT_PROMPT_ID))
+                .isInstanceOfSatisfying(
+                        HostedHarnessRecoveryDeclinedException.class,
+                        error -> assertThat(error.getReason()).isEqualTo(
+                                HostedHarnessRecoveryDeclinedException
+                                        .REASON_PUBLIC_CHILD_UNSUPPORTED));
+        assertThatThrownBy(() -> connector.recoverManagedRuntime(
+                "tenant-a", SESSION_ID, false))
+                .isInstanceOfSatisfying(
+                        HostedHarnessRecoveryDeclinedException.class,
+                        error -> assertThat(error.getReason()).isEqualTo(
+                                HostedHarnessRecoveryDeclinedException
+                                        .REASON_PUBLIC_CHILD_UNSUPPORTED));
+        assertThatThrownBy(() -> connector.createOrLoad(
+                "tenant-a", SESSION_ID, true))
+                .isInstanceOf(HostedHarnessRecoveryDeclinedException.class);
+        verify(client, never()).loadSession(any());
+        verify(client, never()).close();
+    }
+
+    // The shape every real daemon emits: public-child-agents/1 is advertised
+    // unconditionally, so the Shell lifecycle profile is the whole decision.
+    // Without this case, dropping that conjunct keeps the suite green while
+    // production falls back to the transient refusal — the #17260 loop.
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
+    void theShellLifecycleProfileDecidesTheUnsupportedPublicChildDecline(
+            String lifecycleProfile) {
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                null, null, "ACTIVE", BOOT_ID, "epoch-old", 4, 4, 0, 1, 1,
+                null, 1, new ContextBinding("tenant-a", "ws-a", 1, "storage-a",
+                        ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
+                "default", "hosted-workspace-shell/1", null, 1);
+        var sessions = sessions();
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var actions = mock(JdbcManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures())
+                .thenReturn(List.of("approval-selection/1",
+                        "public-child-agents/1", "targeted-cancel/1"));
+        when(capabilities.getLifecycleV2Profiles())
+                .thenReturn(List.of(lifecycleProfile));
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.loadSession(any())).thenReturn(attached);
+        var settings = properties();
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(settings, sessions,
+                execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        if (WorkspaceToolProfiles.SHELL.equals(lifecycleProfile)) {
+            // The Harness can open this shape: the load goes out and its own
+            // answer decides, so the probe must not pre-empt it.
+            assertThat(connector.createOrLoad("tenant-a", SESSION_ID, true)
+                    .bootId()).isEqualTo(BOOT_ID);
+            verify(client).loadSession(any());
+            return;
+        }
+        assertThatThrownBy(() -> connector.createOrLoad(
+                "tenant-a", SESSION_ID, true))
+                .isInstanceOfSatisfying(
+                        HostedHarnessRecoveryDeclinedException.class,
+                        error -> assertThat(error.getReason()).isEqualTo(
+                                HostedHarnessRecoveryDeclinedException
+                                        .REASON_PUBLIC_CHILD_UNSUPPORTED));
+        verify(client, never()).loadSession(any());
+    }
+
+    // The daemon decides this decline from the saved continuation's own
+    // profile, which the capability probe never sees, so it arrives on the
+    // plain open/load route. Unmapped it degrades to a transient failure
+    // that spends the retry budget under a generic code.
+    @Test
+    void anOpenLoadDeclineMapsToTheTypedTerminalException() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException declined = mock(DaemonHttpException.class);
+        when(declined.getStatusCode()).thenReturn(409);
+        when(declined.getErrorCode())
+                .thenReturn(HostedHarnessRecoveryDeclinedException.CODE);
+        when(declined.getBodyField("reason")).thenReturn(
+                HostedHarnessRecoveryDeclinedException
+                        .REASON_PUBLIC_CHILD_UNSUPPORTED);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenThrow(declined);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID,
+                true))
+                .isInstanceOfSatisfying(
+                        HostedHarnessRecoveryDeclinedException.class,
+                        error -> assertThat(error.getReason()).isEqualTo(
+                                HostedHarnessRecoveryDeclinedException
+                                        .REASON_PUBLIC_CHILD_UNSUPPORTED));
+        verify(client, never()).close();
+    }
+
+    // The mapping keys on the code, not the status: a bare 409 still means
+    // "the Harness already holds the Session" for the attachment fallbacks.
+    @Test
+    void aBareOpenLoadConflictIsNotADecline() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn("managed_session_writer_conflict");
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenThrow(conflict);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID,
+                true))
+                .isNotInstanceOf(HostedHarnessRecoveryDeclinedException.class);
+    }
+
+    // The structural decline ends a Turn on its first drive, so an
+    // unreachable daemon must NOT produce it: without a completed
+    // capabilities read the refusal stays the ordinary transient one and
+    // the coordinator retries.
+    @Test
+    void anUnreachableDaemonKeepsTheUnsupportedPublicChildRefusalTransient() {
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                null, null, "ACTIVE", BOOT_ID, "epoch-old", 4, 4, 0, 1, 1,
+                null, 1, new ContextBinding("tenant-a", "ws-a", 1, "storage-a",
+                        ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
+                "default", "hosted-workspace-shell/1", null, 1);
+        var sessions = sessions();
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var actions = mock(JdbcManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        when(client.capabilities())
+                .thenThrow(new IllegalStateException("daemon unreachable"));
+        var settings = properties();
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(settings, sessions,
+                execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        assertThatThrownBy(() -> connector.createOrLoad(
+                "tenant-a", SESSION_ID, true))
+                .isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(HostedHarnessRecoveryDeclinedException.class)
+                .hasMessageContaining("public child recovery is unsupported");
+        verify(client, never()).loadSession(any());
     }
 
     @Test

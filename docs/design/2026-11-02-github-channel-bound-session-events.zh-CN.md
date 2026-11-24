@@ -2,7 +2,7 @@
 
 [English](2026-11-02-github-channel-bound-session-events.md) | [简体中文](2026-11-02-github-channel-bound-session-events.zh-CN.md)
 
-状态：提案（维护者已于 2026-11-02 确认决策：prompt 注入投递、channel 内状态监视、事件范围 = CI 失败 + 合并冲突 + 新评论 + head 前进 / merged / closed）。
+状态：已实现（#16117；维护者已于 2026-11-02 确认决策：prompt 注入投递、channel 内状态监视、事件范围 = CI 失败 + 合并冲突 + 新评论 + head 前进 / merged / closed）。下文按当时的设计描述。其中 PR 状态监视部分已被[由 daemon PR 刷新产生 PR 状态转换事件](2026-11-04-daemon-pr-state-transitions.zh-CN.md)取代，且该设计已落地：daemon 拥有检测与投递，`prWatchEvents` 与 `watch:*` 键是一个 minor 版本内的弃用别名，`prWatchLimit` / `prWatchBudgetReserve` 被忽略。下文的评论投递部分仍然在用。
 
 修订 2026-11-04：第 1 层改为直接读取 PR sidecar（每个 workspace 一次目录列表），不再按活动序分页会话列表，因此 `partial` 只表示目录的一部分读不到（没有 runtime 的 registry 条目、无法列出的 chats 目录、无法读取的 sidecar 或 transcript、无法获取的 live 会话列表）；会话数量不再让快照变成 partial。
 

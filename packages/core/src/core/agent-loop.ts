@@ -37,6 +37,9 @@ import {
 } from './turn.js';
 import type { LlmChat } from './llm-chat.js';
 import { runAgentLoopOnBus } from '../event-bus/adapter.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AGENT_LOOP');
 
 type SchedulerOptions = ConstructorParameters<typeof CoreToolScheduler>[0];
 
@@ -276,7 +279,7 @@ export interface AgentLoopOptions {
   runtimeView?: RuntimeContentGeneratorView;
   /** Passed to each tool batch; see {@link ToolBatchOptions}. */
   duplicateStateForCall?: ToolBatchOptions['duplicateStateForCall'];
-  keepCancelledResults?: boolean;
+  keepCancelledResults?: ToolBatchOptions['keepCancelledResults'];
   /** Leave recording to the host via `nextRound` or the loop result. */
   deferRecording?: boolean;
   /**
@@ -406,6 +409,12 @@ export async function runModelRound(
   calls: ToolCallRequestInfo[];
   stop?: AgentLoopStopReason;
 }> {
+  // Execution marker: with QWEN_DEBUG_LOG_FILE on, this line proves a round
+  // ran on the shared agent loop rather than a surface's legacy loop. The
+  // wording is deliberately distinct from the TUI surfaces' own "model round
+  // on the shared agent loop" marker so the TUI parity's count of that marker
+  // is not doubled by this one.
+  debugLogger.debug('runModelRound on the shared agent loop');
   const calls: ToolCallRequestInfo[] = [];
   let stop: AgentLoopStopReason | undefined;
   const stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined> =
@@ -470,8 +479,10 @@ export interface ToolBatchOptions {
   /**
    * Finish and record a batch `signal` cancelled and return its results,
    * with the stop reason `cancelled`, for a surface that keeps them.
+   * `'launched'` keeps only the results of calls the batch started.
+   * The host still sees any replays it was told about before cancellation.
    */
-  keepCancelledResults?: boolean;
+  keepCancelledResults?: boolean | 'launched';
   /**
    * Leave each result unrecorded and return its recording as `record` on
    * `responses`, for a surface that records only the results it sends.
@@ -671,29 +682,33 @@ export async function runToolBatch(
   if (aborted && !ended && !options.keepCancelledResults) {
     return { parts: [], stop: 'cancelled' };
   }
-  for (const request of executable) {
-    if (results.has(request)) continue;
-    answer(
-      request,
-      skippedResponse(request, host.skippedOutput?.(request) ?? ''),
-      'skipped',
-    );
-  }
-  for (const request of repeated) {
-    const key = providerKey(request);
-    if (!key) continue;
-    markDuplicateProviderToolCallResponseSent(
-      key,
-      duplicateStateFor(request).responded,
-    );
-    answer(
-      request,
-      createDuplicateProviderToolCallResponse(request),
-      'duplicate',
-    );
+  const keepOnlyLaunched =
+    aborted && options.keepCancelledResults === 'launched';
+  if (!keepOnlyLaunched) {
+    for (const request of executable) {
+      if (results.has(request)) continue;
+      answer(
+        request,
+        skippedResponse(request, host.skippedOutput?.(request) ?? ''),
+        'skipped',
+      );
+    }
+    for (const request of repeated) {
+      const key = providerKey(request);
+      if (!key) continue;
+      markDuplicateProviderToolCallResponseSent(
+        key,
+        duplicateStateFor(request).responded,
+      );
+      answer(
+        request,
+        createDuplicateProviderToolCallResponse(request),
+        'duplicate',
+      );
+    }
   }
 
-  const ordered = calls.flatMap((request) => {
+  const ordered = (keepOnlyLaunched ? toRun : calls).flatMap((request) => {
     const result = results.get(request);
     return result ? [result] : [];
   });

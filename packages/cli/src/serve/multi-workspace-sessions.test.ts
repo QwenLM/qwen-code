@@ -183,6 +183,7 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
   }>;
   readonly goalClearCalls: string[];
+  readonly goalControlCalls: Array<{ sessionId: string; request: unknown }>;
   readonly continueCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -516,6 +517,7 @@ function makeBridge(
   const sendMidTurnNowCalls: FakeBridge['sendMidTurnNowCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
+  const goalControlCalls: FakeBridge['goalControlCalls'] = [];
   const continueCalls: FakeBridge['continueCalls'] = [];
   const languageCalls: FakeBridge['languageCalls'] = [];
   const addArtifactCalls: FakeBridge['addArtifactCalls'] = [];
@@ -557,6 +559,7 @@ function makeBridge(
     sendMidTurnNowCalls,
     taskCancelCalls,
     goalClearCalls,
+    goalControlCalls,
     continueCalls,
     languageCalls,
     addArtifactCalls,
@@ -853,6 +856,12 @@ function makeBridge(
       return {
         cleared: workspaceCwd === SECONDARY_CWD,
         condition: workspaceCwd,
+      };
+    },
+    async controlSessionGoal(sessionId: string, request: unknown) {
+      goalControlCalls.push({ sessionId, request });
+      return {
+        snapshot: { v: 2 as const, activity: 'idle' as const, goal: null },
       };
     },
     async continueSession(
@@ -4083,6 +4092,39 @@ describe('multi-workspace session dispatch', () => {
     ]) {
       expect(calls).toEqual([]);
     }
+  });
+
+  it('routes goal lifecycle controls to the owning non-primary workspace bridge', async () => {
+    // The Goals page pauses/resumes/edits secondary-workspace goals through
+    // the same per-session control route as clear; narrowing the owner
+    // resolution to the primary would break every secondary goal control.
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/goal')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({
+        action: 'pause',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.snapshot).toEqual({ v: 2, activity: 'idle', goal: null });
+    expect(secondaryBridge.goalControlCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        request: {
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 1,
+        },
+      },
+    ]);
+    expect(primaryBridge.goalControlCalls).toEqual([]);
   });
 
   it('persists a cross-workspace pr sidecar in the OWNING workspace chats dir', async () => {

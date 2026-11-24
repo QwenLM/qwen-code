@@ -58,6 +58,7 @@ import {
 } from './hosted-model-selection.js';
 import {
   findHostedApprovalContinuation,
+  HostedPublicChildRecoveryProfileChanged,
   type RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import {
@@ -5967,6 +5968,15 @@ export function registerHostedHarnessSessionRoutes(
             error(res, 409, 'hosted_harness_quiescing');
             return;
           }
+          // #17260: the parked Turn's saved public-child profile belongs
+          // to a topology this Harness cannot open. The durable verdict
+          // never changes on retry, so answer the typed terminal decline
+          // instead of the retriable refusal that kept the coordinator's
+          // recovery sweep re-driving it forever.
+          if (cause instanceof HostedPublicChildRecoveryProfileChanged) {
+            recoveryDeclined(res, 'public_child_recovery_unsupported');
+            return;
+          }
           blockRecovery(resident, namedStoreFailure(cause));
           writeStderrLineSafe(
             'qwen serve: Hosted recovery redrive failed: ' + String(cause),
@@ -8467,6 +8477,11 @@ export function registerHostedHarnessSessionRoutes(
         thrown instanceof ManagedSessionCloseError ? thrown.sealError : thrown;
       if (cause instanceof HostedRecoveryQuiescingError) {
         error(res, 409, 'hosted_harness_quiescing');
+      } else if (cause instanceof HostedPublicChildRecoveryProfileChanged) {
+        // #17260: same durable verdict as the attached redrive above — a
+        // saved public-child profile this topology cannot open declines
+        // terminally instead of the generic retriable open failure.
+        recoveryDeclined(res, 'public_child_recovery_unsupported');
       } else if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
       } else if (

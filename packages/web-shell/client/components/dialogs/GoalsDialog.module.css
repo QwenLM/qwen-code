@@ -123,6 +123,23 @@
   outline-offset: -1px;
 }
 
+.select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: inherit;
+}
+
+.select:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+}
+
 .formHint {
   font-size: 12px;
   line-height: 1.5;

@@ -19,7 +19,7 @@
 9551 build-and-publish-image.yml
 55276 cd-cua-driver.yml
 2222 cd-mobile-mcp.yml
-212144 ci.yml
+  217019 ci.yml
 4193 codeql.yml
 9389 comment-attachment-guard.yml
 2090 desktop-packaging-check.yml
@@ -31,6 +31,7 @@
 16647 live-host-release.yml
 5950 live-host.yml
 14543 managed-agent-gate.yml
+4318 managed-agent-loop.yml
 61381 main-ci-failure-issue.yml
 1343 mobile-shell.yml
 3259 pnpm-store.yml
