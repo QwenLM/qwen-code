@@ -823,6 +823,83 @@ describe('git hardening', () => {
       '-c',
       'filter.symwt.clean=',
     ]);
+
+    // 5. [include] spoofing extensions.worktreeConfig=false cannot hide
+    // config.worktree filters or core.worktree, and cross-scope
+    // [includeIf "hasconfig:remote.*.url:..."] filters remain enumerated.
+    const { dir: incRepo, base: incBase, head: incHead } = makeRepo();
+    const incMarker = join(incRepo, 'inc-wt-rce-fired');
+    writeFileSync(
+      join(incRepo, '.git', 'disable.cfg'),
+      '[extensions]\n\tworktreeConfig = false\n',
+    );
+    writeFileSync(
+      join(incRepo, '.git', 'hascfg-evil.cfg'),
+      `[filter "hascfg"]\n\tclean = touch ${incMarker} && cat\n`,
+    );
+    execFileSync(
+      'git',
+      ['-C', incRepo, 'config', '--local', 'core.repositoryformatversion', '1'],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', incRepo, 'config', '--local', 'extensions.worktreeConfig', 'true'],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-C',
+        incRepo,
+        'config',
+        '--local',
+        'remote.origin.url',
+        'https://example.invalid/trigger',
+      ],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', incRepo, 'config', '--local', 'include.path', 'disable.cfg'],
+      { stdio: 'pipe' },
+    );
+    writeFileSync(
+      join(incRepo, '.git', 'config.worktree'),
+      `[filter "sneaky"]\n\tclean = touch ${incMarker} && cat\n[includeIf "hasconfig:remote.*.url:https://example.invalid/trigger"]\n\tpath = hascfg-evil.cfg\n`,
+    );
+    expect(localFilterOverrides(incRepo)).toEqual([
+      '-c',
+      'filter.sneaky.clean=',
+      '-c',
+      'filter.hascfg.clean=',
+    ]);
+    writeFileSync(
+      join(incRepo, '.git', 'info', 'attributes'),
+      'a.txt filter=hascfg\n',
+    );
+    const incRes = runPrepare(
+      incRepo,
+      ['42', '--repo', REPO],
+      installFakeGh(snapshotFor({ base: incBase, head: incHead })),
+    );
+    expect(incRes.status, incRes.stderr).toBe(0);
+    expect(existsSync(incMarker)).toBe(false);
+
+    // Same [include] spoof cannot hide core.worktree inside config.worktree.
+    const incSub = join(incRepo, 'sub');
+    mkdirSync(incSub, { recursive: true });
+    writeFileSync(
+      join(incRepo, '.git', 'config.worktree'),
+      `[core]\n\tworktree = ${incSub}\n`,
+    );
+    const incWtRes = runPrepare(
+      incSub,
+      ['42', '--repo', REPO],
+      installFakeGh(snapshotFor({ base: incBase, head: incHead })),
+    );
+    expect(incWtRes.status).toBe(3);
+    expect(incWtRes.stderr).toContain('core.worktree');
   });
 
   // A filter VALUE may contain newlines; parsing the rendered `key value`

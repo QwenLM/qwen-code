@@ -204,13 +204,13 @@ export function isFilesystemRoot(root) {
   return root === sep || root === '/' || /^[A-Za-z]:[\\/]$/.test(root);
 }
 
-// Root-aware containment. A filesystem root contains every path, so it must
-// fail closed rather than compare against '//' — no real path starts with
 const CASE_INSENSITIVE_FS =
   process.platform === 'darwin' || process.platform === 'win32';
 const normalizeFsPath = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
 const realPath = (p) => realpathSync.native(p);
 
+// Root-aware containment. A filesystem root contains every path, so it must
+// fail closed rather than compare against '//' — no real path starts with
 // '//', which silently disabled the refusal for a round dir directly under a
 // root-level tmp/ (R17-1). Both the --context refusal and the --context-root
 // containment test use this so the two stay consistent.
