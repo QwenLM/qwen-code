@@ -301,6 +301,7 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
+    ...(options?.retractToolCallsOnRetry && { retractToolCallsOnRetry: true }),
     ...(options?.interactionSpan && {
       interactionSpan: options.interactionSpan,
     }),
@@ -530,6 +531,12 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * The consumer buffers streamed `functionCall` parts until end-of-stream and
+   * discards them on `LlmEventType.Retry`, so a transport cut that delivered
+   * only thinking and unexecuted tool calls can replay cleanly.
+   */
+  retractToolCallsOnRetry?: boolean;
   /**
    * Stable model-availability ledger turn key for this send, when it differs
    * from the send's `prompt_id`. A headless runtime Goal run keeps the
@@ -5356,6 +5363,7 @@ export class LlmClient {
           messageType !== SendMessageType.Teammate &&
           !this.backgroundInteractionPromptIds.has(prompt_id),
         options?.ledgerTurnKey,
+        options?.retractToolCallsOnRetry,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -6345,11 +6353,7 @@ export class LlmClient {
           };
         }
 
-        if (
-          goalPermit &&
-          (stopOutput?.isBlockingDecision() ||
-            stopOutput?.shouldStopExecution())
-        ) {
+        if (goalPermit && stopOutput?.isBlockingDecision()) {
           const continueReason = stopOutput.getEffectiveReason();
           const { iterationCount, reasons, cap, capped } =
             this.nextStopHookBlock(prompt_id, continueReason);
@@ -6434,12 +6438,9 @@ export class LlmClient {
           }
         }
 
-        // For Stop hooks, blocking/stop execution should force continuation
-        if (
-          !goalPermit &&
-          (stopOutput?.isBlockingDecision() ||
-            stopOutput?.shouldStopExecution())
-        ) {
+        // A blocking Stop hook forces continuation. `continue: false` without
+        // a block lets the turn end.
+        if (!goalPermit && stopOutput?.isBlockingDecision()) {
           // Check if aborted before continuing
           if (signal.aborted) {
             endCurrentInteraction('cancelled');
@@ -6548,6 +6549,14 @@ export class LlmClient {
           // ToolResult turn still needs to consume the recall result.
           normalCompletion = true;
           return hookTurn;
+        }
+
+        if (stopOutput?.shouldStopExecution() && stopOutput.stopReason) {
+          yield {
+            type: LlmEventType.HookSystemMessage,
+            value: stopOutput.stopReason,
+            isStopReason: true,
+          };
         }
 
         // The stop was allowed, so this prompt is no longer hook-forced.

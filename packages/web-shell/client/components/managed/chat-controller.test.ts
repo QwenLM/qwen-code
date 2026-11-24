@@ -300,6 +300,9 @@ describe('managed chat-controller mappings', () => {
           { id: 'prod', label: 'Prod', description: 'Production cluster' },
         ],
         multiSelect: false,
+        required: true,
+        allowText: true,
+        maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
       },
       {
         id: 'notes',
@@ -310,6 +313,54 @@ describe('managed chat-controller mappings', () => {
           { id: 'verbose', label: 'Verbose', description: '' },
         ],
         multiSelect: true,
+        required: true,
+        allowText: true,
+        maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+      },
+    ]);
+
+    const optionalStrictReq = toManagedQuestionPermissionRequest(
+      questionAction({
+        questions: [
+          {
+            id: 'opt',
+            prompt: 'Optional note?',
+            required: false,
+            multiple: false,
+            allowText: true,
+            options: [],
+          },
+          {
+            id: 'strict',
+            prompt: 'Pick strictly',
+            required: true,
+            multiple: false,
+            allowText: false,
+            options: [{ id: 'a', label: 'A' }],
+          },
+        ],
+      }),
+    );
+    expect(optionalStrictReq.rawInput?.questions).toEqual([
+      {
+        id: 'opt',
+        question: 'Optional note?',
+        header: 'opt',
+        options: [],
+        multiSelect: false,
+        required: false,
+        allowText: true,
+        maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
+      },
+      {
+        id: 'strict',
+        question: 'Pick strictly',
+        header: 'strict',
+        options: [{ id: 'a', label: 'A', description: '' }],
+        multiSelect: false,
+        required: true,
+        allowText: false,
+        maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
       },
     ]);
   });

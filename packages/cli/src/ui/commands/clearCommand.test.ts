@@ -165,6 +165,19 @@ describe('clearCommand', () => {
     expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
   });
 
+  it('notifies ACP of the new session before yielding after rotation', async () => {
+    mockContext.executionMode = 'acp';
+    const action = clearCommand.action!(mockContext, '');
+    try {
+      expect(mockStartNewSession).toHaveBeenCalledOnce();
+      expect(mockContext.session.startNewSession).toHaveBeenCalledWith(
+        'new-session-id',
+      );
+    } finally {
+      await action;
+    }
+  });
+
   it('aborts old background work before starting a new session', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');

@@ -277,6 +277,7 @@ export const githubReader: ReviewPlatformReader = {
       deletions: number;
       changedFiles: number;
       isCrossRepository: boolean;
+      authorAssociation?: string;
       body?: string;
     }>(
       'pr',
@@ -285,13 +286,17 @@ export const githubReader: ReviewPlatformReader = {
       '--repo',
       ownerRepo,
       '--json',
-      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
+      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,authorAssociation,body',
     );
     return {
       headRefOid: view.headRefOid,
       headRefName: view.headRefName,
       baseRefName: view.baseRefName,
       isCrossRepository: view.isCrossRepository,
+      ...(typeof view.authorAssociation === 'string' &&
+      view.authorAssociation.trim().length > 0
+        ? { authorAssociation: view.authorAssociation.trim() }
+        : {}),
       body: view.body,
       additions: view.additions,
       deletions: view.deletions,
