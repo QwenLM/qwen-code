@@ -39,11 +39,17 @@ export function drawsTranslatedRows(sites: readonly ModRenderSite[]): boolean {
 }
 
 async function inspectMarkdown(text: string) {
-  const { parseMarkdown, walkMarkdown } = await import(
-    '../ui/utils/export/markdown-document-policy.js'
-  );
+  const [{ parseMarkdown, walkMarkdown }, { BARE_URL_BREAK_CHARACTERS }] =
+    await Promise.all([
+      import('../ui/utils/export/markdown-document-policy.js'),
+      import('../ui/utils/osc8.js'),
+    ]);
   const root = parseMarkdown(text);
   if (!root) return undefined;
+  const cjkPunctuation = new RegExp(
+    String.raw`(?=[${BARE_URL_BREAK_CHARACTERS}])\p{P}`,
+    'u',
+  );
   const words: string[] = [];
   const fences: Array<{
     value?: string;
@@ -52,7 +58,8 @@ async function inspectMarkdown(text: string) {
   }> = [];
   // Translation may reorder spans and links, but must keep each one.
   const spans: string[] = [];
-  walkMarkdown(root, ({ type, value, lang, meta, url, children }) => {
+  const punctuationOffsets: number[] = [];
+  walkMarkdown(root, ({ type, value, lang, meta, url, children, position }) => {
     if (type === 'text' && value) words.push(value);
     else if (type === 'code') fences.push({ value, lang, meta });
     else if (type === 'inlineCode') spans.push(`code:${value}`);
@@ -60,16 +67,37 @@ async function inspectMarkdown(text: string) {
       spans.push(`${type}:${value}`);
     else if (url !== undefined) {
       // CJK punctuation after a bare URL parses as part of it.
-      const shown = children?.length === 1 ? children[0].value : undefined;
-      const bare =
+      let kept = url;
+      const start = position?.start.offset;
+      const end = position?.end.offset;
+      if (
         type === 'link' &&
-        shown !== undefined &&
-        [shown, `mailto:${shown}`, `http://${shown}`].includes(url);
-      const kept = bare ? url.replace(/(?:(?!\p{ASCII})\p{P})+$/u, '') : url;
+        start !== undefined &&
+        end !== undefined &&
+        children?.length === 1 &&
+        children[0].type === 'text'
+      ) {
+        const raw = text.slice(start, end);
+        if (
+          raw === children[0].value &&
+          [raw, `mailto:${raw}`, `http://${raw}`].includes(url)
+        ) {
+          let urlEnd = url.length;
+          while (cjkPunctuation.test(url.charAt(urlEnd - 1))) urlEnd--;
+          if (urlEnd < url.length) {
+            kept = url.slice(0, urlEnd);
+            punctuationOffsets.push(end - (url.length - urlEnd));
+          }
+        }
+      }
       spans.push(`url:${kept}`);
     }
   });
-  return { prose: words.join(' '), code: { fences, spans: spans.sort() } };
+  return {
+    prose: words.join(' '),
+    code: { fences, spans: spans.sort() },
+    punctuationOffsets,
+  };
 }
 
 async function terminalMarkdown() {
@@ -165,7 +193,26 @@ export async function translateDisplayText(
       logger.debug('Left untranslated: code changed');
       return undefined;
     }
-    return signal.aborted ? undefined : text;
+    if (signal.aborted) return undefined;
+    if (surface === 'terminal' || !translated.punctuationOffsets.length)
+      return text;
+
+    const parts: string[] = [];
+    let start = 0;
+    for (const offset of translated.punctuationOffsets) {
+      parts.push(text.slice(start, offset));
+      start = offset;
+    }
+    parts.push(text.slice(start));
+    const separated = parts.join(' ');
+    // Adding a delimiter can make GFM drop adjacent ASCII URL characters too.
+    const displayed = await inspectMarkdown(separated);
+    return !signal.aborted &&
+      displayed &&
+      !displayed.punctuationOffsets.length &&
+      isDeepStrictEqual(translated.code, displayed.code)
+      ? separated
+      : undefined;
   } catch (error) {
     logger.debug(`Left untranslated: ${String(error)}`);
     return undefined;

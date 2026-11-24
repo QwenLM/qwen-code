@@ -960,6 +960,11 @@ export class ModSession implements ICommandLoader {
         (typeof translationAuthorization !== 'function' ||
           translationAuthorization());
       if (!wanted() || !canTranslate()) return null;
+      const rowSignal = (signal ??= startRender());
+      const branchSignal =
+        typeof translationAuthorization === 'function'
+          ? this.config.getChatRecordingService()?.getBranchAbortSignal()
+          : undefined;
       const text = await translateDisplayText(
         props.text,
         target,
@@ -972,7 +977,7 @@ export class ModSession implements ICommandLoader {
               canTranslate,
             ),
           ),
-        (signal ??= startRender()),
+        branchSignal ? AbortSignal.any([rowSignal, branchSignal]) : rowSignal,
         input.surface,
       );
       if (!canTranslate()) return null;

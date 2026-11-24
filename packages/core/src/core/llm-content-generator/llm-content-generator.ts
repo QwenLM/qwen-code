@@ -122,6 +122,8 @@ function installIsolatedTransport(
       url,
       signal,
     ) => {
+      // The SDK only observes abort events after it starts building the request.
+      signal?.throwIfAborted();
       const hasExplicitNativeHeader = Object.keys(options.headers ?? {}).some(
         (name) => name.toLowerCase() === 'x-goog-api-key',
       );

@@ -133,28 +133,63 @@ describe('translateDisplayText', () => {
   });
 
   it.each([
-    ['See https://a.example/docs.', '详见 https://a.example/docs。'],
+    [
+      'See https://a.example/docs.',
+      '详见 https://a.example/docs。',
+      '详见 https://a.example/docs 。',
+    ],
     [
       'Visit https://a.example/docs,\nthen run it.',
       '请访问 https://a.example/docs，\n然后运行。',
+      '请访问 https://a.example/docs ，\n然后运行。',
     ],
-    ['Open <foo:bar>.', '打开 <foo:bar。>'],
+    ['Open <foo:bar>.', '打开 <foo:bar>。'],
     [
       '详细的使用说明请参见 https://a.example/docs。',
       'See https://a.example/docs for details.',
     ],
     ['Mail a@b.example.', '发邮件到 a@b.example。'],
-    ['See https://a.example.', '详见 https://a.example。'],
-    ['See the docs at https://例子.测试.', '文档详见 https://例子.测试。'],
+    [
+      'See https://a.example.',
+      '详见 https://a.example。',
+      '详见 https://a.example 。',
+    ],
+    [
+      'See the docs at https://例子.测试.',
+      '文档详见 https://例子.测试。',
+      '文档详见 https://例子.测试 。',
+    ],
+    [
+      'See www.a.example/%E3%80%82 and https://b.example/docs.',
+      '详见 www.a.example/%E3%80%82，\n另见 https://b.example/docs。',
+      '详见 www.a.example/%E3%80%82 ，\n另见 https://b.example/docs 。',
+    ],
+    [
+      'See [https://a.example/docs。](https://a.example/docs。).',
+      '详见 [https://a.example/docs。](https://a.example/docs。)。',
+    ],
   ])(
     'accepts a bare URL next to other punctuation in %s',
-    async (original, translated) => {
+    async (original, translated, displayed = translated) => {
       const target = /\p{Script=Han}/u.test(translated) ? 'zh-CN' : 'en';
       await expect(
         translateDisplayText(original, target, answer(translated), signal),
-      ).resolves.toBe(translated);
+      ).resolves.toBe(displayed);
     },
   );
+
+  it('keeps terminal bare-link text as emitted by the model', async () => {
+    const translated = '详见 https://a.example/docs。';
+    await expect(
+      translateDisplayText(
+        'See https://a.example/docs.',
+        'zh-CN',
+        answer(translated),
+        signal,
+        'terminal',
+      ),
+    ).resolves.toBe(translated);
+  });
 
   it('translates Traditional Chinese when the target is Simplified Chinese', async () => {
     const complete = answer('请先确认这个文件是否存在。');
@@ -281,6 +316,13 @@ describe('translateDisplayText', () => {
     ['See https://a.example.', '参见 https://a.example。evil.example/x'],
     ['See https://a.example/docs.', '参见 https://a.example/admin。'],
     ['See https://a.example/?q=1.', '参见 https://a.example/?q=2。'],
+    [
+      'See [https://a.example/docs](https://a.example/docs).',
+      '详见 [https://a.example/docs。](https://a.example/docs。)。',
+    ],
+    ['Open <foo:bar>.', '打开 <foo:bar。>'],
+    ['Mail <mailto:a@b.example>.', '发邮件到 <mailto:a@b.example。>。'],
+    ['See https://a.example/docs.', '详见 https://a.example/docs”'],
     ['Mail <mailto:a@b.example>.', '发邮件到 <mailto:a@b.example．ｃｎ>。'],
     ['Mail <mailto:a@b.example>.', '发邮件到 <mailto:a@evil.example>。'],
     ['Mail a@b.example.', '发邮件到 a@evil.example。'],
@@ -297,6 +339,17 @@ describe('translateDisplayText', () => {
       ).resolves.toBeUndefined();
     },
   );
+
+  it('falls back if separating punctuation would also remove a URL character', async () => {
+    await expect(
+      translateDisplayText(
+        'See <https://a.example/docs!>.',
+        'zh-CN',
+        answer('详见 https://a.example/docs!。'),
+        signal,
+      ),
+    ).resolves.toBeUndefined();
+  });
 
   it('keeps the original when a translation adds a non-web bare link', async () => {
     await expect(

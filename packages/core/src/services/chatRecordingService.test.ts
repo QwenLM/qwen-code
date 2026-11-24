@@ -409,6 +409,19 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  it('cancels work on the replaced branch after a rewind', async () => {
+    const branch = svc.getBranchAbortSignal();
+    turn('first', 'first answer');
+    user('second');
+    await svc.flush();
+    expect(svc.getBranchAbortSignal()).toBe(branch);
+    expect(branch.aborted).toBe(false);
+
+    svc.rewindRecording(1, { truncatedCount: 1 });
+    expect(branch.aborted).toBe(true);
+    expect(svc.getBranchAbortSignal().aborted).toBe(false);
+  });
+
   describe('background execution recording ownership', () => {
     const turn: BackgroundNotificationTurn = {
       turnId: 'automatic-turn',

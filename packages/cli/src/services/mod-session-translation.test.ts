@@ -6,10 +6,15 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import {
+  BaseLlmClient,
+  type GenerateTextOptions,
+} from '@qwen-code/qwen-code-core/core/baseLlmClient.js';
 import type {
   ModAssistantMessageInput,
   ModRenderSite,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 import type { translateDisplayText } from './display-translation-mod.js';
@@ -126,7 +131,7 @@ describe('Mod session display translation', () => {
       getHookSystem: () => undefined,
       getSandbox: () => undefined,
       isSessionAgentSession: () => false,
-      getChatRecordingService: () => undefined,
+      getChatRecordingService: vi.fn<Config['getChatRecordingService']>(),
       getContentGeneratorConfig: () => undefined,
       getResumedSessionData: () => undefined,
       getLlmClient: () => undefined,
@@ -420,7 +425,7 @@ describe('Mod session display translation', () => {
     expect(generateText).not.toHaveBeenCalled();
   });
 
-  it('rechecks authorization at provider dispatch after model routing', async () => {
+  it('rechecks authorization before starting asynchronous model routing', async () => {
     const { config, session, generateText } = setup();
     mocks.translate.mockImplementation(translateWithFakeModel);
     let authorized = true;
@@ -442,6 +447,55 @@ describe('Mod session display translation', () => {
     ).resolves.toEqual({ status: 'unanswered' });
     expect(config.getAllConfiguredModels).toHaveBeenCalled();
     expect(generateText).not.toHaveBeenCalled();
+  });
+
+  it('cancels the provider request if the recorded branch changes during routing', async () => {
+    const { config, session, generateText } = setup();
+    const recorder = new ChatRecordingService(config as unknown as Config);
+    config.getChatRecordingService.mockReturnValue(recorder);
+    mocks.translate.mockImplementation(translateWithFakeModel);
+    const routingStarted = deferred<void>();
+    const finishRouting = deferred<void>();
+    const generateContent = vi.fn(async () => ({
+      candidates: [{ content: { parts: [{ text: '译文' }] } }],
+    }));
+    const client = {
+      config,
+      async resolveForModel() {
+        routingStarted.resolve();
+        await finishRouting.promise;
+        return {
+          contentGenerator: { generateContent },
+          contentGeneratorConfig: {},
+          model: 'model',
+        };
+      },
+    };
+    generateText.mockImplementation((options: GenerateTextOptions) =>
+      BaseLlmClient.prototype.generateText.call(client, options),
+    );
+    const signal = new AbortController().signal;
+    const branch = recorder.getBranchGeneration();
+    await session!.initialize(signal);
+    const pending = session!.askRow(
+      'AssistantMessage',
+      reply.props,
+      signal,
+      () => recorder.getBranchGeneration() === branch,
+    );
+    await routingStarted.promise;
+    recorder.rebuildTurnBoundaries([]);
+    finishRouting.resolve();
+    await expect(pending).resolves.toEqual({ status: 'unanswered' });
+    await expect(generateText.mock.results[0].value).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(generateContent).not.toHaveBeenCalled();
+
+    await expect(
+      session!.askRow('AssistantMessage', reply.props, signal, authorize),
+    ).resolves.toEqual({ status: 'answered', props: translatedReply });
+    expect(generateContent).toHaveBeenCalledOnce();
   });
 
   it('does not return a cached translation after authorization expires', async () => {
