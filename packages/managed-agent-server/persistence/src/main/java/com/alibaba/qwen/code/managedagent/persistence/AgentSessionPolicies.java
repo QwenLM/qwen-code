@@ -674,6 +674,7 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "approval_selection_conflict", "The approval revision changed");
         }
         AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
+        AgentActionParking.dueWakeParks(jdbc, tenantId, sessionId, now);
         ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         Map<String, Object> result = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision, "planMode", planMode));
         if (rules != null) {

@@ -11,6 +11,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.ReferenceGuard {
+    // The plain equalities reach the record's unique key; the binary casts
+    // keep the match byte-exact under the PAD SPACE collation.
+    static final String SETTLED_CHILD_RUN_SQL = "SELECT 1 FROM ma_session_record WHERE record_kind = 'DOMAIN' AND"
+            + " tenant_id = ? AND session_id = ? AND domain = 'child_run' AND record_id = ? AND CAST(domain AS"
+            + " BINARY(2048)) = CAST('child_run' AS BINARY(2048)) AND"
+            + " CAST(record_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND"
+            + " settled_at IS NOT NULL LIMIT 1";
+
     @Override
     public boolean bindingReferenced(Connection connection, RuntimeBindingRecord binding)
             throws SQLException {
@@ -143,16 +151,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                 }
                 // Lineage precedes warm; a canonical terminal run cannot reopen its identity repair
                 // debt.
-                return !exists(
-                        connection,
-                        "SELECT 1 FROM ma_session_record WHERE record_kind = 'DOMAIN' AND"
-                            + " tenant_id = ? AND session_id = ? AND CAST(domain AS"
-                            + " BINARY(2048)) = CAST('child_run' AS BINARY(2048)) AND"
-                            + " CAST(record_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND"
-                            + " settled_at IS NOT NULL LIMIT 1",
-                        tenantId,
-                        parent,
-                        run);
+                return !exists(connection, SETTLED_CHILD_RUN_SQL, tenantId, parent, run, run);
             }
         }
     }

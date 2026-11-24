@@ -12,7 +12,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types.js';
-import type { SessionChatController } from './contract.js';
+import type { QuestionAnswer, SessionChatController } from './contract.js';
 import { regionsToCapabilities } from './capabilities.js';
 
 const captured = vi.hoisted(() => ({
@@ -117,6 +117,7 @@ type QuestionConfirm = (
   id: string,
   optionId: string,
   answers?: Record<string, string>,
+  structuredAnswers?: readonly QuestionAnswer[],
 ) => Promise<boolean>;
 type ApprovalConfirm = (id: string, optionId: string) => Promise<void>;
 
@@ -220,6 +221,34 @@ describe('ChatSurface', () => {
     ]);
     expect(controller.respondApproval).not.toHaveBeenCalled();
     expect(accepted).toBe(true);
+  });
+
+  it('forwards structured question answers without re-decoding rendered labels', async () => {
+    const request = permissionRequest('q1');
+    const controller = fakeController({
+      pendingQuestions: [{ id: 'q1', request }],
+    });
+    mountReact(<ChatSurface controller={controller} />);
+    const onConfirm = captured.question?.onConfirm as QuestionConfirm;
+    const structured = [
+      {
+        questionId: 'notes',
+        value: 'Dry run, Verbose',
+        optionIds: ['dry'],
+        text: 'Verbose',
+      },
+    ] as const;
+    expect(
+      await onConfirm(
+        'q1',
+        'submit',
+        {
+          '0': 'Dry run, Verbose',
+        },
+        structured,
+      ),
+    ).toBe(true);
+    expect(controller.respondQuestion).toHaveBeenCalledWith('q1', structured);
   });
 
   it('routes the question reject option through respondApproval, not respondQuestion', async () => {

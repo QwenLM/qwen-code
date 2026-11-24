@@ -1227,6 +1227,7 @@ public final class JdbcRuntimeBindingRepository
                 dataSource,
                 connection -> {
                     List<RuntimeBindingRecord> records = new ArrayList<>();
+                    boolean h2 = "H2".equals(connection.getMetaData().getDatabaseProductName());
                     try (PreparedStatement statement =
                             connection.prepareStatement(
                                     "SELECT "
@@ -1239,8 +1240,9 @@ public final class JdbcRuntimeBindingRepository
                                             + " EXISTS (SELECT 1 FROM ma_operation recovery WHERE"
                                             + " recovery.operation_kind ="
                                             + " 'WORKSPACE_OPERATOR_RECOVERY' AND"
-                                            + " CAST(recovery.target_id AS BINARY(512)) ="
-                                            + " CAST(ma_runtime_binding.binding_id AS BINARY(512))"
+                                            + " recovery.target_id = "
+                                            + com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate
+                                                    .binaryIdentity("ma_runtime_binding.binding_id", h2)
                                             + " AND recovery.target_revision ="
                                             + " ma_runtime_binding.runtime_generation AND"
                                             + " recovery.state <> 'COMPLETED') ORDER BY binding_id"
