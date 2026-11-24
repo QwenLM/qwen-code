@@ -6,9 +6,11 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
 } from './acp-session-bridge.js';
+import type { LoadAdmissionSnapshot } from './load-admission.js';
 import { createTotalSessionAdmissionController } from './total-session-admission.js';
 
 describe('createTotalSessionAdmissionController', () => {
@@ -145,5 +147,131 @@ describe('createTotalSessionAdmissionController', () => {
     expect(admission.snapshotForWorkspace('/work/a').inFlight).toBe(1);
     replacementReservation.release();
     expect(admission.snapshotForWorkspace('/work/a').inFlight).toBe(0);
+  });
+});
+
+describe('createTotalSessionAdmissionController load admission', () => {
+  const overloadedSnapshot: LoadAdmissionSnapshot = {
+    enabled: true,
+    overloaded: true,
+    reason: 'cpu_load',
+    loadRatio: 2.5,
+    eventLoopLagP99Ms: 120,
+    sampledAtMs: 1_000,
+  };
+  const normalSnapshot: LoadAdmissionSnapshot = {
+    ...overloadedSnapshot,
+    overloaded: false,
+    reason: null,
+    loadRatio: 0.3,
+  };
+
+  it('refuses every fresh-child operation while overloaded, without reserving', () => {
+    const admission = createTotalSessionAdmissionController({
+      getBridges: () => [],
+      loadAdmission: { snapshot: () => overloadedSnapshot },
+    });
+    for (const operation of ['spawn', 'load', 'resume', 'branch'] as const) {
+      expect(() =>
+        admission.admit({ operation, workspaceCwd: '/work/a' }),
+      ).toThrow(SystemOverloadedError);
+    }
+    expect(admission.snapshot()).toEqual({ liveCount: 0, inFlight: 0 });
+  });
+
+  it('carries the monitor reason, readings, and admission context on the error', () => {
+    const admission = createTotalSessionAdmissionController({
+      getBridges: () => [],
+      loadAdmission: { snapshot: () => overloadedSnapshot },
+    });
+    try {
+      admission.admit({
+        operation: 'branch',
+        workspaceCwd: '/work/a',
+        sessionId: 'sess-new',
+        sourceSessionId: 'sess-src',
+      });
+      throw new Error('expected SystemOverloadedError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SystemOverloadedError);
+      expect(err).toMatchObject({
+        reason: 'cpu_load',
+        loadRatio: 2.5,
+        eventLoopLagP99Ms: 120,
+        operation: 'branch',
+        workspaceCwd: '/work/a',
+        sessionId: 'sess-new',
+        sourceSessionId: 'sess-src',
+      });
+    }
+  });
+
+  it('admits normally when the monitor reports no overload', () => {
+    const admission = createTotalSessionAdmissionController({
+      maxTotalSessions: 1,
+      getBridges: () => [],
+      loadAdmission: { snapshot: () => normalSnapshot },
+    });
+    const reservation = admission.admit({
+      operation: 'spawn',
+      workspaceCwd: '/work/a',
+    });
+    expect(admission.snapshot().inFlight).toBe(1);
+    reservation?.release();
+    expect(admission.snapshot().inFlight).toBe(0);
+  });
+
+  it('reads the monitor at admission time, not at construction', () => {
+    let snapshot = normalSnapshot;
+    const admission = createTotalSessionAdmissionController({
+      getBridges: () => [],
+      loadAdmission: { snapshot: () => snapshot },
+    });
+    const reservation = admission.admit({
+      operation: 'spawn',
+      workspaceCwd: '/work/a',
+    });
+    reservation?.release();
+    snapshot = overloadedSnapshot;
+    expect(() =>
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' }),
+    ).toThrow(SystemOverloadedError);
+  });
+
+  it('keeps drain precedence over load refusal', () => {
+    const admission = createTotalSessionAdmissionController({
+      getBridges: () => [],
+      loadAdmission: { snapshot: () => overloadedSnapshot },
+    });
+    admission.beginWorkspaceDrain('/work/a');
+    expect(() =>
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' }),
+    ).toThrow(WorkspaceDrainingError);
+  });
+
+  it('reports overload before the count limit when both trip', () => {
+    const admission = createTotalSessionAdmissionController({
+      maxTotalSessions: 1,
+      getBridges: () => [{ sessionCount: 1 }],
+      loadAdmission: { snapshot: () => overloadedSnapshot },
+    });
+    expect(() =>
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' }),
+    ).toThrow(SystemOverloadedError);
+  });
+
+  it('behaves exactly as before when no monitor is wired', () => {
+    const admission = createTotalSessionAdmissionController({
+      maxTotalSessions: 1,
+      getBridges: () => [{ sessionCount: 0 }],
+    });
+    const reservation = admission.admit({
+      operation: 'spawn',
+      workspaceCwd: '/work/a',
+    });
+    expect(() =>
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/b' }),
+    ).toThrow(TotalSessionLimitExceededError);
+    reservation?.release();
   });
 });
