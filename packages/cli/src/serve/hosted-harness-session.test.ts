@@ -50261,6 +50261,7 @@ describe('idle suspension', () => {
   async function promptPublicShellApproval(
     server: Server,
     approvalTimeoutMs = 60_000,
+    definition: Record<string, unknown> = {},
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
@@ -50268,6 +50269,7 @@ describe('idle suspension', () => {
         sessionScope: 'thread',
         managedSessionStore: store(),
         ...publicShellSession,
+        ...definition,
         approvalMode: 'default',
         approvalTimeoutMs,
       })
@@ -50583,6 +50585,296 @@ describe('idle suspension', () => {
       state.approvalSelections.clear();
     }
   });
+
+  // S5 widens decision 8: a public-children Shell Session whose extensions
+  // bring Hooks parks its Shell approval on the config-scoped Hook owner.
+  it.each(['park', 'Harness death'] as const)(
+    'resumes a public-children Shell approval with extension Hooks after a %s',
+    async (interruption) => {
+      const parks = interruption === 'park';
+      state.wakeDispatch = parks;
+      state.actionParking = parks;
+      state.wakeStamps.length = 0;
+      state.approvalSelections.set(SESSION_ID, {
+        mode: 'default',
+        revision: 0,
+      });
+      const extensions = await mockCommandStepTurn(true);
+      const { prepareV3, executeV3, saved } = await mockPublicShellApproval();
+      const executions: Array<{
+        event: unknown;
+        command: unknown;
+        owner: string;
+      }> = [];
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'hookControl',
+      ).mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: {
+              ...operation.pin,
+              hooks: [
+                HookEventName.PreToolUse,
+                HookEventName.PermissionRequest,
+                HookEventName.PostToolUse,
+              ].map((eventName) => ({
+                hookId: eventName,
+                eventName,
+                sequential: false,
+                async: false,
+                failClosed: true,
+                onceKey: null,
+                config: { type: 'command' as const },
+              })),
+            },
+          };
+        const settled = {
+          operationId: operation.operationId,
+          state: 'settled' as const,
+          result: { success: true, outcome: 'success' as const, duration: 0 },
+        };
+        if (operation.kind !== 'hook-execute') return settled;
+        const event = operation.input['hook_event_name'];
+        const input = Reflect.get(operation.input, 'tool_input') as
+          | Record<string, unknown>
+          | undefined;
+        executions.push({
+          event,
+          command: input?.['command'],
+          owner: this.runtimeSessionId,
+        });
+        // PreToolUse rewrites the command, so the resume must run the saved
+        // effective input rather than decide the Hooks again.
+        if (event !== HookEventName.PreToolUse) return settled;
+        return {
+          ...settled,
+          result: {
+            ...settled.result,
+            output: {
+              hookSpecificOutput: {
+                hookEventName: HookEventName.PreToolUse,
+                updatedInput: { command: 'touch hooked.txt' },
+              },
+            },
+          },
+        };
+      });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+        'hook-owner-claim',
+      );
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'releaseMount',
+      ).mockResolvedValue();
+      state.model.mockImplementation(
+        async ({ toolTurn, resumeFromToolResults, signal }) => {
+          // As the model driver does, a resumed round first completes the
+          // batch's tool Hooks.
+          if (resumeFromToolResults) {
+            await toolTurn!.resumeHookResults(
+              resumeFromToolResults as Part[],
+              'test-model',
+              signal,
+            );
+            return { text: 'resumed', model: 'test-model' };
+          }
+          const call = {
+            name: 'run_shell_command',
+            callId: 'park-shell-call',
+            args: { command: 'touch notes.txt' },
+            isClientInitiated: false,
+            prompt_id: PROMPT_ID,
+          };
+          toolTurn!.setChildModelRoute!('test-model', {
+            authType: 'openai',
+            endpointDigest: 'a'.repeat(64),
+            providerPin: 'b'.repeat(64),
+          });
+          await toolTurn!.execute(
+            [call],
+            [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: call.args,
+                },
+              },
+            ],
+            'test-model',
+            signal,
+          );
+          throw new Error('The waiting Turn unexpectedly continued.');
+        },
+      );
+      const definition = { initialSelection: extensions.selection };
+      const wait = parks
+        ? undefined
+        : vi
+            .spyOn(HostedApprovalWaiters.prototype, 'wait')
+            .mockRejectedValueOnce(
+              new HostedToolRecoveryRequiredError(
+                'approval writer interrupted',
+              ),
+            );
+      try {
+        const original = await app(
+          true,
+          undefined,
+          true,
+          parks ? { idleSuspendMs: 150 } : undefined,
+        );
+        const clientId = await promptPublicShellApproval(
+          original,
+          60_000,
+          definition,
+        );
+        let server = original;
+        if (parks) {
+          await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+            timeout: 5000,
+          });
+          await vi.waitFor(
+            async () => {
+              expect((await statusOf(original, clientId)).status).toBe(404);
+            },
+            { timeout: 5000 },
+          );
+          expect(state.wakeStamps[0]).toMatchObject({
+            parkedTurn: { promptId: PROMPT_ID },
+          });
+          expect(statsOf(original).parkRefusals).toEqual({});
+        } else {
+          await vi.waitFor(
+            async () => {
+              expect((await statusOf(original, clientId)).body).toMatchObject({
+                hasActivePrompt: false,
+                recoveryBlocked: true,
+              });
+            },
+            { timeout: 5000 },
+          );
+          await (
+            wakeDeps.last as { session: { managed: ManagedSession } }
+          ).session.managed.close();
+          wait!.mockRestore();
+          server = await app(true);
+        }
+        const loaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({
+            managedSessionStore: store(),
+            ...publicShellSession,
+            ...definition,
+            ...(parks
+              ? { passiveManagedRuntimeRecovery: true }
+              : { driveRuntimeRecovery: true }),
+          })
+          .expect(200);
+        const resumedClient = loaded.body.clientId as string;
+        const requestId = (await readSessionJournal()).events.findLast(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'requested',
+        )!.payload['requestId'] as string;
+        await headers(
+          supertest(server).post(
+            `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', resumedClient)
+          .send({
+            optionId: 'allow',
+            inputRevision: 1,
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+          })
+          .expect(200);
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, resumedClient)).body).toMatchObject({
+              hasActivePrompt: false,
+              recoveryBlocked: false,
+            });
+          },
+          { timeout: 5000 },
+        );
+
+        if (!parks) expect(state.wakeStamps).toEqual([]);
+        // The Hooks that ran before the wait are read back, never rerun, and
+        // the Allow fires one PostToolUse, all on the config-scoped owner.
+        const owner = executions[0]?.owner;
+        expect(isHostedConfigScopedOwner(owner)).toBe(true);
+        expect(executions).toEqual([
+          {
+            event: HookEventName.PreToolUse,
+            command: 'touch notes.txt',
+            owner,
+          },
+          {
+            event: HookEventName.PermissionRequest,
+            command: 'touch hooked.txt',
+            owner,
+          },
+          {
+            event: HookEventName.PostToolUse,
+            command: 'touch hooked.txt',
+            owner,
+          },
+        ]);
+        const { call, input } = await savedShellCall(saved);
+        expect(input['command']).toBe('touch hooked.txt');
+        expect(prepareV3).toHaveBeenCalledOnce();
+        expect(prepareV3).toHaveBeenCalledWith(
+          call.runtimeCallId,
+          call.argsDigest,
+          call.requestDigest,
+          call.publicationId,
+          PROMPT_ID,
+        );
+        expect(executeV3).toHaveBeenCalledOnce();
+        expect(
+          (
+            JSON.parse(executeV3.mock.calls[0]![1]) as {
+              input: Record<string, unknown>;
+            }
+          ).input['command'],
+        ).toBe('touch hooked.txt');
+        const journal = await readSessionJournal();
+        expect(
+          journal.events.filter(
+            (event) =>
+              event.kind === 'action.changed' &&
+              event.payload['state'] === 'requested',
+          ),
+        ).toHaveLength(1);
+        const settled = journal.events.filter(
+          (event) => event.kind === 'turn.settled',
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0].payload['outcome']).toBe('completed');
+        if (parks)
+          await vi.waitFor(
+            async () => {
+              expect((await statusOf(server, resumedClient)).status).toBe(404);
+            },
+            { timeout: 5000 },
+          );
+      } finally {
+        wait?.mockRestore();
+        saved.mockRestore();
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
 
   const pngImage = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
     'base64',
