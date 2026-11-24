@@ -60885,6 +60885,32 @@ describe('overload pause guards in App', () => {
     ]);
   });
 
+  it('refuses an ordinary first prompt while paused and preserves the draft', async () => {
+    armOverload();
+    mockConnection.sessionId = undefined;
+    const toasts: Array<[string, string]> = [];
+    const onSubmitBefore = vi.fn();
+    const { container } = renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'first prompt under overload';
+    toasts.length = 0;
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('first prompt under overload');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
   it('keeps /fork on the existing ACP runtime while paused', async () => {
     armOverload();
     mockConnection.sessionId = 'source-session';
