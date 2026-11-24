@@ -73,7 +73,7 @@ Hosted Session 通过 Session Store 为日志激活续租。控制面停机超�
   - 结算读取期间租约过期时重新 acquire 并重读头部；
   - 租约逾期叠加租户守卫预算耗尽时仍然封闭；
   - 永久 fence 仍然停止保活。
-- `packages/cli/src/serve/hosted-harness-session.test.ts`
+- `packages/cli/src/serve/hosted-harness-session.child-operations.test.ts`
   - 未结算的消息追加返回 503 `session_message_failed`，而不是 409 记录拒绝。
 - `packages/cli/src/serve/hosted-workspace-tool-turn.commands.test.ts`
   - 未结算的成员命令以 `HostedToolRecoveryRequiredError` 传播，并保留
