@@ -203,6 +203,7 @@ import {
   isRetryableStatuslessUpstreamError,
   isRetryableStreamTransportError,
 } from './stream-transport-retry.js';
+import { StreamInactivityTimeoutError } from './stream-guards.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -924,6 +925,14 @@ const STREAM_RETRY_CONFIG = {
    * the replay budget.
    */
   maxContinuationRetries: 3,
+  /**
+   * Shared budget for replays and continuations after an inactivity timeout
+   * that hit while a tool call's arguments were still open. Providers that
+   * withhold arguments until they are complete go silent for exactly that
+   * stretch, so the same request tends to stall the same way again; one retry
+   * covers a transient cut without spending every budget on a repeat.
+   */
+  maxToolArgumentStallRetries: 1,
 };
 
 /**
@@ -4502,6 +4511,7 @@ export class LlmChat {
           }
         };
         let streamReplayRetryCount = 0;
+        let toolArgumentStallRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -4919,6 +4929,13 @@ export class LlmChat {
             // ask the model to resume from.
             const isReplayableStreamError =
               isContinuableStreamCut || isServerStreamError;
+            const isToolArgumentStall =
+              error instanceof StreamInactivityTimeoutError &&
+              error.openToolCallName !== undefined;
+            const toolArgumentStallBudgetLeft =
+              !isToolArgumentStall ||
+              toolArgumentStallRetryCount <
+                STREAM_RETRY_CONFIG.maxToolArgumentStallRetries;
 
             // Replay transient server errors and curated socket-level failures
             // before any content (non-thought output) has reached callers.
@@ -4951,10 +4968,12 @@ export class LlmChat {
                   // consulted here because this branch is checked before the
                   // continuation one below.
                   transportContinuationText.trim().length === 0)) &&
-              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries &&
+              toolArgumentStallBudgetLeft
             ) {
               self.popPendingPartialAssistantTurn();
               streamReplayRetryCount++;
+              if (isToolArgumentStall) toolArgumentStallRetryCount++;
               const delayMs =
                 STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
               debugLogger.warn(
@@ -5049,10 +5068,12 @@ export class LlmChat {
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                STREAM_RETRY_CONFIG.maxContinuationRetries;
+                STREAM_RETRY_CONFIG.maxContinuationRetries &&
+              toolArgumentStallBudgetLeft;
             if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
+              if (isToolArgumentStall) toolArgumentStallRetryCount++;
               // Everything delivered so far — across earlier continuation
               // attempts too, since `transportContinuationText` accumulates
               // and is never reset while continuing. Each attempt's own text
@@ -5102,12 +5123,14 @@ export class LlmChat {
                   : 'Transport stream retry not taken',
                 {
                   retryPath: 'stream',
-                  retryDecision: attemptClosedWithOwnOutput
-                    ? 'skipped_terminal_finish_reason'
-                    : streamYieldedContentChunk ||
-                        transportContinuationText.trim().length > 0
-                      ? 'skipped_after_content'
-                      : 'exhausted',
+                  retryDecision: !toolArgumentStallBudgetLeft
+                    ? 'tool_argument_stall_exhausted'
+                    : attemptClosedWithOwnOutput
+                      ? 'skipped_terminal_finish_reason'
+                      : streamYieldedContentChunk ||
+                          transportContinuationText.trim().length > 0
+                        ? 'skipped_after_content'
+                        : 'exhausted',
                   attempts: streamReplayRetryCount,
                   maxRetries: STREAM_RETRY_CONFIG.maxRetries,
                   continuationAttempts: transportContinuationCount,

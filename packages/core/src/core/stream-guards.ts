@@ -27,6 +27,11 @@ import {
  * Thrown when a streaming response goes silent past the inactivity timeout.
  * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
  * transport error, identical to a real socket read timeout.
+ *
+ * `openToolCallName` names a tool call whose arguments were still unterminated
+ * when the stream went silent. Some providers withhold tool-call arguments
+ * until they are complete, so that silence usually means the model was still
+ * generating them, and the same request tends to stall the same way again.
  */
 export class StreamInactivityTimeoutError extends Error {
   readonly code = 'ETIMEDOUT' as const;
@@ -35,10 +40,20 @@ export class StreamInactivityTimeoutError extends Error {
     readonly idleMs: number,
     readonly chunksReceived: number,
     readonly streamLifetimeMs: number,
+    readonly openToolCallName?: string,
   ) {
     super(
       `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
-        `(stream lifetime: ${streamLifetimeMs}ms). For provider-backed models, ` +
+        `(stream lifetime: ${streamLifetimeMs}ms). ` +
+        (openToolCallName
+          ? `The stream went silent while the arguments of tool call ` +
+            `"${openToolCallName}" were still open. Some providers withhold ` +
+            `tool-call arguments until they are complete, so the model was ` +
+            `most likely still generating them; retrying the same request ` +
+            `usually stalls the same way, and a longer idle timeout helps only ` +
+            `if the arguments are legitimately that large. `
+          : '') +
+        `For provider-backed models, ` +
         `increase modelProviders[providerId][].generationConfig.streamIdleTimeoutMs; ` +
         `provider configuration takes precedence, so model.generationConfig is ` +
         `ignored for those models. For runtime models, increase ` +

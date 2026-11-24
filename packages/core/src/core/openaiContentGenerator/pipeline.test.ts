@@ -5802,6 +5802,38 @@ describe('ContentGenerationPipeline', () => {
       expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
     });
 
+    it('names the tool call whose arguments were still open when the stream went silent', async () => {
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+        (
+          _chunk: unknown,
+          context: { toolCallParser?: StreamingToolCallParser },
+        ) => {
+          context.toolCallParser?.addChunk(
+            0,
+            '{"segment": "s01", "docs": ',
+            'call_1',
+            'structured_output',
+          );
+          return new GenerateContentResponse();
+        },
+      );
+      const { gated, run } = await drainGated(1000);
+      gated.push(chunk('x'));
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await run.done;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect(err).toMatchObject({
+        code: 'ETIMEDOUT',
+        idleMs: 1000,
+        chunksReceived: 1,
+        openToolCallName: 'structured_output',
+      });
+      expect((err as Error).message).toContain(
+        'the arguments of tool call "structured_output" were still open',
+      );
+      expect(gated.wasReturned()).toBe(true);
+    });
+
     it('uses the default stream idle timeout when no override is configured', async () => {
       const { gated, run } = await drainGated(undefined, undefined, null); // never push/end → silent
       await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);

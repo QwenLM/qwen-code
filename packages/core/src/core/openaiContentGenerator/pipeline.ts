@@ -1234,6 +1234,10 @@ export class ContentGenerationPipeline {
         error instanceof StreamLifetimeExceededError
       ) {
         const isLifetime = error instanceof StreamLifetimeExceededError;
+        const openToolCallName =
+          error instanceof StreamInactivityTimeoutError
+            ? context.toolCallParser?.getIncompleteToolCallName()
+            : undefined;
         debugLogger.warn(
           isLifetime
             ? 'OpenAI stream lifetime cap exceeded'
@@ -1249,9 +1253,19 @@ export class ContentGenerationPipeline {
                     .maxLifetimeMs,
                 }
               : { idleMs: (error as StreamInactivityTimeoutError).idleMs }),
+            ...(openToolCallName && { openToolCallName }),
           },
         );
-        throw redactProxyError(error);
+        throw redactProxyError(
+          openToolCallName && error instanceof StreamInactivityTimeoutError
+            ? new StreamInactivityTimeoutError(
+                error.idleMs,
+                error.chunksReceived,
+                error.streamLifetimeMs,
+                openToolCallName,
+              )
+            : error,
+        );
       }
 
       if (
