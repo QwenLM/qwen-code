@@ -10791,7 +10791,9 @@ describe('DaemonSessionProvider', () => {
     const session = createMockSession({
       hasActivePrompt: true,
       submitPrompt: vi.fn(() => accepted.promise),
-      events: async function* restoredPromptCompleteDuringLocalPrompt() {
+      events: async function* restoredPromptCompleteDuringLocalPrompt(
+        opts: { signal?: AbortSignal } = {},
+      ) {
         await releaseRestoredComplete.promise;
         yield {
           id: 6,
@@ -10808,6 +10810,7 @@ describe('DaemonSessionProvider', () => {
           data: { promptId: 'local-prompt', stopReason: 'end_turn' },
         } satisfies DaemonEvent;
         localCompleteDelivered.resolve();
+        await untilAborted(opts.signal);
       },
     });
     sdkMocks.sessions.push(session);
@@ -11225,7 +11228,7 @@ describe('DaemonSessionProvider', () => {
       hasActivePrompt: true,
       backgroundTurn,
       lastEventId: 5,
-      async *events() {
+      async *events(opts: { signal?: AbortSignal } = {}) {
         yield {
           id: 6,
           v: 1,
@@ -11241,6 +11244,7 @@ describe('DaemonSessionProvider', () => {
           data: { promptId: 'auto-1', stopReason: 'end_turn' },
         };
         finished.resolve();
+        await untilAborted(opts.signal);
       },
     });
     sdkMocks.sessions.push(session);
@@ -18845,6 +18849,7 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const retryStarted = createDeferred<void>();
     let eventsCalls = 0;
     const conflict = new DaemonHttpError(
       409,
@@ -18857,8 +18862,14 @@ describe('DaemonSessionProvider', () => {
     );
     sdkMocks.sessions.push(
       createMockSession({
-        events: async function* conflictEvents() {
-          eventsCalls += 1;
+        events: async function* conflictEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          if (++eventsCalls > 1) {
+            retryStarted.resolve();
+            await untilAborted(opts.signal);
+            return;
+          }
           await Promise.resolve();
           yield* [];
           throw conflict;
@@ -18878,7 +18889,7 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await wait(50);
+      await retryStarted.promise;
       await flushPromises();
     });
 
@@ -21923,7 +21934,9 @@ describe('DaemonSessionProvider', () => {
       sessionId: 'session-ring-unaccepted-prompt',
       lastEventId: 10,
       submitPrompt: vi.fn(() => accepted.promise),
-      events: async function* ringEvictedEvents() {
+      events: async function* ringEvictedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
         await ringEvicted.promise;
         yield {
           v: 1,
@@ -21934,6 +21947,7 @@ describe('DaemonSessionProvider', () => {
             earliestAvailableId: 12,
           },
         };
+        await untilAborted(opts.signal);
       },
     });
     const reloadedSession = createMockSession({
@@ -21979,6 +21993,7 @@ describe('DaemonSessionProvider', () => {
           type: 'turn_complete',
           data: { promptId: 'prompt-new', stopReason: 'end_turn' },
         };
+        await untilAborted(opts.signal);
       },
     });
     sdkMocks.sessions.push(firstSession, reloadedSession);
@@ -23071,6 +23086,8 @@ describe('DaemonSessionProvider', () => {
   it.each(['idle_timeout', 'last_client_detached'] as const)(
     'does NOT stop reconnect on session_closed with reason "%s"',
     async (reason) => {
+      const onReconnect = createDeferred<void>();
+      let subscriptions = 0;
       // session_closed with idle_timeout or last_client_detached should
       // NOT prevent reconnection — these are server-initiated closes,
       // not user deletions. The provider should preserve the session
@@ -23079,13 +23096,17 @@ describe('DaemonSessionProvider', () => {
         events: async function* nonClientCloseEvents(
           opts: { signal?: AbortSignal } = {},
         ) {
+          if (subscriptions++ > 0) {
+            onReconnect.resolve();
+            await untilAborted(opts.signal);
+            return;
+          }
           yield {
             id: 1,
             v: 1,
             type: 'session_closed',
             data: { reason },
           };
-          if (opts.signal?.aborted) return;
         },
       });
       sdkMocks.sessions.push(session);
@@ -23107,7 +23128,7 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
       await act(async () => {
-        await wait(50);
+        await onReconnect.promise;
         await flushPromises();
       });
 
@@ -23122,17 +23143,23 @@ describe('DaemonSessionProvider', () => {
     // Defensive: if the server sends session_closed without a reason
     // field (older daemon versions), treat it as non-client_close and
     // let the normal reconnect path handle it.
+    const onReconnect = createDeferred<void>();
+    let subscriptions = 0;
     const session = createMockSession({
       events: async function* noReasonEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
+        if (subscriptions++ > 0) {
+          onReconnect.resolve();
+          await untilAborted(opts.signal);
+          return;
+        }
         yield {
           id: 1,
           v: 1,
           type: 'session_closed',
           data: {},
         };
-        if (opts.signal?.aborted) return;
       },
     });
     sdkMocks.sessions.push(session);
@@ -23154,7 +23181,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
     await act(async () => {
-      await wait(50);
+      await onReconnect.promise;
       await flushPromises();
     });
 
@@ -26732,6 +26759,9 @@ describe('DaemonSessionProvider', () => {
           expect(container!.querySelector('[role="alert"]')).not.toBeNull();
         }
       } finally {
+        // Nothing observes the continuation promise once the banner unmounts,
+        // so the cleanup rejection needs its own handler.
+        admission.promise.catch(() => undefined);
         await act(async () => {
           root?.unmount();
           root = null;
@@ -28532,15 +28562,24 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
 
 function createIdleEvents(): MockSession['events'] {
   return async function* idleEvents(opts: { signal?: AbortSignal } = {}) {
-    await new Promise<void>((resolve) => {
-      if (opts.signal?.aborted) {
-        resolve();
-        return;
-      }
-      opts.signal?.addEventListener('abort', () => resolve(), { once: true });
-    });
+    await untilAborted(opts.signal);
     yield* [];
   };
+}
+
+// A fixture stream that returns as soon as it has delivered its events leaves
+// the provider's reconnect loop spinning at the fixture's reconnect delay, so a
+// `wait(50)` between assertions re-subscribes tens of thousands of times and
+// starves the rest of the worker. Stay-alive fixtures park on their own abort
+// signal instead, which the provider raises on unmount.
+function untilAborted(signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    signal?.addEventListener('abort', () => resolve(), { once: true });
+  });
 }
 
 function createPendingEvents(
@@ -28548,13 +28587,7 @@ function createPendingEvents(
 ): MockSession['events'] {
   return async function* pendingEvents(opts: { signal?: AbortSignal } = {}) {
     started.resolve();
-    await new Promise<void>((resolve) => {
-      if (opts.signal?.aborted) {
-        resolve();
-        return;
-      }
-      opts.signal?.addEventListener('abort', () => resolve(), { once: true });
-    });
+    await untilAborted(opts.signal);
     yield* [];
   };
 }
@@ -28653,6 +28686,7 @@ function createTurnCompleteEvents(
       sessionId: 'session-1',
       data: { promptId, stopReason: 'end_turn' },
     };
+    await untilAborted(opts.signal);
   };
 }
 
@@ -28670,8 +28704,11 @@ function createClosableEvents(): {
 } {
   const closed = createDeferred<void>();
   return {
-    events: async function* closableEvents() {
+    events: async function* closableEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
       await closed.promise;
+      await untilAborted(opts.signal);
       yield* [];
     },
     close: closed.resolve,
