@@ -74,6 +74,9 @@ async function startRig(opts: {
   }
   const spawned = await spawnDaemon({
     workspaceCwd: workspaceDir,
+    // Feedback, not host-load admission, is under test here. Do not let a
+    // shared runner's real load change this fixture's outcome.
+    extraArgs: ['--no-load-admission'],
     token: TOKEN,
     bootTimeoutMs: 30_000,
     // Hermetic rig: host-session leakage (QWEN_RUNTIME_DIR above all)
@@ -105,10 +108,10 @@ async function startRig(opts: {
   // writes and never observe the record (same seam as the harness's
   // mcpApprovals keying).
   const canonicalWorkspaceDir = realpathSync(workspaceDir);
-  const projectDir = Storage.runWithRuntimeBaseDir(
-    qwenHome,
-    canonicalWorkspaceDir,
-    () => new Storage(canonicalWorkspaceDir).getProjectDir(),
+  // Match the rig's explicit HOME without letting an inherited
+  // QWEN_RUNTIME_DIR redirect this observer to the host profile.
+  const projectDir = Storage.runWithResolvedRuntimeBaseDir(qwenHome, () =>
+    new Storage(canonicalWorkspaceDir).getProjectDir(),
   );
   const feedbackRecords = (sessionId: string): FeedbackRecord[] => {
     let raw: string;

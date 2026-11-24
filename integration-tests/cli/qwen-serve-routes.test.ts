@@ -188,6 +188,9 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      // This fixture creates fresh children to exercise unrelated route
+      // contracts, whose setup must remain deterministic on loaded CI hosts.
+      '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
