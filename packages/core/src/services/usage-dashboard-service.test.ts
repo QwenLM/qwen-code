@@ -657,6 +657,102 @@ describe('loadUsageDashboard', () => {
     }
   });
 
+  it('promotes a complete ended replay after future-owned runs', async () => {
+    const root = process.env['QWEN_HOME']!;
+    const now = Date.parse('2026-05-25T12:00:00.000Z');
+    const sessionId = 'ended-future-owned-runs';
+    const project = '/runtime/ended-future-owned-runs';
+    const run = (
+      executionId: string,
+      timestamp: number,
+      startTime: number,
+    ) => ({
+      ...rec({
+        sessionId,
+        project,
+        timestamp,
+        startTime,
+        model: { inputTokens: 100, totalTokens: 100, totalLatencyMs: 10 },
+      }),
+      runScoped: true,
+      requestExecutionIds: [executionId],
+      successfulRequestExecutionIds: [executionId],
+    });
+    seed([
+      run('ended-future-bounded', now - 240_000, now - 360_000),
+      {
+        ...run('ended-future-unbounded', now - 120_000, NaN),
+        durationMs: NaN,
+      },
+    ]);
+    const file = plantRuntimeRequest(root, {
+      sessionId,
+      project,
+      timestamp: new Date(now - 300_000).toISOString(),
+      executionId: 'ended-future-bounded',
+      tokens: 100,
+    });
+    for (const [offsetMs, executionId, tokens] of [
+      [-120_000, 'ended-future-unbounded', 100],
+      [-60_000, 'independent-ended-tail', 50],
+    ] as const) {
+      const timestamp = new Date(now + offsetMs).toISOString();
+      fs.appendFileSync(
+        file,
+        `${JSON.stringify({
+          sessionId,
+          cwd: project,
+          uuid: executionId,
+          timestamp,
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': timestamp,
+              response_id: executionId,
+              execution_id: executionId,
+              model: 'qwen-max',
+              duration_ms: 10,
+              input_token_count: tokens,
+              output_token_count: 0,
+              cached_content_token_count: 0,
+              thoughts_token_count: 0,
+              total_token_count: tokens,
+              prompt_id: executionId,
+            },
+          },
+        })}\n`,
+      );
+    }
+    const sources = await loadScopedSourcesAt(
+      [root, path.join(tmpHome, 'empty-ended-root')],
+      new Date(now).toISOString(),
+    );
+    expect(sources.records).toHaveLength(1);
+    expect(sources.records[0]?.transcriptSupplement).not.toBe(true);
+    expect(sources.records[0]?.requestExecutionIds).toEqual(
+      expect.arrayContaining([
+        'ended-future-bounded',
+        'ended-future-unbounded',
+        'independent-ended-tail',
+      ]),
+    );
+    expect(
+      buildUsageDashboard(
+        sources.records,
+        { range: 'all' },
+        sources.ledgerDaily,
+        sources.runtimeScopes,
+      ).summary,
+    ).toMatchObject({
+      sessions: 1,
+      requests: 3,
+      inputTokens: 250,
+      totalTokens: 250,
+    });
+  });
+
   it('reduces duplicate future-backed records without erasing ended runs', async () => {
     const now = Date.parse('2026-05-25T12:00:00.000Z');
     const timestamp = new Date(now + 60_000).toISOString();

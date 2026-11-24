@@ -1942,7 +1942,22 @@ export function dedupBySessionId(
             record.timestamp > latest.timestamp ? record : latest,
           )
         : undefined;
-      if (newestRebuild && newestRebuild.timestamp > last.timestamp) {
+      // Replay can emit a whole snapshot beside its own bounded tail.
+      const validRequestIds = (ids: readonly string[] | undefined) =>
+        Array.isArray(ids) &&
+        ids.length > 0 &&
+        ids.every((id) => typeof id === 'string' && id.length > 0) &&
+        new Set(ids).size === ids.length;
+      const coversSupplement =
+        newestRebuild !== undefined &&
+        last.transcriptSupplement === true &&
+        validRequestIds(last.requestExecutionIds) &&
+        validRequestIds(newestRebuild.requestExecutionIds) &&
+        rebuildCoversRun(newestRebuild, last, true);
+      if (
+        newestRebuild &&
+        (newestRebuild.timestamp > last.timestamp || coversSupplement)
+      ) {
         out.push(newestRebuild);
       } else {
         out.push(last);

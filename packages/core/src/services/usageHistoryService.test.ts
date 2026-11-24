@@ -3605,6 +3605,75 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
           .filter((record) => record.transcriptSupplement === true)
           .flatMap((record) => record.requestExecutionIds ?? []),
       ).not.toContain('unbounded-future-run');
+
+      const endedReplay = await loadUsageHistoryWithLive({
+        includePersistedRecords: false,
+        sinceMs: 0,
+        readAt: Date.parse('2026-07-02T00:11:00.000Z'),
+      });
+      expect(endedReplay).toHaveLength(1);
+      expect(endedReplay[0]?.transcriptRebuild).toBe(true);
+      expect(endedReplay[0]?.transcriptSupplement).not.toBe(true);
+      expect(endedReplay[0]?.requestExecutionIds).toEqual(
+        expect.arrayContaining([
+          'bounded-future-run',
+          'unbounded-future-run',
+          ...(includeIndependent ? ['independent-unbounded-response'] : []),
+        ]),
+      );
+      expect(aggregateUsage(endedReplay, 'all')).toMatchObject({
+        sessionCount: 1,
+        totalRequests: 2 + Number(includeIndependent),
+        models: {
+          'qwen-max': { totalTokens: 200 + (includeIndependent ? 50 : 0) },
+        },
+      });
+    },
+  );
+
+  it('does not let a whole replay snapshot erase an independent tail', () => {
+    const whole = {
+      ...persistedRec('whole-tail-coverage', 200),
+      transcriptRebuild: true,
+      requestExecutionIds: ['whole-response'],
+    };
+    const independentTail = {
+      ...whole,
+      transcriptSupplement: true,
+      requestExecutionIds: ['independent-tail'],
+    };
+    expect(
+      dedupBySessionId([
+        { ...whole, models: structuredClone(whole.models) },
+        { ...independentTail, models: structuredClone(whole.models) },
+      ]),
+    ).toEqual([independentTail]);
+  });
+
+  it.each([
+    ['string tail', 'whole-response', false],
+    ['array-like tail', { 0: 'whole-response', length: 1 }, false],
+    ['duplicate tail', ['whole-response', 'whole-response'], false],
+    ['array-like whole', { 0: 'whole-response', length: 1 }, true],
+  ] as const)(
+    'keeps a %s execution identity conservative',
+    (_kind, requestIds, malformedWhole) => {
+      const whole = {
+        ...persistedRec('whole-tail-coverage', 200),
+        transcriptRebuild: true,
+        requestExecutionIds: (malformedWhole
+          ? requestIds
+          : ['whole-response']) as unknown as string[],
+      };
+      const tail = {
+        ...whole,
+        transcriptSupplement: true,
+        requestExecutionIds: (malformedWhole
+          ? ['whole-response']
+          : requestIds) as unknown as string[],
+        models: structuredClone(whole.models),
+      };
+      expect(dedupBySessionId([whole, tail])).toEqual([tail]);
     },
   );
 

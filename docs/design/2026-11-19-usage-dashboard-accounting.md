@@ -224,7 +224,12 @@ history from an old unmarked record whose provenance is unknowable.
 - **No run-scoped record in the group** -> ordinary cumulative copies retain
   last-wins. A newer measured transcript reconstruction may replace an older
   reconstruction snapshot by actual event time, so a persisted older snapshot
-  cannot hide later native daemon activity.
+  cannot hide later native daemon activity. Replay may return a whole
+  reconstruction beside its bounded tail at the same event time. The whole
+  snapshot wins only when both records have non-empty arrays of unique,
+  non-empty string IDs, it contains every tail ID, and its model/tool/file
+  counters cover the tail. Malformed, duplicate, new or conflicting identities
+  remain conservative instead of being absorbed by time or token totals alone.
 - **Run-scoped records present** -> retain disjoint runs. Windows are half-open:
   a new run starting exactly when the previous one ended is retained. Equal
   `[startTime, endTime)` windows and partial overlaps are duplicates or
