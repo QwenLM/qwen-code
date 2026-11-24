@@ -309,6 +309,34 @@ export class TotalSessionLimitExceededError extends Error {
 }
 
 /**
+ * Thrown by the daemon's fresh-session admission when its load monitor
+ * reports sustained host saturation or daemon event-loop starvation. The
+ * HTTP route maps this to 503 with a `Retry-After` hint. Only NEW children
+ * are refused — live sessions and the control plane stay open. Distinct
+ * error type so routes can branch without text-matching.
+ */
+export class SystemOverloadedError extends Error {
+  readonly reason: 'cpu_load' | 'event_loop_lag' | 'observation_gap';
+  readonly loadRatio: number;
+  readonly eventLoopLagP99Ms: number;
+  constructor(
+    reason: 'cpu_load' | 'event_loop_lag' | 'observation_gap',
+    loadRatio: number,
+    eventLoopLagP99Ms: number,
+  ) {
+    super(
+      `System overloaded (${reason}: load ratio ${loadRatio.toFixed(2)}, ` +
+        `event-loop p99 ${Math.round(eventLoopLagP99Ms)} ms); ` +
+        'new sessions are paused until load subsides',
+    );
+    this.name = 'SystemOverloadedError';
+    this.reason = reason;
+    this.loadRatio = loadRatio;
+    this.eventLoopLagP99Ms = eventLoopLagP99Ms;
+  }
+}
+
+/**
  * Thrown by `sendPrompt` when a session already has too many accepted
  * prompts waiting or running. The REST route maps this to 503 with
  * `Retry-After`; SDK clients can retry after observing a turn completion.

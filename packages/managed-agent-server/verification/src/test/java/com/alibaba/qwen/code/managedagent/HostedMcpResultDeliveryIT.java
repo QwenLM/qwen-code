@@ -62,7 +62,7 @@ class HostedMcpResultDeliveryIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "mcp-delivery-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<ProxyCall> proxyCalls =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
     private final List<Map<String, Object>> wire = new CopyOnWriteArrayList<>();
@@ -299,9 +299,9 @@ class HostedMcpResultDeliveryIT {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND tenant_id = ? AND session_id = ?",
-                String.class, scope, ref.path("resourceId").asText(), tenant,
+                String.class, tenant, session, ref.path("resourceId").asText(), tenant,
                 session);
         assertThat(body).as("published response body").isNotBlank();
         try {

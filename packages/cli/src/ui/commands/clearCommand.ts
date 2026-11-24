@@ -98,9 +98,11 @@ export const clearCommand: SlashCommand = {
         }
       }
 
-      getInteractiveModSession(config)?.invalidateTools();
+      const interactiveMods = getInteractiveModSession(config);
+      interactiveMods?.invalidateTools();
       const newSessionId = config.startNewSession();
-      await getInteractiveModSession(config)?.syncSession('clear');
+      // In ACP, notify the session of the switch before yielding to old work.
+      if (interactiveMods) await interactiveMods.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();

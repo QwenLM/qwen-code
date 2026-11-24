@@ -92,7 +92,7 @@ class ManagedMcpSettingsStoreTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"key", "scope", "tenant", "session", "domain", "id"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"tenant", "session", "domain", "id"})
     void findRequiresTheCanonicalRecordKeyAndAllRawScopeFields(String mismatch) throws Exception {
         String id = UUID.randomUUID().toString();
         var journal = publicJournal(id);
@@ -102,19 +102,15 @@ class ManagedMcpSettingsStoreTest {
         journal.commit(request);
         journal.committed(request);
         assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isEqualTo(json.readTree(first.toString()));
-        String key = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
-                .recordKey(id, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", id);
         String update = switch (mismatch) {
-            case "key" -> "UPDATE ma_session_record SET record_key = ?";
-            case "scope" -> "UPDATE ma_session_record SET session_scope_key = ?";
             case "tenant" -> "UPDATE ma_session_record SET tenant_id = ?";
             case "session" -> "UPDATE ma_session_record SET session_id = ?";
             case "domain" -> "UPDATE ma_session_record SET domain = ?";
             case "id" -> "UPDATE ma_session_record SET record_id = ?";
             default -> throw new AssertionError(mismatch);
         };
-        jdbc.update(update + " WHERE session_scope_key = ? AND record_key = ?", "c".repeat(64), scope, key);
+        jdbc.update(update + " WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                "c".repeat(36), "tenant", id, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
         assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isNull();
     }
 
@@ -155,14 +151,13 @@ class ManagedMcpSettingsStoreTest {
     void legacySettingsRevisionsReplaceTheirProjectionRowInsteadOfAccumulating() throws Exception {
         String id = UUID.randomUUID().toString();
         var journal = publicJournal(id);
-        byte[] session = id.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         ObjectNode first = settings(1, "enabled", null);
         var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
                 event -> {}, records -> records, 0);
         journal.commit(request);
         journal.committed(request);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND session_id=?",
-                Integer.class, session)).isEqualTo(1);
+                Integer.class, id)).isEqualTo(1);
         ObjectNode second = settings(2, "disabled", first);
         var disable = journal.requestOrdinary(second.path("operationId").asText(), "config_install", second,
                 event -> {}, records -> records, 0);
@@ -172,7 +167,7 @@ class ManagedMcpSettingsStoreTest {
         // projection row — two revisions still leave exactly one row rather than
         // accumulating one per revision for the Session's whole life.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND session_id=?",
-                Integer.class, session)).isEqualTo(1);
+                Integer.class, id)).isEqualTo(1);
     }
 
     @Test

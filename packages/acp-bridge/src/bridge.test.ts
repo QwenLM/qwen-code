@@ -15,6 +15,7 @@ import { format } from 'node:util';
 import {
   AGENT_METHODS,
   AgentSideConnection,
+  ClientSideConnection,
   PROTOCOL_VERSION,
   RequestError,
   ndJsonStream,
@@ -125,10 +126,19 @@ import {
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
 } from './bridgeTypes.js';
 import {
+  CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT,
   CHANNEL_LIVENESS_INTERVAL_MS,
   CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
   CHANNEL_LIVENESS_TIMEOUT_CODE,
 } from './channel-liveness.js';
+import { sampleChannelProcess } from './channel-process-sample.js';
+
+// The wiring tests below control the process snapshot deterministically;
+// every other test in this file runs channels without a pid, where the real
+// sampler returns undefined anyway.
+vi.mock('./channel-process-sample.js', () => ({
+  sampleChannelProcess: vi.fn(() => undefined),
+}));
 import {
   ApprovalMode,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -1250,7 +1260,7 @@ describe('createAcpSessionBridge', () => {
       ).toEqual({
         'qwen.goalProposals': true,
         'qwen.mcpAppHost': true,
-        'qwen.modRows': ['AssistantMessage'],
+        'qwen.modRows': ['AssistantMessage', 'Thinking'],
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
@@ -16750,6 +16760,288 @@ describe('createAcpSessionBridge', () => {
         vi.useRealTimers();
       }
     });
+
+    it('keeps numeric zero evidence and omits empty wchan in liveness telemetry', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        vi.mocked(sampleChannelProcess).mockReturnValue({
+          cpuTicks: 100,
+          state: 'T',
+          wchan: '',
+          rssBytes: 0,
+        });
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        handle.channel = { ...handle.channel, pid: 4242 };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + 2 * CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const call = event.mock.calls.find(
+          ([name]) => name === 'channel.liveness_failed',
+        );
+        expect(call).toBeDefined();
+        const attrs = call![1] as Record<string, unknown>;
+        expect(attrs['qwen-code.daemon.channel.liveness.pid']).toBe(4242);
+        expect(attrs['qwen-code.daemon.channel.liveness.state']).toBe('T');
+        // Zero is evidence (a zero-CPU stall), not absence.
+        expect(attrs['qwen-code.daemon.channel.liveness.cpu_delta_ticks']).toBe(
+          0,
+        );
+        expect(attrs['qwen-code.daemon.channel.liveness.rss_bytes']).toBe(0);
+        expect(
+          attrs['qwen-code.daemon.channel.liveness.consecutive_timeouts'],
+        ).toBe(2);
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            attrs,
+            'qwen-code.daemon.channel.liveness.wchan',
+          ),
+        ).toBe(false);
+        expect(Object.values(attrs).every((v) => v !== undefined)).toBe(true);
+        expect(vi.mocked(sampleChannelProcess)).toHaveBeenCalledWith(4242);
+        expect(handle.killed).toBe(true);
+        const killLines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('channel liveness failed'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=4242 state=T wchan=? cpuDelta=0 busy=0 timeouts=2 rssMB=0; killing channel\n',
+        ]);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
+
+    it('omits absent evidence keys from liveness telemetry instead of undefined', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        vi.mocked(sampleChannelProcess).mockReturnValue(undefined);
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + 2 * CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const call = event.mock.calls.find(
+          ([name]) => name === 'channel.liveness_failed',
+        );
+        expect(call).toBeDefined();
+        const attrs = call![1] as Record<string, unknown>;
+        expect(Object.keys(attrs).sort()).toEqual(
+          [
+            'qwen-code.daemon.acp_channel.id',
+            'qwen-code.daemon.channel.session_count',
+            'qwen-code.daemon.channel.transport_error_code',
+            'qwen-code.daemon.channel.liveness.busy_extensions',
+            'qwen-code.daemon.channel.liveness.consecutive_timeouts',
+          ].sort(),
+        );
+        expect(Object.values(attrs).every((v) => v !== undefined)).toBe(true);
+        expect(vi.mocked(sampleChannelProcess)).toHaveBeenCalledWith(undefined);
+        const killLines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('channel liveness failed'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=? state=? wchan=? cpuDelta=? busy=0 timeouts=2 rssMB=?; killing channel\n',
+        ]);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
+
+    it('logs guarded evidence on every busy extension and on the final kill', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        let ticks = 0;
+        vi.mocked(sampleChannelProcess).mockImplementation(() => ({
+          cpuTicks: (ticks += 10),
+          state: 'R',
+          wchan: '',
+          rssBytes: 0,
+        }));
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        handle.channel = { ...handle.channel, pid: 4242 };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS +
+            (CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT + 1) *
+              CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const lines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.startsWith('qwen serve: channel liveness'));
+        const graceLines = lines.filter((l) => l.includes('extending grace'));
+        expect(graceLines).toHaveLength(
+          CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT - 1,
+        );
+        expect(graceLines[0]).toBe(
+          'qwen serve: channel liveness probe timed out but agent pid=4242 consumed CPU (10 ticks) state=R wchan=? rssMB=0; extending grace 1/6\n',
+        );
+        expect(graceLines[4]).toContain('extending grace 5/6');
+        const killLines = lines.filter((l) => l.includes('killing channel'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=4242 state=R wchan=? cpuDelta=10 busy=6 timeouts=0 rssMB=0; killing channel\n',
+        ]);
+        const call = event.mock.calls.find(
+          ([name]) => name === 'channel.liveness_failed',
+        );
+        expect(call?.[1]).toMatchObject({
+          'qwen-code.daemon.channel.liveness.busy_extensions': 6,
+          'qwen-code.daemon.channel.liveness.consecutive_timeouts': 0,
+        });
+        expect(handle.killed).toBe(true);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
+
+    it('renders real wchan and RSS values on grace and kill lines', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        let ticks = 0;
+        vi.mocked(sampleChannelProcess).mockImplementation(() => ({
+          cpuTicks: (ticks += 10),
+          state: 'R',
+          wchan: 'do_signal_stop',
+          rssBytes: 44_040_192,
+        }));
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        handle.channel = { ...handle.channel, pid: 4242 };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS +
+            (CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT + 1) *
+              CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const lines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.startsWith('qwen serve: channel liveness'));
+        const graceLines = lines.filter((l) => l.includes('extending grace'));
+        // Non-empty wchan and non-zero RSS must pass through verbatim: a
+        // constant-'?' / constant-'0' renderer would keep every other test
+        // green while destroying the forensic value of these lines.
+        expect(graceLines[0]).toBe(
+          'qwen serve: channel liveness probe timed out but agent pid=4242 consumed CPU (10 ticks) state=R wchan=do_signal_stop rssMB=42; extending grace 1/6\n',
+        );
+        const killLines = lines.filter((l) => l.includes('killing channel'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=4242 state=R wchan=do_signal_stop cpuDelta=10 busy=6 timeouts=0 rssMB=42; killing channel\n',
+        ]);
+        expect(handle.killed).toBe(true);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('transport failure marks the channel dying before process exit', async () => {
@@ -23223,6 +23515,96 @@ describe('createAcpSessionBridge', () => {
       expect(() => bridge.getPendingPrompts('unknown')).toThrow(
         SessionNotFoundError,
       );
+    });
+  });
+
+  describe('rateSessionTurn', () => {
+    it('forwards the mark to the owning child and returns its answer', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionFeedback) {
+            return { recorded: true };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const result = await bridge.rateSessionTurn(session.sessionId, {
+        promptId: 'prompt-feedback',
+        rating: 'up',
+      });
+
+      expect(result).toEqual({ recorded: true });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        params: {
+          sessionId: session.sessionId,
+          promptId: 'prompt-feedback',
+          rating: 'up',
+        },
+      });
+      await bridge.shutdown();
+    });
+
+    it('passes a suppressed collection answer through unchanged', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionFeedback
+            ? { recorded: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.rateSessionTurn(session.sessionId, {
+          promptId: 'prompt-feedback',
+          rating: 'down',
+        }),
+      ).resolves.toEqual({ recorded: false });
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown sessions', async () => {
+      const bridge = makeBridge();
+      await expect(
+        bridge.rateSessionTurn('unknown', {
+          promptId: 'prompt-feedback',
+          rating: 'up',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+
+    it('propagates child failures', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionFeedback) {
+            throw new Error('child refused');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // The JSON-RPC layer sanitizes a plain child Error to the standard
+      // internal-error message; the point is that the failure propagates
+      // instead of fabricating a recorded answer.
+      await expect(
+        bridge.rateSessionTurn(session.sessionId, {
+          promptId: 'prompt-feedback',
+          rating: 'up',
+        }),
+      ).rejects.toThrow('Internal error');
+      await bridge.shutdown();
     });
   });
 
@@ -31548,6 +31930,67 @@ describe('createAcpSessionBridge', () => {
       shellSpy.mockRestore();
     });
 
+    it('fences both queued and new shell requests while a session closes', async () => {
+      const shellSpy = mockShellExecute();
+      const cd = deferred<{
+        previousCwd: string;
+        newCwd: string;
+        warnings: string[];
+      }>();
+      const close = deferred<{ closed: true }>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) return cd.promise;
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            return close.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const context = { clientId: session.clientId };
+        const cwdChange = bridge.changeSessionCwd(session.sessionId, {
+          path: WS_B,
+        });
+        const queued = bridge.executeShellCommand(
+          session.sessionId,
+          'echo queued',
+          undefined,
+          context,
+        );
+        void queued.catch(() => undefined);
+        const closing = bridge.closeSession(session.sessionId, undefined, {
+          forDeletion: true,
+        });
+        void closing.catch(() => undefined);
+
+        await expect(
+          bridge.executeShellCommand(
+            session.sessionId,
+            'echo new',
+            undefined,
+            context,
+          ),
+        ).rejects.toMatchObject({ code: 'session_closing' });
+        cd.resolve({ previousCwd: WS_A, newCwd: WS_B, warnings: [] });
+        await cwdChange;
+        await expect(queued).rejects.toMatchObject({ code: 'session_closing' });
+        expect(shellSpy).not.toHaveBeenCalled();
+        close.resolve({ closed: true });
+        await closing;
+      } finally {
+        cd.resolve({ previousCwd: WS_A, newCwd: WS_B, warnings: [] });
+        close.resolve({ closed: true });
+        await bridge.shutdown();
+        shellSpy.mockRestore();
+      }
+    });
+
     it('executes direct shell in previous cwd when a pending cd fails', async () => {
       const shellSpy = mockShellExecute();
       const cdResult = deferred<{
@@ -35684,6 +36127,41 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not call freshSessionAdmission for a warm re-attach on a live session', async () => {
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return { release: () => {} };
+        },
+      });
+
+      const live = await bridge.loadSession({
+        sessionId: 'warm-1',
+        workspaceCwd: WS_A,
+      });
+      expect(live.attached).toBe(false);
+      expect(contexts).toHaveLength(1);
+      contexts.length = 0;
+
+      // Re-attaching to the already-live session via loadSession or
+      // resumeSession must bypass admission (no new child is spawned).
+      const reattachedLoad = await bridge.loadSession({
+        sessionId: 'warm-1',
+        workspaceCwd: WS_A,
+      });
+      expect(reattachedLoad.attached).toBe(true);
+
+      const reattachedResume = await bridge.resumeSession({
+        sessionId: 'warm-1',
+        workspaceCwd: WS_A,
+      });
+      expect(reattachedResume.attached).toBe(true);
+      expect(contexts).toEqual([]);
+      await bridge.shutdown();
+    });
+
     it('does not reserve live capacity for a persisted branch', async () => {
       const contexts: Array<{
         operation: string;
@@ -35891,6 +36369,203 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('closeSession', () => {
+    it.each(['queued fork', 'btw', 'fork'])(
+      'rejects a %s for a session closing for deletion',
+      async (request) => {
+        const close = deferred<{ closed: true }>();
+        let closingId: string;
+        const handle = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (
+              method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+              params['sessionId'] === closingId
+            ) {
+              return close.promise;
+            }
+            return { closed: true, answer: 'Still available', launched: true };
+          },
+        });
+        const channelFactory = vi.fn(async () => handle.channel);
+        const bridge = makeBridge({ channelFactory, sessionScope: 'thread' });
+        try {
+          const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          closingId = a.sessionId;
+          expect(channelFactory).toHaveBeenCalledTimes(1);
+
+          const queuedFork =
+            request === 'queued fork'
+              ? bridge.launchSessionForkAgent(a.sessionId, 'Review this')
+              : undefined;
+          void queuedFork?.catch(() => undefined);
+          await expect(
+            bridge.closeSession(a.sessionId, undefined, {
+              forDeletion: true,
+              agentCloseTimeoutMs: 10,
+            }),
+          ).rejects.toBeInstanceOf(BridgeTimeoutError);
+          const sideRequest =
+            queuedFork ??
+            (request === 'btw'
+              ? bridge.generateSessionBtw(a.sessionId, 'What is this?')
+              : bridge.launchSessionForkAgent(a.sessionId, 'Review this'));
+          await expect(sideRequest).rejects.toMatchObject({
+            code: 'session_closing',
+          });
+          const requestedMethods = handle.agent.extMethodCalls.map(
+            ({ method }) => method,
+          );
+          expect(requestedMethods).not.toContain(
+            request === 'btw'
+              ? SERVE_CONTROL_EXT_METHODS.sessionBtw
+              : SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+          );
+          await expect(
+            bridge.generateSessionBtw(b.sessionId, 'What is this?'),
+          ).resolves.toEqual({
+            sessionId: b.sessionId,
+            answer: 'Still available',
+          });
+        } finally {
+          close.resolve({ closed: true });
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it('keeps a sibling turn running when closing a session for deletion times out', async () => {
+      const promptStarted = deferred<void>();
+      const prompt = deferred<PromptResponse>();
+      const close = deferred<{ closed: true }>();
+      let closingId: string;
+      const handle = makeChannel({
+        promptImpl: () => {
+          promptStarted.resolve();
+          return prompt.promise;
+        },
+        extMethodImpl: (method, params) => {
+          if (
+            method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            params['sessionId'] === closingId
+          ) {
+            return close.promise;
+          }
+          return { closed: true };
+        },
+      });
+      const channelFactory = vi.fn(async () => handle.channel);
+      const bridge = makeBridge({ channelFactory, sessionScope: 'thread' });
+      try {
+        const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        closingId = a.sessionId;
+        expect(channelFactory).toHaveBeenCalledTimes(1);
+        const running = bridge.sendPrompt(b.sessionId, {
+          sessionId: b.sessionId,
+          prompt: [{ type: 'text', text: 'Keep running' }],
+        });
+        void running.catch(() => undefined);
+        await promptStarted.promise;
+        expect(bridge.getSessionSummary(b.sessionId).activeWorkState).toBe(
+          'active',
+        );
+
+        const options = { forDeletion: true, agentCloseTimeoutMs: 10 };
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, options),
+        ).rejects.toBeInstanceOf(BridgeTimeoutError);
+        expect(handle.killed).toBe(false);
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, options),
+        ).rejects.toMatchObject({ code: 'session_closing' });
+        expect(bridge.getSessionSummary(b.sessionId).activeWorkState).toBe(
+          'active',
+        );
+
+        prompt.resolve({ stopReason: 'end_turn' });
+        await expect(running).resolves.toMatchObject({
+          stopReason: 'end_turn',
+        });
+        close.resolve({ closed: true });
+        await expect.poll(() => bridge.sessionCount).toBe(1);
+        expect(bridge.getSessionSummary(b.sessionId).sessionId).toBe(
+          b.sessionId,
+        );
+      } finally {
+        prompt.resolve({ stopReason: 'end_turn' });
+        close.resolve({ closed: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('keeps the deletion target retryable when the child declines closure', async () => {
+      let closed = false;
+      const handle = makeChannel({
+        extMethodImpl: () => ({ closed }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, { forDeletion: true }),
+        ).rejects.toThrow('Agent did not acknowledge session close');
+        expect(bridge.getSessionSummary(a.sessionId).sessionId).toBe(
+          a.sessionId,
+        );
+        expect(handle.killed).toBe(false);
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+          params: {
+            sessionId: a.sessionId,
+            requireFlush: true,
+            drainTimeoutMs: sessionCloseDrainBudgetMs(10_000),
+          },
+        });
+        closed = true;
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, { forDeletion: true }),
+        ).resolves.toBeUndefined();
+        expect(bridge.sessionCount).toBe(0);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('retries deletion on the same channel after an unconfirmed close fails', async () => {
+      const handle = makeChannel({ extMethodImpl: () => ({ closed: true }) });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const { sessionId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+        });
+        const extMethod = vi
+          .spyOn(ClientSideConnection.prototype, 'extMethod')
+          .mockRejectedValueOnce(new Error('close acknowledgement lost'));
+        onTestFinished(() => extMethod.mockRestore());
+        const options = { forDeletion: true };
+        await expect(
+          bridge.closeSession(sessionId, undefined, options),
+        ).rejects.toThrow('close acknowledgement lost');
+        expect(bridge.sessionCount).toBe(1);
+        expect(handle.killed).toBe(false);
+        await expect(
+          bridge.closeSession(sessionId, undefined, options),
+        ).resolves.toBeUndefined();
+        expect(extMethod).toHaveBeenCalledTimes(2);
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+          params: {
+            sessionId,
+            requireFlush: true,
+            drainTimeoutMs: sessionCloseDrainBudgetMs(10_000),
+          },
+        });
+        expect(bridge.sessionCount).toBe(0);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
     it('publishes session_closed and removes session from maps', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

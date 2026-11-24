@@ -26,7 +26,7 @@ GET /session/:id/turns/:promptId/hooks 及工作区限定形式返回 sessionId�
 
 普通轮次的 turn-index 在既有请求 promptId、持久化用户记录 turnId 旁显式返回可查询的 historyPromptId。UI 用这条映射关联回放的用户记录或已接收的请求，再将 historyPromptId 传给 Hook 查询。未记录 Hook 的轮次也有映射；没有 promptId 的旧记录沿用已有 legacy-record 身份。托管导航不提供该字段，因为其 Hook 查询不受支持。既有回放与请求身份保持原义。
 
-解析和校验快照时不生成导航预览。每轮排序后的执行、汇总和 coverage 附着在已有 transcript 索引缓存项上，计入共享 64 MiB 预算并沿用五分钟有效期。结果无法容纳时正常返回但不缓存。冻结页复用归并结果；追加后的新快照使用不同缓存项。只复制当前页的执行和汇总后返回，避免调用方修改缓存。文件截断、替换或等长改写后，冻结快照失效。
+解析和校验快照时不生成导航预览。每轮排序后的执行、汇总和 coverage 附着在已有 transcript 索引缓存项上，按加入后条目所属预算类记账（64 MiB 共享预算；合并条目超出共享预算时计入 256 MiB 超大索引预算）并沿用五分钟有效期。合并后的条目放不下其类预算时正常返回但不缓存。冻结页复用归并结果；追加后的新快照使用不同缓存项。只复制当前页的执行和汇总后返回，避免调用方修改缓存。文件截断、替换或等长改写后，冻结快照失效。
 
 两个路由均为 persisted-workspace scoped，复用 transcript 运行时解析、归档锁、generation 检查和存储上下文。live 首屏用现有 transcript barrier 刷盘，冻结页不重复刷盘。冷会话无需加载即可读取。未知、歧义或已移除运行时不回退到主运行时。旧轮次无记录为 unrecorded，托管会话为 unsupported，已知缺失为 partial。汇总表示已记录执行，不证明历史采集完整。
 

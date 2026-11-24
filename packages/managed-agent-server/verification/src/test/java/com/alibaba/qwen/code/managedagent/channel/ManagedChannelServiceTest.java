@@ -28,7 +28,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -72,8 +71,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedChannelServiceTest {
-    private static final String TENANT = "tenant-channel-"
-            + UUID.randomUUID();
+    private static final String TENANT = UUID.randomUUID().toString();
     private static final String WORKSPACE = "ws-channel";
     private static final String ACTOR = "channel-owner";
     /** Per test: the H2 database outlives the test, and generations only move forward. */
@@ -326,6 +324,20 @@ class ManagedChannelServiceTest {
                 .isInstanceOf(ManagedAgentException.class)
                 .extracting(e -> ((ManagedAgentException) e).getCode())
                 .isEqualTo("channel_not_found");
+    }
+
+    @Test
+    void refusesAChannelActorWithTrailingSpaces() {
+        RegisterChannelRequest padded = new RegisterChannelRequest("email",
+                "agent@example.com", 1, ACTOR + " ", WORKSPACE, ".",
+                new ChannelPolicy("email", "allowlist",
+                        List.of("alice@example.com"), "followup"));
+        assertThatThrownBy(() -> service.register(TENANT, "padded-actor",
+                padded))
+                .isInstanceOf(ManagedAgentException.class)
+                .extracting(e -> ((ManagedAgentException) e).getCode())
+                .isEqualTo("invalid_request");
+        assertThat(instances.findInstance(TENANT, "padded-actor")).isEmpty();
     }
 
     @Test
@@ -2102,21 +2114,18 @@ class ManagedChannelServiceTest {
                  "run":{"state":"admitted","reason":null,"definition":null,"executionCallId":null,"effectId":"%s","dispatchId":null,"deliveryId":"%s","execution":null,"runtime":null,"delivery":{"target":"channel","state":"planned"}}}
                 """.formatted(deliveryId, routeId, "a".repeat(64), segmentsJson,
                 deliveryId, deliveryId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, ?, ?, 'managed-channel_delivery', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scopeKey(sessionId), resourceId), scopeKey(sessionId), TENANT, WORKSPACE, sessionId, resourceId,
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, 'managed-channel_delivery', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                TENANT, WORKSPACE, sessionId, resourceId,
                 body.length(), "c".repeat(64),
                 body.getBytes(StandardCharsets.UTF_8), "publish-" + resourceId);
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, 'channel_delivery', ?, ?,"
+                        + " VALUES (?, ?, ?, 'channel_delivery', ?, ?,"
                         + " 1, ?, NULL, NULL, 'channel', 'planned', ?)",
-                scopeKey(sessionId),
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
-                        .recordKey(sessionId, "channel_delivery", deliveryId),
                 TENANT, WORKSPACE, sessionId, deliveryId, "d".repeat(64),
                 resourceId, clock.get());
     }
@@ -2257,10 +2266,6 @@ class ManagedChannelServiceTest {
                         + " WHERE tenant_id = ? AND delivery_id = ?",
                 clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
                 deliveryId);
-    }
-
-    private static String scopeKey(String sessionId) {
-        return ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
     }
 
     /** Answers the channel operations the way the hosted funnel does. */

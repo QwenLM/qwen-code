@@ -9,12 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createShowResult, parseToolResult } from '../contracts.js';
 import type { GeneratedDocument } from '../contracts.js';
 import type { CaptureResult, ViewState, ViewStateHost } from './controller.js';
+import type { UiEffect } from './runtime-contract.js';
 
 const presentation = vi.hoisted(() => ({
   onStatus: undefined as ((state: ViewState) => void) | undefined,
   onDocument: undefined as ((document: GeneratedDocument) => void) | undefined,
   capture: vi.fn<() => CaptureResult>(),
   stateHost: undefined as ViewStateHost | undefined,
+  onEffect: undefined as ((effect: UiEffect) => void) | undefined,
   onEvent: undefined as
     | ((event: {
         id: string;
@@ -48,6 +50,7 @@ vi.mock('./controller.js', async (importOriginal) => {
         presentation.onStatus = args[3];
         presentation.onDocument = args[2];
         presentation.stateHost = args[4];
+        presentation.onEffect = args[5];
       }
       override captureSnapshot() {
         return presentation.capture();
@@ -65,6 +68,7 @@ const bridge = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   updateModelContext: vi.fn(),
   request: vi.fn(),
+  downloadFile: vi.fn(),
   onteardown: undefined as (() => Promise<object>) | undefined,
 }));
 vi.mock('@modelcontextprotocol/ext-apps', () => ({
@@ -114,6 +118,8 @@ beforeEach(async () => {
   bridge.getHostCapabilities.mockReturnValue({ message: { text: {} } });
   bridge.sendMessage.mockResolvedValue({});
   bridge.updateModelContext.mockResolvedValue({});
+  bridge.request.mockResolvedValue({});
+  bridge.downloadFile.mockResolvedValue({});
   presentation.capture.mockReturnValue({ ok: false, reason: 'not-ready' });
   vi.stubGlobal('Worker', undefined);
   document.body.innerHTML = readFileSync('src/app/index.html', 'utf8');
@@ -910,5 +916,104 @@ describe('saved view state', () => {
     await expect(presentation.stateHost!.load(shown())).rejects.toThrow();
     presentation.stateHost!.save('1');
     expect(bridge.request).toHaveBeenCalledOnce();
+  });
+});
+
+describe('copy and download from a click', () => {
+  const copy: UiEffect = { kind: 'copy', text: 'Total: 12.30' };
+  const download: UiEffect = {
+    kind: 'download',
+    filename: 'plans 2026',
+    mimeType: 'text/csv',
+    text: 'plan,payment',
+  };
+  const notice = () => document.getElementById('notice')!;
+
+  it('asks the host to perform each effect it offers', async () => {
+    bridge.getHostCapabilities.mockReturnValue({
+      downloadFile: {},
+      experimental: { 'qwen-code/generated-ui-copy': {} },
+    });
+    ready();
+    presentation.onEffect!(copy);
+    presentation.onEffect!(download);
+    expect(bridge.request).toHaveBeenCalledWith(
+      {
+        method: 'qwen-code/generated-ui-copy/write',
+        params: { text: 'Total: 12.30' },
+      },
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(bridge.downloadFile).toHaveBeenCalledWith({
+      contents: [
+        {
+          type: 'resource',
+          resource: {
+            uri: 'file:///plans%202026.csv',
+            mimeType: 'text/csv',
+            text: 'plan,payment',
+          },
+        },
+      ],
+    });
+    expect(notice().hidden).toBe(true);
+  });
+
+  it('gives every downloaded name the extension of its type', () => {
+    bridge.getHostCapabilities.mockReturnValue({ downloadFile: {} });
+    ready();
+    for (const filename of ['run.bat', 'notes.MD'])
+      presentation.onEffect!({
+        kind: 'download',
+        filename,
+        mimeType: filename === 'run.bat' ? 'text/plain' : 'text/markdown',
+        text: 'a',
+      });
+    expect(
+      bridge.downloadFile.mock.calls.map(
+        ([params]) =>
+          (params as { contents: Array<{ resource: { uri: string } }> })
+            .contents[0].resource.uri,
+      ),
+    ).toEqual(['file:///run.bat.txt', 'file:///notes.MD']);
+  });
+
+  it('encodes a download name containing an unpaired surrogate', () => {
+    bridge.getHostCapabilities.mockReturnValue({ downloadFile: {} });
+    ready();
+    presentation.onEffect!({ ...download, filename: '📈report\uD83D' });
+    expect(bridge.downloadFile).toHaveBeenCalledWith({
+      contents: [
+        {
+          type: 'resource',
+          resource: {
+            uri: `file:///${encodeURIComponent('📈report\uFFFD.csv')}`,
+            mimeType: download.mimeType,
+            text: download.text,
+          },
+        },
+      ],
+    });
+  });
+
+  it('says so when the host cannot copy or download', () => {
+    bridge.getHostCapabilities.mockReturnValue({ downloadFile: {} });
+    ready();
+    presentation.onEffect!(copy);
+    expect(bridge.request).not.toHaveBeenCalled();
+    expect(notice().textContent).toBe(
+      'This host cannot copy or download from the view.',
+    );
+    presentation.onEffect!(download);
+    expect(notice().hidden).toBe(true);
+  });
+
+  it('says a dropped effect needs another click', () => {
+    ready();
+    present({ effectDropped: true });
+    expect(notice().textContent).toBe(
+      'Nothing was copied or downloaded because the values changed. Click again.',
+    );
   });
 });

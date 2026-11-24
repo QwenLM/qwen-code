@@ -2,13 +2,11 @@ package com.alibaba.qwen.code.managedagent.automation;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.OccurrenceRow;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -197,11 +195,9 @@ class AutomationScannerConcurrencyMySqlIT {
         repeatableRead().executeWithoutResult(status -> {
             jdbc.queryForList("SELECT tenant_id FROM ma_session"
                     + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", row.tenantId(), row.sessionId());
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id,"
                             + " session_id, domain, record_id, revision, task_kind, task_state, record_resource_id, gmt_create)"
-                            + " VALUES (?, ?, ?, 'workspace', ?, 'automation_run', ?, 1, 'automation_run', 'completed', 'res', 42)",
-                    ManagedSessionStore.sessionScopeKey(row.tenantId(), row.sessionId()),
-                    ManagedExtensionProjection.recordKey(row.sessionId(), "automation_run", row.runId()),
+                            + " VALUES (?, 'workspace', ?, 'automation_run', ?, 1, 'automation_run', 'completed', 'res', 42)",
                     row.tenantId(), row.sessionId(), row.runId());
             jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 1"
                             + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?"

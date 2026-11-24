@@ -185,6 +185,6 @@ class ReplayFloorAdvancerTest {
     }
 
     private static String tenant() {
-        return "tenant-replay-floor-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 }

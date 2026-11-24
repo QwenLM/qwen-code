@@ -24,6 +24,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
+import { resolveDaemonExportChannel } from '../config/acp-channel-fallback.js';
 import type {
   DaemonMetricsBucket,
   DaemonPerfSnapshot,
@@ -232,7 +233,6 @@ import {
   registerHostedPackagePreparation,
   HOSTED_PACKAGE_PREPARATION_PREFIX,
 } from './hosted-package-preparation.js';
-import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -268,6 +268,12 @@ import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
 } from './total-session-admission.js';
+import {
+  createLoadAdmissionMonitor,
+  DISABLED_LOAD_ADMISSION_SNAPSHOT,
+  type LoadAdmissionMonitor,
+  type LoadAdmissionSnapshot,
+} from './load-admission.js';
 import {
   sendBridgeError as sendBridgeErrorResponse,
   sendPermissionVoteError as sendPermissionVoteErrorResponse,
@@ -575,6 +581,11 @@ export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /**
+   * Load-monitor factory; tests inject a stub so constructing an app does
+   * not leak a real host sampler (histogram + interval) per test app.
+   */
+  createLoadAdmissionMonitor?: () => LoadAdmissionMonitor;
+  /**
    * Enables resident management of scheduled-task-owned sessions: a periodic
    * keepalive (so their schedulers aren't idle-reaped) and a boot-time
    * rehydration (so they re-arm after a restart). Opt-in — only the real
@@ -693,6 +704,7 @@ export interface ServeAppDeps {
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getLoadAdmissionSnapshot?: () => LoadAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
   managedChildProcesses?: {
     registry: ProcessRegistry;
@@ -934,6 +946,13 @@ export function createServeApp(
   }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  // Resolved once per daemon from the frozen launch env; both transcript
+  // export surfaces (workspace sessions and standalone conversations) share
+  // it so a co-resident daemon cannot relabel either.
+  const exportChannel = resolveDaemonExportChannel(
+    opts.profile,
+    daemonEnvAtBoot,
+  );
   const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
     opts.maxRegisteredWorkspaces,
     daemonEnvAtBoot,
@@ -1367,12 +1386,19 @@ export function createServeApp(
     );
   let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
+  const loadAdmissionMonitor =
+    !deps.bridge && !injectedWorkspaceRegistry && opts.loadAdmission !== false
+      ? (deps.createLoadAdmissionMonitor ?? createLoadAdmissionMonitor)()
+      : undefined;
   const totalSessionAdmission =
     !deps.bridge && !injectedWorkspaceRegistry
       ? createTotalSessionAdmissionController({
           maxTotalSessions: opts.maxTotalSessions,
           getBridges: () =>
             defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
+          ...(loadAdmissionMonitor
+            ? { loadAdmission: loadAdmissionMonitor }
+            : {}),
         })
       : undefined;
   const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
@@ -2063,6 +2089,7 @@ export function createServeApp(
     );
     standaloneSessionService = new StandaloneSessionService({
       daemonLog,
+      exportChannel,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);
@@ -2644,7 +2671,6 @@ export function createServeApp(
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
-  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
@@ -2654,17 +2680,6 @@ export function createServeApp(
             token: opts.managedRuntimeBrokerToken,
           }
         : undefined;
-    if (opts.hostedCsiSessionStoreUrl && broker) {
-      const privateSessions = registerHostedCsiSessionRoutes(
-        app,
-        hostedHarness,
-        opts.hostedCsiSessionStoreUrl,
-        broker,
-        (id) => ordinary.owns(id),
-      );
-      stopHostedCsiSessions = privateSessions.stopLocal;
-      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
-    }
     const ordinary = registerHostedHarnessSessionRoutes(
       app,
       hostedHarness,
@@ -2872,6 +2887,10 @@ export function createServeApp(
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
+    getLoadAdmissionSnapshot:
+      deps.getLoadAdmissionSnapshot ??
+      (() =>
+        loadAdmissionMonitor?.snapshot() ?? DISABLED_LOAD_ADMISSION_SNAPSHOT),
     getChildHeapPolicySnapshot: deps.managedChildProcesses
       ? () => deps.managedChildProcesses!.policy.snapshot()
       : deps.getChildHeapPolicySnapshot,
@@ -3692,6 +3711,7 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    exportChannel,
     // Late-bound: the refresh timer is started before this app exists, so the
     // serve root installs the hook on locals and it is read per restore.
     onSessionRestored: ({ workspaceCwd, sessionId }) => {
@@ -3703,6 +3723,10 @@ export function createServeApp(
     },
     mutate,
     sendBridgeError,
+    getLoadAdmissionSnapshot:
+      deps.getLoadAdmissionSnapshot ??
+      (() =>
+        loadAdmissionMonitor?.snapshot() ?? DISABLED_LOAD_ADMISSION_SNAPSHOT),
     daemonLog,
     sseAdmissionCaps,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
@@ -4586,13 +4610,18 @@ export function createServeApp(
     ]);
   };
   serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
+  if (loadAdmissionMonitor) {
+    const monitor = loadAdmissionMonitor;
+    serveAppLifecycle.addAppDrain(async () => {
+      monitor.dispose();
+    });
+  }
   if (stopHostedPackagePreparation)
     serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
-        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (

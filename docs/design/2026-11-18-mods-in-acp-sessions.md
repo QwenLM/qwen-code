@@ -24,7 +24,7 @@ Non-goals:
 - Render sites (`ui.render`). Nothing in an ACP client draws a Mod rewrite yet. The Web Shell projection, with its client capability check, is the next step.
 - Tool and command middleware (`tool.call`, `tool.check`, Mod commands) and prompts (`prompt.submit`, `$.prompt.submit`). They are a later ACP step.
 - Showing Mod logs in the Web Shell, which comes with the projection.
-- Removing `MessageRewriteMiddleware`. It can go once the Web Shell draws Mod rewrites.
+- Removing `MessageRewriteMiddleware`. It went once the Web Shell drew Mod rewrites: [Removing MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.md).
 
 ## Contract
 

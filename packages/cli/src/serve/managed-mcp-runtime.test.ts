@@ -2030,6 +2030,9 @@ describe('parked connection upkeep', () => {
       expect(view.catalog?.connectionGeneration).toBe(
         catalog!.connectionGeneration,
       );
+      // An Action-parked MCP call resumes only if every input of its model
+      // tool name, catalogRevision included, comes back unchanged (S6b).
+      expect(view.catalog).toEqual(catalog);
       expect(methods.filter((method) => method === 'ping')).toHaveLength(1);
     },
   );

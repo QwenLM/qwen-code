@@ -120,6 +120,14 @@ export interface ServeOptions {
    */
   maxTotalSessions?: number;
   /**
+   * Load-based admission for fresh child spawns. When enabled (the
+   * default), a periodic monitor refuses new sessions with 503
+   * `system_overloaded` while host load or daemon event-loop lag stays
+   * past its enter thresholds; live sessions and the control plane are
+   * never gated. `false` disables the monitor entirely.
+   */
+  loadAdmission?: boolean;
+  /**
    * Per-session cap on accepted prompts that have not settled yet.
    * Defaults to 5. `0` or `Infinity` disables the cap.
    */
@@ -392,8 +400,6 @@ export interface ServeOptions {
   managedRuntimeBrokerToken?: string;
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
-  /** Trusted startup URL for the operator-only original CSI attachment. */
-  hostedCsiSessionStoreUrl?: string;
   /**
    * Per-SSE-connection writer stall budget (ms). A stream whose write is
    * stuck waiting for `drain` (the consumer stopped reading) for longer
