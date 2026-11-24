@@ -216,7 +216,7 @@ describe('Hosted Harness model boundary', () => {
     await runHostedHarnessTextTurn({
       ...input,
       memory: { recall },
-      recallUserInput: true,
+      userPrompt: true,
       hooks: hooks.session,
       workspaceContext: { read: () => 'workspace instructions' },
     });
@@ -233,15 +233,20 @@ describe('Hosted Harness model boundary', () => {
     );
   });
 
-  it('does not recall personal memory without a new accepted user input', async () => {
+  it('skips prompt hooks and memory recall for automated input', async () => {
     config([{ type: LlmEventType.Finished }]);
     const recall = vi.fn();
+    const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
     await runHostedHarnessTextTurn({
       ...input,
       memory: { recall },
-      recallUserInput: false,
+      userPrompt: false,
+      hooks: hooks.session,
     });
     expect(recall).not.toHaveBeenCalled();
+    expect(hooks.fire.mock.calls.map(([event]) => event)).not.toContain(
+      HookEventName.UserPromptSubmit,
+    );
   });
 
   it.each(['tool-results', 'model'] as const)(
@@ -276,7 +281,7 @@ describe('Hosted Harness model boundary', () => {
         await runHostedHarnessTextTurn({
           ...input,
           memory: { recall },
-          recallUserInput: true,
+          userPrompt: true,
           ...(kind === 'model'
             ? { resumeModel: { round: 0, prepared } as HostedModelRequest }
             : { resumeFromToolResults: responses }),
@@ -309,7 +314,7 @@ describe('Hosted Harness model boundary', () => {
     await runHostedHarnessTextTurn({
       ...input,
       memory: { recall },
-      recallUserInput: true,
+      userPrompt: true,
       userMessages: { claim, commit, commitAssistant: vi.fn() },
     });
     expect(recall.mock.calls.map(([id, text]) => [id, text])).toEqual([

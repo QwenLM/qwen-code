@@ -1944,7 +1944,7 @@ describe('Session', () => {
       },
     );
 
-    it('keeps the original envelope when a hook blocks Retry before the next retry', async () => {
+    it('replays the original envelope without evaluating a blocking prompt hook on Retry', async () => {
       const reminder =
         '<system-reminder>\nWorkflow mode is enabled for this session. Original guidance.\n</system-reminder>';
       const orphan: Content = {
@@ -1959,13 +1959,10 @@ describe('Session', () => {
         addHistory: vi.fn((entry: Content) => history.push(entry)),
       });
       const messageBus = {
-        request: vi
-          .fn()
-          .mockResolvedValueOnce({
-            success: true,
-            output: { decision: 'block', reason: 'Retry paused by hook' },
-          })
-          .mockResolvedValue({ success: true, output: {} }),
+        request: vi.fn().mockResolvedValue({
+          success: true,
+          output: { decision: 'block', reason: 'New prompt denied' },
+        }),
       };
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
       mockConfig.getDisableAllHooks = vi.fn(() => false);
@@ -1979,10 +1976,6 @@ describe('Session', () => {
         _meta: { 'qwen.daemon.retry': true },
       };
 
-      await session.prompt(prompt);
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(history).toEqual([orphan]);
-      vi.mocked(mockChat.addHistory).mockClear();
       vi.mocked(mockChat.sendMessageStream).mockImplementation(async () => {
         pushes++;
         return createEmptyStream();
@@ -1991,6 +1984,7 @@ describe('Session', () => {
       expect(
         textParts(firstSentMessage()).filter((text) => text === reminder),
       ).toHaveLength(1);
+      expect(messageBus.request).not.toHaveBeenCalled();
       expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       expect(mockChat.addHistory).not.toHaveBeenCalled();
     });
@@ -5748,39 +5742,51 @@ describe('Session', () => {
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
     });
 
-    it('runs a channel prompt on the shared round, without a submitted prompt', async () => {
-      const send = useSharedRounds([text('Hello'), finished()]);
+    it.each([false, true])(
+      'runs a channel prompt on the shared round (userInitiated=%s)',
+      async (userInitiated) => {
+        const send = useSharedRounds([text('Hello'), finished()]);
 
-      // A channel's own submission is not passed on as the user's.
-      await prompt({
-        _meta: {
-          [CHANNEL_PROMPT_META_KEY]: true,
-          'qwen.daemon.submittedPrompt': 'hello',
-        },
-      });
+        await prompt({
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: {
+              ...channelWorkflowOrigin,
+              userInitiated,
+            },
+            'qwen.daemon.submittedPrompt': 'hello',
+          },
+        });
 
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(send).toHaveBeenCalledOnce();
-      expect(send.mock.calls[0][3]).toMatchObject({
-        type: core.SendMessageType.UserQuery,
-        // A channel's turn runs no memory extraction, but still recalls.
-        skipMemoryExtraction: true,
-        memoryRecallQuery: 'hello',
-      });
-      expect(send.mock.calls[0][3]).not.toHaveProperty('submittedPrompt');
-      expect(send.mock.calls[0][3]).not.toHaveProperty('humanInput');
-      expect(
-        (
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(send).toHaveBeenCalledOnce();
+        expect(send.mock.calls[0][3]).toMatchObject({
+          type: core.SendMessageType.UserQuery,
+          // A channel's turn runs no memory extraction, but still recalls.
+          skipMemoryExtraction: true,
+          memoryRecallQuery: 'hello',
+        });
+        expect(send.mock.calls[0][3]).not.toHaveProperty('submittedPrompt');
+        expect(send.mock.calls[0][3]).not.toHaveProperty('humanInput');
+        const admit = (
           mockLlmClient as unknown as {
             admitUserPrompt: ReturnType<typeof vi.fn>;
           }
-        ).admitUserPrompt,
-      ).toHaveBeenCalledWith(
-        'hello',
-        'test-session-id########1',
-        expect.objectContaining({ submittedPrompt: undefined }),
-      );
-    });
+        ).admitUserPrompt;
+        if (userInitiated) {
+          expect(admit).toHaveBeenCalledWith(
+            'hello',
+            'test-session-id########1',
+            expect.objectContaining({ submittedPrompt: undefined }),
+          );
+        } else {
+          expect(admit).not.toHaveBeenCalled();
+          expect(send.mock.calls[0][3]).toMatchObject({
+            skipUserPromptSubmit: true,
+          });
+        }
+      },
+    );
 
     it.each([
       ['the Stop hook reached its cap', 'cap'],
@@ -6461,8 +6467,33 @@ describe('Session', () => {
       expect(mockConfig.getFileHistoryService).not.toHaveBeenCalled();
     });
 
-    it('reports a UserPromptSubmit block of a tool-result round and ends the turn', async () => {
+    it('checks each steering message and sends the tool result with the allowed input', async () => {
       useTool(core.Kind.Read, 'read_file');
+      const request = vi.fn(
+        async ({ input }: { input: { prompt: string } }) => ({
+          output:
+            input.prompt === 'block this message'
+              ? { decision: 'block', reason: 'steering declined' }
+              : {
+                  hookSpecificOutput: { additionalContext: 'steering context' },
+                },
+        }),
+      );
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+      mockConfig.hasHooksForEvent = vi.fn(
+        (event) => event === 'UserPromptSubmit',
+      );
+      let drained = false;
+      vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+        if (method === 'craft/drainMidTurnQueue' && !drained) {
+          drained = true;
+          return {
+            messages: ['use plan B instead', 'block this message'],
+            hasQueuedPrompt: false,
+          };
+        }
+        return { messages: [] };
+      });
       const send = useSharedRounds(
         [
           toolCall({
@@ -6472,93 +6503,33 @@ describe('Session', () => {
           }),
           finished(),
         ],
-        [
-          {
-            type: core.LlmEventType.UserPromptSubmitBlocked,
-            value: { reason: 'secret in output', originalPrompt: '' },
-          },
-        ],
+        [text('finished'), finished()],
       );
 
       const result = await prompt();
 
       expect(result.stopReason).toBe('end_turn');
-      expect(send).toHaveBeenCalledTimes(2);
-      expect(agentText()).toContain(
-        '✗ **UserPromptSubmit blocked**: secret in output',
-      );
-      // The calls close with the block, not with the withheld output.
-      expect(mockChat.addHistory).toHaveBeenCalledWith({
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-read',
-              name: 'read_file',
-              response: {
-                error: expect.stringContaining('UserPromptSubmit hook blocked'),
-              },
-            },
-          },
-        ],
-      });
-      expect(
-        JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
-      ).not.toContain('done');
-      expect(
-        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('keeps the input taken with the results of a tool-result round the hook blocked', async () => {
-      useTool(core.Kind.Read, 'read_file');
-      let drained = false;
-      vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
-        if (method === 'craft/drainMidTurnQueue' && !drained) {
-          drained = true;
-          return { messages: ['use plan B instead'], hasQueuedPrompt: false };
-        }
-        return { messages: [] };
-      });
-      useSharedRounds(
-        [
-          toolCall({
-            id: 'call-read',
-            name: 'read_file',
-            args: { file_path: '/tmp/a.txt' },
-          }),
-          finished(),
-        ],
-        [
-          {
-            type: core.LlmEventType.UserPromptSubmitBlocked,
-            value: { reason: 'secret in output', originalPrompt: '' },
-          },
-        ],
-      );
-
-      const result = await prompt();
-
-      expect(result.stopReason).toBe('end_turn');
-      const closed = vi
-        .mocked(mockChat.addHistory)
-        .mock.calls.map(([content]) => content)
-        .find((content) =>
-          content.parts?.some(
-            (part) => part.functionResponse?.id === 'call-read',
-          ),
-        );
-      expect(closed?.parts?.[0]).toMatchObject({
-        functionResponse: {
-          id: 'call-read',
-          response: {
-            error: expect.stringContaining('UserPromptSubmit hook blocked'),
-          },
-        },
-      });
-      // The input the drain took is already shown as delivered.
-      expect(JSON.stringify(closed?.parts?.slice(1))).toContain(
+      expect(request.mock.calls.map(([call]) => call.input.prompt)).toEqual([
         'use plan B instead',
+        'block this message',
+      ]);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1][0]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'call-read' }),
+          }),
+          { text: expect.stringContaining('use plan B instead') },
+          expect.objectContaining({
+            text: expect.stringContaining('steering context'),
+          }),
+        ]),
+      );
+      expect(JSON.stringify(send.mock.calls[1][0])).not.toContain(
+        'block this message',
+      );
+      expect(agentText()).toContain(
+        '✗ **UserPromptSubmit blocked**: steering declined',
       );
     });
 
@@ -6581,14 +6552,10 @@ describe('Session', () => {
             yield finished();
           })(),
         )
-        // The client throws before the push when the tool-result round's
-        // UserPromptSubmit hook request times out.
         .mockImplementationOnce(() =>
           (async function* () {
             if (pushes > 0) {
-              throw new Error(
-                'Request timed out waiting for hook-execution-response',
-              );
+              throw new Error('Request timed out before the history push');
             }
             yield text('never');
           })(),
@@ -6612,6 +6579,49 @@ describe('Session', () => {
           ]),
         }),
       );
+    });
+
+    it('checks interrupted steering again before preserving it in history', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      const request = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          await session.cancelPendingPrompt();
+          return { output: undefined };
+        })
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'declined' },
+        });
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+      mockConfig.hasHooksForEvent = vi.fn(
+        (event) => event === 'UserPromptSubmit',
+      );
+      vi.mocked(mockClient.extMethod).mockImplementation(async (method) =>
+        method === 'craft/drainMidTurnQueue'
+          ? { messages: ['do not include this'], hasQueuedPrompt: false }
+          : {},
+      );
+      const send = useSharedRounds([
+        toolCall({
+          id: 'call-read',
+          name: 'read_file',
+          args: { file_path: '/tmp/a.txt' },
+        }),
+        finished(),
+      ]);
+
+      await expect(prompt()).resolves.toMatchObject({
+        stopReason: 'cancelled',
+      });
+
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).not.toHaveBeenCalled();
+      expect(
+        JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
+      ).not.toContain('do not include this');
     });
 
     it('judges a next-speaker continuation in the round by its own response', async () => {
@@ -7279,16 +7289,8 @@ describe('Session', () => {
             userTurn: { promptId: send.mock.calls[0][2] },
             historyPromptId: promptId,
           });
-          // A retry runs UserPromptSubmit, as before; a continue does not.
-          if (mode === 'retry') {
-            expect(admit).toHaveBeenCalledOnce();
-            expect(send.mock.calls[0][3]).toMatchObject({
-              promptAdmission: { blocked: false },
-            });
-          } else {
-            expect(admit).not.toHaveBeenCalled();
-            expect(send.mock.calls[0][3]).not.toHaveProperty('promptAdmission');
-          }
+          expect(admit).not.toHaveBeenCalled();
+          expect(send.mock.calls[0][3]).not.toHaveProperty('promptAdmission');
           expect(
             mockChatRecordingService.recordUserMessage,
           ).not.toHaveBeenCalled();
@@ -50474,6 +50476,8 @@ describe('Session', () => {
           retry?: boolean;
           metaRetry?: boolean;
           channel?: boolean;
+          channelUserInitiated?: boolean;
+          internal?: boolean;
         }>([
           {
             name: 'text blocks without resource bodies',
@@ -50547,11 +50551,13 @@ describe('Session', () => {
             name: 'channel turn without display projection',
             prompt: [{ type: 'text', text: 'composed channel wrapper' }],
             channel: true,
+            channelUserInitiated: true,
             declared: 'human channel message',
           },
           {
             name: 'machine dispatch without a declaration',
             prompt: [{ type: 'text', text: 'Run this scheduled task now' }],
+            internal: true,
           },
           {
             name: 'empty declaration never falls back to request text',
@@ -50579,6 +50585,8 @@ describe('Session', () => {
             retry,
             metaRetry,
             channel,
+            channelUserInitiated,
+            internal,
           }) => {
             const messageBus = {
               request: vi.fn().mockResolvedValue({ success: true, output: {} }),
@@ -50604,10 +50612,19 @@ describe('Session', () => {
                     ? { 'qwen.daemon.submittedPrompt': declared }
                     : {}),
                   ...(channel ? { [CHANNEL_PROMPT_META_KEY]: true } : {}),
+                  ...(channelUserInitiated
+                    ? {
+                        [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: {
+                          ...channelWorkflowOrigin,
+                          userInitiated: true,
+                        },
+                      }
+                    : {}),
                   ...(displayText !== undefined
                     ? { 'qwen.daemon.promptDisplayText': displayText }
                     : {}),
                   ...(metaRetry ? { 'qwen.daemon.retry': true } : {}),
+                  ...(internal ? { 'qwen.daemon.userPrompt': false } : {}),
                 },
               } as PromptRequest,
               modelPrompt === undefined
@@ -50622,6 +50639,15 @@ describe('Session', () => {
             );
 
             expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            if (
+              retry ||
+              metaRetry ||
+              internal ||
+              (channel && !channelUserInitiated)
+            ) {
+              expect(messageBus.request).not.toHaveBeenCalled();
+              return;
+            }
             expect(messageBus.request).toHaveBeenCalledWith(
               expect.objectContaining({
                 eventName: 'UserPromptSubmit',

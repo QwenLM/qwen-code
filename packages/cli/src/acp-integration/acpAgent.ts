@@ -528,6 +528,7 @@ import {
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -7433,6 +7434,7 @@ class QwenAgent implements Agent {
       this.privateParentState === 'trusted'
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
+    const userPrompt = meta[DAEMON_USER_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
     const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedChannelWorkflowOrigin =
@@ -7447,6 +7449,10 @@ class QwenAgent implements Agent {
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[SUBMITTED_PROMPT_META_KEY];
     delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    delete meta[DAEMON_USER_PROMPT_META_KEY];
+    if (this.privateParentState === 'trusted' && userPrompt === false) {
+      meta[DAEMON_USER_PROMPT_META_KEY] = false;
+    }
     if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
