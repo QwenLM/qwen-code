@@ -167,6 +167,7 @@ import type {
 } from './hosted-approval-continuation.js';
 import {
   type HostedContinuationCaptureRefusal,
+  hostedNativeOwnerRefusal,
   registerHostedActionPark,
 } from './hosted-action-parking.js';
 import {
@@ -283,11 +284,11 @@ import {
   HOSTED_TOOL_INPUT_ORDER,
   HostedHookInputConflictError,
   hostedHookOccurrenceId,
-  isHostedConfigScopedOwner,
   recordedToolHookFields,
   semanticInputDigest,
 } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import { waitForTurn } from './hosted-turn-wait.js';
 import { rewriteGitHubBlobUrl } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
@@ -346,6 +347,12 @@ export function isRetryableWorkspaceAcquisition(
     (cause.code === 'workspace_busy' || cause.code === 'workspace_unavailable')
   );
 }
+function withoutMcpGrant(input: object): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(input).filter(([key]) => key !== 'grant'),
+  );
+}
+
 function isBusyWorkspaceAcquisition(cause: unknown): boolean {
   return (
     isRetryableWorkspaceAcquisition(cause) && cause.code === 'workspace_busy'
@@ -4384,7 +4391,11 @@ export class HostedWorkspaceToolTurn {
     const hooksPlan = plan.calls.some((item) => item.hookResults !== undefined);
     if (
       (!plan.commandStep &&
-        (this.mcp || (this.hooks !== undefined) !== hooksPlan)) ||
+        ((this.hooks !== undefined) !== hooksPlan ||
+          hostedNativeOwnerRefusal({
+            mcp: this.mcp?.broker.runtimeSessionId,
+            hooks: this.hooks?.broker.runtimeSessionId,
+          }) !== undefined)) ||
       (plan.commandStep &&
         plan.commandStep.configRevision !== this.extensionConfig?.revision) ||
       this.promptId !== plan.promptId ||
@@ -4503,6 +4514,27 @@ export class HostedWorkspaceToolTurn {
           !item.publicationId
         )
           throw new Error('Original Shell publication identity is missing.');
+        // An MCP call derived again from the reloaded catalog must name the
+        // saved server, revisions and connection. Only its grant differs, and
+        // the execution loop renews that before the prepare.
+        const mcp =
+          (JSON.parse(input.payloadJson) as { toolName?: unknown }).toolName ===
+          MANAGED_MCP_TOOL;
+        if (mcp) {
+          const derived = this.mcp?.toolInput(
+            item.call.name,
+            item.call.args,
+            item.runtimeCallId,
+          );
+          if (
+            !derived ||
+            !isDeepStrictEqual(
+              withoutMcpGrant(derived.input),
+              withoutMcpGrant(input.input),
+            )
+          )
+            throw new Error('Original MCP call changed.');
+        }
         requests.push({
           call: item.call,
           validationAdmission: 'invalid',
@@ -4517,7 +4549,7 @@ export class HostedWorkspaceToolTurn {
               ? managedToolDigest(input.input)
               : undefined,
           isShell: item.call.name === 'run_shell_command',
-          mcp: false,
+          mcp,
           publicationId: item.publicationId ?? null,
           background:
             item.call.name === 'run_shell_command' &&
@@ -4600,13 +4632,13 @@ export class HostedWorkspaceToolTurn {
       !this.publicChildren
     )
       return 'shell_profile';
-    if (!commandStep && this.mcp) return 'mcp';
-    if (
-      !commandStep &&
-      this.hooks &&
-      !isHostedConfigScopedOwner(this.hooks.broker.runtimeSessionId)
-    )
-      return 'hooks_activation_owner';
+    if (!commandStep) {
+      const owner = hostedNativeOwnerRefusal({
+        mcp: this.mcp?.broker.runtimeSessionId,
+        hooks: this.hooks?.broker.runtimeSessionId,
+      });
+      if (owner) return owner;
+    }
     // A memory plan names no Runtime session, so it cannot name the Hook
     // owner its calls ran on.
     if (!commandStep && this.hooks && memoryBatch) return 'hooks_memory_batch';
@@ -4617,6 +4649,7 @@ export class HostedWorkspaceToolTurn {
             singlePlanExit ||
             singleQuestion ||
             request.memory ||
+            request.mcp ||
             (commandStep && request.call.name === 'skill') ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||

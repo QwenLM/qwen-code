@@ -3893,7 +3893,9 @@ it.each([
   };
   const receiver = {
     session,
-    hooks: hooks ? {} : undefined,
+    hooks: hooks
+      ? { broker: { runtimeSessionId: 'extensions-components-owner' } }
+      : undefined,
     broker: { ...broker, runtimeSessionId: 'extensions-components-owner' },
     promptId: 'prompt',
     savedToolHookResults: vi.fn().mockReturnValue(current),

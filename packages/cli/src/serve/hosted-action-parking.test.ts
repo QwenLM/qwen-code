@@ -10,6 +10,7 @@ import {
   hostedCommandStepResumeShapeRefusal,
 } from './hosted-action-parking.js';
 import { hostedConfigScopedOwnerId } from './hosted-hook-session.js';
+import { hostedDurableMcpOwnerId } from './hosted-mcp-session.js';
 
 describe('hostedApprovalResumeShapeRefusal', () => {
   const broker = {};
@@ -49,13 +50,49 @@ describe('hostedApprovalResumeShapeRefusal', () => {
     ).toBe('hooks_activation_owner');
   });
 
-  it('names MCP before the Hook owner, and both before the tool owner', () => {
-    expect(
-      hostedApprovalResumeShapeRefusal(
-        { hooks: activationOwner, mcp: {} },
+  const mcpOwner = {
+    broker: {
+      runtimeSessionId: hostedDurableMcpOwnerId(
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: 'session' },
         undefined,
       ),
-    ).toBe('mcp');
+    },
+  };
+
+  it('admits MCP on a durable or config-scoped owner, and Hooks that borrow it', () => {
+    for (const mcp of [mcpOwner, configOwner])
+      expect(
+        hostedApprovalResumeShapeRefusal({ ...files, mcp }, broker),
+      ).toBeUndefined();
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { ...files, mcp: mcpOwner, hooks: mcpOwner },
+        broker,
+      ),
+    ).toBeUndefined();
+    // An MCP Session with settings but no configuration rows takes the
+    // latest Hook execution's owner, which may be activation-scoped.
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { ...files, mcp: activationOwner, hooks: activationOwner },
+        broker,
+      ),
+    ).toBe('mcp_activation_owner');
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { ...files, mcp: mcpOwner, hooks: activationOwner },
+        broker,
+      ),
+    ).toBe('hooks_activation_owner');
+  });
+
+  it('names the MCP owner before the Hook owner, and both before the tool owner', () => {
+    expect(
+      hostedApprovalResumeShapeRefusal(
+        { hooks: activationOwner, mcp: activationOwner },
+        undefined,
+      ),
+    ).toBe('mcp_activation_owner');
     expect(
       hostedApprovalResumeShapeRefusal({ hooks: activationOwner }, undefined),
     ).toBe('hooks_activation_owner');

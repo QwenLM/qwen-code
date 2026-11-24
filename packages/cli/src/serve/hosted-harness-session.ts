@@ -5231,9 +5231,9 @@ export function registerHostedHarnessSessionRoutes(
       ? hostedCommandStepResumeShapeRefusal(session, brokerOptions)
       : hostedApprovalResumeShapeRefusal(session, brokerOptions);
     if (shape) return shape;
-    // Recovery admits a command step on an MCP Session, but parking one waits
-    // for MCP parking (#18149 Stage 4).
-    if (commandStep && session.mcp) return 'mcp';
+    // A drained MCP owner comes back under a new connection, so its tool
+    // names would no longer match the saved batch.
+    if (session.mcp && !session.mcp.parkable()) return 'mcp_not_parkable';
     // The pump resumes only a native wait.
     if (commandStep && wakeOwned) return 'wake_owned';
     if (
@@ -8543,7 +8543,8 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_tool_profile_conflict');
       }
       const pendingContinuation =
-        (session.extensions?.enabled || session.hooks) && unsettled
+        (session.extensions?.enabled || session.hooks || session.mcp) &&
+        unsettled
           ? await findHostedApprovalContinuation(managed, unsettled)
           : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
@@ -8562,10 +8563,11 @@ export function registerHostedHarnessSessionRoutes(
         !lifecycle &&
         !!session.extensions?.enabled &&
         pendingContinuation?.plan.commandStep !== undefined;
-      // A Hooks Session's saved native batch is recovered the same way: only
-      // by an explicit takeover load, and only on a shape recovery admits.
+      // A Hooks or MCP Session's saved native batch is recovered the same
+      // way: only by an explicit takeover load, and only on a shape recovery
+      // admits.
       const hooksNativePark =
-        session.hooks !== undefined &&
+        (session.hooks !== undefined || session.mcp !== undefined) &&
         pendingContinuation !== undefined &&
         pendingContinuation.plan.commandStep === undefined &&
         hostedApprovalResumeShapeRefusal(session, brokerOptions) === undefined;

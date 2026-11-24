@@ -51519,6 +51519,480 @@ describe('idle suspension', () => {
     });
   });
 
+  // S6b (#18149 Stage 4): an approval wait on an MCP Session parks when the
+  // Broker parks MCP owners, and resumes on the same durable owner.
+  async function mockMcpApprovalTurn(
+    tool: 'write_file' | 'mcp',
+    parkable = true,
+    suspensionOptions: Parameters<typeof app>[3] = { idleSuspendMs: 150 },
+    hooks = false,
+  ) {
+    mockApprovalTurn();
+    // A Session-definition Hook catalog beside an MCP server borrows the MCP
+    // broker, so its Hooks run on the durable MCP owner.
+    const executions: Array<{ event: unknown; owner: string }> = [];
+    if (hooks) {
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'authorizeLifecycle',
+      ).mockResolvedValue();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'hookControl',
+      ).mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: {
+              ...operation.pin,
+              hooks: [
+                HookEventName.PreToolUse,
+                HookEventName.PermissionRequest,
+                HookEventName.PostToolUse,
+              ].map((eventName) => ({
+                hookId: eventName,
+                eventName,
+                sequential: false,
+                async: false,
+                failClosed: true,
+                onceKey: null,
+                config: { type: 'command' as const },
+              })),
+            },
+          };
+        if (operation.kind === 'hook-execute')
+          executions.push({
+            event: operation.input['hook_event_name'],
+            owner: this.runtimeSessionId,
+          });
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { success: true, outcome: 'success', duration: 0 },
+        };
+      });
+    }
+    const fixture = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-mcp/1',
+      {
+        approvalMode: 'default',
+        approvalTimeoutMs: 60_000,
+        ...(hooks ? { hookCatalog: hookPin } : {}),
+      },
+      suspensionOptions,
+    );
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    const acquired = acquire.getMockImplementation()!;
+    acquire.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      await acquired.call(this);
+      this.mcpParkable = parkable;
+    });
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const controlled = control.getMockImplementation()!;
+    control.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      operation,
+    ) {
+      const reply = await controlled.call(this, operation);
+      // The reply map keeps this object, so later discovers see the tool too.
+      if (operation.kind === 'mcp-configure' && reply.catalog)
+        Object.assign(reply.catalog, {
+          tools: [
+            {
+              name: 'echo',
+              description: 'Echo a message',
+              inputSchema: { type: 'object' },
+            },
+          ],
+        });
+      return reply;
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'mcp-claim',
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockResolvedValue();
+    state.model.mockImplementation(
+      async ({ toolTurn, resumeFromToolResults, signal }) => {
+        // As the model driver does, a resumed round first completes the
+        // batch's tool Hooks.
+        if (resumeFromToolResults) {
+          if (hooks)
+            await toolTurn!.resumeHookResults(
+              resumeFromToolResults as Part[],
+              'test-model',
+              signal,
+            );
+          return { text: 'resumed', model: 'test-model' };
+        }
+        const declarations = await toolTurn!.declarations(signal);
+        const call =
+          tool === 'mcp'
+            ? {
+                name: declarations.find((item) =>
+                  item.name?.startsWith('mcp_'),
+                )!.name!,
+                callId: 'park-mcp-call',
+                args: { message: 'hello' },
+                isClientInitiated: false,
+                prompt_id: PROMPT_ID,
+              }
+            : {
+                name: 'write_file',
+                callId: 'park-mcp-call',
+                args: { file_path: 'notes.txt', content: 'hello' },
+                isClientInitiated: false,
+                prompt_id: PROMPT_ID,
+              };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        throw new Error('The waiting Turn unexpectedly continued.');
+      },
+    );
+    return { ...fixture, executions };
+  }
+
+  const mcpDefinition = {
+    managedSessionStore: store(),
+    toolProfile: 'hosted-workspace-mcp/1',
+    mcpServers: [
+      { serverId: 'demo', serverRevision: 1, definitionDigest: 'a'.repeat(64) },
+    ],
+  };
+
+  async function promptMcpApproval(
+    authorize: (request: supertest.Test) => supertest.Test,
+    server: Server,
+  ): Promise<void> {
+    const prompt = [{ type: 'text', text: 'use the tool' }];
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+  }
+
+  it.each(
+    (['write_file', 'mcp', 'mcp with Hooks'] as const).flatMap((tool) =>
+      (['park', 'Harness death'] as const).map(
+        (interruption) => [tool, interruption] as const,
+      ),
+    ),
+  )(
+    'resumes a %s approval on an MCP Session after a %s',
+    async (variant, interruption) => {
+      const hooks = variant === 'mcp with Hooks';
+      const tool = hooks ? 'mcp' : variant;
+      const parks = interruption === 'park';
+      state.wakeDispatch = parks;
+      state.actionParking = parks;
+      state.wakeStamps.length = 0;
+      state.approvalSelections.set(SESSION_ID, {
+        mode: 'default',
+        revision: 0,
+      });
+      const wait = parks
+        ? undefined
+        : vi
+            .spyOn(HostedApprovalWaiters.prototype, 'wait')
+            .mockRejectedValueOnce(
+              new HostedToolRecoveryRequiredError(
+                'approval writer interrupted',
+              ),
+            );
+      const saved = vi.spyOn(
+        approvalContinuation,
+        'findHostedApprovalContinuation',
+      );
+      try {
+        const {
+          server: original,
+          authorize,
+          requests,
+          executions,
+        } = await mockMcpApprovalTurn(
+          tool,
+          true,
+          parks ? { idleSuspendMs: 150 } : undefined,
+          hooks,
+        );
+        await promptMcpApproval(authorize, original);
+        let server = original;
+        if (parks) {
+          await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+            timeout: 5000,
+          });
+          await vi.waitFor(
+            () => expect(statsOf(original).cleanSuspensions).toBe(1),
+            { timeout: 5000 },
+          );
+          expect(state.wakeStamps[0]).toMatchObject({
+            parkedTurn: { promptId: PROMPT_ID },
+          });
+          expect(statsOf(original).parkRefusals).toEqual({});
+          expect(requests.filter((r) => r.kind === 'mcp-release')).toEqual([]);
+          // A bare load must not answer the parked batch (R9-1).
+          const parked = await readSessionJournal();
+          await headers(supertest(original).post(`/session/${SESSION_ID}/load`))
+            .send(mcpDefinition)
+            .expect(409);
+          expect(
+            (await readSessionJournal()).events
+              .slice(parked.events.length)
+              .filter((event) =>
+                [
+                  'message.committed',
+                  'action.changed',
+                  'turn.settled',
+                ].includes(event.kind),
+              ),
+          ).toEqual([]);
+        } else {
+          await vi.waitFor(
+            async () => {
+              expect(
+                (
+                  await authorize(
+                    supertest(original).get(`/session/${SESSION_ID}/status`),
+                  )
+                ).body,
+              ).toMatchObject({
+                hasActivePrompt: false,
+                recoveryBlocked: true,
+              });
+            },
+            { timeout: 5000 },
+          );
+          await (
+            wakeDeps.last as { session: { managed: ManagedSession } }
+          ).session.managed.close();
+          wait!.mockRestore();
+          server = await app(true);
+        }
+        requests.length = 0;
+        const loaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({
+            ...mcpDefinition,
+            ...(parks
+              ? { passiveManagedRuntimeRecovery: true }
+              : { driveRuntimeRecovery: true }),
+          })
+          .expect(200);
+        const resumedClient = loaded.body.clientId as string;
+        const requestId = (await readSessionJournal()).events.findLast(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'requested',
+        )!.payload['requestId'] as string;
+        await headers(
+          supertest(server).post(
+            `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', resumedClient)
+          .send({
+            optionId: 'allow',
+            inputRevision: 1,
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+          })
+          .expect(200);
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, resumedClient)).body).toMatchObject({
+              hasActivePrompt: false,
+              recoveryBlocked: false,
+            });
+          },
+          { timeout: 5000 },
+        );
+        const execute = vi.mocked(HostedWorkspaceBroker.prototype.execute);
+        expect(execute).toHaveBeenCalledOnce();
+        const payload = JSON.parse(execute.mock.calls[0]![1]) as {
+          toolName: string;
+          input: Record<string, unknown>;
+        };
+        if (tool === 'mcp') {
+          // The saved call ran under its own runtime call ID, with a grant
+          // issued after the resume.
+          const prepared = vi.mocked(HostedWorkspaceBroker.prototype.prepare)
+            .mock.calls[0]![0];
+          expect(payload.toolName).toBe('managed_mcp_call');
+          expect(payload.input['operationId']).toBe(prepared);
+          expect(payload.input['request']).toEqual({
+            kind: 'tool_call',
+            name: 'echo',
+            arguments: { message: 'hello' },
+          });
+          const continuation = (await saved.mock.results[0]!.value) as Awaited<
+            ReturnType<
+              typeof approvalContinuation.findHostedApprovalContinuation
+            >
+          >;
+          const savedGrant = continuation!.inputs[0]!.input['grant'] as {
+            expiresAt: number;
+          };
+          expect(
+            (payload.input['grant'] as { expiresAt: number }).expiresAt,
+          ).toBeGreaterThan(savedGrant.expiresAt);
+        } else {
+          expect(payload.input).toEqual({
+            file_path: 'notes.txt',
+            content: 'hello',
+          });
+        }
+        if (parks)
+          expect(requests.some((r) => r.kind === 'mcp-configure')).toBe(false);
+        // The Hooks that ran before the wait are read back, never rerun, and
+        // the Allow fires one PostToolUse, all on the durable MCP owner.
+        if (hooks) {
+          const owner = executions[0]?.owner;
+          expect(isHostedDurableMcpOwner(owner ?? '')).toBe(true);
+          expect(executions).toEqual([
+            { event: HookEventName.PreToolUse, owner },
+            { event: HookEventName.PermissionRequest, owner },
+            { event: HookEventName.PostToolUse, owner },
+          ]);
+        } else expect(executions).toEqual([]);
+        const journal = await readSessionJournal();
+        expect(
+          journal.events.filter(
+            (event) =>
+              event.kind === 'action.changed' &&
+              event.payload['state'] === 'requested',
+          ),
+        ).toHaveLength(1);
+        const settled = journal.events.filter(
+          (event) => event.kind === 'turn.settled',
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0].payload['outcome']).toBe('completed');
+        if (parks)
+          await vi.waitFor(
+            () => expect(statsOf(server).cleanSuspensions).toBe(2),
+            { timeout: 5000 },
+          );
+      } finally {
+        wait?.mockRestore();
+        saved.mockRestore();
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
+
+  it('keeps an MCP Session approval resident when the Broker would drain its owner', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    try {
+      const { server, authorize } = await mockMcpApprovalTurn('mcp', false);
+      await promptMcpApproval(authorize, server);
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(state.wakeStamps).toEqual([]);
+      expect(statsOf(server).cleanSuspensions).toBe(0);
+      expect(statsOf(server).parkRefusals).toEqual({ mcp_not_parkable: 1 });
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/cancel`),
+      ).expect(204);
+    } finally {
+      waiting.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // The pin's limit (§4.6): a server that changed its tools during the park
+  // comes back under a new catalog revision, so its model tool names differ
+  // and recovery declines rather than run a call it can no longer prove.
+  it('declines a parked MCP approval whose catalog changed during the park', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    try {
+      const { server, authorize, replies } = await mockMcpApprovalTurn('mcp');
+      await promptMcpApproval(authorize, server);
+      await vi.waitFor(() => expect(statsOf(server).cleanSuspensions).toBe(1), {
+        timeout: 5000,
+      });
+      for (const reply of replies.values())
+        if (reply.catalog)
+          Object.assign(reply.catalog, {
+            catalogRevision: reply.catalog.catalogRevision + 1,
+          });
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ ...mcpDefinition, passiveManagedRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      const requestId = (await readSessionJournal()).events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.prepare).not.toHaveBeenCalled();
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/cancel`));
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
   it('an admitted mutation resets the idle timer', async () => {
     const server = await app(false, undefined, true, { idleSuspendMs: 4000 });
     const clientId = await createIdleSession(server);
