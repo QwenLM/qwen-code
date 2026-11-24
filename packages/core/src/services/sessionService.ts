@@ -3805,7 +3805,22 @@ export class SessionService {
               identity.filePath,
             );
             complete &&= parsed.complete;
-            records.push(...parsed.records);
+            const salvagedCount = parsed.salvagedCount ?? 0;
+            const cleanCount = parsed.records.length - salvagedCount;
+            for (let idx = 0; idx < parsed.records.length; idx++) {
+              const record = parsed.records[idx]!;
+              const isSalvaged = idx >= cleanCount;
+              if (
+                isSalvaged &&
+                record?.uuid &&
+                (record.parentUuid
+                  ? !records.some((r) => r.uuid === record.parentUuid)
+                  : records.length > 0)
+              ) {
+                continue;
+              }
+              records.push(record);
+            }
           }
         } finally {
           lines.close();

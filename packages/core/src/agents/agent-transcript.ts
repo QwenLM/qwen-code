@@ -549,6 +549,12 @@ export function readLastTranscriptRecordUuidSync(
         const recovered = _recoverObjectsFromLine<ChatRecord>(trimmed);
         const lastRecovered = recovered[recovered.length - 1];
         if (lastRecovered?.uuid) {
+          if (
+            lastRecovered.parentUuid &&
+            !raw.includes(`"uuid":"${lastRecovered.parentUuid}"`)
+          ) {
+            continue;
+          }
           return lastRecovered.uuid;
         }
       }
