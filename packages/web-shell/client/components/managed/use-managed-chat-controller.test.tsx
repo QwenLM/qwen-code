@@ -689,6 +689,91 @@ describe('useManagedChatController', () => {
     expect(h.controller!.operations[0]?.state).toBe('running');
   });
 
+  it('joins a concurrent second cancel intent onto the live admission instead of dropping the first receipt', async () => {
+    const h = mount();
+    const cancelReceipt = deferred<{
+      sessionId: string;
+      turnId: string;
+      operationId: string;
+    }>();
+    vi.mocked(h.provider.cancel).mockReturnValueOnce(cancelReceipt.promise);
+    vi.mocked(h.provider.queryCancelOperation).mockResolvedValue({
+      sessionId: 'session-1',
+      operationId: 'cancel-concurrent',
+      type: 'cancel',
+      status: 'completed',
+      admissionStage: 'java_durable',
+      deliveryState: 'confirmed',
+      replayed: false,
+    });
+    await h.render();
+    await flushReact();
+
+    const first = h.controller!.cancel();
+    const second = h.controller!.cancel();
+    await flushReact();
+    expect(h.provider.cancel).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      cancelReceipt.resolve({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        operationId: 'cancel-concurrent',
+      });
+      await Promise.resolve();
+    });
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    await flushReact();
+    expect(firstResult.admission).toBe('accepted');
+    expect(secondResult.admission).toBe('accepted');
+    expect(
+      h.controller!.operations.some(
+        (op) => op.kind === 'cancel' && op.state === 'established',
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects foreign session summaries, mismatched cancel turn receipts, and foreign action admissions', async () => {
+    // 1. Summary sessionId mismatch -> no controller bound
+    const mismatched = mount({ sessionId: 'session-expected' });
+    vi.mocked(mismatched.provider.getSession).mockResolvedValue(
+      summary('session-foreign'),
+    );
+    await mismatched.render();
+    await flushReact();
+    expect(mismatched.controller).toBeUndefined();
+    act(() => root?.unmount());
+    root = undefined;
+
+    // 2. Cancel receipt with mismatched turnId -> unknown admission
+    const action = pendingQuestion();
+    const h = mount({ pending: [action] });
+    vi.mocked(h.provider.cancel).mockResolvedValueOnce({
+      sessionId: 'session-1',
+      turnId: 'turn-other',
+      operationId: 'op-wrong-turn',
+    });
+    await h.render();
+    await flushReact();
+    const cancelResult = await act(async () => h.controller!.cancel());
+    expect(cancelResult.admission).toBe('unknown');
+
+    // 3. Action onAccepted with foreign sessionId -> unknown admission
+    vi.mocked(h.provider.actions!.respond).mockImplementationOnce(
+      async (_action, _response, command) => {
+        command.onAccepted?.({
+          sessionId: 'session-foreign',
+          operationId: 'op-foreign',
+        });
+      },
+    );
+    const actionResult = await h.controller!.respondQuestion(action.actionId, [
+      { questionId: 'q1', value: '', optionIds: ['q1o1'] },
+      { questionId: 'q2', value: '', optionIds: ['q2o1'] },
+    ]);
+    expect(actionResult.admission).toBe('unknown');
+  });
+
   it('returns undefined when no sessionId or matching summary is available', async () => {
     const h = mount({ sessionId: undefined });
     await h.render({ sessionId: undefined });

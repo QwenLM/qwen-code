@@ -48,7 +48,6 @@ interface BindingOwner {
   readonly sessionId: string | undefined;
   readonly projectMessages: ReturnType<typeof createManagedMessageProjector>;
   abort: AbortController;
-  eventsSeeded: boolean;
   highWaterId: number;
   onOperation?: (event: ManagedOperationSettlement) => void;
   onTurn?: (event: ManagedTurnSettlement) => void;
@@ -86,7 +85,6 @@ export function useManagedChatController({
       sessionId,
       projectMessages: createManagedMessageProjector(),
       abort: new AbortController(),
-      eventsSeeded: false,
       highWaterId: 0,
     }),
     [provider, clientId, sessionId],
@@ -255,6 +253,7 @@ export function useManagedChatController({
         owner: BindingOwner;
         turnId: string;
         resolve: (admission: ManagedTransportAdmission) => void;
+        waiters: Array<(admission: ManagedTransportAdmission) => void>;
       }
     | undefined
   >(undefined);
@@ -316,39 +315,58 @@ export function useManagedChatController({
     (
       source: BindingOwner,
       turnId: string,
-    ): Promise<ManagedTransportAdmission> =>
-      new Promise((resolve) => {
-        if (!isCurrent(source)) {
-          resolve({ admission: 'unknown' });
-          return;
+    ): Promise<ManagedTransportAdmission> => {
+      if (!isCurrent(source)) {
+        return Promise.resolve({ admission: 'unknown' });
+      }
+      if (facts(source).summary?.capabilities.canCancel !== true) {
+        return Promise.resolve({ admission: 'rejected' });
+      }
+      const live = cancelResponseRef.current;
+      if (live && live.owner === source) {
+        if (live.turnId === turnId) {
+          return new Promise((resolve) => {
+            live.waiters.push(resolve);
+          });
         }
-        if (facts(source).summary?.capabilities.canCancel !== true) {
-          resolve({ admission: 'rejected' });
-          return;
-        }
+        return Promise.resolve({ admission: 'unknown' });
+      }
+      return new Promise((resolve) => {
         const signal = source.abort.signal;
         let settled = false;
+        const slot = {
+          owner: source,
+          turnId,
+          resolve: (admission: ManagedTransportAdmission) => {
+            settle(admission);
+          },
+          waiters: [] as Array<(admission: ManagedTransportAdmission) => void>,
+        };
         const settle = (admission: ManagedTransportAdmission) => {
           if (settled) return;
           settled = true;
           signal.removeEventListener('abort', onAbort);
-          if (cancelResponseRef.current?.resolve === settle) {
+          if (cancelResponseRef.current === slot) {
             cancelResponseRef.current = undefined;
           }
-          resolve(isCurrent(source) ? admission : { admission: 'unknown' });
+          const resolved: ManagedTransportAdmission = isCurrent(source)
+            ? admission
+            : { admission: 'unknown' };
+          resolve(resolved);
+          for (const waiter of slot.waiters) {
+            waiter(resolved);
+          }
+          slot.waiters.length = 0;
         };
         const onAbort = () => settle({ admission: 'unknown' });
         signal.addEventListener('abort', onAbort, { once: true });
-        cancelResponseRef.current = {
-          owner: source,
-          turnId,
-          resolve: settle,
-        };
+        cancelResponseRef.current = slot;
         void turnCancelRef.current.request().then(
           () => settle({ admission: 'unknown' }),
           (error) => settle(admissionFromError(error)),
         );
-      }),
+      });
+    },
     [facts, isCurrent],
   );
 
@@ -518,19 +536,12 @@ export function useManagedChatController({
     };
   }, [bound, owner]);
 
-  // Establish the event high-water mark once the initial summary and transcript
-  // finish loading so initial history snapshots and later loadOlder() pages
-  // (whose event ids are <= highWaterId) never replay as fresh turn settlements.
+  // Advance the monotonic event high-water mark so already-seen snapshot events
+  // and later loadOlder() pages (event.id <= highWaterId) never replay as fresh
+  // turn settlements.
   useEffect(() => {
     if (!hasSummary || detail.loading) return;
-    if (!owner.eventsSeeded) {
-      owner.eventsSeeded = true;
-      owner.highWaterId = detail.events.reduce(
-        (max, event) => (event.id > max ? event.id : max),
-        0,
-      );
-      return;
-    }
+    let forwarded = false;
     for (const event of detail.events) {
       if (event.id <= owner.highWaterId) continue;
       owner.highWaterId = event.id;
@@ -547,8 +558,9 @@ export function useManagedChatController({
       const listener = owner.onTurn;
       if (!listener) continue;
       listener({ turnId: event.turnId, outcome: event.type });
-      render();
+      forwarded = true;
     }
+    if (forwarded) render();
   }, [detail.events, detail.loading, hasSummary, isCurrent, owner]);
 
   return bound?.controller;
