@@ -47,6 +47,7 @@ import {
   HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
+import { isHostedConfigScopedOwner } from './hosted-hook-session.js';
 
 describe('idle suspension', () => {
   beforeEach(setupHostedTextSession);
@@ -448,6 +449,200 @@ describe('idle suspension', () => {
       }
     },
   );
+
+  // Stage 4 S5 pre-check (#18149): a native Hooks batch runs on the Hook
+  // owner, so S5 depends on what the park's owner close leaves behind. A
+  // command-step park on an extensions Session is the Hooks park that exists
+  // before S5, and it rides the same config-scoped owner.
+  it('hands back a config-scoped Hook owner mount at park and resumes its Hooks on the same owner', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const fixture = await mockCommandStepTurn(true);
+    const executions: Array<{ event: unknown; tool: unknown; owner: string }> =
+      [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async function (this: HostedWorkspaceBroker, operation) {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: {
+              ...operation.pin,
+              hooks: [HookEventName.PreToolUse, HookEventName.PostToolUse].map(
+                (eventName) => ({
+                  hookId: eventName,
+                  eventName,
+                  sequential: false,
+                  async: false,
+                  failClosed: true,
+                  onceKey: null,
+                  config: { type: 'command' as const },
+                }),
+              ),
+            },
+          };
+        if (operation.kind === 'hook-execute')
+          executions.push({
+            event: operation.input['hook_event_name'],
+            tool: Reflect.get(operation.input, 'tool_name'),
+            owner: this.runtimeSessionId,
+          });
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { success: true, outcome: 'success', duration: 0 },
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'hook-owner-claim',
+    );
+    const handbacks: string[] = [];
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockImplementation(async function (this: HostedWorkspaceBroker) {
+      handbacks.push(this.runtimeSessionId);
+    });
+    const live = state.model.getMockImplementation()!;
+    const resumedHistories: Array<readonly ChatRecord[]> = [];
+    state.model.mockImplementation(async (input) => {
+      if (input.resumeFromToolResults)
+        resumedHistories.push(
+          (input as { history?: readonly ChatRecord[] }).history ?? [],
+        );
+      return live(input);
+    });
+    const ownerOf = (contexts: unknown[]) =>
+      contexts.map(
+        (context) => (context as HostedWorkspaceBroker).runtimeSessionId,
+      );
+    const definition = {
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      initialSelection: fixture.selection,
+    };
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          ...definition,
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'run the step' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      const owner = executions[0]?.owner;
+      expect(executions).toEqual([
+        { event: HookEventName.PreToolUse, tool: 'skill', owner },
+        { event: HookEventName.PreToolUse, tool: 'run_shell_command', owner },
+      ]);
+      expect(isHostedConfigScopedOwner(owner)).toBe(true);
+      expect(handbacks).toEqual([owner]);
+      expect(
+        ownerOf(
+          vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+        ),
+      ).not.toContain(owner);
+
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+      acquire.mockClear();
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ ...definition, passiveManagedRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(fixture.commands).toEqual(['printf parked']);
+      // The resumed batch reacquires the plan's Runtime on the same owner. The
+      // completed PreToolUse occurrences are read back, not rerun, and the
+      // approved step's PostToolUse runs once on that owner.
+      expect(
+        acquire.mock.calls.filter(
+          (_, index) => ownerOf([acquire.mock.contexts[index]])[0] === owner,
+        ),
+      ).toContainEqual([{ runtimeBindingId: 'binding', generation: '1' }]);
+      expect(executions).toEqual([
+        { event: HookEventName.PreToolUse, tool: 'skill', owner },
+        { event: HookEventName.PreToolUse, tool: 'run_shell_command', owner },
+        { event: HookEventName.PostToolUse, tool: 'run_shell_command', owner },
+      ]);
+      expect(resumedHistories).toHaveLength(1);
+      expect(
+        resumedHistories[0].find(
+          (record) =>
+            record.type === 'user' && record.daemonPromptId === PROMPT_ID,
+        )?.message?.parts,
+      ).toEqual([{ text: 'run the step' }]);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
 
   it('parks a recoverable approval and resumes it through cold recovery', async () => {
     state.wakeDispatch = true;
