@@ -28,6 +28,7 @@ import {
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
@@ -128,7 +129,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }> = [];
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
-  private loadedTurnSkills = new WeakMap<TurnSkillSnapshot, Set<string>>();
+  private loadedTurnSkills = new WeakMap<
+    TurnSkillSnapshot,
+    Map<string, symbol>
+  >();
   private loadedSkillContents = new Map<string, string>();
   private loadedSkillContentByName = new Map<
     string,
@@ -439,25 +443,63 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.skillManager,
       params,
       (name: string, content?: string, skill?: SkillConfig) => {
+        const previousName =
+          content === undefined
+            ? undefined
+            : this.loadedSkillContents.get(content);
         if (content !== undefined) this.loadedSkillContents.set(content, name);
+        const undoTrackedContent = () => {
+          if (
+            content === undefined ||
+            this.loadedSkillContents.get(content) !== name
+          )
+            return;
+          if (previousName === undefined)
+            this.loadedSkillContents.delete(content);
+          else this.loadedSkillContents.set(content, previousName);
+        };
+        const signal = getCurrentToolCallSource()?.signal;
         // A staged path is meaningful only to this turn. Keep its exact
         // output for history accounting, but never deduplicate a live call
         // against a directory that will disappear when this turn settles.
         if (pinned) {
           let loaded = this.loadedTurnSkills.get(pinned);
           if (!loaded) {
-            loaded = new Set();
+            loaded = new Map();
             this.loadedTurnSkills.set(pinned, loaded);
           }
-          loaded.add(name);
+          const turnLoads = loaded;
+          const token = Symbol();
+          turnLoads.set(name, token);
+          signal?.addEventListener(
+            'abort',
+            () => {
+              if (turnLoads.get(name) !== token) return;
+              turnLoads.delete(name);
+              undoTrackedContent();
+            },
+            { once: true },
+          );
           return;
         }
         this.loadedSkillNames.add(name);
         if (content !== undefined) {
-          this.loadedSkillContentByName.set(name, {
+          const load = {
             content,
             restrictionNames: skillRestrictionNames(skill ?? { name }),
-          });
+          };
+          this.loadedSkillContentByName.set(name, load);
+          // Only undo the body registered by this cancelled nested call.
+          signal?.addEventListener(
+            'abort',
+            () => {
+              if (this.loadedSkillContentByName.get(name) !== load) return;
+              this.loadedSkillNames.delete(name);
+              this.loadedSkillContentByName.delete(name);
+              undoTrackedContent();
+            },
+            { once: true },
+          );
         }
       },
       this.config.getModelInvocableCommandsExecutor(),
@@ -854,9 +896,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   async execute(
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    const nestedSignal = getCurrentToolCallSource() ? signal : undefined;
     if (this.isSkillHidden(this.params.skill)) {
       let hiddenCommandFallbackAttempted = false;
       if (this.commandExecutor) {
@@ -922,6 +965,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const skill = this.getPinnedSkill
         ? this.getPinnedSkill()
         : await this.skillManager.loadSkillForRuntime(this.params.skill);
+      nestedSignal?.throwIfAborted();
       if (skill && !this.config.isSkillEnabled(getSkillSource(skill))) {
         return this.executeDisabledSkill();
       }
@@ -1021,6 +1065,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         }
         activationWarning = ` Warning: review workflow activation failed (${error.message}); workflow dispatch may be unavailable.`;
       }
+      nestedSignal?.throwIfAborted();
 
       // Prevent re-invoking an already-loaded skill from appending
       // duplicate instructions to context. The first invocation
@@ -1055,6 +1100,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         modelOverride: skill.model,
       };
     } catch (error) {
+      nestedSignal?.throwIfAborted();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[SkillsTool] Error using skill: ${errorMessage}`);
