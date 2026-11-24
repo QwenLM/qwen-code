@@ -14368,6 +14368,7 @@ Other open files:
           expect(events).toContainEqual({
             type: LlmEventType.HookSystemMessage,
             value: 'Build is red.',
+            isStopReason: true,
           });
         },
       );

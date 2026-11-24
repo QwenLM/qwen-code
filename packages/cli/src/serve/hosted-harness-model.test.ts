@@ -3113,8 +3113,9 @@ it.each(['decision', 'stopReason'] as const)(
 it('ends the turn when a Stop hook returns continue: false without a block', async () => {
   const model = config([{ type: LlmEventType.Finished }]);
   const hooks = hostedHooks();
+  let stops = 0;
   hooks.fire.mockImplementation(async (event) =>
-    event === HookEventName.Stop
+    event === HookEventName.Stop && ++stops === 1
       ? { continue: false, stopReason: 'Build is red.' }
       : undefined,
   );

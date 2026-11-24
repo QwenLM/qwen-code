@@ -1367,18 +1367,20 @@ export function transcriptBlocksToDaemonMessages(
           branchDisplayName && options.labels?.branchSuccess
             ? options.labels.branchSuccess(branchDisplayName)
             : statusBlock.text;
-        if (isIgnoredWebShellStatus(text)) break;
-        const todos = parsePlanTodos(text);
-        if (todos) {
-          messages.push({
-            id: block.id,
-            role: 'plan',
-            todos,
-            timestamp: blockTime,
-            sourceBlockIds: [block.id],
-          });
-          needsNewContentMessage = true;
-          break;
+        if (statusBlock.source !== 'stop_hook_notice') {
+          if (isIgnoredWebShellStatus(text)) break;
+          const todos = parsePlanTodos(text);
+          if (todos) {
+            messages.push({
+              id: block.id,
+              role: 'plan',
+              todos,
+              timestamp: blockTime,
+              sourceBlockIds: [block.id],
+            });
+            needsNewContentMessage = true;
+            break;
+          }
         }
         // Status blocks and the debug blocks that survive the filter above are
         // daemon-level diagnostics, not tool output. Keeping them in the main

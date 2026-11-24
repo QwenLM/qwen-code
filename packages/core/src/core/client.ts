@@ -6534,6 +6534,7 @@ export class LlmClient {
           yield {
             type: LlmEventType.HookSystemMessage,
             value: stopOutput.stopReason,
+            isStopReason: true,
           };
         }
 
