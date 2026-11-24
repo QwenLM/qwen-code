@@ -22,12 +22,10 @@ patches comments itself.
 module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
 Stage 1c direction escalation, or Stage 1-pre's two request-changes exits —
 linked issue closed as not planned, or a remaining delta against a merged
-fix), draft exactly one terminal `stage=1-pre` comment with the request-changes
-recommendation and stop. Do not continue to Stage 2, Stage 3, or approval. A
-duplicate close recommendation stays in that comment for a maintainer to act on.
-Recommendations are non-voting: `github-actions[bot]` cannot submit formal PR
-reviews, and the final approval/request-changes decision belongs to a human
-maintainer. Never draft a `review` action or an `approve-on-green` marker.
+fix), draft exactly one `CHANGES_REQUESTED` review and stop. Do not also draft
+or update a Stage 1 issue comment, and do not continue to Stage 2, Stage 3, or
+approval. The Stage 1-pre duplicate-close exit is different: it drafts the
+terminal `stage=1-pre` comment and a `close-pr` action instead of a review.
 
 **Re-runs:** the publisher resolves each comment by its stage marker AT
 PUBLISH TIME — bot author plus body `startswith` the marker line, last match
@@ -42,7 +40,8 @@ someone else's comment.
 The `stage_comment_id` helper remains for READS (the reopen guard below):
 
 ```bash
-# In CI the read-only token and publisher are both github-actions[bot].
+# In CI the workflow passes BOT_LOGIN (the read-only token's `gh api user`
+# would return github-actions[bot], not the publishing bot).
 BOT_LOGIN="${BOT_LOGIN:-$(gh api user --jq '.login')}"
 stage_comment_id() { # $1 = stage number (1, 2, 3), "1-pre", or "status"
   gh api "repos/$REPO/issues/$PR_NUMBER/comments" --method GET --paginate -F per_page=100 |
@@ -51,8 +50,11 @@ stage_comment_id() { # $1 = stage number (1, 2, 3), "1-pre", or "status"
 }
 ```
 
-Never create duplicates. The publisher updates the terminal comment by its
-`stage=1-pre` marker using the same bot-author filter as the other stages.
+Never create duplicates. For terminal-exit reviews the GitHub API does not
+support editing PR reviews; the publisher skips re-submitting when the bot
+already has a `CHANGES_REQUESTED` review on the PR (the existing review
+already gates it). Draft the review once per run; dedup is the publisher's
+job, enforced with a paginated read.
 
 **Signature & footer:** capture the reviewed commit's **full** OID **once, when you begin inspecting the code** — the SHA the worktree/diff actually reflects. Not a 7-char prefix (28 bits; a fork author can force-push a colliding prefix), and **not** a fresh read at draft time (that would attest to code you never reviewed). Reuse this `HEAD_SHA` for every stage's footer, and before each draft — and again before the approval draft — re-read the head and bail if it moved:
 
@@ -72,13 +74,34 @@ Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signatu
 <sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
 
-**If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not draft an update to an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new comment that never had a footer may go out without one. Terminal-gate comments (Stage 1-pre request-changes exits and Stage 1a/1b/1c) use the signature only — no footer; they stop before a real review pass.
+**If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not draft an update to an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new comment that never had a footer may go out without one. Terminal-gate reviews (Stage 1-pre request-changes exits and Stage 1a/1b/1c) use the signature only — no footer; they reject before a real review pass.
 
-**Approval recommendation:** "approve" below means a non-voting recommendation
-in the Stage 3 comment, not an `APPROVED` review. Include the review findings,
-verdict and reviewed SHA in that comment; a maintainer supplies the actual
-vote. Draft no extra action for either an approval or a request-changes
-recommendation.
+**Approval:** the approval draft runs **after** the Stage 3 comment draft, **pinned to the reviewed commit**. The publisher submits it through the reviews API with `commit_id` (never `gh pr review --approve`, which binds to no SHA), and skips it as stale if the head moved past `commit_id` before publish:
+
+```bash
+printf '%s\n' 'LGTM, looks ready to ship. ✅' > "$DRAFT_DIR/bodies/approve.md"
+jq -cn --arg sha "$HEAD_SHA" '{action:"review",event:"APPROVE",commit_id:$sha,body:"bodies/approve.md"}' \
+  >> "$DRAFT_DIR/actions.jsonl"
+```
+
+**Approve once per commit — and only your OWN approval counts as already done.** Re-running triage three times must not stack three approvals, so check before drafting. But "already approved" means **this bot's** `APPROVED` review on **this exact** `HEAD_SHA`, and nothing else:
+
+- **Another account's approval is not yours.** `main` requires two approving reviews, so a maintainer's approval is a _different_ vote — the whole reason the bot's is still needed. Never read it as "already approved".
+- **A `DISMISSED` review is not an approval.** Branch protection runs with `dismiss_stale_reviews: true`, so every push dismisses the bot's prior approval. That is precisely when a fresh one is required.
+- **An approval on an earlier commit does not carry over**, for the same reason.
+
+Decide it with the query, not by scanning the review list — the failure mode is silent, and the run still reports ✅:
+
+```bash
+# Does the bot's OWN approval already stand on the commit under review?
+MINE=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method GET --paginate -F per_page=100 |
+  jq -s --arg bot "$BOT_LOGIN" --arg sha "$HEAD_SHA" \
+    '[.[][] | select(.user.login == $bot and .state == "APPROVED" and .commit_id == $sha)] | length')
+# Only draft the APPROVE action above when MINE is 0. The publisher
+# re-checks this idempotence (and head staleness) at publish time.
+```
+
+This rule exists because a maintainer approved a PR three minutes before re-triggering `/triage`; the run read that human approval as "existing approval from prior run still valid, head SHA unchanged", skipped its own approve, and reported ✅ Approved (5/5) — leaving the PR at 1 of 2 required approvals with nothing in the run log marked wrong.
 
 Only approve when you're genuinely confident.
 
@@ -97,7 +120,7 @@ Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth
 ```bash
 printf '%s\n' "This refactor touches core infrastructure at scale (N production lines). Core refactors of this size must be maintainer-initiated — please open an issue to discuss the design first." \
   > "$DRAFT_DIR/bodies/stage-0-core-block.md"
-jq -cn '{action:"upsert-comment",marker:"stage=1-pre",body:"bodies/stage-0-core-block.md"}' >> "$DRAFT_DIR/actions.jsonl"
+jq -cn '{action:"review",event:"REQUEST_CHANGES",body:"bodies/stage-0-core-block.md"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
 
 Then **stop**. This is a wall, not a guideline.
@@ -202,7 +225,7 @@ proceed to 1a.
 
 ```bash
 # after writing the bilingual body to "$DRAFT_DIR/bodies/stage-1pre-not-planned.md"
-jq -cn '{action:"upsert-comment",marker:"stage=1-pre",body:"bodies/stage-1pre-not-planned.md"}' >> "$DRAFT_DIR/actions.jsonl"
+jq -cn '{action:"review",event:"REQUEST_CHANGES",body:"bodies/stage-1pre-not-planned.md"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
 
 - Any linked issue **closed as completed** → find what closed it (GraphQL —
@@ -247,62 +270,69 @@ latest close was manual), treat the closer as unresolved.
     the default JSON representation leaves `content` empty for files at or
     above 1 MiB. A 404 from this encoded-path request means the file is absent
     — apply the predicates above to that known state. If any other raw fetch fails, subsumption is
-    unverified: recommend no close; flag it in the Stage 1 comment and escalate to
+    unverified: never close; flag it in the Stage 1 comment and escalate to
     the maintainer. A diff
     with NO production changes (e.g. tests-only) is never fully subsumed —
     any file it adds outside the production set is itself a remaining
-    delta. → post the terminal comment below with a close recommendation for
-    the maintainer. Triage never closes a PR.
+    delta. → post the terminal comment below, then close the PR. This is
+    the ONLY place triage closes a PR.
   - **Any remaining delta** — everything else: an added production line
     that is missing there, a deleted production line that still exists
     there, or any non-production addition → submit exactly one
-    request-changes recommendation: name the merged PR, name the remaining
+    `CHANGES_REQUESTED` review: name the merged PR, name the remaining
     delta, ask the author to rebase onto the default branch and reduce the
     PR to that delta (bilingual body whose first line is the
     `<!-- qwen-triage stage=1-pre -->` marker, @mention the author). Stop:
 
 ```bash
 # after writing the bilingual body to "$DRAFT_DIR/bodies/stage-1pre-remaining-delta.md"
-jq -cn '{action:"upsert-comment",marker:"stage=1-pre",body:"bodies/stage-1pre-remaining-delta.md"}' >> "$DRAFT_DIR/actions.jsonl"
+jq -cn '{action:"review",event:"REQUEST_CHANGES",body:"bodies/stage-1pre-remaining-delta.md"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
 
 - Closed manually (no close commit) or the closer cannot be resolved →
   never close on ambiguity: flag it in the Stage 1 comment and escalate to
   the maintainer.
 
-**Reopen guard.** An explicit `@qwen-code /triage` re-run executes every stage
-again — including on a PR a maintainer reopened after acting on the earlier
-recommendation. If the PR is open but that stage comment already exists, flag
-the reopen for the maintainer rather than repeating a close recommendation:
+**Reopen guard.** The close below is the gate's only irreversible act, and an
+explicit `@qwen-code /triage` re-run executes every stage again — including
+on a PR a maintainer reopened after this very close. On a reopened PR all
+inputs re-derive identically (the issue is still closed as completed, the
+closer is still merged, the diff is unchanged), so without a guard the gate
+would re-close against the maintainer's deliberate reopen, and keep
+re-closing on every later re-run. Check before posting and closing:
 
 ```bash
 PRIOR_1PRE=$(stage_comment_id 1-pre)
 ```
 
-If the PR is OPEN and `PRIOR_1PRE` is non-empty, do not repeat the close
-recommendation — flag the reopen in the Stage 1 comment and escalate to the
-maintainer. The other terminal exits also update `stage=1-pre` comments, so
-their later instructions still apply.
+The duplicate-close exit is the only Stage 1-pre path that posts a
+`stage=1-pre` issue comment (the two request-changes exits post reviews
+only). If the PR is OPEN and `PRIOR_1PRE` is non-empty, a duplicate close
+already happened and a human reopened the PR: do not post or close again —
+flag the reopen in the Stage 1 comment and escalate to the maintainer. The
+deliberate reopen means the duplicate judgment needs human eyes, and this
+guard is what keeps that judgment from being overridden on the next run.
 
 ```bash
 cat > "$DRAFT_DIR/bodies/stage-1pre-duplicate.md" <<'EOF'
 <!-- qwen-triage stage=1-pre -->
 
 The linked issue #N was already fixed by #M, and every production change in
-this PR is already on the default branch — a maintainer can close it as a duplicate of #M. If
+this PR is already on the default branch — closing as a duplicate of #M. If
 something here is NOT covered by #M, say so and this can be reopened.
 
 <details>
 <summary>中文说明</summary>
 
 关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已存在于默认分支，
-建议 maintainer 将其作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，请说明。
+现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，请说明，可以重新打开。
 
 </details>
 
 — _Qwen Code · qwen3.7-max_
 EOF
 jq -cn '{action:"upsert-comment",marker:"stage=1-pre",body:"bodies/stage-1pre-duplicate.md"}' >> "$DRAFT_DIR/actions.jsonl"
+jq -cn '{action:"close-pr"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
 
 **1a. Template check:**
@@ -311,7 +341,7 @@ PR body missing required headings from `.github/pull_request_template.md` (read 
 
 ```bash
 # after writing the body to "$DRAFT_DIR/bodies/pr-gate-template.md"
-jq -cn '{action:"upsert-comment",marker:"stage=1-pre",body:"bodies/pr-gate-template.md"}' >> "$DRAFT_DIR/actions.jsonl"
+jq -cn '{action:"review",event:"REQUEST_CHANGES",body:"bodies/pr-gate-template.md"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
 
 **1b. Problem existence check (MANDATORY):**
@@ -323,7 +353,7 @@ Before "is the direction right?", ask **"does this problem actually exist?"**
 
 ```bash
 cat > "$DRAFT_DIR/bodies/stage-1b-reproduction.md" <<'EOF'
-<!-- qwen-triage stage=1-pre -->
+<!-- qwen-triage stage=1b -->
 
 This PR addresses a theoretical concern — "could theoretically send X" — but
 no reproduction demonstrates it has actually happened. Could you provide a
@@ -345,7 +375,7 @@ If the author cannot provide one on re-run, escalate to the maintainer and stop.
 
 — _Qwen Code · qwen3.7-max_
 EOF
-jq -cn '{action:"upsert-comment",marker:"stage=1-pre",body:"bodies/stage-1b-reproduction.md"}' >> "$DRAFT_DIR/actions.jsonl"
+jq -cn '{action:"review",event:"REQUEST_CHANGES",body:"bodies/stage-1b-reproduction.md"}' >> "$DRAFT_DIR/actions.jsonl"
 ```
 
 If the author cannot provide a reproduction on re-run, escalate to the maintainer via a `defer` draft (Stage 3) and stop — do not proceed to Stage 2.
@@ -363,7 +393,8 @@ Ask the hard questions before reading a single line of code:
 - "Can do" ≠ "should do" — technically feasible doesn't mean we should ship it.
 
 CHANGELOG is a reference signal, not the sole criterion. In CI the workflow
-prefetches it without credentials; locally, fetch it through `gh`:
+prefetches it (the agent's read-only token cannot read other repositories);
+locally, fetch it through `gh`:
 
 ```bash
 if [ -n "${QWEN_TRIAGE_CHANGELOG:-}" ] && [ -f "$QWEN_TRIAGE_CHANGELOG" ]; then
@@ -595,18 +626,21 @@ runs ~30 minutes — longer than any in-agent waiting budget, so a poll loop
 burns runner minutes and still gives up before the result exists (measured: a
 10-minute poll cap surrendered 13 minutes before the suite finished). Fetch
 once, report what is there. Checks still running → list them as pending in the
-table and move on — do not guess the outcome. Stage 3 must retain any pending
-check status and leave the voting decision to a maintainer.
+table and move on — do not guess the outcome. The `Qwen Triage Finalize`
+workflow (a deterministic `workflow_run` job, no model, no checkout) rewrites
+the table region below in place once CI settles, and performs any deferred
+approval (see Stage 3).
 
 Quote real check names, real conclusions, and the failing excerpt in the
 Stage 2 comment — never a bare "tests pass". A red check that the PR
 plausibly caused is a finding; a red check that is clearly pre-existing infra
 noise should be named as such, with the evidence for that call.
 
-**Wrap the CI table in machine-readable region markers** to record which
-observed commit the CI evidence covers. Each marker sits on its own
+**Wrap the CI table in machine-readable region markers** so the finalize
+workflow can update it in place after CI completes. Each marker sits on its own
 line; `sha=` carries the full reviewed `HEAD_SHA` — the same OID the footer
-attests:
+attests, which is what lets the finalize job refuse to touch a table belonging
+to a commit its CI run didn't cover:
 
 ```markdown
 <!-- qwen-triage-ci sha=<HEAD_SHA> -->
@@ -766,7 +800,7 @@ so the maintainer can trust and reproduce it.
 
 Draft a single Stage 2 comment (body → `$DRAFT_DIR/bodies/stage-2.md`, then append the `upsert-comment` action with marker `stage=2`; the body must include `<!-- qwen-triage stage=2 -->` at the top), in this order: code review findings → optional sequence diagram (2a-bis) → optional changed-files overview (2a-bis) → CI test evidence (2b) → the sandboxed-lane line when the central claim is behavioural and 2b cannot settle it (2b-bis) → real-scenario testing result when one was driven locally (2c) → the bilingual `<details>` Chinese summary → signature + footer last (the same tail order as the Stage 1 template). Include the two enrichments only when 2a-bis says they earn their place; a small, focused PR is just findings + testing. The 2b-bis line is not an enrichment — on the CI path it is the only thing in the comment that can close a behavioural gap, so omit it only under the two conditions 2b-bis names.
 
-**⛔ BEFORE POSTING: verify the testing section carries real evidence.** Read back through your draft. In CI: does it quote actual check names and conclusions (and the failing job's log excerpt when red), and is the CI table wrapped in the `qwen-triage-ci` region markers identifying the measured commit? On a local run: does it have a fenced code block with the actual terminal capture (or the `N/A` substitution for docs/types/refactor PRs with nothing user-visible)? Does the evidence depth match the PR type per “Scale the evidence” above — screenshots for UI changes, measurements for performance claims, clean-state numbers for build/test claims? If not, fix that now — and never paper over a gap with the author's self-reported results. The maintainer cannot approve without seeing what actually happened.
+**⛔ BEFORE POSTING: verify the testing section carries real evidence.** Read back through your draft. In CI: does it quote actual check names and conclusions (and the failing job's log excerpt when red), and is the CI table wrapped in the `qwen-triage-ci` region markers so the finalize workflow can update it? On a local run: does it have a fenced code block with the actual terminal capture (or the `N/A` substitution for docs/types/refactor PRs with nothing user-visible)? Does the evidence depth match the PR type per “Scale the evidence” above — screenshots for UI changes, measurements for performance claims, clean-state numbers for build/test claims? If not, fix that now — and never paper over a gap with the author's self-reported results. The maintainer cannot approve without seeing what actually happened.
 
 ````markdown
 ## Before (installed build)
@@ -830,22 +864,28 @@ PENDING=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --pa
 case "$PENDING" in '' | *[!0-9]*) PENDING=1 ;; esac   # unreadable → treat as pending (defer, fail closed)
 ```
 
-If `PENDING` is greater than 0, state in Stage 3 that the recommendation is
-conditional on the identified pending checks landing green. CI may have
-completed since that one read, so name the measured state rather than claiming
-an automatic update will follow. Never emit an `approve-on-green` marker.
-
-**Step 2: Act on the verdict.**
-
-**⛔ Approval guardrail — check this BEFORE recommending approval.** A cross-repository (fork) `refactor` PR must never receive an automatic approval recommendation: refactors touch structure broadly and a fork author is not a trusted committer, so these always need a human maintainer's eye (this rule exists because such a PR was wrongly auto-approved and merged). Decide it deterministically — do not eyeball it.
+**Compute the approval guardrail HERE, before the marker.** The marker is an approval with a CI precondition attached, so everything that would block an immediate approval must block the marker too — evaluating the guardrail only in Step 2, after the comment is posted, would leave a standing approval instruction that Step 2 cannot cleanly withdraw:
 
 ```bash
 GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
   --jq 'if (.isCrossRepository and (.title | test("^\\s*refactor"; "i"))) then "block" else "ok" end')
 ```
 
-If `GUARD` is `block`: escalate to the maintainer instead of recommending
-approval. Recommend changes only when blocking issues were actually found.
+Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, and Stage 0 raised no maintainer escalation. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail before approving, but that is a backstop, not the mechanism.)
+
+When the marker is warranted, state it plainly in the comment — "approval deferred until CI lands green on `<HEAD_SHA>`" — and include it on its own line (full OID, the same one the footer attests):
+
+```
+<!-- qwen-triage approve-on-green sha=<HEAD_SHA> -->
+```
+
+The finalize workflow honors the marker only in comments authored by the bot itself, but still: emit it exactly once, and never quote the marker text in prose or the Chinese translation.
+
+**Step 2: Act on the verdict.**
+
+**⛔ Approval guardrail — check this BEFORE approving.** A cross-repository (fork) `refactor` PR must never be auto-approved: refactors touch structure broadly and a fork author is not a trusted committer, so these always need a human maintainer's eye (this rule exists because such a PR was wrongly auto-approved and merged). Decide it deterministically — do not eyeball it. `GUARD` was already computed in Step 1 (where it also gates the `approve-on-green` marker, for the same reason); reuse that value here.
+
+If `GUARD` is `block`: do **not** draft an `APPROVE` action no matter how clean every stage looked. Escalate to the maintainer instead (the "Genuinely unsure" defer path below), and only draft `REQUEST_CHANGES` if you actually found blocking issues. This overrides the "approve" path.
 
 If Stage 0 escalated the PR for maintainer awareness, do **not** approve automatically; use the "Genuinely unsure" path below.
 
@@ -853,14 +893,22 @@ If Stage 0 escalated the PR for maintainer awareness, do **not** approve automat
 
 All stages genuinely clean, `GUARD` is `ok`, and no Stage 0 maintainer escalation remains — how you approve depends on the `PENDING` count computed in Step 1:
 
-- `PENDING` = 0 → recommend approval in Stage 3, pinned to the reviewed commit
-  in its existing footer.
-- `PENDING` > 0 → state that the recommendation is conditional on those checks
-  passing. It remains a non-voting comment; do not schedule a later approval.
+- `PENDING` = 0 → draft the approval now, pinned to the reviewed commit (see the Approval note above) — the publisher submits it through the reviews API with `commit_id`, never `gh pr review --approve`, which binds to no SHA:
 
-Reflection shows it shouldn't merge — include a request-changes recommendation
-in the Stage 3 comment immediately, citing its specific concerns. Do not create
-another draft action.
+  ```bash
+  printf '%s\n' 'LGTM, looks ready to ship. ✅' > "$DRAFT_DIR/bodies/approve.md"
+  jq -cn --arg sha "$HEAD_SHA" '{action:"review",event:"APPROVE",commit_id:$sha,body:"bodies/approve.md"}' \
+    >> "$DRAFT_DIR/actions.jsonl"
+  ```
+
+- `PENDING` > 0 → **post no approval in this run.** The Stage 3 comment already carries the `approve-on-green` marker (Step 1); the finalize workflow posts the same commit-pinned approval only after every check on `HEAD_SHA` completes green, and withholds it — flagging the status comment — if anything lands red or the head moves. Approving while the unit suite is still running would attest to a result that does not exist yet; that gap is exactly what the deferred path closes.
+
+Reflection shows it shouldn't merge — draft a request-changes review immediately, citing the specific concerns from the comment:
+
+```bash
+printf '%s\n' 'Needs some rethinking — see my notes above. 🙏' > "$DRAFT_DIR/bodies/stage-3-rethink.md"
+jq -cn '{action:"review",event:"REQUEST_CHANGES",body:"bodies/stage-3-rethink.md"}' >> "$DRAFT_DIR/actions.jsonl"
+```
 
 Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Draft a `defer` action whose body:
 
@@ -876,7 +924,7 @@ jq -cn '{action:"defer",body:"bodies/defer.md"}' >> "$DRAFT_DIR/actions.jsonl"
 
 The publisher resolves who owns the call, prepends the @mention line
 (`⏸️ Deferring to @<login> — needs a human call on this one.`), posts the
-comment, without changing assignees. The resolution is
+comment, and assigns the PR to that maintainer best-effort. The resolution is
 deterministic and lives in `.github/scripts/triage-publish.mjs` — it moved out
 of this skill because its collaborator-permission lookup needs a write-level
 token the CI agent no longer holds: `$QWEN_MAINTAINER_HANDLE` wins when set;

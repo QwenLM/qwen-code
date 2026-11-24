@@ -29,8 +29,7 @@ const workflowPath = join(
   'workflows',
   'qwen-triage.yml',
 );
-const workflowText = readFileSync(workflowPath, 'utf8');
-const doc = parse(workflowText);
+const doc = parse(readFileSync(workflowPath, 'utf8'));
 const cacheProducerPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -782,7 +781,7 @@ describe('qwen-triage: runner routing under token isolation', () => {
   });
 
   it('keeps the authorize gate itself on the same-repo guard', () => {
-    // authorize IS the permission check; it cannot
+    // authorize IS the permission check (and loads CI_BOT_PAT); it cannot
     // route on its own output and must not widen to association-based trust.
     assert.match(
       authorizeRunsOn,
@@ -840,10 +839,10 @@ describe('qwen-triage: runner routing under token isolation', () => {
         s.name,
       );
     }
-    // Every step that uses GITHUB_TOKEN on gh pins gh's config resolution
+    // Every step that spends CI_BOT_PAT on gh pins gh's config resolution
     // (GH_HOST + a private, guarded GH_CONFIG_DIR), like the sibling pool
-    // jobs; a planted shared ~/.config/gh must not receive the credential.
-    // Identify token-using steps by the credential in their env, not by the
+    // jobs; a planted shared ~/.config/gh must not receive the PAT.
+    // Identify PAT-spending steps by the credential in their env, not by the
     // spelling of a gh subcommand, so a differently-spelled gh call cannot
     // slip past the hardening check.
     const ghSteps = authorizeJob.steps.filter((s) => s.env && s.env.GH_TOKEN);
@@ -913,7 +912,7 @@ describe('qwen-triage: token isolation contract', () => {
     assert.match(tools.run, /apt-get install[^\n]*util-linux/);
     const env = triageStep.env ?? {};
     // The agent's GitHub credential is the job's read-only GITHUB_TOKEN.
-    assert.equal(env.GH_TOKEN, '${{ github.token }}');
+    assert.equal(env.GH_TOKEN, '${{ secrets.GITHUB_TOKEN }}');
     assert.ok(!JSON.stringify(env).includes('CI_BOT_PAT'));
     assert.ok(!JSON.stringify(env).includes('QWEN_CODE_BOT_TOKEN'));
     const run = triageStep.run;
@@ -1007,22 +1006,41 @@ describe('qwen-triage: token isolation contract', () => {
     );
     assert.ok(publish, 'publisher must run the draft script');
     assert.match(publish.run, /triage-publish\.mjs/);
-    assert.equal(publish.env.GH_TOKEN, '${{ github.token }}');
-    assert.deepEqual(publishTriageJob.permissions, {
-      contents: 'read',
-      issues: 'write',
-      'pull-requests': 'read',
-    });
-    assert.ok(
-      !workflowText.includes('secrets.CI_BOT_PAT'),
-      'triage must not depend on a PAT',
+    assert.equal(
+      publish.env.GH_TOKEN,
+      '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}',
     );
-    assert.ok(!workflowText.includes('secrets.QWEN_CODE_BOT_TOKEN'));
   });
 
-  it('inspects published comments only after publishing (notify moved)', () => {
-    // The notify step reads this run's verdict comment; those land in the
-    // publish step, so notify must follow it in
+  it('falls back to GITHUB_TOKEN only when both bot PATs are absent', () => {
+    const expected =
+      '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}';
+    for (const name of [
+      'Acknowledge triage request',
+      'Post triage status comment',
+      'Prepare agent context',
+      'Finalize triage status comment',
+    ]) {
+      assert.equal(
+        steps.find((step) => step.name === name).env.GH_TOKEN,
+        expected,
+        `${name} must share the publishing identity`,
+      );
+    }
+    for (const name of [
+      'Publish triage drafts',
+      'Notify silent triage re-run',
+    ]) {
+      assert.equal(
+        publishTriageJob.steps.find((step) => step.name === name).env.GH_TOKEN,
+        expected,
+      );
+    }
+  });
+
+  it('inspects published reviews only after publishing (notify moved)', () => {
+    // The notify step reads the reviews THIS run posted; under token
+    // isolation those land in the publish step, so notify must follow it in
     // the publish job — left in the agent job it would always see none.
     const notify = publishTriageJob.steps.find(
       (s) => s.name === 'Notify silent triage re-run',
