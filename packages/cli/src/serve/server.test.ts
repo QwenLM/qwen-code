@@ -21845,6 +21845,7 @@ describe('createServeApp', () => {
         }),
       });
       let busy = true;
+      let fsyncPending = true;
       let received:
         | Awaited<ReturnType<NonNullable<typeof bridge.retireSessionIfIdle>>>
         | undefined;
@@ -21857,7 +21858,9 @@ describe('createServeApp', () => {
           throw Object.assign(new Error('held'), {
             code: 'session_retire_busy',
           });
-        received = { ...identity, state: 'retired' };
+        received = fsyncPending
+          ? { ...identity, state: 'retiring', awaitingFenceSync: true }
+          : { ...identity, state: 'retired' };
         return received;
       });
       const app = createServeApp(baseOpts, undefined, {
@@ -21890,6 +21893,20 @@ describe('createServeApp', () => {
         404,
       );
       busy = false;
+      const pending = await put();
+      expect(pending.status).toBe(202);
+      expect(pending.body).toEqual({
+        sessionId,
+        eventEpoch,
+        operationId,
+        state: 'retiring',
+        awaitingFenceSync: true,
+      });
+      expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
+        pending.body,
+      );
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(2);
+      fsyncPending = false;
       const accepted = await put();
       expect(accepted.status).toBe(200);
       expect(accepted.body).toEqual({
@@ -21902,7 +21919,7 @@ describe('createServeApp', () => {
       expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
         accepted.body,
       );
-      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(2);
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(3);
     });
 
     it('scopes idempotency keys per session (W4)', async () => {

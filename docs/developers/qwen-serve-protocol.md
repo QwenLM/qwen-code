@@ -4315,6 +4315,10 @@ fenced by that integrator before treating an archived workspace as consistent.
 
 The response identifies `sessionId`, `operationId`, `eventEpoch`, and
 `state`. `200 retired` confirms the native recorder flushed and closed.
+If a `202 retiring` receipt includes `awaitingFenceSync: true`, the live owner
+confirmed it has not sent the native close and may retry syncing the same
+fence. Repeat the identical PUT to resume. Polling alone only reads the
+receipt. A restarted owner cannot make that assertion.
 `202 retiring` and `202 result_unknown` prohibit migration or replay. Poll
 `GET /session/:id/retirements/:operationId` for that exact receipt. An unknown
 outcome retains the source fence, including across daemon restart. The owning

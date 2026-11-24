@@ -31,6 +31,8 @@ export interface SessionRetirementIdentity {
 
 export interface SessionRetirementReceipt extends SessionRetirementIdentity {
   state: 'retiring' | 'retired' | 'result_unknown';
+  /** The current owner has not dispatched close and can retry syncing this fence. */
+  awaitingFenceSync?: true;
 }
 
 export class SessionRetirementError extends Error {
@@ -64,6 +66,10 @@ function missing(error: unknown): boolean {
 /** A record fences this native ID in this source workspace, even after restart. */
 export class SessionRetirementLedger {
   private readonly directory: string;
+  private readonly unsyncedFences = new Map<
+    string,
+    SessionRetirementIdentity
+  >();
 
   constructor(runtimeRoot: string, workspace: string) {
     this.directory = path.join(
@@ -132,7 +138,35 @@ export class SessionRetirementLedger {
     }
   }
 
+  canRetryFenceSync(receipt: SessionRetirementReceipt): boolean {
+    const owner = this.unsyncedFences.get(this.file(receipt.sessionId));
+    return (
+      receipt.state === 'retiring' &&
+      owner?.sessionId === receipt.sessionId &&
+      owner.operationId === receipt.operationId &&
+      owner.eventEpoch === receipt.eventEpoch
+    );
+  }
+
   begin(identity: SessionRetirementIdentity): void {
+    const file = this.file(identity.sessionId);
+    if (this.unsyncedFences.has(file)) {
+      const receipt = this.read(identity.sessionId);
+      if (
+        !receipt ||
+        !this.canRetryFenceSync(receipt) ||
+        receipt.sessionId !== identity.sessionId ||
+        receipt.operationId !== identity.operationId ||
+        receipt.eventEpoch !== identity.eventEpoch
+      )
+        throw new SessionRetirementError(
+          'session_retire_identity_conflict',
+          'A retirement already owns this native session',
+          identity,
+        );
+      this.syncFence(file);
+      return;
+    }
     try {
       this.write({ ...identity, state: 'retiring' }, true);
     } catch (error) {
@@ -173,6 +207,13 @@ export class SessionRetirementLedger {
     }
   }
 
+  private syncFence(file: string): void {
+    this.syncDirectory(this.directory);
+    this.syncDirectory(path.dirname(this.directory));
+    this.syncDirectory(path.dirname(path.dirname(this.directory)));
+    this.unsyncedFences.delete(file);
+  }
+
   settle(
     identity: SessionRetirementIdentity,
     state: 'retired' | 'result_unknown',
@@ -203,12 +244,15 @@ export class SessionRetirementLedger {
       } finally {
         closeSync(fd);
       }
-      if (exclusive) linkSync(temporary, target);
-      else renameSync(temporary, target);
-      this.syncDirectory(this.directory);
       if (exclusive) {
-        this.syncDirectory(path.dirname(this.directory));
-        this.syncDirectory(path.dirname(path.dirname(this.directory)));
+        linkSync(temporary, target);
+        // This process performed the exclusive link. Until all syncs succeed,
+        // the caller cannot reach the native close dispatch.
+        this.unsyncedFences.set(target, receipt);
+        this.syncFence(target);
+      } else {
+        renameSync(temporary, target);
+        this.syncDirectory(this.directory);
       }
     } finally {
       try {

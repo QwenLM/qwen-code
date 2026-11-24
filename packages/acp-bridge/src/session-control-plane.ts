@@ -2613,6 +2613,9 @@ export function createSessionControlPlane(
       (operationId !== undefined && receipt.operationId !== operationId)
     )
       return undefined;
+    if (retirementLedger?.canRetryFenceSync(receipt)) {
+      return { ...receipt, awaitingFenceSync: true as const };
+    }
     if (
       receipt.state === 'retiring' &&
       retiringSessions.get(sessionId) !== 'retiring'
@@ -13910,7 +13913,12 @@ export function createSessionControlPlane(
                   identity,
                 );
               }
-              return getSessionRetirement(sessionId, operationId)!;
+              if (
+                !retirementLedger.canRetryFenceSync(previous) ||
+                retiringSessions.get(sessionId) === 'retiring'
+              ) {
+                return getSessionRetirement(sessionId, operationId)!;
+              }
             }
             const entry = byId.get(sessionId);
             if (!entry || entry.events.epoch !== eventEpoch) {
@@ -13967,6 +13975,8 @@ export function createSessionControlPlane(
                     recorded.eventEpoch !== eventEpoch
                   )
                     throw error;
+                  if (retirementLedger.canRetryFenceSync(recorded))
+                    return { ...recorded, awaitingFenceSync: true };
                   return recorded.state === 'retiring'
                     ? retirementLedger.settle(identity, 'result_unknown')
                     : recorded;
@@ -13990,6 +14000,8 @@ export function createSessionControlPlane(
                 recorded.eventEpoch !== eventEpoch
               )
                 throw error;
+              if (retirementLedger.canRetryFenceSync(recorded))
+                return { ...recorded, awaitingFenceSync: true };
               if (recorded.state !== 'retiring') return recorded;
               // Keep the durable fence. Only the outstanding native call can
               // later confirm a close or explicitly refuse before starting.

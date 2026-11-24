@@ -7389,25 +7389,32 @@ export function registerSessionRoutes(
     };
     const route = 'PUT /session/:id/retirements/:operationId';
     try {
-      const existing = retirementRuntimes().flatMap(({ bridge }) => {
-        const receipt = bridge.getSessionRetirement?.(sessionId);
-        return receipt ? [receipt] : [];
+      const existing = retirementRuntimes().flatMap((runtime) => {
+        const receipt = runtime.bridge.getSessionRetirement?.(sessionId);
+        return receipt ? [{ runtime, receipt }] : [];
       });
-      if (existing.length) {
+      const recorded = existing[0];
+      if (recorded) {
         if (
           existing.length !== 1 ||
-          existing[0]?.operationId !== identity.operationId ||
-          existing[0].eventEpoch !== identity.eventEpoch
-        )
+          recorded.receipt.operationId !== identity.operationId ||
+          recorded.receipt.eventEpoch !== identity.eventEpoch
+        ) {
           res
             .status(409)
             .json({ ...identity, code: 'session_retire_identity_conflict' });
-        else sendRetirement(res, existing[0]);
-        return;
+          return;
+        }
+        if (!recorded.receipt.awaitingFenceSync) {
+          sendRetirement(res, recorded.receipt);
+          return;
+        }
       }
-      const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
-      if (!owner) return;
-      const runtime = owner.runtime;
+      const runtime =
+        recorded?.runtime ??
+        (await resolveOwnerSessionRuntime(sessionId, res, route))?.runtime;
+      if (!runtime) return;
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       if (
         !retirementRuntimes().includes(runtime) ||
         !runtime.bridge.retireSessionIfIdle

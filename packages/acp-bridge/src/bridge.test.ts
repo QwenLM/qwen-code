@@ -54,6 +54,7 @@ import {
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
 import type { StandaloneSessionSpawnError } from './bridgeErrors.js';
+import { SessionRetirementLedger } from './session-retirement.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
@@ -36777,6 +36778,93 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'retries the same retirement after fence sync fails before closing the child',
+      async () => {
+        const runtime = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-retirement-sync-'),
+        );
+        const handle = makeChannel({
+          initializeImpl: () => {
+            const response = activeWorkInitializeResponse();
+            return {
+              ...response,
+              _meta: {
+                ...response._meta,
+                [SESSION_RETIREMENT_RECEIPT_META_KEY]: 1,
+              },
+            };
+          },
+          extMethodImpl: async (method, params) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? {
+                  closed: true,
+                  sessionId: params['sessionId'],
+                  retirementOperationId: params['retirementOperationId'],
+                }
+              : {},
+        });
+        const bridge = makeBridge({
+          artifactSnapshotRuntimeBaseDir: runtime,
+          channelFactory: async () => handle.channel,
+        });
+        const ledgerPrototype =
+          SessionRetirementLedger.prototype as unknown as {
+            syncDirectory(path: string): void;
+          };
+        const sync = vi.spyOn(ledgerPrototype, 'syncDirectory');
+        try {
+          const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          await sendActiveWorkSnapshot(handle, 1, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+          const identity = {
+            sessionId: session.sessionId,
+            operationId: 'c7910c8b-ff96-4022-a9cc-bb47cf5df066',
+            eventEpoch: bridge.getSessionEventEpoch(session.sessionId),
+          };
+          const closeCalls = () =>
+            handle.agent.extMethodCalls.filter(
+              (call) => call.method === SERVE_CONTROL_EXT_METHODS.sessionClose,
+            );
+          sync.mockImplementationOnce(() => {
+            throw new Error('directory fsync failed after link');
+          });
+          await expect(
+            bridge.retireSessionIfIdle!(identity),
+          ).resolves.toMatchObject({
+            ...identity,
+            state: 'retiring',
+            awaitingFenceSync: true,
+          });
+          expect(bridge.getSessionRetirement!(session.sessionId)).toMatchObject(
+            { awaitingFenceSync: true },
+          );
+          expect(closeCalls()).toHaveLength(0);
+          const restarted = new SessionRetirementLedger(runtime, WS_A);
+          const stored = restarted.read(session.sessionId);
+          expect(stored).toMatchObject({ ...identity, state: 'retiring' });
+          expect(restarted.canRetryFenceSync(stored!)).toBe(false);
+          await expect(
+            bridge.retireSessionIfIdle!({
+              ...identity,
+              operationId: 'c7910c8b-ff96-4022-a9cc-bb47cf5df067',
+            }),
+          ).rejects.toMatchObject({ code: 'session_retire_identity_conflict' });
+          expect(closeCalls()).toHaveLength(0);
+          await expect(bridge.retireSessionIfIdle!(identity)).resolves.toEqual({
+            ...identity,
+            state: 'retired',
+          });
+          expect(closeCalls()).toHaveLength(1);
+        } finally {
+          sync.mockRestore();
+          await bridge.shutdown();
+          await fsp.rm(runtime, { recursive: true, force: true });
+        }
+      },
+    );
 
     it.skipIf(process.platform === 'win32')(
       'reopens a source when the owning child confirms a late idle-retirement refusal',
