@@ -11692,13 +11692,8 @@ describe('LlmChat', async () => {
       });
 
       describe('inactivity timeout while tool-call arguments are open', () => {
-        const toolArgumentStall = () =>
-          new StreamInactivityTimeoutError(
-            180_000,
-            280,
-            190_000,
-            'structured_output',
-          );
+        const toolArgumentStall = (toolName = 'structured_output') =>
+          new StreamInactivityTimeoutError(180_000, 280, 190_000, toolName);
 
         it('replays once, then propagates', async () => {
           vi.useFakeTimers();
@@ -11717,6 +11712,51 @@ describe('LlmChat', async () => {
           expectWarned('Transport stream retry not taken', {
             retryDecision: 'tool_argument_stall_exhausted',
           });
+        });
+
+        it('propagates a stall whose tool name resembles a context error', async () => {
+          vi.useFakeTimers();
+          const error = toolArgumentStall('context_length_exceeded');
+          const compress = mockCompressOnce(
+            noop(),
+            compressed(135_000, 40_000, [...summaryAck(), userText('test')]),
+          );
+          mockStreamsOnce(
+            streamThenThrow([], error),
+            streamThenThrow([], error),
+            streamOf(textChunk('unexpected retry', 'STOP')),
+          );
+
+          const { caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-context-name'),
+            30_000,
+          );
+
+          expectStreamCalls(2);
+          expect(compress).toHaveBeenCalledOnce();
+          expect(caughtError).toBe(error);
+        });
+
+        it('keeps an annotated timeout in the transport retry path with model fallback configured', async () => {
+          vi.useFakeTimers();
+          vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['backup']);
+          const error = Object.assign(toolArgumentStall(), { status: 429 });
+          streamMock().mockImplementation(() =>
+            Promise.resolve(streamThenThrow([], error)),
+          );
+
+          const { caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-fallback'),
+            30_000,
+          );
+
+          expectStreamCalls(2);
+          expect(caughtError).toBe(error);
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Fallback chain skipped: primary error is not fallback-eligible',
+            ),
+          );
         });
 
         it('continues once after delivered text, then propagates', async () => {

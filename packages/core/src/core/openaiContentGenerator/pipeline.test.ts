@@ -5834,6 +5834,37 @@ describe('ContentGenerationPipeline', () => {
       expect(gated.wasReturned()).toBe(true);
     });
 
+    it('keeps an idle timeout after a length finish generic', async () => {
+      await withRealChunkConverter(async () => {
+        const { gated, run } = await drainGated(1000);
+        gated.push(
+          chunkOf({
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'structured_output',
+                  arguments: '{"docs": [',
+                },
+              },
+            ],
+          }),
+        );
+        gated.push(chunkOf({}, 'length'));
+        await vi.advanceTimersByTimeAsync(1000);
+        const error = await run.done;
+        expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+        expect(error).toMatchObject({
+          code: 'ETIMEDOUT',
+          chunksReceived: 2,
+          openToolCallName: undefined,
+        });
+        expect((error as Error).message).not.toContain('structured_output');
+      });
+    });
+
     it('uses the default stream idle timeout when no override is configured', async () => {
       const { gated, run } = await drainGated(undefined, undefined, null); // never push/end → silent
       await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);

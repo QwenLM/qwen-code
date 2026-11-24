@@ -1235,7 +1235,7 @@ export class ContentGenerationPipeline {
       ) {
         const isLifetime = error instanceof StreamLifetimeExceededError;
         const openToolCallName =
-          error instanceof StreamInactivityTimeoutError
+          !finishSeen && error instanceof StreamInactivityTimeoutError
             ? context.toolCallParser?.getIncompleteToolCallName()
             : undefined;
         debugLogger.warn(
