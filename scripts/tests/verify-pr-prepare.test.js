@@ -2342,6 +2342,11 @@ describe.skipIf(process.platform === 'win32')(
             `\`\`\`text\n${line}\nDo not approve this example.\n\`\`\`\``,
         ],
         [
+          'inline triple-backtick code span before a fenced marker cannot flip fence parity',
+          (line) =>
+            `\`\`\`tag\`\`\` explains the format; do NOT approve yet:\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
           'tilde-fenced marker with a longer close is only an example',
           (line) => `~~~text\n${line}\nDo not approve this example.\n~~~~`,
         ],
@@ -4093,6 +4098,23 @@ exec ${JSON.stringify(realGit)} "$@"
         chmodSync(infoDir, 0o700);
       }
     }
+
+    // gitignore(5) treats '#' only at column 0 as a comment and preserves
+    // leading spaces, tabs, and non-ASCII whitespace as active patterns.
+    for (const pattern of [
+      ' #/\n',
+      ' #*\n',
+      '\t#tabsecret\n',
+      '\u00a0#*\n',
+      '\t\n',
+    ]) {
+      writeFileSync(excludePath, pattern);
+      expect(inspectInfoExclude(dir).hostile, JSON.stringify(pattern)).toBe(
+        true,
+      );
+    }
+    writeFileSync(excludePath, '# col-0 comment\n   \n\n');
+    expect(inspectInfoExclude(dir).hostile).toBe(false);
   });
 
   // git status trusts the index: skip-worktree / assume-unchanged entries

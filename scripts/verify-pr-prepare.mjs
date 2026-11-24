@@ -1038,9 +1038,13 @@ export function inspectInfoExclude(root) {
   }
   const hostile = readFileSync(path, 'utf8')
     .split('\n')
-    .some((line) => {
-      const trimmed = line.trim();
-      return trimmed !== '' && !trimmed.startsWith('#');
+    .some((rawLine) => {
+      const line = rawLine.replace(/\r$/, '');
+      if (line.startsWith('#')) return false;
+      // gitignore(5) treats only empty / trailing-ASCII-space-only lines as
+      // blank and '#' only at column 0 as a comment; leading spaces, tabs or
+      // non-ASCII whitespace before '#' (or a lone tab) are active patterns.
+      return line.replace(/ +$/, '') !== '';
     });
   return { path, hostile };
 }
@@ -1224,8 +1228,12 @@ function directApprovalMarkers(body) {
       continue;
     }
     if (run) {
-      fence = { char: run[1][0], length: run[1].length };
-      continue;
+      // CommonMark §4.5: backtick fence info strings cannot contain backticks;
+      // a line like ```tag``` prose is inline code, not a fence opener.
+      if (run[1][0] !== '`' || !run[2].includes('`')) {
+        fence = { char: run[1][0], length: run[1].length };
+        continue;
+      }
     }
     // Only a direct, full-line HTML comment is an instruction. Blockquotes,
     // indented code and fenced examples are prose, never execution approval.
@@ -1391,6 +1399,12 @@ function captureWriteRecord(path, label, next, expectedParent = null) {
     };
   }
   try {
+    const existing = lstatSync(path);
+    if (existing.size > 16 * 1024 * 1024) {
+      return {
+        error: `could not preserve the ${label} at ${path}: file exceeds 16 MiB`,
+      };
+    }
     record.previous = readFileSync(path);
   } catch (error) {
     if (error.code !== 'ENOENT') {

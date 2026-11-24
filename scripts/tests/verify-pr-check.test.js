@@ -4641,5 +4641,49 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         },
       ).errors.join('\n'),
     ).toMatch(/boundary\.json mode vm contradicts a host --execution-record/);
+
+    // 8i. A parent-directory symlink aliasing <clone>/tmp under another name
+    // must not downgrade derived trustRoot/execTrustRoot when --context-root
+    // is omitted: in-clone --context and --execution-record stay refused.
+    const aliasParent = join(base, 'alias');
+    symlinkSync(join(clone, 'tmp'), aliasParent);
+    const aliasedDir = join(aliasParent, basename(dir));
+    const inCloneCtx = join(clone, 'tmp', 'verify-context', 'pr17185.json');
+    mkdirSync(dirname(inCloneCtx), { recursive: true });
+    writeFileSync(inCloneCtx, ctxText);
+    const inCloneRec = join(clone, 'forged-exec-record.json');
+    writeFileSync(inCloneRec, boundRecText);
+
+    const aliasedCtxRefused = run([
+      '--context',
+      inCloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      aliasedDir,
+    ]);
+    expect(aliasedCtxRefused.status).toBe(1);
+    expect(aliasedCtxRefused.stderr).toMatch(
+      /--context must not point inside the PR-writable worktree/,
+    );
+
+    const aliasedRecRefused = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      inCloneRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      aliasedDir,
+    ]);
+    expect(aliasedRecRefused.status).toBe(1);
+    expect(aliasedRecRefused.stderr).toMatch(
+      /--execution-record must not point inside the PR-writable worktree/,
+    );
   });
 });

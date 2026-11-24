@@ -196,9 +196,11 @@ existing complete/release commands but must be released and restarted before a
 new comment approval can authorize execution. This cooperative final check is
 not an OS sandbox against a caller that bypasses prepare and executes PR code.
 
-Both exact-tree passes resolve Git's actual `info/exclude` with `git rev-parse
---path-format=absolute --git-path info/exclude`, rather than assuming it lives
-under `.git/info/exclude`. This includes the common exclude of a linked
+Both exact-tree passes resolve Git's common directory with `git rev-parse
+--path-format=absolute --git-common-dir` (falling back to `--git-common-dir`
+resolved against the clone root on Git < 2.31), then inspect `info/` and
+`info/exclude` with `lstat` and a size bound rather than following symlinks or
+assuming `.git/info/exclude`. This includes the common exclude of a linked
 worktree, so that file cannot hide untracked files from status. Failure to
 resolve or read the exclude also refuses preparation.
 

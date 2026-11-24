@@ -2012,6 +2012,21 @@ function main(argv) {
       ? { owner: repoMatch[1], repo: repoMatch[2], number }
       : null;
   };
+  const deriveTrustRoot = () => {
+    if (contextRoot) return realpathSync(contextRoot);
+    const lexicalContainer = dirname(resolve(dir));
+    const realDir = realpathSync(dir);
+    const realContainer = dirname(realDir);
+    const realDirPrNumber =
+      dirPrNumber ?? /^pr(\d+)-verify-/.exec(basename(realDir))?.[1];
+    if (realDirPrNumber && basename(lexicalContainer) === 'tmp') {
+      const lexicalParent = realpathSync(dirname(lexicalContainer));
+      if (isFilesystemRoot(lexicalParent)) return lexicalParent;
+    }
+    return realDirPrNumber && basename(realContainer) === 'tmp'
+      ? dirname(realContainer)
+      : realDir;
+  };
   let coordinates = null;
   let trustedSnapshot = null;
   let contextDigestVerified = false;
@@ -2050,16 +2065,7 @@ function main(argv) {
     // --context-root was validated above (contains the artifact dir). The
     // fallback root is the clone root for a pr<n>-verify-<ts> dir under tmp/
     // (the tmp container's parent), or the dir itself for a plain fixture.
-    let trustRoot;
-    if (contextRoot) {
-      trustRoot = realpathSync(contextRoot);
-    } else {
-      const container = dirname(resolve(dir));
-      trustRoot =
-        dirPrNumber && basename(container) === 'tmp'
-          ? realpathSync(dirname(container))
-          : realpathSync(dir);
-    }
+    const trustRoot = deriveTrustRoot();
     const insideByPath = withinRoot(trustRoot, realContext);
     // A hard link gives a PR-writable file a second name outside the trust
     // root; realpath cannot see the source name, but a freshly written host
@@ -2207,16 +2213,7 @@ function main(argv) {
     } catch {
       realExecRecord = resolve(executionRecordPath);
     }
-    let execTrustRoot;
-    if (contextRoot) {
-      execTrustRoot = realpathSync(contextRoot);
-    } else {
-      const container = dirname(resolve(dir));
-      execTrustRoot =
-        dirPrNumber && basename(container) === 'tmp'
-          ? realpathSync(dirname(container))
-          : realpathSync(dir);
-    }
+    const execTrustRoot = deriveTrustRoot();
     const execInsideByPath = withinRoot(execTrustRoot, realExecRecord);
     let execIsAlias = false;
     let execLinks = 0;

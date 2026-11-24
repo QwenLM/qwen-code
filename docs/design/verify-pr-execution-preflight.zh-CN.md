@@ -83,7 +83,7 @@ VM 的 `mode` 为 `vm`。只有完整 HTML comment 在列零独占一行时，�
 
 所有 GitHub 调用与 review-state 拉取完成后，评论批准进入与 start、release、complete 相同的协作式 watch-state 锁。prepare 先在锁内重新读取注册，复核 repo、PR、规范化 head/round 和精确 `registrationNonce`，再用初始检查相同的 hardened Git 参数与 local-filter override 重复 exact HEAD、clean-status 和 index-flag 检查；锁内不发起新的网络请求，随后才写宿主 context 与产物声明。本地信任不需要注册锁，但在 review 响应之后、写入前执行同一末次检出复核。因此最终 GraphQL 响应暂停期间变脏的检出必须 exit 3，且不写新的批准或宿主快照字节。锁竞争同样 exit 3，绝不把旧批准当成仍然有效；不变的 in-flight 注册重试保留 nonce，可以正常签发。实际 release 后重新 start 会轮换 nonce，需要新评论；无 nonce 的 legacy 条目仍可由现有 complete/release 读取，但必须释放并重启后才能由新的评论批准授权执行。这套协作式末次检查不是防御绕过 prepare 并执行 PR 代码之调用方的 OS 沙箱。
 
-两次 exact-tree 检查都通过 `git rev-parse --path-format=absolute --git-path info/exclude` 定位 Git 实际使用的 `info/exclude`，而不假定其固定为 `.git/info/exclude`。这也涵盖 linked worktree 的 common exclude，避免该文件从状态检查中隐藏未跟踪文件。无法定位或读取该文件时同样拒绝准备。
+两次 exact-tree 检查都通过 `git rev-parse --path-format=absolute --git-common-dir`（在 Git < 2.31 上回退为相对克隆根解析的 `--git-common-dir`）定位 Git 公共目录，再用 `lstat` 与体积上限校验其 `info/` 目录和 `info/exclude` 文件，避免跟随符号链接或假定固定为 `.git/info/exclude`。这也涵盖 linked worktree 的 common exclude，避免该文件从状态检查中隐藏未跟踪文件。无法定位或读取该文件时同样拒绝准备。
 
 ## 记录与发布
 
