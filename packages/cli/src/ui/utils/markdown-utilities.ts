@@ -145,6 +145,28 @@ export const getEnclosingFenceInfo = (
   return fence ? parseCodeFenceInfo(fence.infoString) : null;
 };
 
+/** Code and fence info as Ink reads them, including fences indented past three spaces. */
+export function getFencedCodeBlocks(markdown: string) {
+  const content = markdown.replaceAll('\r\n', '\n');
+  const blocks: Array<{ info: string; value: string }> = [];
+  const collect = (start: number, end: number) => {
+    const newline = content.indexOf('\n', start);
+    const opening = content.slice(
+      start,
+      newline === -1 ? content.length : newline,
+    );
+    blocks.push({
+      info: CODE_FENCE_RE.exec(opening)?.[2]?.trim() ?? '',
+      value: newline === -1 ? '' : content.slice(newline + 1, end),
+    });
+  };
+  const open = getEnclosingFence(content, content.length, (start, end) =>
+    collect(start, content.lastIndexOf('\n', end)),
+  );
+  if (open) collect(open.startIndex, content.length);
+  return blocks;
+}
+
 export const findLastSafeSplitPoint = (
   content: string,
   idealMaxLength?: number,

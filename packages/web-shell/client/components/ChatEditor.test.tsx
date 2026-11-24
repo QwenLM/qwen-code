@@ -5900,7 +5900,7 @@ describe('ChatEditor slash command popovers', () => {
     { source: 'plugin-command', extensionName: undefined },
     { source: 'skill', extensionName: 'suite' },
   ])(
-    'separates Extension Skill details for $source',
+    'shows only the Skill name in the slash menu and highlights the Extension in the hover detail for $source',
     ({ source, extensionName }) => {
       const name = 'suite:rust:chat';
       composerCoreState.slashMenu = {
@@ -5920,6 +5920,9 @@ describe('ChatEditor slash command popovers', () => {
       const option = document.querySelector(
         '[data-web-shell-slash-menu] [role="option"]',
       );
+      const commandLabel = option?.querySelector(`.${styles.slashCommand}`);
+      expect(commandLabel?.textContent).toBe('/rust:chat');
+      expect(option?.textContent).not.toContain('suite:');
       act(() =>
         option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
       );
@@ -5927,11 +5930,117 @@ describe('ChatEditor slash command popovers', () => {
       expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
         'rust:chat',
       );
-      expect(detail?.firstElementChild?.children[1]?.textContent).toBe(
-        'Extension: suite',
+      const extensionRow = detail?.querySelector(
+        `.${styles.slashDetailExtension}`,
       );
+      expect(extensionRow).not.toBeNull();
+      expect(extensionRow?.classList.contains(styles.slashDetailText)).toBe(
+        false,
+      );
+      expect(
+        extensionRow?.querySelector(`.${styles.slashDetailExtensionLabel}`)
+          ?.textContent,
+      ).toBe('Extension');
+      expect(
+        extensionRow?.querySelector(`.${styles.slashDetailExtensionName}`)
+          ?.textContent,
+      ).toBe('suite');
+      expect(
+        detail?.querySelector(`.${styles.slashDetailText}`)?.textContent,
+      ).toBe('Chat');
     },
   );
+
+  it('shows the hover detail for an Extension Skill without a description', () => {
+    const name = 'suite:rust:chat';
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 1,
+      query: '',
+      selectedIndex: 0,
+      items: [{ id: name, label: `/${name}`, apply: `/${name} ` }],
+    };
+    renderChatEditor({
+      commands: [{ name, description: '', source: 'skill' }],
+      skills: [{ name, description: '', extensionName: 'suite' }],
+    });
+    const option = document.querySelector(
+      '[data-web-shell-slash-menu] [role="option"]',
+    );
+    expect(option?.querySelector(`.${styles.slashCommand}`)?.textContent).toBe(
+      '/rust:chat',
+    );
+    act(() =>
+      option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+    const detail = document.querySelector('[data-web-shell-slash-detail]');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailCommand}`)?.textContent,
+    ).toBe('rust:chat');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailExtensionName}`)?.textContent,
+    ).toBe('suite');
+    expect(detail?.querySelector(`.${styles.slashDetailText}`)).toBeNull();
+  });
+
+  it('strips the Extension prefix in /skills subcommand rows while leaving other subcommands intact', () => {
+    const name = 'suite:rust:chat';
+    composerCoreState.slashMenu = {
+      kind: 'subcommand',
+      from: 0,
+      to: 8,
+      query: '',
+      selectedIndex: 0,
+      items: [
+        {
+          id: `/skills ${name}`,
+          label: name,
+          apply: `/skills ${name} `,
+          detail: 'Chat',
+          type: 'skill',
+        },
+        {
+          id: name,
+          label: name,
+          apply: `/other ${name} `,
+          detail: 'Plain subcommand',
+        },
+      ],
+    };
+    renderChatEditor({
+      commands: [{ name, description: 'Chat', source: 'skill' }],
+      skills: [{ name, description: 'Chat', extensionName: 'suite' }],
+    });
+    const options = document.querySelectorAll(
+      '[data-web-shell-slash-menu] [role="option"]',
+    );
+    expect(
+      options[0]?.querySelector(`.${styles.slashCommand}`)?.textContent,
+    ).toBe('rust:chat');
+    expect(
+      options[1]?.querySelector(`.${styles.slashCommand}`)?.textContent,
+    ).toBe(name);
+
+    act(() =>
+      options[0]?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+    const detail = document.querySelector('[data-web-shell-slash-detail]');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailCommand}`)?.textContent,
+    ).toBe('rust:chat');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailExtensionName}`)?.textContent,
+    ).toBe('suite');
+
+    act(() =>
+      options[1]?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+    expect(
+      detail?.querySelector(`.${styles.slashDetailCommand}`)?.textContent,
+    ).toBe(name);
+    expect(detail?.querySelector(`.${styles.slashDetailExtension}`)).toBeNull();
+  });
 
   it.each([true, false])(
     'preserves colon names without an Extension (Skill: %s)',
@@ -5960,6 +6069,9 @@ describe('ChatEditor slash command popovers', () => {
       const option = document.querySelector(
         '[data-web-shell-slash-menu] [role="option"]',
       );
+      expect(
+        option?.querySelector(`.${styles.slashCommand}`)?.textContent,
+      ).toBe(`/${name}`);
       act(() =>
         option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
       );
@@ -5967,7 +6079,10 @@ describe('ChatEditor slash command popovers', () => {
       expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
         isSkill ? name : `/${name}`,
       );
-      expect(detail?.textContent).not.toContain('Extension:');
+      expect(
+        detail?.querySelector(`.${styles.slashDetailExtension}`),
+      ).toBeNull();
+      expect(detail?.textContent).not.toContain('Extension');
     },
   );
 
