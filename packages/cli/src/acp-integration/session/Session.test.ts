@@ -33,6 +33,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import { StreamInactivityTimeoutError } from '@qwen-code/qwen-code-core/core/stream-guards.js';
 import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
@@ -7233,6 +7234,36 @@ describe('Session', () => {
 
       await expect(prompt()).rejects.toBe(providerError);
       expect(clientFinished).toBe(true);
+    });
+
+    it('keeps a stream timeout out of billing StopFailure hooks', async () => {
+      const timeout = new StreamInactivityTimeoutError(
+        1000,
+        2,
+        1000,
+        'check_quota',
+      );
+      const structured = { message: timeout.message };
+      structuredErrorCauses.set(structured, timeout);
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getHookSystem = vi.fn().mockReturnValue({
+        fireStopFailureEvent,
+      });
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'StopFailure');
+      useSharedRounds([
+        {
+          type: core.LlmEventType.Error,
+          value: { error: structured },
+        },
+      ]);
+
+      await expect(prompt()).rejects.toBe(timeout);
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'unknown',
+        timeout.message,
+      );
     });
 
     describe('a turn it re-enters', () => {
@@ -53100,7 +53131,23 @@ describe('Session', () => {
             'Concurrent request limit exceeded (principal scope)',
           );
         });
-        it('fires StopFailure hook when API error occurs during sendMessageStream', async () => {
+        it.each([
+          {
+            category: 'rate_limit',
+            error: Object.assign(new Error('Rate limit exceeded'), {
+              status: 429,
+            }),
+          },
+          {
+            category: 'unknown',
+            error: new StreamInactivityTimeoutError(
+              1000,
+              2,
+              1000,
+              'check_quota',
+            ),
+          },
+        ])('StopFailure: $category', async ({ category, error }) => {
           const mockFireStopFailureEvent = vi.fn().mockResolvedValue({
             success: true,
           });
@@ -53110,14 +53157,8 @@ describe('Session', () => {
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
           mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
 
-          // Simulate API error (rate limit)
-          const apiError = new Error('Rate limit exceeded') as Error & {
-            status: number;
-          };
-          apiError.status = 429;
-
           mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
-            throw apiError;
+            throw error;
           });
 
           await expect(
@@ -53127,10 +53168,9 @@ describe('Session', () => {
             }),
           ).rejects.toThrow();
 
-          // StopFailure hook should be called with rate_limit error type
           expect(mockFireStopFailureEvent).toHaveBeenCalledWith(
-            'rate_limit',
-            'Rate limit exceeded',
+            category,
+            error.message,
           );
         });
 

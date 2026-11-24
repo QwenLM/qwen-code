@@ -93,6 +93,7 @@ import {
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import { getStructuredErrorCause } from '@qwen-code/qwen-code-core/core/turn.js';
 import type {
   AgentLoopRound,
   AgentLoopStopReason,
@@ -2929,7 +2930,10 @@ export const useLlmStream = (
       setThought(null); // Reset thought when there's an error
 
       // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-      const errorType = classifyApiError(eventValue.error);
+      const errorType = classifyApiError(
+        eventValue.error,
+        getStructuredErrorCause(eventValue.error),
+      );
       config
         .getHookSystem()
         ?.fireStopFailureEvent(
