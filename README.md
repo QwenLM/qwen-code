@@ -216,6 +216,7 @@ On **SWE-bench Verified**, seven Qwen Code versions scored **76.40%–77.80%** o
 - [**AionUi**](https://github.com/iOfficeAI/AionUi) — A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) — A cross-platform desktop/web/mobile UI for Qwen Code
 - [**qwen-audio-agent**](https://github.com/QwenAudio/qwen-audio-agent) — Realtime full-duplex voice frontend for Qwen Code over ACP — talk hands-free with barge-in and a local wake word
+- [**Kling AI Agent Plugin**](https://github.com/klingai-tech/claude-plugin) — Official Global-region Agent Plugin v1 for Kling image and video creation via OAuth MCP; install with `qwen extensions install klingai-tech/claude-plugin`. China users can use the [Kling China Plugin](https://github.com/klingai-tech/claude-plugin-cn), which uses the matching China account and credits.
 
 - [**🦞 Qwen Code Claw**](https://github.com/openclaw/acpx) — Let other agents (Claude, Codex, etc.) delegate coding tasks to Qwen Code via ACP. Paste this prompt into your agent:
 
