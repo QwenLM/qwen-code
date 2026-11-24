@@ -11,6 +11,7 @@ import {
   chmodSync,
   constants,
   cpSync,
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -5287,5 +5288,142 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(missingBoundaryWithExec.errors.join('\n')).toMatch(
       /boundary\.json is missing/,
     );
+
+    // 8w. A symlink target containing its own "tmp" segment (<clone>/tmp[/link]
+    // -> <outside>/fake/tmp) or a trailing "<round>/tmp/.." detour inside the
+    // PR-writable artifact dir cannot evict the source PR clone's <clone>/tmp.
+    const fakeOutsideTmp = join(base, 'outside-fake', 'tmp');
+    const fakeOutsideRound = join(
+      fakeOutsideTmp,
+      'pr17185-verify-20261124-040000',
+    );
+    mkdirSync(join(fakeOutsideRound, 'evidence'), { recursive: true });
+    writeFileSync(join(fakeOutsideRound, 'report.md'), validFiles().report);
+    writeFileSync(join(fakeOutsideRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(fakeOutsideRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(fakeOutsideRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(fakeOutsideRound, 'evidence', '01-ab-cells.png'), 'png');
+
+    const r8CloneA = join(base, 'r8-clone-a');
+    mkdirSync(r8CloneA, { recursive: true });
+    symlinkSync(fakeOutsideTmp, join(r8CloneA, 'tmp'));
+    const r8CloneACtx = join(r8CloneA, 'forged-ctx.json');
+    writeFileSync(r8CloneACtx, ctxText);
+    const r8aRes = run([
+      '--context',
+      r8CloneACtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      join(r8CloneA, 'tmp', basename(fakeOutsideRound)),
+    ]);
+    expect(r8aRes.status).toBe(1);
+    expect(r8aRes.stderr).toMatch(/must not point inside/);
+
+    const r8CloneB = join(base, 'r8-clone-b');
+    mkdirSync(join(r8CloneB, 'tmp'), { recursive: true });
+    symlinkSync(fakeOutsideTmp, join(r8CloneB, 'tmp', 'link'));
+    const r8CloneBCtx = join(r8CloneB, 'forged-ctx.json');
+    writeFileSync(r8CloneBCtx, ctxText);
+    const r8CloneBRec = join(r8CloneB, 'forged-rec.json');
+    writeFileSync(r8CloneBRec, boundRecText);
+    for (const [label, args] of [
+      [
+        'symlink target tmp + in-clone context',
+        [
+          '--context',
+          r8CloneBCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          join(r8CloneB, 'tmp', 'link', basename(fakeOutsideRound)),
+        ],
+      ],
+      [
+        'symlink target tmp + in-clone execution-record',
+        [
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          r8CloneBRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          join(r8CloneB, 'tmp', 'link', basename(fakeOutsideRound)),
+        ],
+      ],
+    ]) {
+      const res = run(args);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // Trailing "/tmp/.." inside the PR-writable round dir cannot evict <clone>/tmp.
+    mkdirSync(join(symRoundDir, 'tmp'), { recursive: true });
+    const r8cRes = run([
+      '--context',
+      cloneRootCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${symRoundDir}/tmp/..`,
+    ]);
+    expect(r8cRes.status).toBe(1);
+    expect(r8cRes.stderr).toMatch(/must not point inside/);
+
+    // 8x. On macOS, the canonicalized /private/tmp/pr* spelling triggers the
+    // same root-level tmp/ refusal as /tmp/pr* even for host contexts outside
+    // /private.
+    if (process.platform === 'darwin' && existsSync('/private/tmp')) {
+      const privRound = join(
+        '/private/tmp',
+        `pr17185-verify-20261124-r8-${process.pid}`,
+      );
+      try {
+        mkdirSync(join(privRound, 'evidence'), { recursive: true });
+        writeFileSync(join(privRound, 'report.md'), validFiles().report);
+        writeFileSync(join(privRound, 'verdict.txt'), validFiles().verdict);
+        writeFileSync(
+          join(privRound, 'assertions.json'),
+          validFiles().assertions,
+        );
+        writeFileSync(
+          join(privRound, 'boundary.json'),
+          JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+        );
+        writeFileSync(join(privRound, 'evidence', '01-ab-cells.png'), 'png');
+        const privRes = run([
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          privRound,
+        ]);
+        expect(privRes.status).toBe(1);
+        expect(privRes.stderr).toMatch(/contains every path/);
+      } finally {
+        rmSync(privRound, { recursive: true, force: true });
+      }
+    }
   });
 });

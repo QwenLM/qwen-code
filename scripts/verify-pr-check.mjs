@@ -1990,7 +1990,14 @@ function main(argv) {
       const isTmpName = (p) => normalizeFsPath(basename(p)) === 'tmp';
       const isSystemTmpDir = (p) => {
         const norm = normalizeFsPath(p);
-        if (norm === '/tmp' || norm === '/private/tmp') return true;
+        if (
+          norm === '/tmp' ||
+          norm === '/private/tmp' ||
+          norm === '/var/tmp' ||
+          norm === '/private/var/tmp'
+        ) {
+          return true;
+        }
         return isTmpName(p) && isFilesystemRoot(dirname(p));
       };
       let leafSymlink = false;
@@ -2020,7 +2027,29 @@ function main(argv) {
       const queue = [...rawSpec.parts];
       let cur = rawSpec.root;
       let linkHops = 0;
-      const tmpCandidates = [];
+      const committedTmpContainers = [];
+      let segmentTmp = null;
+      let hitRootSystemTmp = false;
+      const recordWalkTmp = (candidate) => {
+        let resolvedCandidate;
+        let cloneCandidate;
+        try {
+          resolvedCandidate = realPath(candidate);
+          cloneCandidate = realPath(dirname(candidate));
+        } catch {
+          return;
+        }
+        if (withinRoot(canonicalDir, resolvedCandidate)) return;
+        if (isSystemTmpDir(candidate) || isSystemTmpDir(resolvedCandidate)) {
+          if (normalizeFsPath(resolvedCandidate) === normCanonicalParent) {
+            hitRootSystemTmp = true;
+            roots.add(parse(resolvedCandidate).root);
+            roots.add(resolvedCandidate);
+          }
+          return;
+        }
+        segmentTmp = { cloneCandidate, resolvedCandidate };
+      };
       while (queue.length > 0) {
         const part = queue.shift();
         if (part === '.') continue;
@@ -2033,7 +2062,7 @@ function main(argv) {
           sawVerifyRoundSegment = true;
         }
         if (isTmpName(cur)) {
-          tmpCandidates.push(cur);
+          recordWalkTmp(cur);
         }
         const st = lstatSync(cur);
         if (st.isSymbolicLink()) {
@@ -2042,6 +2071,13 @@ function main(argv) {
             return {
               error: `could not resolve artifact directory ${dir}: too many symlink hops`,
             };
+          }
+          // Freeze the current path domain's innermost non-system tmp before
+          // crossing a symlink so a "tmp" segment on the symlink target side
+          // cannot evict the source PR clone's own <clone>/tmp container.
+          if (segmentTmp) {
+            committedTmpContainers.push(segmentTmp);
+            segmentTmp = null;
           }
           try {
             const linkTargetReal = realPath(cur);
@@ -2063,16 +2099,20 @@ function main(argv) {
           }
         }
       }
+      if (segmentTmp) committedTmpContainers.push(segmentTmp);
 
       if (sawVerifyRoundSegment) {
         // 1. Canonical path: take only the innermost non-system "tmp" ancestor
-        // (never climb into system /tmp, macOS /private/tmp, or outer .qwen/tmp).
+        // (never climb into system /tmp, /var/tmp, macOS /private/tmp, or outer
+        // .qwen/tmp). When the direct parent itself is a system tmp dir, add
+        // the filesystem root sentinel ('/') consistently across /tmp and
+        // /private/tmp.
         let ancestor = canonicalParent;
         while (ancestor && !isFilesystemRoot(ancestor)) {
           if (isTmpName(ancestor)) {
             if (isSystemTmpDir(ancestor)) {
               if (normalizeFsPath(ancestor) === normCanonicalParent) {
-                roots.add(dirname(ancestor));
+                roots.add(parse(ancestor).root);
                 roots.add(ancestor);
               }
             } else {
@@ -2086,34 +2126,16 @@ function main(argv) {
           ancestor = next;
         }
 
-        // 2. Traversed path candidates: enclose root-level /tmp only when it
-        // directly hosts canonicalDir, and enclose the innermost non-system
-        // "tmp" container encountered along the path (covering symlinked tmp,
-        // <clone>/tmp/sub-link/pr42-*, <clone>/tmp/pr42-* -> <outside>/plain,
-        // and <clone>/tmp/link/../pr42-*).
-        let innermostNonSystemTmp = null;
-        for (const candidate of tmpCandidates) {
-          let resolvedCandidate;
-          let cloneCandidate;
-          try {
-            resolvedCandidate = realPath(candidate);
-            cloneCandidate = realPath(dirname(candidate));
-          } catch {
-            continue;
-          }
-          if (isSystemTmpDir(candidate) || isSystemTmpDir(resolvedCandidate)) {
-            if (normalizeFsPath(resolvedCandidate) === normCanonicalParent) {
-              roots.add(cloneCandidate);
-              roots.add(resolvedCandidate);
-            }
-            continue;
-          }
-          innermostNonSystemTmp = { cloneCandidate, resolvedCandidate };
+        // 2. Traversed path domains: add every committed segment's innermost
+        // non-system tmp container.
+        for (const item of committedTmpContainers) {
+          roots.add(item.cloneCandidate);
+          roots.add(item.resolvedCandidate);
         }
-        if (innermostNonSystemTmp) {
-          roots.add(innermostNonSystemTmp.cloneCandidate);
-          roots.add(innermostNonSystemTmp.resolvedCandidate);
-        }
+      } else if (hitRootSystemTmp) {
+        // Remove any system-tmp root recorded before sawVerifyRoundSegment was
+        // confirmed false (e.g. a plain non-verify fixture dir under /tmp).
+        return { roots: [canonicalDir], leafSymlink };
       }
       return { roots: [...roots], leafSymlink };
     } catch (error) {

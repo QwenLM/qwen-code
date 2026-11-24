@@ -1223,12 +1223,13 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
 
 // Extract column-0 approval markers using a fail-closed rule rather than
 // replicating CommonMark's full block/container grammar: an approval comment
-// must not be preceded by any code-fence delimiter (``` / ~~~) or raw HTML
-// block/tag opener (including inside list items or blockquotes). Without
-// preceding fences or HTML blocks, a column-0 single-line HTML comment is
-// guaranteed by CommonMark 0.31.2 to be a top-level HTML comment, never text
-// inside a fenced code block, indented code block, blockquote, list item, or
-// HTML block (types 1–7).
+// must not be preceded by any code-fence delimiter (``` / ~~~), GFM display
+// math delimiter ($$), or raw HTML block/tag opener (including inside list
+// items or blockquotes). Without preceding fences, math blocks, or HTML
+// blocks, a column-0 single-line HTML comment is guaranteed by CommonMark
+// 0.31.2 to be a top-level HTML comment, never text inside a fenced code
+// block, indented code block, blockquote, list item, math block, or HTML block
+// (types 1–7).
 function directApprovalMarkers(body) {
   const markers = [];
   for (const line of body.replace(/\r\n?/g, '\n').split('\n')) {
@@ -1240,8 +1241,7 @@ function directApprovalMarkers(body) {
       continue;
     }
     if (
-      /`{3,}|~{3,}/.test(line) ||
-      /^[ \t>*+-]*\$\$/.test(line) ||
+      /`{3,}|~{3,}|\$\$/.test(line) ||
       /^(?:[ \t>*+-]|\d+[.)])*<(?:!|\?|[A-Za-z/])/.test(line)
     ) {
       break;

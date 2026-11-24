@@ -71,7 +71,7 @@ coordinate path 的 `--execution` 默认为 `container`，使旧 watch prompt �
 Approved host execution for this verify round.
 ```
 
-VM 的 `mode` 为 `vm`。只有完整 HTML comment 在列零独占一行时，标记才是执行批准；引用块、代码 fence 或缩进代码示例都不算批准，额外出现的字面 prefix 仍违反 exactly-once 规则。建议将标记放在评论首行（或置于任意代码 fence 与行首 HTML 标签/尖括号自链接之前），因为扫描器遇到前置代码围栏或原始 HTML 起始符时会 fail closed 停止提取。prepare 对 GitHub 实际评论正文计算哈希，而不是对抽取或归一化后的字符串计算。prepare 在创建产物目录前，通过经过认证的 `gh` 验证以下全部条件：
+VM 的 `mode` 为 `vm`。只有完整 HTML comment 在列零独占一行时，标记才是执行批准；引用块、代码 fence 或缩进代码示例都不算批准，额外出现的字面 prefix 仍违反 exactly-once 规则。建议将标记放在评论首行（或置于任意代码 fence、`$$` 数学块定界符与行首 HTML 标签/尖括号自链接之前），因为扫描器遇到前置代码围栏、`$$` 数学块定界符或原始 HTML 起始符时会 fail closed 停止提取。prepare 对 GitHub 实际评论正文计算哈希，而不是对抽取或归一化后的字符串计算。prepare 在创建产物目录前，通过经过认证的 `gh` 验证以下全部条件：
 
 - 永久链接符合现有允许形状，并指向本仓库和本 PR；
 - 指定编号的 issue comment 存在且属于该 PR；

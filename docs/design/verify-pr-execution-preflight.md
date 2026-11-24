@@ -158,8 +158,9 @@ For a VM, `mode` is `vm`. The marker is an instruction only when the complete
 HTML comment occupies one direct line at column zero; blockquote, fenced or
 indented-code examples are not approvals, and additional literal prefixes still
 violate the exactly-once rule. Place the marker on the first line (or before any
-code fence or line-leading HTML tag/autolink), because scanning stops fail-closed
-at any preceding fence delimiter or raw HTML opener. Prepare hashes the actual
+code fence, `$$` math delimiter, or line-leading HTML tag/autolink), because
+scanning stops fail-closed at any preceding fence delimiter, `$$` math block
+delimiter, or raw HTML opener. Prepare hashes the actual
 GitHub body rather than
 a normalized extraction. Prepare validates all of the following through
 authenticated `gh` before creating the artifact directory:
