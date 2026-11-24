@@ -669,6 +669,48 @@ export function decodeAnsiCEscape(
 }
 
 /**
+ * True when `text` holds an ANSI-C `$'…'` string whose `\xHH` or octal
+ * escape carries a byte ≥ 0x80. shell-quote decodes those to the
+ * same-numbered Unicode code point while bash passes the raw byte through,
+ * so a token parsed from such a string names different path bytes than the
+ * ones bash hands the program: `$'\xc3\xbf'` parses as `Ã¿` but executes
+ * as `ÿ`. A consumer that acts on the parsed token (a path guard, a sed
+ * simulation) cannot recover bash's bytes from it and must fail closed.
+ * `\u`/`\U` escapes are NOT byte-valued — both sides UTF-8-encode the code
+ * point — so they stay aligned and are never flagged; neither are the
+ * ASCII-valued escapes, whose byte and code point agree.
+ */
+export function hasByteValuedAnsiCEscape(text: string): boolean {
+  for (let index = 0; index + 1 < text.length; index++) {
+    if (text[index] !== '$' || text[index + 1] !== "'") continue;
+    index += 2;
+    while (index < text.length && text[index] !== "'") {
+      if (text[index] !== '\\') {
+        index++;
+        continue;
+      }
+      const escape = decodeAnsiCEscape(text, index);
+      if (escape === null) {
+        index += 2;
+        continue;
+      }
+      const marker = text[index + 1]!;
+      if (marker === 'x') {
+        if (escape.bytes[0]! >= 0x80) return true;
+      } else if (marker >= '0' && marker <= '7') {
+        // decodeAnsiCEscape masks to a byte; the divergence is on the
+        // unmasked value (`\477` is byte `?` for bash but U+013F for
+        // shell-quote), so re-read the digits here.
+        const digits = /^[0-7]{1,3}/.exec(text.slice(index + 1))![0];
+        if (parseInt(digits, 8) >= 0x80) return true;
+      }
+      index += escape.length;
+    }
+  }
+  return false;
+}
+
+/**
  * UTF-8 encode a numeric code point, including the surrogate range and the
  * 0x110000–0x1FFFFF range bash still writes in the four-byte form.
  */

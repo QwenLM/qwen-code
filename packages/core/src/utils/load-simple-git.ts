@@ -56,6 +56,23 @@ export const LOADER_ALLOWED_ENVIRONMENT_KEYS = [
   'GIT_CONFIG_SYSTEM',
 ] as const;
 
+// simple-git v4's environment guard matches allowEnvironment by exact
+// lowercase name, so the indexed operator config (`GIT_CONFIG_COUNT`,
+// `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`, `GIT_CONFIG_PARAMETERS`) cannot
+// be named as a wildcard. Enumerate the ambient instances instead: a client
+// that inherits process.env keeps the operator's command-scoped config
+// (safe.directory for dubious ownership, credential headers), while
+// `.env(gitEnv())` clients never carry these names — gitEnv() scrubs every
+// `GIT_*` it does not restore — so naming them permits, never injects.
+const AMBIENT_GIT_CONFIG_ENV_NAME =
+  /^git_config_(?:count|parameters|key_\d+|value_\d+)$/;
+
+function ambientGitConfigEnvironment(): string[] {
+  return Object.keys(process.env)
+    .map((key) => key.toLowerCase())
+    .filter((key) => AMBIENT_GIT_CONFIG_ENV_NAME.test(key));
+}
+
 let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;
 
 /**
@@ -104,6 +121,7 @@ function guardFsmonitor(factory: SimpleGitFactory): SimpleGitFactory {
       // survive, so the `.env(gitEnv())` clients keep their scrub.
       allowEnvironment: [
         ...LOADER_ALLOWED_ENVIRONMENT_KEYS,
+        ...ambientGitConfigEnvironment(),
         ...(options?.allowEnvironment ?? []),
       ],
     };

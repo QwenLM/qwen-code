@@ -168,6 +168,15 @@ describe('loadSimpleGit', () => {
         GIT_CONFIG_GLOBAL: '/tmp/operator-gitconfig',
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_CONFIG_SYSTEM: '/tmp/operator-system-gitconfig',
+        // The indexed command-scoped config: an operator's safe.directory
+        // answer to dubious ownership or an injected credential header.
+        // allowEnvironment matches exact lowercase names with no wildcard,
+        // so the loader must enumerate the ambient instances — dropping
+        // that enumeration turns this red.
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'safe.directory',
+        GIT_CONFIG_VALUE_0: '/data/team-checkout',
+        GIT_CONFIG_PARAMETERS: "'safe.directory'=*",
       };
       fs.writeFileSync(shim, `#!/bin/sh\nenv > '${dump}'\nexit 1\n`);
       fs.chmodSync(shim, 0o755);

@@ -19,6 +19,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  hasByteValuedAnsiCEscape,
   hasNonFinalTopLevelBackgroundOperator,
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
@@ -612,6 +613,29 @@ const RESOLVED_PAYLOADS: Array<[string, string]> = [
 '--' 'cat > /etc/motd'`,
   ],
 ];
+
+describe('hasByteValuedAnsiCEscape', () => {
+  it.each([
+    // Byte-valued escapes ≥ 0x80: shell-quote decodes to the code point,
+    // bash passes the raw byte, so the parsed token names different bytes.
+    [String.raw`git -C $'\xc3\xbf' reset --hard`, true],
+    [String.raw`sed -i 's/a/b/' $'\377'`, true],
+    [String.raw`echo $'\200'`, true],
+    // Octal beyond 0377 wraps for bash but not for shell-quote.
+    [String.raw`echo $'\477'`, true],
+    // `\u`/`\U` encode the code point as UTF-8 on both sides.
+    [String.raw`git -C $'\u00ff' reset --hard`, false],
+    [String.raw`echo $'\U0001F600'`, false],
+    // ASCII-valued escapes agree as byte and code point.
+    [String.raw`echo $'\x41\t'`, false],
+    [String.raw`echo $'\101'`, false],
+    // No ANSI-C quoting at all.
+    [`git -C repo reset --hard`, false],
+    [`echo '$'`, false],
+  ])('flags %s as %s', (command, expected) => {
+    expect(hasByteValuedAnsiCEscape(command)).toBe(expected);
+  });
+});
 
 describe('stripShellWrapper', () => {
   it.each([

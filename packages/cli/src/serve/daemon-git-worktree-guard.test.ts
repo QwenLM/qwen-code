@@ -237,6 +237,59 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  // shell-quote decodes a byte-valued ANSI-C escape to the same-numbered
+  // code point while bash passes the raw byte: `$'\xc3\xbf'` parses as
+  // `Ã¿` (U+00C3 U+00BF) but executes as `ÿ` (bytes c3 bf). With a decoy
+  // directory at the parsed name inside the workspace and a symlink at the
+  // byte path pointing outside it, an analysis that trusted the token would
+  // validate the decoy while bash reset the external repository, so the
+  // encoded form fails closed.
+  it.runIf(bashSemanticsLane)(
+    'fails closed on a byte-valued ANSI-C relocation the parse misreads',
+    async () => {
+      const decoy = path.join(effectiveCwd, 'Ã¿');
+      const bytePath = path.join(effectiveCwd, 'ÿ');
+      mkdirSync(decoy, { recursive: true });
+      await symlink(outsideRepo, bytePath);
+      const guard = createDaemonToolGuard();
+
+      // The control group: the direct paths keep their ordinary verdicts.
+      await expect(
+        guard(request(`git -C ${cmdPath(decoy)} reset --hard`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`git -C ${cmdPath(bytePath)} reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+
+      // The encoded form can name either one depending on who decodes it,
+      // so it is refused outright.
+      await expect(
+        guard(request(String.raw`git -C $'\xc3\xbf' reset --hard`)),
+      ).resolves.toMatchObject({ allowed: false });
+      // Octal escapes are byte-valued the same way.
+      await expect(
+        guard(request(String.raw`git -C $'\303\277' reset --hard`)),
+      ).resolves.toMatchObject({ allowed: false });
+
+      // `\u` encodes the code point as UTF-8 on both sides, so the
+      // `\u00ff` form still analyses as the byte path `ÿ` and earns the
+      // ordinary relocation denial — not the fail-closed one.
+      await expect(
+        guard(request(String.raw`git -C $'\u00ff' reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+    },
+  );
+
   it.each([
     // Git treats an empty `-C` as a no-op and applies the next relocation.
     () => `git -C "" -C ${cmdPath(outsideRepo)} reset --hard`,
