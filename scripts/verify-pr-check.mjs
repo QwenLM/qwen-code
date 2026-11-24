@@ -46,7 +46,17 @@ export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
  * maintainer's explicit decision to run on the host, recorded so a host
  * round is a visible exception instead of a silent default.
  */
-export const BOUNDARY_MODES = ['container', 'vm', 'waived'];
+export const BOUNDARY_MODES = ['container', 'microvm', 'vm', 'waived'];
+export const PR_TRUST_LEVELS = [
+  'local-owner',
+  'collaborator',
+  'external',
+  'unknown',
+];
+export const EXECUTION_CLASSES = ['hardware-isolated', 'trusted-shared-kernel'];
+export const HARDWARE_BACKENDS = ['firecracker', 'vfkit', 'provider-vm'];
+export const LIGHTWEIGHT_BACKENDS = ['container'];
+export const EXECUTION_RECORD_SCHEMA = 'verify-pr-exec-record-v1';
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -76,7 +86,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--execution-record <record>] [--execution-record-sha256 <digest>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -541,10 +551,383 @@ const placeholder = (value) =>
     TEMPLATE_TOKENS.some((token) => value.includes(token)) ||
     TEMPLATE_TOKEN_RE.test(value));
 
+const SHA256_RE = /^[0-9a-f]{64}$/;
+const FULL_OID_RE = /^[0-9a-f]{40}$/;
+const ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function parseIsoTimestamp(value) {
+  if (typeof value !== 'string' || !ISO_TIMESTAMP_RE.test(value.trim())) {
+    return null;
+  }
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Independently cross-checks a host snapshot's `trustClassification` object so
+ * a self-contradictory classification (e.g. `prTrust: "external"` or non-empty
+ * `escalationReasons` paired with `executionClass: "trusted-shared-kernel"`)
+ * cannot pass the publication gate even if the upstream classifier were faulty.
+ */
+export function checkTrustClassification(tc, expectedHead = null) {
+  if (tc === undefined) {
+    return { errors: [], requiredExecutionClass: null };
+  }
+  if (tc === null || typeof tc !== 'object' || Array.isArray(tc)) {
+    return {
+      errors: ['trustClassification must be a JSON object'],
+      requiredExecutionClass: 'hardware-isolated',
+    };
+  }
+  const errors = [];
+  if (tc.headRefOid && expectedHead && tc.headRefOid !== expectedHead) {
+    errors.push(
+      `stale trustClassification.headRefOid ${tc.headRefOid} (expected ${expectedHead})`,
+    );
+  }
+  if (!PR_TRUST_LEVELS.includes(tc.prTrust)) {
+    errors.push(
+      `trustClassification.prTrust must be one of ${PR_TRUST_LEVELS.join(' | ')} (got ${JSON.stringify(tc.prTrust)})`,
+    );
+  }
+  if (!EXECUTION_CLASSES.includes(tc.executionClass)) {
+    errors.push(
+      `trustClassification.executionClass must be one of ${EXECUTION_CLASSES.join(' | ')} (got ${JSON.stringify(tc.executionClass)})`,
+    );
+  }
+  if (
+    tc.escalationReasons !== undefined &&
+    !Array.isArray(tc.escalationReasons)
+  ) {
+    errors.push('trustClassification.escalationReasons must be an array');
+  }
+  const hasEscalations =
+    Array.isArray(tc.escalationReasons) && tc.escalationReasons.length > 0;
+  const untrustedAuthor = tc.prTrust === 'external' || tc.prTrust === 'unknown';
+  if (untrustedAuthor && tc.executionClass !== 'hardware-isolated') {
+    errors.push(
+      `trustClassification contradicts itself: prTrust=${tc.prTrust} cannot pair with executionClass=${JSON.stringify(tc.executionClass)} (must be hardware-isolated)`,
+    );
+  }
+  if (hasEscalations && tc.executionClass !== 'hardware-isolated') {
+    errors.push(
+      `trustClassification contradicts itself: non-empty escalationReasons cannot pair with executionClass=${JSON.stringify(tc.executionClass)} (must be hardware-isolated)`,
+    );
+  }
+  const requiredExecutionClass =
+    untrustedAuthor || hasEscalations || errors.length > 0
+      ? 'hardware-isolated'
+      : tc.executionClass;
+  return { errors, requiredExecutionClass };
+}
+
+/**
+ * Validates the host-held execution-record.json that replaces guest
+ * self-certification for microVM and provider-VM rounds (D9/D10).
+ */
+export function checkExecutionRecord(
+  text,
+  {
+    expectedBase = null,
+    expectedHead = null,
+    coordinates = null,
+    expectedSha256 = null,
+    actualSha256 = null,
+    expectedContextSha256 = null,
+    requiredExecutionClass = null,
+  } = {},
+) {
+  const errors = [];
+  if (text === null || text === undefined || text.trim() === '') {
+    return {
+      errors: ['execution-record.json is missing or empty'],
+      record: null,
+    };
+  }
+  if (expectedSha256 && actualSha256 && actualSha256 !== expectedSha256) {
+    return {
+      errors: [
+        'execution-record.json does not match --execution-record-sha256: the host execution record was modified or substituted',
+      ],
+      record: null,
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return {
+      errors: ['execution-record.json is not valid JSON'],
+      record: null,
+    };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {
+      errors: ['execution-record.json must be a JSON object'],
+      record: null,
+    };
+  }
+  const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
+  if (parsed.schemaVersion !== EXECUTION_RECORD_SCHEMA) {
+    errors.push(
+      `execution-record.json schemaVersion must be "${EXECUTION_RECORD_SCHEMA}" (got ${JSON.stringify(parsed.schemaVersion)})`,
+    );
+  }
+  for (const field of [
+    'runId',
+    'repo',
+    'baseRefOid',
+    'headRefOid',
+    'contextDigest',
+    'backend',
+    'backendVersion',
+    'platform',
+    'launchPolicyDigest',
+    'trustedInputDigest',
+  ]) {
+    if (!nonEmpty(parsed[field])) {
+      errors.push(`execution-record.json missing required field ${field}`);
+    }
+  }
+  if (!Number.isInteger(parsed.pr) || parsed.pr <= 0) {
+    errors.push('execution-record.json pr must be a positive integer');
+  }
+  // Without host-held coordinates the record cannot be anchored to this
+  // round; refuse rather than accept a self-consistent forged record.
+  if (
+    !coordinates ||
+    typeof coordinates.owner !== 'string' ||
+    typeof coordinates.repo !== 'string'
+  ) {
+    errors.push(
+      'execution-record.json requires a host-held --context to anchor repo, pr, and headRefOid to this round',
+    );
+  }
+  if (!expectedHead) {
+    errors.push(
+      'execution-record.json requires a host-held --context headRefOid to anchor headRefOid to this round',
+    );
+  }
+  if (
+    parsed.supervisorPid !== undefined &&
+    !Number.isInteger(parsed.supervisorPid)
+  ) {
+    errors.push(
+      'execution-record.json supervisorPid must be an integer when present',
+    );
+  }
+  if (nonEmpty(parsed.baseRefOid) && !FULL_OID_RE.test(parsed.baseRefOid)) {
+    errors.push('execution-record.json baseRefOid must be a 40-hex OID');
+  } else if (
+    expectedBase &&
+    nonEmpty(parsed.baseRefOid) &&
+    parsed.baseRefOid !== expectedBase
+  ) {
+    errors.push(
+      `execution-record.json baseRefOid ${parsed.baseRefOid} does not match expected base ${expectedBase}`,
+    );
+  }
+  if (nonEmpty(parsed.headRefOid) && !FULL_OID_RE.test(parsed.headRefOid)) {
+    errors.push('execution-record.json headRefOid must be a 40-hex OID');
+  } else if (
+    expectedHead &&
+    nonEmpty(parsed.headRefOid) &&
+    parsed.headRefOid !== expectedHead
+  ) {
+    errors.push(
+      `execution-record.json headRefOid ${parsed.headRefOid} does not match expected head ${expectedHead}`,
+    );
+  }
+  if (coordinates && nonEmpty(parsed.repo)) {
+    const expectedRepo = `${coordinates.owner}/${coordinates.repo}`;
+    if (
+      parsed.repo.toLowerCase() !== expectedRepo.toLowerCase() ||
+      parsed.pr !== coordinates.number
+    ) {
+      errors.push(
+        `execution-record.json cites ${parsed.repo}#${parsed.pr}, not this round's ${expectedRepo}#${coordinates.number}`,
+      );
+    }
+  }
+  for (const digestField of [
+    'contextDigest',
+    'launchPolicyDigest',
+    'trustedInputDigest',
+  ]) {
+    if (nonEmpty(parsed[digestField]) && !SHA256_RE.test(parsed[digestField])) {
+      errors.push(`execution-record.json ${digestField} must be 64-hex sha256`);
+    }
+  }
+  if (
+    expectedContextSha256 &&
+    nonEmpty(parsed.contextDigest) &&
+    parsed.contextDigest !== expectedContextSha256
+  ) {
+    errors.push(
+      `execution-record.json contextDigest ${parsed.contextDigest} does not match host context sha256 ${expectedContextSha256}`,
+    );
+  }
+
+  const { prTrust, executionClass, backend } = parsed;
+  if (!PR_TRUST_LEVELS.includes(prTrust)) {
+    errors.push(
+      `execution-record.json prTrust must be one of ${PR_TRUST_LEVELS.join(' | ')}`,
+    );
+  }
+  if (!EXECUTION_CLASSES.includes(executionClass)) {
+    errors.push(
+      `execution-record.json executionClass must be one of ${EXECUTION_CLASSES.join(' | ')}`,
+    );
+  }
+  if (
+    requiredExecutionClass === 'hardware-isolated' &&
+    executionClass !== 'hardware-isolated'
+  ) {
+    errors.push(
+      `execution-record.json executionClass=${JSON.stringify(executionClass)} violates host context requirement executionClass=hardware-isolated`,
+    );
+  }
+  if (
+    (prTrust === 'external' || prTrust === 'unknown') &&
+    executionClass !== 'hardware-isolated'
+  ) {
+    errors.push(
+      `execution-record.json prTrust=${prTrust} requires executionClass=hardware-isolated (got ${JSON.stringify(executionClass)})`,
+    );
+  }
+  if (
+    executionClass === 'hardware-isolated' &&
+    !HARDWARE_BACKENDS.includes(backend)
+  ) {
+    errors.push(
+      `execution-record.json executionClass=hardware-isolated requires backend in ${HARDWARE_BACKENDS.join(' | ')} (got ${JSON.stringify(backend)})`,
+    );
+  }
+  if (
+    executionClass === 'trusted-shared-kernel' &&
+    !LIGHTWEIGHT_BACKENDS.includes(backend)
+  ) {
+    errors.push(
+      `execution-record.json executionClass=trusted-shared-kernel requires backend in ${LIGHTWEIGHT_BACKENDS.join(' | ')} (got ${JSON.stringify(backend)})`,
+    );
+  }
+
+  if (parsed.outputStatus !== 'complete') {
+    errors.push(
+      `execution-record.json outputStatus must be "complete" before publish (got ${JSON.stringify(parsed.outputStatus)})`,
+    );
+  }
+
+  const startedMs = parseIsoTimestamp(parsed.startedAt);
+  const endedMs = parseIsoTimestamp(parsed.endedAt);
+  const destroyedMs = parseIsoTimestamp(parsed.destroyedAt);
+  if (startedMs === null || endedMs === null) {
+    errors.push(
+      'execution-record.json requires valid ISO startedAt and endedAt',
+    );
+  } else if (endedMs < startedMs) {
+    errors.push('execution-record.json endedAt must not precede startedAt');
+  }
+  if (parsed.teardownStatus !== 'destroyed') {
+    errors.push(
+      `execution-record.json teardownStatus must be "destroyed" before publish (got ${JSON.stringify(parsed.teardownStatus)})`,
+    );
+  }
+  if (destroyedMs === null || (startedMs !== null && destroyedMs < startedMs)) {
+    errors.push(
+      'execution-record.json destroyedAt must be a valid ISO timestamp at or after startedAt',
+    );
+  }
+  if (parsed.diskDestroyed !== true) {
+    errors.push(
+      'execution-record.json diskDestroyed must be true before publish',
+    );
+  }
+  if (parsed.tokenRevoked !== true) {
+    errors.push(
+      'execution-record.json tokenRevoked must be true before publish',
+    );
+  }
+
+  if (backend === 'firecracker' || backend === 'vfkit') {
+    for (const digestField of ['kernelDigest', 'rootfsDigest']) {
+      if (
+        !nonEmpty(parsed[digestField]) ||
+        !SHA256_RE.test(parsed[digestField])
+      ) {
+        errors.push(
+          `execution-record.json ${digestField} must be 64-hex sha256 for backend ${backend}`,
+        );
+      }
+    }
+    if (!Number.isInteger(parsed.workerPid) || parsed.workerPid <= 1) {
+      errors.push(
+        `execution-record.json workerPid must be an integer > 1 for backend ${backend}`,
+      );
+    }
+    if (!nonEmpty(parsed.workerExe)) {
+      errors.push(
+        `execution-record.json workerExe is required for backend ${backend}`,
+      );
+    }
+    if (parsed.workerExitEvidence !== 'absent') {
+      errors.push(
+        `execution-record.json workerExitEvidence must be "absent" before publish (got ${JSON.stringify(parsed.workerExitEvidence)})`,
+      );
+    }
+  } else if (backend === 'provider-vm') {
+    const pl = parsed.providerLifecycle;
+    if (pl === null || typeof pl !== 'object' || Array.isArray(pl)) {
+      errors.push(
+        'execution-record.json providerLifecycle is required for backend provider-vm',
+      );
+    } else {
+      if (!nonEmpty(pl.allocationId)) {
+        errors.push(
+          'execution-record.json providerLifecycle.allocationId is required',
+        );
+      }
+      if (!nonEmpty(pl.freshDiskId)) {
+        errors.push(
+          'execution-record.json providerLifecycle.freshDiskId is required',
+        );
+      }
+      if (pl.boundRunId !== parsed.runId) {
+        errors.push(
+          'execution-record.json providerLifecycle.boundRunId must match runId',
+        );
+      }
+      if (pl.boundHeadRefOid !== parsed.headRefOid) {
+        errors.push(
+          'execution-record.json providerLifecycle.boundHeadRefOid must match headRefOid',
+        );
+      }
+      if (pl.terminationState !== 'terminated') {
+        errors.push(
+          `execution-record.json providerLifecycle.terminationState must be "terminated" (got ${JSON.stringify(pl.terminationState)})`,
+        );
+      }
+      if (pl.diskDeleted !== true) {
+        errors.push(
+          'execution-record.json providerLifecycle.diskDeleted must be true before publish',
+        );
+      }
+    }
+  }
+
+  return { errors, record: parsed };
+}
+
 export function checkBoundary(
   text,
   gateText = null,
-  { publishLane = false, coordinates = null } = {},
+  {
+    publishLane = false,
+    coordinates = null,
+    executionRecord = null,
+    executionRecordSha256 = null,
+  } = {},
 ) {
   if (text === null || text === undefined || text.trim() === '') {
     return {
@@ -587,10 +970,92 @@ export function checkBoundary(
   if (parsed.mode === 'container') {
     const gateErrors = gateRecordErrors(gateText, { publishLane });
     if (gateErrors.length > 0) return { errors: gateErrors };
+    if (executionRecord) {
+      if (executionRecord.executionClass !== 'trusted-shared-kernel') {
+        return {
+          errors: [
+            `boundary.json mode container contradicts execution-record.json executionClass=${JSON.stringify(executionRecord.executionClass)}`,
+          ],
+        };
+      }
+      if (
+        parsed.executionClass !== undefined &&
+        parsed.executionClass !== executionRecord.executionClass
+      ) {
+        return {
+          errors: [
+            `boundary.json executionClass=${JSON.stringify(parsed.executionClass)} contradicts execution-record.json executionClass=${JSON.stringify(executionRecord.executionClass)}`,
+          ],
+        };
+      }
+    }
   }
+
+  const isProviderVmBoundary =
+    parsed.mode === 'vm' &&
+    (parsed.backend === 'provider-vm' ||
+      executionRecord?.backend === 'provider-vm');
+
+  if (parsed.mode === 'microvm' || isProviderVmBoundary) {
+    if (!executionRecord) {
+      return {
+        errors: [
+          `boundary.json ${parsed.mode === 'microvm' ? 'mode microvm' : 'mode vm with backend provider-vm'} requires a host-held --execution-record (guest-written declarations cannot self-certify hardware isolation)`,
+        ],
+      };
+    }
+    const expectedBackendSet =
+      parsed.mode === 'microvm' ? ['firecracker', 'vfkit'] : ['provider-vm'];
+    const errors = [];
+    if (executionRecord.executionClass !== 'hardware-isolated') {
+      errors.push(
+        `boundary.json mode ${parsed.mode} requires executionClass=hardware-isolated (execution-record.json has ${JSON.stringify(executionRecord.executionClass)})`,
+      );
+    }
+    if (!expectedBackendSet.includes(executionRecord.backend)) {
+      errors.push(
+        `boundary.json mode ${parsed.mode} requires backend in ${expectedBackendSet.join(' | ')} (execution-record.json has ${JSON.stringify(executionRecord.backend)})`,
+      );
+    }
+    for (const field of [
+      'backend',
+      'executionClass',
+      'prTrust',
+      'runId',
+      'headRefOid',
+    ]) {
+      if (parsed[field] !== executionRecord[field]) {
+        errors.push(
+          `boundary.json ${field} (${JSON.stringify(parsed[field])}) must match execution-record.json (${JSON.stringify(executionRecord[field])})`,
+        );
+      }
+    }
+    if (parsed.writtenAfterTeardown !== true) {
+      errors.push(
+        `boundary.json mode ${parsed.mode} must set writtenAfterTeardown: true`,
+      );
+    }
+    if (
+      executionRecordSha256 &&
+      parsed.executionRecordSha256 !== executionRecordSha256
+    ) {
+      errors.push(
+        'boundary.json executionRecordSha256 must match the host execution record digest',
+      );
+    }
+    return { errors };
+  }
+
   // A waived host round and an attested VM both run outside an observed
   // container boundary, so both need the maintainer's recorded approval.
   // The VM additionally records what the operator attested (nothing mounted).
+  if (parsed.mode === 'waived' && executionRecord) {
+    return {
+      errors: [
+        'boundary.json mode waived contradicts a host --execution-record',
+      ],
+    };
+  }
   const approvalMode = parsed.mode === 'waived' || parsed.mode === 'vm';
   if (approvalMode && (!nonEmpty(parsed.by) || !nonEmpty(parsed.reason))) {
     return {
@@ -664,7 +1129,13 @@ export function executionApprovalErrors(
   } catch {
     return [];
   }
-  if (!declared || !['vm', 'waived'].includes(declared.mode)) return [];
+  if (
+    !declared ||
+    !['vm', 'waived'].includes(declared.mode) ||
+    (declared.mode === 'vm' && declared.backend === 'provider-vm')
+  ) {
+    return [];
+  }
   if (!contextProvided) {
     return [
       `boundary.json mode ${declared.mode} needs the host-held --context snapshot containing prepare's executionApproval`,
@@ -927,7 +1398,9 @@ function boundaryLineWarnings(text, label, boundaryMode = null) {
     // bare word "container": a truthful "no container was used" must not be
     // accused, and a waiver phrased without the "waiv" stem is not flagged.
     if (
-      (boundaryMode === 'waived' || boundaryMode === 'vm') &&
+      (boundaryMode === 'waived' ||
+        boundaryMode === 'vm' ||
+        boundaryMode === 'microvm') &&
       /node:\d|--network none/i.test(content)
     ) {
       warnings.push(
@@ -949,12 +1422,18 @@ function boundaryLineWarnings(text, label, boundaryMode = null) {
 export function checkArtifacts({
   files,
   evidence = [],
+  expectedBase = null,
   expectedHead = null,
   publisherOwnsBoundary = false,
   publishLane = false,
   coordinates = null,
   evidenceUnreadable = false,
   unreadableKeys = new Set(),
+  executionRecordText = null,
+  executionRecordSha256 = null,
+  expectedContextSha256 = null,
+  requiredExecutionClass = null,
+  trustClassification = undefined,
 }) {
   const errors = [];
   const warnings = [];
@@ -1123,6 +1602,53 @@ export function checkArtifacts({
   }
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
+  let effectiveRequiredClass = requiredExecutionClass;
+  if (trustClassification !== undefined) {
+    const tcCheck = checkTrustClassification(trustClassification, expectedHead);
+    errors.push(...tcCheck.errors);
+    if (
+      tcCheck.requiredExecutionClass === 'hardware-isolated' ||
+      effectiveRequiredClass === null
+    ) {
+      effectiveRequiredClass = tcCheck.requiredExecutionClass;
+    }
+  }
+  let executionRecord = null;
+  let actualExecutionRecordSha256 = null;
+  if (executionRecordText !== null && executionRecordText !== undefined) {
+    actualExecutionRecordSha256 = createHash('sha256')
+      .update(executionRecordText, 'utf8')
+      .digest('hex');
+    const execCheck = checkExecutionRecord(executionRecordText, {
+      expectedBase,
+      expectedHead,
+      coordinates,
+      expectedSha256: executionRecordSha256,
+      actualSha256: actualExecutionRecordSha256,
+      expectedContextSha256,
+      requiredExecutionClass: effectiveRequiredClass,
+    });
+    errors.push(...execCheck.errors);
+    executionRecord = execCheck.record;
+  }
+
+  if (
+    effectiveRequiredClass === 'hardware-isolated' &&
+    files.boundary &&
+    files.boundary.trim() !== ''
+  ) {
+    try {
+      const b = JSON.parse(files.boundary);
+      if (b && typeof b === 'object' && b.mode === 'container') {
+        errors.push(
+          'boundary.json mode container violates host context requirement executionClass=hardware-isolated',
+        );
+      }
+    } catch {
+      // Malformed boundary.json is reported by checkBoundary below.
+    }
+  }
+
   const boundaryAbsent =
     files.boundary === null ||
     files.boundary === undefined ||
@@ -1141,6 +1667,9 @@ export function checkArtifacts({
     const boundaryErrors = checkBoundary(files.boundary, files.boundaryGate, {
       publishLane,
       coordinates,
+      executionRecord,
+      executionRecordSha256:
+        executionRecordSha256 ?? actualExecutionRecordSha256,
     }).errors.filter(
       (error) =>
         !(gateUnreadable && error.startsWith('boundary-gate.json is missing')),
@@ -1172,6 +1701,7 @@ export function checkArtifacts({
   // mode when a usable declaration exists; on the CI entry path the
   // publish job writes it later, so there is nothing to compare yet.
   let boundaryMode = null;
+  let boundaryBackend = null;
   if (files.boundary && files.boundary.trim() !== '') {
     try {
       const declared = JSON.parse(files.boundary);
@@ -1181,24 +1711,38 @@ export function checkArtifacts({
         BOUNDARY_MODES.includes(declared.mode)
       ) {
         boundaryMode = declared.mode;
+        boundaryBackend =
+          typeof declared.backend === 'string' ? declared.backend : null;
       }
     } catch {
       // checkBoundary already reports the invalid JSON.
     }
   }
 
+  const isHostBackedProviderVm =
+    boundaryMode === 'vm' &&
+    (boundaryBackend === 'provider-vm' ||
+      executionRecord?.backend === 'provider-vm');
+
   // Disclose the coordinate-check downgrade: a waiver/vm whose approval
   // permalink was only shape-checked (no trusted repo/pr coordinates) must
   // not read as "the approval was compared against this PR".
   if (
     !publisherOwnsBoundary &&
-    (boundaryMode === 'waived' || boundaryMode === 'vm') &&
+    (boundaryMode === 'waived' ||
+      (boundaryMode === 'vm' && !isHostBackedProviderVm)) &&
     !coordinates
   ) {
     warnings.push(
       "the waiver's approval target was not compared against this PR: no trusted repo/pr coordinates were available, so only the approval permalink's URL shape was checked",
     );
   }
+
+  const effectiveHead =
+    expectedHead ??
+    (FULL_OID_RE.test(executionRecord?.headRefOid ?? '')
+      ? executionRecord.headRefOid
+      : null);
 
   if (files.report && files.report.trim() !== '') {
     const report = normalizeNewlines(files.report);
@@ -1212,10 +1756,10 @@ export function checkArtifacts({
       );
     }
     const cited = lead.join('\n').match(/\b[0-9a-f]{40}\b/g) ?? [];
-    if (expectedHead) {
-      if (!cited.includes(expectedHead)) {
+    if (effectiveHead) {
+      if (!cited.includes(effectiveHead)) {
         warnings.push(
-          `report.md does not name the verified head ${expectedHead} in its first 10 non-empty lines${cited.length > 0 ? ` (it cites ${cited.length} other OID${cited.length === 1 ? '' : 's'})` : ''}`,
+          `report.md does not name the verified head ${effectiveHead} in its first 10 non-empty lines${cited.length > 0 ? ` (it cites ${cited.length} other OID${cited.length === 1 ? '' : 's'})` : ''}`,
         );
       }
     } else if (cited.length === 0) {
@@ -1268,6 +1812,8 @@ function main(argv) {
   let contextPath = null;
   let contextRoot = null;
   let contextSha = null;
+  let executionRecordPath = null;
+  let executionRecordSha = null;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -1296,6 +1842,22 @@ function main(argv) {
         );
         return 2;
       }
+    } else if (arg === '--execution-record') {
+      executionRecordPath = argv[++index];
+      if (!executionRecordPath) {
+        process.stderr.write(
+          `verify-pr check: --execution-record requires a host execution record path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--execution-record-sha256') {
+      executionRecordSha = argv[++index];
+      if (!executionRecordSha || !/^[0-9a-f]{64}$/.test(executionRecordSha)) {
+        process.stderr.write(
+          `verify-pr check: --execution-record-sha256 requires a 64-hex digest\n\n${HELP}`,
+        );
+        return 2;
+      }
     } else if (arg === '--publish-lane') {
       // The CI publish job's flag: honors the ci-lane gate record the job
       // writes itself. An argv claim, not an authenticated identity — a
@@ -1311,6 +1873,12 @@ function main(argv) {
   if (contextSha && !contextPath) {
     process.stderr.write(
       `verify-pr check: --context-sha256 binds a --context snapshot; pass --context too\n\n${HELP}`,
+    );
+    return 2;
+  }
+  if (executionRecordSha && !executionRecordPath) {
+    process.stderr.write(
+      `verify-pr check: --execution-record-sha256 binds an --execution-record file; pass --execution-record too\n\n${HELP}`,
     );
     return 2;
   }
@@ -1447,6 +2015,10 @@ function main(argv) {
   let coordinates = null;
   let trustedSnapshot = null;
   let contextDigestVerified = false;
+  let expectedBase = null;
+  let hostContextSha256 = null;
+  let requiredExecutionClass = null;
+  let trustClassification = undefined;
   if (contextPath) {
     // A host-held snapshot: the PR clone is mounted read-write, so the round
     // can write ANY path inside it — the artifact dir AND the
@@ -1558,14 +2130,32 @@ function main(argv) {
       snapshotWarning = `--context ${contextPath} has no --context-sha256 binding; provenance rests on the path/link checks alone — pass the digest prepare printed to bind the snapshot's bytes`;
     }
     if (snapshotText !== null && snapshotText !== UNREADABLE) {
+      hostContextSha256 = createHash('sha256')
+        .update(snapshotText, 'utf8')
+        .digest('hex');
       try {
         const snapshot = JSON.parse(snapshotText);
+        if (/^[0-9a-f]{40}$/.test(snapshot?.baseRefOid ?? '')) {
+          expectedBase = snapshot.baseRefOid;
+        }
         if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
           expectedHead = snapshot.headRefOid;
           snapshotPath = contextPath;
         }
         trustedSnapshot = snapshot;
         coordinates = coordinatesFrom(snapshot);
+        const tc = snapshot?.trustClassification;
+        if (tc !== undefined) {
+          trustClassification = tc;
+          const tcCheck = checkTrustClassification(tc, expectedHead);
+          if (tcCheck.errors.length > 0) {
+            process.stderr.write(
+              `verify-pr check: --context ${contextPath} has invalid trustClassification: ${tcCheck.errors.join('; ')}\n`,
+            );
+            return 1;
+          }
+          requiredExecutionClass = tcCheck.requiredExecutionClass;
+        }
       } catch {
         // Reported below; never falls back to the writable artifact copy.
       }
@@ -1608,6 +2198,90 @@ function main(argv) {
     }
   }
 
+  let executionRecordText = null;
+  let executionRecordWarning = null;
+  if (executionRecordPath) {
+    let realExecRecord;
+    try {
+      realExecRecord = realpathSync(executionRecordPath);
+    } catch {
+      realExecRecord = resolve(executionRecordPath);
+    }
+    let execTrustRoot;
+    if (contextRoot) {
+      execTrustRoot = realpathSync(contextRoot);
+    } else {
+      const container = dirname(resolve(dir));
+      execTrustRoot =
+        dirPrNumber && basename(container) === 'tmp'
+          ? realpathSync(dirname(container))
+          : realpathSync(dir);
+    }
+    const execInsideByPath = withinRoot(execTrustRoot, realExecRecord);
+    let execIsAlias = false;
+    let execLinks = 0;
+    if (!execInsideByPath) {
+      try {
+        const execStat = statSync(realExecRecord);
+        if (execStat.isFile()) {
+          execLinks = execStat.nlink;
+          execIsAlias = execStat.nlink !== 1;
+        }
+      } catch {
+        // Missing/unreadable record is refused below.
+      }
+    }
+    if (execInsideByPath || execIsAlias) {
+      let reason;
+      if (execIsAlias) {
+        reason = `--execution-record ${executionRecordPath} is a hard link (${execLinks} names); copy it into launcher-owned storage instead of linking it`;
+      } else if (isFilesystemRoot(execTrustRoot)) {
+        reason = `--execution-record ${executionRecordPath} cannot be trusted under root-level trust root '${execTrustRoot}'`;
+      } else {
+        reason = `--execution-record must not point inside the PR-writable worktree (${executionRecordPath}): pass a host-held launcher record outside the artifact tree`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
+      return 1;
+    }
+    const rawExec = readIfExists(executionRecordPath);
+    if (rawExec === null || rawExec === UNREADABLE) {
+      process.stderr.write(
+        `verify-pr check: --execution-record ${executionRecordPath} is missing or unreadable (symlinks, directories, FIFOs, and oversized files are refused)\n`,
+      );
+      return 1;
+    }
+    if (executionRecordSha) {
+      const actualExecSha = createHash('sha256')
+        .update(rawExec, 'utf8')
+        .digest('hex');
+      if (actualExecSha !== executionRecordSha) {
+        process.stderr.write(
+          `verify-pr check: --execution-record ${executionRecordPath} does not match --execution-record-sha256\n`,
+        );
+        return 1;
+      }
+    } else {
+      executionRecordWarning = `--execution-record ${executionRecordPath} has no --execution-record-sha256 binding; pass the host digest to bind its bytes`;
+    }
+    executionRecordText = rawExec;
+  }
+
+  // Refuse a guest-planted execution-record.json inside the PR-writable artifact dir (D5/D9).
+  // Only ENOENT confirms absence; EACCES/ENOTDIR must fail closed.
+  const plantedExecRecordPath = join(dir, 'execution-record.json');
+  try {
+    lstatSync(plantedExecRecordPath);
+    unreadableErrors.push(
+      'execution-record.json must not reside inside the PR-writable artifact directory: pass the host-held record via --execution-record',
+    );
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      unreadableErrors.push(
+        `could not verify absence of planted execution-record.json (${error?.code ?? 'error'})`,
+      );
+    }
+  }
+
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
   // job owns the declaration, so an absent boundary.json is a warning for
   // the round's own pre-finish self-check, not an error it cannot clear.
@@ -1615,17 +2289,29 @@ function main(argv) {
   const result = checkArtifacts({
     files,
     evidence,
+    expectedBase,
     expectedHead,
     publisherOwnsBoundary,
     publishLane,
     coordinates,
     evidenceUnreadable,
     unreadableKeys,
+    executionRecordText,
+    executionRecordSha256: executionRecordSha,
+    expectedContextSha256: contextSha ?? hostContextSha256,
+    requiredExecutionClass,
+    trustClassification,
   });
   let executionMode = null;
   try {
-    const mode = JSON.parse(files.boundary ?? '')?.mode;
-    if (mode === 'vm' || mode === 'waived') executionMode = mode;
+    const parsedBoundary = JSON.parse(files.boundary ?? '');
+    if (
+      parsedBoundary?.mode === 'waived' ||
+      (parsedBoundary?.mode === 'vm' &&
+        parsedBoundary?.backend !== 'provider-vm')
+    ) {
+      executionMode = parsedBoundary.mode;
+    }
   } catch {
     // The artifact-shape check reports malformed declarations.
   }
@@ -1706,6 +2392,7 @@ function main(argv) {
     ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
   );
   result.errors.unshift(...unreadableErrors);
+  if (executionRecordWarning) result.warnings.unshift(executionRecordWarning);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
   if (expectedHead) lines.push(`  head source: ${snapshotPath}`);

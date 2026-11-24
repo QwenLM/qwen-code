@@ -52,8 +52,9 @@
 - **审批/提问。** 表面渲染第一个 `pending` 审批（跳过被取代项）与第一个待处理提问。
   `ToolApproval` 确认路由到 `respondApproval(id, optionId)`，并在非 accepted 准入时
   **reject**（经 `onError` 上报），因为 `ToolApproval` 仅经 rejection 重新解锁——resolve
-  会把卡片闩死失效。`AskUserQuestion` 确认按所选选项路由：提交（`allow_once`）选项把
-  按索引键控的答案记录规范化为 `QuestionAnswer[]` 走 `respondQuestion`；拒绝选项是决策
+  会把卡片闩死失效。`AskUserQuestion` 确认按所选选项路由：提交（`allow_once`）选项在
+  每个问题及其全部选项携带后端 id 时直接转发结构化 `QuestionAnswer[]`，否则把旧
+  索引键控的答案记录规范化为该结构再走 `respondQuestion`；拒绝选项是决策
   投票，走 `respondApproval`（`respondQuestion` 总是投提交选项、无法表达拒绝）。两者均以
   `admission === 'accepted'` 作为组件的成功布尔返回。
 - **在流决策卡片。** 待处理卡片在输入框之前以在流方式渲染并替换它（输入框被隐藏并收到

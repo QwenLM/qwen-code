@@ -1730,6 +1730,65 @@ nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
 
+### Disposable MySQL safety
+
+A leaked MySQL 8 `mysqld` whose datadir was removed keeps looping on
+`MY-012894 Unable to open './#innodb_redo/...'`, and the stray log can reach
+hundreds of GB within hours — enough to fill the volume. MariaDB emits no
+`MY-0*` codes and fails silently instead, so the pre-delete presence check in
+rule 3 is what has to work there. Scripted fixtures such as
+`integration-tests/helpers/provider-media-mysql.mjs` already pair start and
+stop; these rules are for instances started by hand:
+
+1. Cap the output. Start the server under bash with `ulimit -f 8388608`
+   (8 GiB in bash's 1024-byte blocks; dash counts 512-byte blocks, so the
+   same value is 4 GiB there) and pass `--log-error=<path>` so the server
+   keeps its own log, including startup notes, independent of the launching
+   shell. A runaway writer then dies with SIGXFSZ at the cap. The limit
+   bounds shell redirects too; the server's own log is preferred because it
+   survives the shell, not because a redirect would be uncapped.
+   `RLIMIT_FSIZE` is per-process: it also caps the datadir's own files, so
+   keep the bound well above the expected datadir size or a legitimate
+   `ibdata`/redo grow fails with SIGXFSZ and reads as a mysterious crash.
+2. Pair start and stop in the same shell, and always pass `--pid-file=`.
+   Trap EXIT for the stop and make INT/TERM exit, so the stop runs exactly
+   once:
+
+   ```bash
+   (ulimit -f 8388608; exec mysqld --no-defaults --datadir="$DATADIR" \
+     --socket="$SOCKET" --pid-file="$DATADIR/mysql.pid" \
+     --log-error="$DATADIR/mysql.log") &
+   PID=$!
+   trap 'mysqladmin --socket="$SOCKET" -uroot shutdown 2>/dev/null;
+         kill -0 "$PID" 2>/dev/null && kill -9 "$PID"' EXIT
+   trap 'exit 130' INT; trap 'exit 143' TERM
+   ```
+
+   With `exec`, `$PID` is the server itself. The guarded `kill -9` fires
+   only if the graceful shutdown left the server alive, so a recycled PID
+   is not signalled.
+
+3. Confirm the process is actually gone **before** removing the datadir,
+   and fail closed on unknown — an empty or missing pid file is not "gone":
+
+   ```bash
+   PID=$(cat "$DATADIR/mysql.pid") && [ -n "$PID" ] \
+     || { echo 'no pid recorded — do not delete'; exit 1; }
+   if kill -0 "$PID" 2>/dev/null; then
+     echo 'server still alive — do not delete'; exit 1
+   fi
+   ```
+
+   `pgrep -f <datadir>` is argv-text matching, not a presence check: it
+   misses a server started from a config file (no datadir on argv) and
+   matches any launcher whose argv merely mentions the path. Use it only
+   as a secondary sweep when `--datadir` is on the command line.
+
+4. A background wrapper reporting "terminated by signal 9" killed only the
+   wrapper. Re-check the real child with a pid-file `kill -0` (or
+   `pgrep -f <datadir>` when the datadir is on argv) and stop it explicitly
+   before deleting anything.
+
 ## Managed extension packages
 
 Complete package distribution and the seven-component Managed profile are opt-in.

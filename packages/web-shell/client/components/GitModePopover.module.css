@@ -58,6 +58,8 @@
   height: 14px;
 }
 .chipText {
+  min-width: 0;
+  flex: 0 1 auto;
   max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;

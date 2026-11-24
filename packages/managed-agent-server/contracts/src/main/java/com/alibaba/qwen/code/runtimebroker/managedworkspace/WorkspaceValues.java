@@ -6,7 +6,7 @@ import java.util.regex.Pattern;
 
 public final class WorkspaceValues {
     public static final int MAXIMUM_TEXT_CODE_POINTS = 512;
-    private static final int MAXIMUM_ACTOR_CODE_POINTS = 36;
+    private static final int MAXIMUM_ACTOR_UTF16_UNITS = 36;
 
     private static final Pattern IDENTIFIER = Pattern.compile(
             "[A-Za-z0-9._:-]{1,128}");
@@ -43,11 +43,11 @@ public final class WorkspaceValues {
      */
     static String requireActor(String value, String name) {
         String actor = requireText(value, name);
-        if (actor.length() > MAXIMUM_ACTOR_CODE_POINTS
+        if (actor.length() > MAXIMUM_ACTOR_UTF16_UNITS
                 || Character.isWhitespace(
                         actor.codePointBefore(actor.length()))) {
             throw new IllegalArgumentException(name + " must be 1 to "
-                    + MAXIMUM_ACTOR_CODE_POINTS
+                    + MAXIMUM_ACTOR_UTF16_UNITS
                     + " characters without trailing spaces");
         }
         return actor;

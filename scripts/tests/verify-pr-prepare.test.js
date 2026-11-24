@@ -28,11 +28,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { arePermissionBitsEnforced } from '@qwen-code/qwen-code-core/test-utils/permission-bits.js';
 import { executionApprovalErrors } from '../../scripts/verify-pr-check.mjs';
 import {
+  FORCE_HARDWARE_ENV,
   GIT_HARDENING,
   REVIEW_STATE_QUERY,
   artifactDirName,
+  classifyPrTrust,
   detectCredentialSignals,
   detectIsolation,
+  detectMandatoryEscalations,
   gitStatusArgs,
   localFilterOverrides,
   parseArgs,
@@ -3302,19 +3305,22 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line));
-    expect(args[0]).toEqual([
-      'api',
-      'graphql',
-      '--paginate',
-      '--slurp',
-      '-f',
-      'owner=QwenLM',
-      '-f',
-      'name=qwen-code',
-      '-F',
-      'number=42',
-      '-f',
-      `query=${REVIEW_STATE_QUERY}`,
+    expect(args).toEqual([
+      ['api', 'repos/QwenLM/qwen-code/collaborators/someone/permission'],
+      [
+        'api',
+        'graphql',
+        '--paginate',
+        '--slurp',
+        '-f',
+        'owner=QwenLM',
+        '-f',
+        'name=qwen-code',
+        '-F',
+        'number=42',
+        '-f',
+        `query=${REVIEW_STATE_QUERY}`,
+      ],
     ]);
 
     // All threads arrive before the filter, comment bodies included: one
@@ -3984,6 +3990,61 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(existsSync(join(realpathSync(linked), 'tmp'))).toBe(false);
   });
 
+  it('falls back to rev-parse --git-path when git rejects --path-format=absolute', () => {
+    const { dir, base, head } = makeRepo();
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    const shimDir = makeTmpDir();
+    const gitShim = join(shimDir, 'git');
+    writeFileSync(
+      gitShim,
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--path-format=absolute" ]; then
+    printf "error: unknown option 'path-format'\\n" >&2
+    exit 129
+  fi
+done
+if [ "\${FAKE_GIT_RELATIVE_EXCLUDE:-}" = "1" ]; then
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--git-path" ] && [ "$arg" = "info/exclude" ]; then
+      printf '.git/info/exclude\\n'
+      exit 0
+    fi
+    prev="$arg"
+  done
+fi
+exec ${JSON.stringify(realGit)} "$@"
+`,
+    );
+    chmodSync(gitShim, 0o755);
+
+    const baseEnv = installFakeGh(snapshotFor({ base, head }));
+    const oldGitEnv = {
+      ...baseEnv,
+      PATH: `${shimDir}:${baseEnv.PATH}`,
+      FAKE_GIT_RELATIVE_EXCLUDE: '1',
+    };
+
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(
+      join(dir, '.git', 'info', 'exclude'),
+      '# default commented exclude\n',
+    );
+    const clean = runPrepare(dir, ['42', '--repo', REPO], oldGitEnv);
+    expect(clean.status, clean.stderr).toBe(0);
+
+    rmSync(join(dir, 'tmp'), { recursive: true, force: true });
+    writeFileSync(join(dir, '.git', 'info', 'exclude'), 'hidden.ts\n');
+    const refused = runPrepare(dir, ['42', '--repo', REPO], oldGitEnv);
+    expect(refused.status).toBe(3);
+    expect(refused.stderr).toContain(
+      join(realpathSync(dir), '.git', 'info', 'exclude'),
+    );
+    expect(refused.stderr).not.toContain('unknown option');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+  });
+
   // git status trusts the index: skip-worktree / assume-unchanged entries
   // (a sparse checkout sets them en masse) hide tracked divergence, so the
   // gate must refuse them instead of stamping a partial tree as clean.
@@ -4070,5 +4131,441 @@ describe('repository coupling', () => {
     const gitignore = readFileSync(join(repoRoot, '.gitignore'), 'utf8');
     // CRLF-safe: a Windows checkout may carry \r\n line endings.
     expect(gitignore.split(/\r?\n/)).toContain('tmp/');
+  });
+});
+
+describe('trust classification and mandatory escalation (§4)', () => {
+  it('detects all mandatory escalation path classes and ignores ordinary source files', () => {
+    const hits = detectMandatoryEscalations([
+      'packages/core/src/utils/math.ts',
+      'README.md',
+      'packages/cli/package.json',
+      'pnpm-lock.yaml',
+      '.npmrc',
+      '.pnpmfile.mjs',
+      'packages/managed-agent-server/pom.xml',
+      '.github/workflows/qwen-triage.yml',
+      'scripts/verify-pr-check.mjs',
+      'scripts/lib/entry-point.js',
+      '.gitmodules',
+      '.gitattributes',
+      'patches/dep.patch',
+      '.husky/pre-commit',
+      'eslint.config.js',
+      'Dockerfile',
+      '.qwen/skills/verify-pr/SKILL.md',
+      'tools/bootstrap.sh',
+      'native/binding.node',
+    ]);
+    const reasonsByPath = Object.fromEntries(
+      hits.map((h) => [h.path, h.reason]),
+    );
+    expect(reasonsByPath).toEqual({
+      'packages/cli/package.json': 'dependency-manifest',
+      'pnpm-lock.yaml': 'dependency-manifest',
+      '.npmrc': 'dependency-manifest',
+      '.pnpmfile.mjs': 'dependency-manifest',
+      'patches/dep.patch': 'dependency-manifest',
+      'packages/managed-agent-server/pom.xml': 'maven-build',
+      '.github/workflows/qwen-triage.yml': 'ci-workflow',
+      'scripts/verify-pr-check.mjs': 'verify-or-sandbox-script',
+      'scripts/lib/entry-point.js': 'verify-or-sandbox-script',
+      '.gitmodules': 'verify-or-sandbox-script',
+      '.gitattributes': 'verify-or-sandbox-script',
+      '.husky/pre-commit': 'verify-or-sandbox-script',
+      'eslint.config.js': 'verify-or-sandbox-script',
+      Dockerfile: 'verify-or-sandbox-script',
+      '.qwen/skills/verify-pr/SKILL.md': 'agent-control-config',
+      'tools/bootstrap.sh': 'executable-or-binary',
+      'native/binding.node': 'executable-or-binary',
+    });
+  });
+
+  it('routes ordinary collaborator and local-owner work to trusted-shared-kernel, and escalates high-risk changes', () => {
+    expect(
+      classifyPrTrust({
+        permission: 'write',
+        changedPaths: ['packages/core/src/foo.ts'],
+      }),
+    ).toEqual({
+      prTrust: 'collaborator',
+      executionClass: 'trusted-shared-kernel',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({
+        isLocalOwner: true,
+        changedPaths: ['packages/cli/src/ui/App.tsx'],
+      }),
+    ).toEqual({
+      prTrust: 'local-owner',
+      executionClass: 'trusted-shared-kernel',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    const escalated = classifyPrTrust({
+      permission: 'admin',
+      changedPaths: ['packages/core/src/foo.ts', '.github/workflows/ci.yml'],
+    });
+    expect(escalated.prTrust).toBe('collaborator');
+    expect(escalated.executionClass).toBe('hardware-isolated');
+    expect(escalated.escalationReasons).toEqual([
+      'ci-workflow:.github/workflows/ci.yml',
+    ]);
+  });
+
+  it('keeps external, fork, sponsored external, unknown permission, missing diff, and global-switch runs on hardware-isolated', () => {
+    expect(
+      classifyPrTrust({
+        permission: 'read',
+        sponsored: true,
+        changedPaths: ['README.md'],
+      }),
+    ).toEqual({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: true,
+    });
+
+    expect(
+      classifyPrTrust({
+        permission: 'write',
+        isFork: true,
+        changedPaths: ['README.md'],
+      }),
+    ).toEqual({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({
+        isLocalOwner: true,
+        isFork: true,
+        changedPaths: ['README.md'],
+      }),
+    ).toEqual({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({ permission: null, changedPaths: ['README.md'] }),
+    ).toEqual({
+      prTrust: 'unknown',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({ permission: 'write', changedPaths: null }),
+    ).toEqual({
+      prTrust: 'collaborator',
+      executionClass: 'hardware-isolated',
+      escalationReasons: ['changed-files-unavailable'],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({
+        isLocalOwner: true,
+        changedPaths: ['README.md'],
+        forceHardware: true,
+      }),
+    ).toEqual({
+      prTrust: 'local-owner',
+      executionClass: 'hardware-isolated',
+      escalationReasons: ['global-hardware-only-switch'],
+      sponsored: false,
+    });
+  });
+
+  it('CLI writes trustClassification into the digest-bound host snapshot for collaborator, escalation, and emergency switch', () => {
+    const { dir, base, head } = makeRepo();
+
+    const snap = {
+      number: 99,
+      title: 'Collaborator change',
+      body: '',
+      author: { login: 'core-dev' },
+      baseRefName: 'main',
+      baseRefOid: base,
+      headRefOid: head,
+      commits: [],
+    };
+    const fakeDir = makeTmpDir();
+    const bin = join(fakeDir, 'bin');
+    mkdirSync(bin);
+    const snapPath = join(fakeDir, 'snap.json');
+    writeFileSync(snapPath, JSON.stringify(snap));
+    const gh = join(bin, 'gh');
+    writeFileSync(
+      gh,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = api ] && [ "$2" = graphql ]; then',
+        '  exit 1',
+        'fi',
+        'if [ "$1" = api ]; then',
+        '  printf \'{"permission":"write"}\\n\'',
+        '  exit 0',
+        'fi',
+        'cat "$FAKE_SNAP"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(gh, 0o755);
+
+    const hostOut1 = join(fakeDir, 'host-1.json');
+    const envBase = {
+      ...gitEnv,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      FAKE_SNAP: snapPath,
+    };
+    const r1 = runPrepare(
+      dir,
+      ['99', '--repo', REPO, '--context-out', hostOut1],
+      envBase,
+    );
+    expect(r1.status).toBe(0);
+    expect(r1.stdout).toContain(
+      'trust      collaborator -> trusted-shared-kernel',
+    );
+    const raw1 = readFileSync(hostOut1, 'utf8');
+    const parsed1 = JSON.parse(raw1);
+    expect(parsed1.trustClassification).toMatchObject({
+      prTrust: 'collaborator',
+      executionClass: 'trusted-shared-kernel',
+      escalationReasons: [],
+      headRefOid: head,
+      permission: 'write',
+    });
+    const sha1 = createHash('sha256').update(raw1, 'utf8').digest('hex');
+    expect(r1.stdout).toContain(`context-sha256  ${sha1}`);
+
+    // Same collaborator under global hardware switch -> forced hardware-isolated
+    const hostOut2 = join(fakeDir, 'host-2.json');
+    const r2 = runPrepare(
+      dir,
+      ['99', '--repo', REPO, '--context-out', hostOut2],
+      { ...envBase, [FORCE_HARDWARE_ENV]: '1' },
+    );
+    expect(r2.status).toBe(0);
+    expect(r2.stdout).toContain('trust      collaborator -> hardware-isolated');
+    const parsed2 = JSON.parse(readFileSync(hostOut2, 'utf8'));
+    expect(parsed2.trustClassification.executionClass).toBe(
+      'hardware-isolated',
+    );
+    expect(parsed2.trustClassification.escalationReasons).toContain(
+      'global-hardware-only-switch',
+    );
+
+    // Same collaborator adding a non-ASCII workflow filename -> -z defeats core.quotePath bypass
+    mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(dir, '.github', 'workflows', '测试.yml'), 'name: ci\n');
+    execFileSync('git', ['add', '.github/workflows/测试.yml'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    execFileSync('git', ['commit', '-qm', 'add non-ascii workflow'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const wfHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(snapPath, JSON.stringify({ ...snap, headRefOid: wfHead }));
+    const hostOut3 = join(fakeDir, 'host-3.json');
+    const r3 = runPrepare(
+      dir,
+      ['99', '--repo', REPO, '--context-out', hostOut3],
+      envBase,
+    );
+    expect(r3.status).toBe(0);
+    const parsed3 = JSON.parse(readFileSync(hostOut3, 'utf8'));
+    expect(parsed3.trustClassification).toMatchObject({
+      prTrust: 'collaborator',
+      executionClass: 'hardware-isolated',
+      headRefOid: wfHead,
+    });
+    expect(parsed3.trustClassification.escalationReasons).toContain(
+      'ci-workflow:.github/workflows/测试.yml',
+    );
+  });
+
+  it('CLI supports explicit --local-owner and --sponsored flags and escalates extensionless 100755/ELF/symlink files', () => {
+    // 1. Explicit --local-owner on non-fork ordinary tree -> local-owner -> trusted-shared-kernel
+    const { dir, base, head } = makeRepo();
+    const fakeDir = makeTmpDir();
+    const bin = join(fakeDir, 'bin');
+    mkdirSync(bin);
+    const snapPath = join(fakeDir, 'snap.json');
+    const writeSnap = (extra = {}) =>
+      writeFileSync(
+        snapPath,
+        JSON.stringify({
+          number: 101,
+          title: 'Local owner test',
+          body: '',
+          author: { login: 'owner-user' },
+          baseRefName: 'main',
+          baseRefOid: base,
+          headRefOid: head,
+          isCrossRepository: false,
+          commits: [],
+          ...extra,
+        }),
+      );
+    const gh = join(bin, 'gh');
+    writeFileSync(
+      gh,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = api ] && [ "$2" = graphql ]; then exit 1; fi',
+        'if [ "$1" = api ]; then printf \'{"permission":"read"}\\n\'; exit 0; fi',
+        'cat "$FAKE_SNAP"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(gh, 0o755);
+    const envBase = {
+      ...gitEnv,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      FAKE_SNAP: snapPath,
+    };
+
+    writeSnap();
+    const localOut = join(fakeDir, 'local-owner.json');
+    const rLocal = runPrepare(
+      dir,
+      ['101', '--repo', REPO, '--local-owner', '--context-out', localOut],
+      envBase,
+    );
+    expect(rLocal.status).toBe(0);
+    expect(
+      JSON.parse(readFileSync(localOut, 'utf8')).trustClassification,
+    ).toMatchObject({
+      prTrust: 'local-owner',
+      executionClass: 'trusted-shared-kernel',
+      sponsored: false,
+    });
+
+    // 2. --local-owner on a fork PR still fails closed to external -> hardware-isolated; --sponsored never lowers tier
+    writeSnap({ isCrossRepository: true });
+    const forkOut = join(fakeDir, 'fork-sponsored.json');
+    const rFork = runPrepare(
+      dir,
+      [
+        '101',
+        '--repo',
+        REPO,
+        '--local-owner',
+        '--sponsored',
+        '--context-out',
+        forkOut,
+      ],
+      envBase,
+    );
+    expect(rFork.status).toBe(0);
+    expect(
+      JSON.parse(readFileSync(forkOut, 'utf8')).trustClassification,
+    ).toMatchObject({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      sponsored: true,
+    });
+
+    // 3. Extensionless 100755 executable (tools/release), 100644 ELF binary (native/agent),
+    // 120000 symlink (links/tool), and 160000 gitlink (vendor/sub) all escalate even for --local-owner
+    mkdirSync(join(dir, 'tools'), { recursive: true });
+    mkdirSync(join(dir, 'native'), { recursive: true });
+    mkdirSync(join(dir, 'links'), { recursive: true });
+    mkdirSync(join(dir, 'vendor', 'sub'), { recursive: true });
+    writeFileSync(join(dir, 'tools', 'release'), 'echo hi\n');
+    chmodSync(join(dir, 'tools', 'release'), 0o755);
+    writeFileSync(
+      join(dir, 'native', 'agent'),
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]),
+    );
+    chmodSync(join(dir, 'native', 'agent'), 0o644);
+    symlinkSync('../base.txt', join(dir, 'links', 'tool'));
+    // Initialize a minimal nested git repo so the 160000 gitlink has a clean working tree.
+    execFileSync('git', ['init', '-qb', 'main'], {
+      cwd: join(dir, 'vendor', 'sub'),
+      env: gitEnv,
+    });
+    writeFileSync(join(dir, 'vendor', 'sub', 'x.txt'), 'sub\n');
+    execFileSync('git', ['add', 'x.txt'], {
+      cwd: join(dir, 'vendor', 'sub'),
+      env: gitEnv,
+    });
+    execFileSync('git', ['commit', '-qm', 'sub init'], {
+      cwd: join(dir, 'vendor', 'sub'),
+      env: gitEnv,
+    });
+    const subHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: join(dir, 'vendor', 'sub'),
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync(
+      'git',
+      ['add', 'tools/release', 'native/agent', 'links/tool'],
+      {
+        cwd: dir,
+        env: gitEnv,
+      },
+    );
+    execFileSync(
+      'git',
+      ['update-index', '--add', '--cacheinfo', `160000,${subHead},vendor/sub`],
+      { cwd: dir, env: gitEnv },
+    );
+    execFileSync(
+      'git',
+      ['commit', '-qm', 'add extensionless executables, symlink, and gitlink'],
+      { cwd: dir, env: gitEnv },
+    );
+    const execHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    writeSnap({ headRefOid: execHead, isCrossRepository: false });
+    const execOut = join(fakeDir, 'exec-escalated.json');
+    const rExec = runPrepare(
+      dir,
+      ['101', '--repo', REPO, '--local-owner', '--context-out', execOut],
+      envBase,
+    );
+    expect(rExec.status).toBe(0);
+    const tcExec = JSON.parse(
+      readFileSync(execOut, 'utf8'),
+    ).trustClassification;
+    expect(tcExec.prTrust).toBe('local-owner');
+    expect(tcExec.executionClass).toBe('hardware-isolated');
+    expect(tcExec.escalationReasons).toContain(
+      'executable-or-binary:tools/release',
+    );
+    expect(tcExec.escalationReasons).toContain(
+      'executable-or-binary:native/agent',
+    );
+    expect(tcExec.escalationReasons).toContain(
+      'symlink-or-submodule:links/tool',
+    );
+    expect(tcExec.escalationReasons).toContain(
+      'symlink-or-submodule:vendor/sub',
+    );
   });
 });

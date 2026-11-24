@@ -210,6 +210,293 @@ test('a chip for several runs lists them to pick from', async ({
   ).toBeVisible();
 });
 
+test('clicking an expanded multi-task chip again collapses its list', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+
+  await chip.click();
+  await expect(list).toBeVisible();
+  await expect(chip).toHaveAttribute('aria-expanded', 'true');
+
+  await chip.click();
+  await expect(list).toHaveCount(0);
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+  await expect(chip).toBeFocused();
+
+  // Pressing a non-focusable part of the list must not leave an expanded
+  // list with keyboard focus outside its handling container.
+  await chip.click();
+  await expect(page.getByTestId('composer-task-open').first()).toBeFocused();
+  await list.locator('div').first().click();
+  await expect(list).toBeVisible();
+  await expect(page.getByTestId('composer-task-open').first()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await expect(chip).toBeFocused();
+});
+
+test('a task refresh during pointer press does not undo the chip collapse', async ({
+  page,
+}, testInfo) => {
+  const tasks = [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ];
+  const { daemon, scenario } = await openSession(page, testInfo, tasks);
+  await page.route(`**/session/${scenario.sessionId}/tasks`, async (route) => {
+    await route.fulfill({
+      json: {
+        v: 1,
+        sessionId: scenario.sessionId,
+        now: Date.now(),
+        tasks: tasks.map((task) => ({
+          ...task,
+          runtimeMs: task.runtimeMs + 3000,
+        })),
+      },
+    });
+  });
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+  await chip.click();
+  await expect(list).toBeVisible();
+  const box = (await chip.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+
+  await daemon.sendEvent(
+    toolCallEvent('workflow-refresh-tool', 'workflow', {
+      name: 'Keep the task list active',
+    }),
+  );
+  const refreshed = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/session/${scenario.sessionId}/tasks`) &&
+      response.request().method() === 'GET',
+    { timeout: 6000 },
+  );
+  await refreshed;
+  await page.mouse.up();
+
+  await expect(list).toHaveCount(0);
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('keyboard focus leaving during a pointer press closes the task list', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+  await chip.click();
+  await expect(page.getByTestId('composer-task-open').first()).toBeFocused();
+
+  const titleBox = (await list.locator('div').first().boundingBox())!;
+  await page.mouse.move(
+    titleBox.x + titleBox.width / 2,
+    titleBox.y + titleBox.height / 2,
+  );
+  await page.mouse.down();
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  for (let index = 0; index < 20; index += 1) {
+    await page.keyboard.press('Tab');
+    if (
+      await editor.evaluate((element) => element === document.activeElement)
+    ) {
+      break;
+    }
+  }
+  await expect(editor).toBeFocused();
+  await expect(list).toHaveCount(0);
+  await page.mouse.up();
+  await expect(list).toHaveCount(0);
+});
+
+test('clicking an expanded single-task shell chip again collapses its detail panel', async ({
+  page,
+}, testInfo) => {
+  const shellTask: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-collapse',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: Date.now() - 20_000,
+    runtimeMs: 20_000,
+    command: 'npm run dev',
+    cwd: '/workspace',
+  };
+  const events: DaemonEvent[] = [
+    userTextEvent('Run the dev server in the background.', { id: 1 }),
+    toolCallEvent(
+      'shell-call',
+      'run_shell_command',
+      { command: 'npm run dev', is_background: true },
+      { id: 2 },
+    ),
+    turnCompleteEvent('shell-collapse', { id: 3 }),
+  ];
+  const scenario = createWebShellDaemonScenario({
+    workflowTasks: [shellTask],
+    events,
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.goto(`/session/${scenario.sessionId}?theme=dark`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: scenario.sessionId,
+      replayedCount: events.length,
+    }),
+  );
+
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 shell' });
+  const panelExplain = page.getByTestId('artifact-panel-explain');
+
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+  await chip.click();
+  await expect(panelExplain).toBeVisible();
+  await expect(chip).toHaveAttribute('aria-expanded', 'true');
+
+  await chip.click();
+  await expect(panelExplain).toHaveCount(0);
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('mouse presses on a task-row button preserve list focus until selection', async ({
+  page,
+}, testInfo) => {
+  const firstShell: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-first',
+    command: 'First command',
+    label: 'First command',
+    description: 'First command',
+    status: 'running',
+    startTime: Date.now() - 20_000,
+    runtimeMs: 20_000,
+    cwd: '/workspace',
+  };
+  await openSession(page, testInfo, [
+    firstShell,
+    {
+      ...firstShell,
+      id: 'shell-second',
+      command: 'Second command',
+      label: 'Second command',
+      description: 'Second command',
+    },
+  ]);
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 shells' })
+    .click();
+  const list = page.getByTestId('composer-task-list');
+  const firstRow = list.getByTestId('composer-task-open').first();
+  const secondRow = list.getByTestId('composer-task-open').nth(1);
+  await expect(firstRow).toBeFocused();
+
+  await secondRow.hover();
+  await page.mouse.down();
+  await expect(list).toBeVisible();
+  await expect(firstRow).toBeFocused();
+  await page.mouse.up();
+  await expect(list).toHaveCount(0);
+  await expect(page.getByTestId('artifact-panel-explain')).toBeVisible();
+});
+
+test('clicking an unlinked workflow chip again cancels its pending dialog', async ({
+  page,
+}, testInfo) => {
+  const { scenario, tasksPolled } = await openSession(page, testInfo, [
+    workflowTask({ toolUseId: undefined }),
+  ]);
+  await tasksPolled;
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 workflow' });
+  await expect(chip).toBeVisible();
+  let requests = 0;
+  let releaseResponse!: () => void;
+  const responseGate = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  await page.route(
+    (url) =>
+      url.pathname.endsWith(`/session/${scenario.sessionId}/tasks`) &&
+      url.searchParams.get('includeWorkflows') === 'true',
+    async (route) => {
+      requests += 1;
+      await responseGate;
+      await route.fulfill({
+        json: {
+          v: 1,
+          sessionId: scenario.sessionId,
+          now: Date.now(),
+          tasks: scenario.workflowTasks ?? [],
+        },
+      });
+    },
+  );
+  const dialogRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return (
+      url.pathname.endsWith(`/session/${scenario.sessionId}/tasks`) &&
+      url.searchParams.get('includeWorkflows') === 'true' &&
+      request.method() === 'GET'
+    );
+  });
+
+  await chip.click();
+  await dialogRequest;
+  await chip.click();
+  releaseResponse();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
+
+  expect(requests).toBe(1);
+  await expect(
+    page.getByRole('dialog', { name: 'Background tasks' }),
+  ).toHaveCount(0);
+});
+
 test('a "?" on a task choice asks a side question for an explanation', async ({
   page,
 }, testInfo) => {

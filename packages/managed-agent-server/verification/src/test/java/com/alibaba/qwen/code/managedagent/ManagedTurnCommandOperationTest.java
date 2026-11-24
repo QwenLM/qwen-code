@@ -690,6 +690,23 @@ class ManagedTurnCommandOperationTest {
         assertThat(claimed.orElseThrow().errorCode()).isNull();
     }
 
+    // S2 (#18149): a wake staged before the CAS leaves the certificate due
+    // now, so the park still succeeds, spends no retry, and redispatches at once.
+    @Test
+    void anActionParkWhoseCertificateIsDueReleasesTheTurnForImmediateDispatch() {
+        Admission turn = actionParkableTurn();
+        var before = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_background = 1,"
+                + " wake_seal_parked_until = ? WHERE session_id = ?", now.get(), sessionId);
+
+        assertThat(store.parkTurnForAction(TENANT, sessionId, turn.turnId(), OWNER)).isTrue();
+
+        var parked = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
+        assertThat(parked.retryAfter()).isEqualTo(now.get());
+        assertThat(parked.consecutiveFailures()).isEqualTo(before.consecutiveFailures());
+        assertThat(store.findDispatchable(now.get(), 10)).anyMatch(row -> row.turnId().equals(turn.turnId()));
+    }
+
     @Test
     void aClaimKeepsEveryOtherErrorCode() {
         Admission turn = submit("other-code", "digest-other-code");
