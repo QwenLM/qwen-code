@@ -106,7 +106,7 @@ public final class ManagedTeamRecords {
             require(!LEADER.equals(memberName),
                     "Team member cannot be named leader");
             String run = ManagedExtensionRecords.id(member.get("childRunId"),
-                    "members.childRunId");
+                    "members.childRunId", 256);
             require(member.get("planModeRequired").isBoolean(),
                     "members.planModeRequired must be boolean");
             names.add(memberName);
