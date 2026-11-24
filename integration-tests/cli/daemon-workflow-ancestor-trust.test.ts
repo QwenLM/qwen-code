@@ -130,7 +130,13 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
       }));
       daemon = await spawnDaemon({
         workspaceCwd: workspaces[0]!.target,
-        extraArgs: ['--workspace', workspaces[1]!.target],
+        // Ancestor trust, not host-load admission, is under test here. Keep
+        // a shared runner's real load out of this fixture's creation path.
+        extraArgs: [
+          '--no-load-admission',
+          '--workspace',
+          workspaces[1]!.target,
+        ],
         bootTimeoutMs: 60_000,
         env: {
           HOME: home,

@@ -1225,8 +1225,7 @@ export interface DaemonStatusReport {
      * omit this field, and `enabled: false` marks the operator opt-out or
      * an injected bridge. While `overloaded`, new child spawns are refused
      * with 503 `system_overloaded`; live sessions and the control plane stay
-     * open.
-     * `reason` is widened to string per the SDK convention.
+     * open. `reason` is widened to string per the SDK convention.
      */
     loadAdmission?: {
       enabled: boolean;
