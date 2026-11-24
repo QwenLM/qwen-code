@@ -135,9 +135,10 @@ describe('translateDisplayText', () => {
   it.each([
     ['See https://a.example/docs.', '详见 https://a.example/docs。'],
     [
-      'Visit https://a.example/docs, then run it.',
-      '请访问 https://a.example/docs，然后运行。',
+      'Visit https://a.example/docs,\nthen run it.',
+      '请访问 https://a.example/docs，\n然后运行。',
     ],
+    ['Open <foo:bar>.', '打开 <foo:bar。>'],
     [
       '详细的使用说明请参见 https://a.example/docs。',
       'See https://a.example/docs for details.',
@@ -277,6 +278,11 @@ describe('translateDisplayText', () => {
     ['Install it.', '安装它：https://evil.example/releases。'],
     ['Install from https://a.example/releases.', '安装它。'],
     ['See https://a.example.', '参见 https://a.example。evil.example/x'],
+    ['See https://a.example/docs.', '参见 https://a.example/admin。'],
+    ['See https://a.example/?q=1.', '参见 https://a.example/?q=2。'],
+    ['Mail <mailto:a@b.example>.', '发邮件到 <mailto:a@b.example．ｃｎ>。'],
+    ['Mail <mailto:a@b.example>.', '发邮件到 <mailto:a@evil.example>。'],
+    ['Mail a@b.example.', '发邮件到 a@evil.example。'],
   ])(
     'keeps the original when a bare URL changes: %s -> %j',
     async (original, translated) => {
