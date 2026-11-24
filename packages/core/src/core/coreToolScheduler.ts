@@ -143,6 +143,7 @@ import {
   persistAndTruncateToolResult,
 } from '../tools/truncation.js';
 import {
+  applyPermissionRequestHookUpdates,
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
 } from './permission-helpers.js';
@@ -2011,6 +2012,7 @@ export class CoreToolScheduler {
   // Session PreToolUse hooks that applied to a call when its hook ran; one
   // registered later (by a skill in the same batch) stops the call.
   private readonly preToolUseSessionHookIds = new Map<string, Set<string>>();
+  private readonly approvedHookPermissionUpdates = new Map<string, unknown[]>();
   // Calls whose input a hook replaced; they lose the Code Mode Bash
   // concurrency exemption, which assumes the model's own commands.
   private readonly hookReplacedInputCallIds = new Set<string>();
@@ -2683,6 +2685,7 @@ export class CoreToolScheduler {
     this.preToolUseIds.delete(callId);
     this.preToolUseAsks.delete(callId);
     this.preToolUseSessionHookIds.delete(callId);
+    this.approvedHookPermissionUpdates.delete(callId);
     this.hookReplacedInputCallIds.delete(callId);
     this.autoModeFallbackCallIds.delete(callId);
     this.runtimeContentGeneratorViews.delete(callId);
@@ -3992,7 +3995,7 @@ export class CoreToolScheduler {
       // A PermissionRequest hook's replacement input re-enters this loop as
       // a rebuilt call that carries that hook's one-time allow; it is not
       // fired again, so a call takes at most two rounds.
-      const permissionRequestGrants = new Set<string>();
+      const permissionRequestGrants = new Map<string, unknown[]>();
       for (const toolCall of newToolCalls) {
         if (toolCall.status !== 'validating') {
           continue;
@@ -4777,14 +4780,18 @@ export class CoreToolScheduler {
               | undefined;
             const hooksEnabled = !this.config.getDisableAllHooks();
 
-            const permissionRequestGrant = permissionRequestGrants.has(
+            const permissionRequestGrant = permissionRequestGrants.get(
               reqInfo.callId,
             );
             if ((hooksEnabled && messageBus) || permissionRequestGrant) {
               const permissionMode = String(this.config.getApprovalMode());
               const hookResult: PermissionRequestHookResult =
                 permissionRequestGrant
-                  ? { hasDecision: true, shouldAllow: true }
+                  ? {
+                      hasDecision: true,
+                      shouldAllow: true,
+                      updatedPermissions: permissionRequestGrant,
+                    }
                   : await runInRequestGoalContext(reqInfo, () =>
                       firePermissionRequestHook(
                         messageBus,
@@ -4893,6 +4900,12 @@ export class CoreToolScheduler {
                       approval.outcome,
                     );
                     this.setToolCallOutcome(reqInfo.callId, approval.outcome);
+                    if (hookResult.updatedPermissions?.length) {
+                      this.approvedHookPermissionUpdates.set(
+                        reqInfo.callId,
+                        hookResult.updatedPermissions,
+                      );
+                    }
                     this.setStatusInternal(reqInfo.callId, 'scheduled');
                     continue;
                   }
@@ -4906,7 +4919,10 @@ export class CoreToolScheduler {
                       toolSpan,
                     );
                     if (rebuilt) {
-                      permissionRequestGrants.add(reqInfo.callId);
+                      permissionRequestGrants.set(
+                        reqInfo.callId,
+                        hookResult.updatedPermissions ?? [],
+                      );
                       newToolCalls.push(rebuilt);
                     }
                     continue;
@@ -4970,6 +4986,12 @@ export class CoreToolScheduler {
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  if (hookResult.updatedPermissions?.length) {
+                    this.approvedHookPermissionUpdates.set(
+                      reqInfo.callId,
+                      hookResult.updatedPermissions,
+                    );
+                  }
                   this.setStatusInternal(reqInfo.callId, 'scheduled');
                 } else {
                   // Hook denied permission - cancel with optional message
@@ -6459,6 +6481,17 @@ export class CoreToolScheduler {
         );
         return;
       }
+    }
+
+    const hookPermissionUpdates =
+      this.approvedHookPermissionUpdates.get(callId);
+    if (hookPermissionUpdates) {
+      this.approvedHookPermissionUpdates.delete(callId);
+      await applyPermissionRequestHookUpdates(
+        hookPermissionUpdates,
+        this.config,
+        signal,
+      );
     }
 
     if (signal.aborted) {

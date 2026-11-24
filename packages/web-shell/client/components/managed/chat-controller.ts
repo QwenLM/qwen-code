@@ -182,6 +182,9 @@ export function toManagedQuestionPermissionRequest(
           description: option.description ?? '',
         })),
         multiSelect: question.multiple,
+        required: question.required,
+        allowText: question.allowText,
+        maxTextLength: MAX_MANAGED_QUESTION_TEXT_LENGTH,
       })),
     },
     // Managed question actions carry no dismiss wire variant (sending a string
