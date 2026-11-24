@@ -600,8 +600,7 @@ export class SkillManager {
     if (!skill.paths || skill.paths.length === 0) return true;
     const registry =
       (!liveOnly &&
-        skill.level !== 'bundled' &&
-        getTurnSkillActivation(this.config.getProjectRoot())) ||
+        getTurnSkillActivation(this.config.getProjectRoot(), this)) ||
       this.activationRegistry;
     return registry?.isActivated(skill.name) ?? false;
   }
@@ -635,7 +634,10 @@ export class SkillManager {
   async matchAndActivateByPaths(
     filePaths: readonly string[],
   ): Promise<string[]> {
-    const turnRegistry = getTurnSkillActivation(this.config.getProjectRoot());
+    const turnRegistry = getTurnSkillActivation(
+      this.config.getProjectRoot(),
+      this,
+    );
     const registry = turnRegistry ?? this.activationRegistry;
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();

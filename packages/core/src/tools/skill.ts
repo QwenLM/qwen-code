@@ -439,17 +439,21 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.skillManager,
       params,
       (name: string, content?: string, skill?: SkillConfig) => {
+        if (content !== undefined) this.loadedSkillContents.set(content, name);
+        // A staged path is meaningful only to this turn. Keep its exact
+        // output for history accounting, but never deduplicate a live call
+        // against a directory that will disappear when this turn settles.
+        if (pinned) {
+          let loaded = this.loadedTurnSkills.get(pinned);
+          if (!loaded) {
+            loaded = new Set();
+            this.loadedTurnSkills.set(pinned, loaded);
+          }
+          loaded.add(name);
+          return;
+        }
         this.loadedSkillNames.add(name);
         if (content !== undefined) {
-          if (pinned) {
-            let loaded = this.loadedTurnSkills.get(pinned);
-            if (!loaded) {
-              loaded = new Set();
-              this.loadedTurnSkills.set(pinned, loaded);
-            }
-            loaded.add(name);
-          }
-          this.loadedSkillContents.set(content, name);
           this.loadedSkillContentByName.set(name, {
             content,
             restrictionNames: skillRestrictionNames(skill ?? { name }),

@@ -14,8 +14,10 @@ import type { Config } from '../config/config.js';
 import { SkillTool } from '../tools/skill.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import { partToString } from '../utils/partUtils.js';
+import * as paths from '../utils/paths.js';
 import { SkillManager } from './skill-manager.js';
 import {
+  getTurnSkillSourcePath,
   prepareTurnSkillSnapshot,
   runWithTurnSkillSnapshot,
   type TurnSkillSnapshotLease,
@@ -207,6 +209,80 @@ describe('turn skill snapshot', () => {
         .execute(new AbortController().signal);
       expect(partToString(result.llmContent)).toContain('bundled body');
     });
+  });
+
+  it('reloads a Skill from its live directory after a pinned prompt', async () => {
+    const skill = await publish('body 1');
+    const snapshot = await capture(skill);
+    const { tool } = setupTool(skill);
+    await tool.refreshSkills();
+    const invoke = () =>
+      tool.build({ skill: skill.name }).execute(new AbortController().signal);
+    const pinned = await runWithTurnSkillSnapshot(snapshot, invoke);
+    expect(partToString(pinned.llmContent)).toContain(
+      path.dirname(snapshot.skills[0]!.filePath),
+    );
+    await leases.pop()!.dispose();
+
+    const live = partToString((await invoke()).llmContent);
+    expect(live).toContain(path.dirname(skill.filePath));
+    expect(live).toContain('body 1');
+    expect(partToString((await invoke()).llmContent)).toContain(
+      'already loaded',
+    );
+  });
+
+  it('activates an unshadowed path-conditional bundled Skill in a pinned turn', async () => {
+    const skill = await publish('body 1');
+    const bundled: SkillConfig = {
+      ...skill,
+      name: 'builtin',
+      level: 'bundled',
+      paths: ['**/*.ts'],
+      filePath: path.join(source, 'builtin', 'SKILL.md'),
+    };
+    const snapshot = await capture(skill);
+    const { manager } = setupTool(skill, bundled);
+    await runWithTurnSkillSnapshot(snapshot, async () => {
+      expect(manager.isSkillActive(bundled)).toBe(false);
+      expect(
+        await manager.matchAndActivateByPath(path.join(source, 'test.ts')),
+      ).toEqual(['builtin']);
+      expect(manager.isSkillActive(bundled)).toBe(true);
+    });
+  });
+
+  it('aliases only companion paths that still have their staged destination', async () => {
+    const skill = await publish('body 1');
+    const snapshot = await capture(skill);
+    const staged = path.join(
+      path.dirname(snapshot.skills[0]!.filePath),
+      'script.cjs',
+    );
+    runWithTurnSkillSnapshot(snapshot, () => {
+      expect(getTurnSkillSourcePath(staged)).toBe(
+        path.join(skillDirectory, 'script.cjs'),
+      );
+      const resolve = vi
+        .spyOn(paths, 'realpathNearestExisting')
+        .mockReturnValue(path.join(source, 'replacement'));
+      try {
+        expect(getTurnSkillSourcePath(staged)).toBeUndefined();
+      } finally {
+        resolve.mockRestore();
+      }
+    });
+  });
+
+  it('rejects a digest if an empty companion directory was removed', async () => {
+    const skill = await publish('body 1');
+    const companion = path.join(skillDirectory, 'assets');
+    await fs.mkdir(companion);
+    const snapshot = await capture(skill);
+    await fs.rmdir(companion);
+    await expect(capture(skill, snapshot.digest)).rejects.toThrow(
+      'expected digest',
+    );
   });
 
   it('checks the original resource identity against current authorization after building a tool call', async () => {

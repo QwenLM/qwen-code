@@ -11,6 +11,7 @@ import * as fs from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { realpathNearestExisting } from '../utils/paths.js';
 import { parseSkillContent } from './skill-load.js';
 import { SkillActivationRegistry } from './skill-activation.js';
 import type { SkillManager } from './skill-manager.js';
@@ -90,6 +91,10 @@ export function getTurnSkillSourcePath(filePath: string): string | undefined {
       !relative.startsWith(`..${path.sep}`) &&
       !path.isAbsolute(relative)
     ) {
+      // Staging creates regular files under a canonical root. If the actual
+      // destination changed, evaluate it under the usual file policy instead
+      // of transferring the original Skill's access to a different file.
+      if (realpathNearestExisting(filePath) !== filePath) return undefined;
       return path.join(path.dirname(skill.sourceFilePath), relative);
     }
   }
@@ -98,13 +103,20 @@ export function getTurnSkillSourcePath(filePath: string): string | undefined {
 
 export function getTurnSkillActivation(
   projectRoot: string,
+  manager: Pick<SkillManager, 'getCachedSkills'>,
 ): SkillActivationRegistry | undefined {
   const view = activeView.getStore();
   if (!view) return undefined;
   let registry = view.activations.get(projectRoot);
   if (!registry) {
+    const pinnedNames = new Set(
+      view.snapshot.skills.map((skill) => skill.name),
+    );
+    const bundled = (manager.getCachedSkills('bundled') ?? []).filter(
+      (skill) => !pinnedNames.has(skill.name),
+    );
     registry = new SkillActivationRegistry(
-      view.snapshot.skills.filter(
+      [...view.snapshot.skills, ...bundled].filter(
         (skill) => skill.paths?.length && !skill.disableModelInvocation,
       ),
       projectRoot,
@@ -192,13 +204,22 @@ export async function prepareTurnSkillSnapshot(
     if (info.isDirectory()) {
       await fs.mkdir(target, { mode: 0o700 });
       const children = await fs.opendir(source);
+      let empty = true;
       for await (const child of children) {
+        empty = false;
         await copyTree(
           path.join(source, child.name),
           path.join(target, child.name),
           root,
           files,
           depth + 1,
+        );
+      }
+      if (empty) {
+        // The absence of any file cannot identify an empty companion directory.
+        files.set(
+          path.relative(root, source).split(path.sep).join('/') + '/',
+          '',
         );
       }
       return;
