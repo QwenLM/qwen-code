@@ -73,6 +73,7 @@ class HostedExtensionsIT {
     private int harnessPort;
     private int brokerPort;
     private int boots;
+    private boolean parkApprovals;
     private HttpServer model;
     private ExecutorService modelExecutor;
     private ServletWebServerApplicationContext spring;
@@ -147,6 +148,51 @@ class HostedExtensionsIT {
                 .hasSize(2);
         assertThat(canary.isAlive()).isTrue();
         assertThat(modelFailure.get()).isNull();
+    }
+
+    @Test
+    @Timeout(150)
+    void hooksAndMcpApprovalResumesOnTheSameOwnerAfterParkingAndHarnessReplacementOnMySql() throws Exception {
+        parkApprovals = true;
+        boot();
+        var approvalDefinition = new java.util.LinkedHashMap<>(definition(1));
+        approvalDefinition.put("permission_policy", Map.of("approval_mode", "default"));
+        String agent = api("POST", "/v1/agents", approvalDefinition, "definition", 202).path("id").asText();
+        String session = createSession(agent, "parked-mcp");
+        String turn = submit(session, "EXT_PARK");
+        var parkedAction = new AtomicReference<HostedParkedAction>();
+        waitFor(() -> parkedAction.set(HostedParkedAction.read(jdbc, tenant, session, turn)));
+        HostedParkedAction parked = parkedAction.get();
+        List<JsonNode> hooks = events("hook.call");
+        assertThat(hooks).singleElement().satisfies(hook ->
+                assertThat(hook.at("/input/tool_input/value").asText()).isEqualTo("EXT_PARK"));
+        List<JsonNode> mcpStarts = events("mcp.start");
+        assertThat(mcpStarts).hasSize(1);
+        assertThat(running(mcpStarts.getFirst())).isTrue();
+        assertEffects();
+        assertThat(modelRequests).hasSize(1);
+
+        replaceHarness();
+        String route = "/v1/agents/sessions/" + session;
+        String actionRoute = route + "/actions/" + parked.actionId();
+        JsonNode action = api("GET", actionRoute, null, null, 200);
+        assertThat(action.path("tool_name").asText()).startsWith("mcp_");
+        String operation = api("POST", actionRoute + "/responses", parked.response(action, "allow"),
+                "parked-mcp-allow", 202).path("id").asText();
+        waitFor(() -> {
+            assertThat(api("GET", route + "/operations/" + operation, null, null, 200)
+                    .at("/action_resolution/outcome").asText()).isEqualTo("decided");
+            parked.assertSettled(jdbc, tenant, session, turn, "COMPLETED", "turn.completed");
+        });
+        assertThat(events("hook.call")).containsExactlyElementsOf(hooks);
+        assertThat(events("mcp.start")).containsExactlyElementsOf(mcpStarts);
+        assertThat(events("mcp.request").stream()
+                .filter(event -> "tools/call".equals(event.path("method").asText())).toList()).hasSize(1);
+        assertThat(execution(session, turn).path("execution_state").asText()).isEqualTo("SETTLED");
+        assertEffects("EXT_PARK");
+        assertThat(modelRequests).hasSize(2);
+        assertThat(modelRequests.getLast().path("tools")).isEqualTo(modelRequests.getFirst().path("tools"));
+        close(session, worker(session), mcpStarts.getFirst());
     }
 
     @Test
@@ -290,6 +336,8 @@ class HostedExtensionsIT {
                         "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + port,
                         "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
                         "--qwen.managed-agent.session-store.writer-lease-duration=3s",
+                        "--qwen.managed-agent.action-parking.enabled=" + parkApprovals,
+                        "--qwen.managed-agent.wake-dispatch.enabled=" + parkApprovals,
                         "--qwen.managed-agent.harness.enabled=true",
                         "--qwen.managed-agent.harness.workspace-files-enabled=true",
                         "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
@@ -298,6 +346,7 @@ class HostedExtensionsIT {
                         "--qwen.managed-agent.runtime-broker.enabled=true",
                         "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
+                        "--qwen.managed-agent.runtime-broker.mcp-parking.enabled=" + parkApprovals,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                         "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=true",
@@ -381,6 +430,9 @@ class HostedExtensionsIT {
                 "OPENAI_API_KEY", "fixture-only", "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN,
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", CAPABILITY, "QWEN_HOSTED_LIFECYCLE_V2_PROFILES", PROFILE,
                 "QWEN_CODE_MODELS_DEV_REFRESH", "off"));
+        if (parkApprovals) {
+            env.put("QWEN_E2E_IDLE_SUSPEND_MS", "3000");
+        }
         for (String key : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH", "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
             env.put(key, home.resolve(key + ".json").toString());
         }

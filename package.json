@@ -241,7 +241,7 @@
     "prettier": "^3.5.3",
     "react-devtools-core": "^6.1.5",
     "semver": "^7.7.2",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "strip-ansi": "^7.1.2",
     "tsx": "^4.20.3",
     "typescript-eslint": "^8.30.1",
@@ -253,7 +253,7 @@
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "ink": "7.0.3",
-    "simple-git": "^3.36.0"
+    "simple-git": "^4.1.0"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",

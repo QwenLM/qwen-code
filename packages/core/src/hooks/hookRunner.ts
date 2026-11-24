@@ -1715,6 +1715,17 @@ export class HookRunner {
       }
     }
 
+    // Stop consumers receive the output decision without the process result.
+    if (
+      isBlockingError &&
+      (eventName === HookEventName.Stop ||
+        eventName === HookEventName.SubagentStop) &&
+      output?.decision !== 'block' &&
+      output?.decision !== 'deny'
+    ) {
+      output = { ...output, decision: 'deny' };
+    }
+
     const killedBySignal = exitCode === null;
     return {
       hookConfig,
