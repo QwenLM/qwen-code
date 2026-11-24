@@ -70,8 +70,10 @@ revision` (`updatedAt + title + option ids`, no payload serialization): a
   non-accepted admission (reporting through `onError`), because `ToolApproval`
   re-arms only through rejection — resolving would latch the card inert.
   `AskUserQuestion` confirmation routes by the chosen option: the submit
-  (`allow_once`) option normalizes its index-keyed answers record into
-  `QuestionAnswer[]` and goes to `respondQuestion`; the reject option is a decision
+  (`allow_once`) option forwards structured `QuestionAnswer[]` when every
+  question and its options carry backend ids, otherwise normalizes the legacy
+  index-keyed answers record into that shape, then goes to `respondQuestion`;
+  the reject option is a decision
   vote and goes to `respondApproval` (`respondQuestion` always votes the submit
   option and cannot express a rejection). Both return `admission === 'accepted'`
   as the component's success boolean.
@@ -86,11 +88,16 @@ revision` (`updatedAt + title + option ids`, no payload serialization): a
   slots (`header`, `panels`, `composerStatus`, `transcriptError`). The status stack
   and usage stats need richer facts than the current conservative `statusFacts`
   (`queueLength`/`goalActive`), so the owning page supplies them until parity lands.
-- **Page-supplied facts and gating.** History pagination forwards
-  `hasOlderHistory`, `onLoadOlderHistory` (defaulting to `controller.loadOlder`), and
-  the paired `historyPaginationError` (without it a failed older page is invisible
-  and every top-scroll re-issues it). Plan facts and focus/notification gating
-  arrive as props (`planTodos`, `planExecutionMode`, `approvalDisabled`,
+- **Controller-defaulted pagination and page-supplied gating.** History
+  pagination forwards `hasOlderHistory`, `loadingOlderHistory`,
+  `historyCapacityReached`, `historyPaginationError`, and `onLoadOlderHistory`:
+  all four facts and the loader default from the controller
+  (`controller.hasOlderHistory`, `controller.loadingOlderHistory`,
+  `controller.historyCapacityReached`, `controller.historyPaginationError`,
+  `controller.loadOlder`), and an owning page may override any of them via props
+  (without `historyPaginationError` a failed older page is invisible and every
+  top-scroll re-issues it). Plan facts and focus/notification gating arrive as
+  props (`planTodos`, `planExecutionMode`, `approvalDisabled`,
   `approvalKeyboardActive`, `showBrowserNotifications`) because the owning page
   computes them; split-view panes pass `approvalKeyboardActive={false}` to avoid
   stealing focus (it reaches both the approval and the question card). The question

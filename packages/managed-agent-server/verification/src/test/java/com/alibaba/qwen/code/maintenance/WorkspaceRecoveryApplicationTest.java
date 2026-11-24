@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.maintenance;
 
 import com.alibaba.druid.pool.DruidDataSource;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderLoaders;
+import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -18,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceRecoveryApplicationTest {
     @Test
-    void sqlMaintenanceDoesNotDiscoverOrRequireOnlineFactories() {
+    void sqlMaintenanceDoesNotDiscoverOrRequireOnlineFactories() throws Exception {
         var discoveries = new AtomicInteger();
         ClassLoader previous = Thread.currentThread().getContextClassLoader();
         var withoutFactories = new ClassLoader(previous) {
@@ -48,10 +50,16 @@ class WorkspaceRecoveryApplicationTest {
                     .run(context -> {
                         assertThat(context).hasNotFailed();
                         assertThat(discoveries).hasValue(0);
-                        var properties = context.getBean(ManagedAgentProperties.class);
-                        assertThatThrownBy(properties::validateRuntimeProvider)
-                                .hasMessageContaining("not installed: local-process");
                     });
+            // Absence must hold at the loaders discovery consults, not only at the context loader.
+            try (var loader = RuntimeProviderLoaders.withoutFactoryServices()) {
+                var registry = loader.loadClass(RuntimeProviderRegistry.class.getName())
+                        .getConstructor().newInstance();
+                var require = registry.getClass().getMethod("require", String.class);
+                assertThatThrownBy(() -> require.invoke(registry, "local-process"))
+                        .isInstanceOf(InvocationTargetException.class)
+                        .rootCause().hasMessageContaining("not installed: local-process");
+            }
         } finally {
             Thread.currentThread().setContextClassLoader(previous);
         }

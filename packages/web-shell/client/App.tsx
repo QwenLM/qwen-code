@@ -372,7 +372,14 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
-import { artifactDisplayName } from './components/artifacts/artifactUtils';
+import {
+  artifactDisplayName,
+  resolvePendingArtifactJumpOpen,
+  runArtifactLibrarySessionJump,
+  type PendingArtifactJumpOpenRequest,
+} from './components/artifacts/artifactUtils';
+import { WorkspaceArtifactLibraryPage } from './components/artifacts/WorkspaceArtifactLibraryPage';
+import { WORKSPACE_ARTIFACT_LIBRARY_FEATURE } from './hooks/useWorkspaceArtifactLibrary';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -2068,6 +2075,7 @@ type MainView =
   | 'prWatches'
   | 'workflows'
   | 'goals'
+  | 'artifacts'
   | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -4817,6 +4825,10 @@ export function App({
   // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
   const prWatchesAvailable =
     workspace.capabilities?.features?.includes('autofix_pr_watches') === true;
+  const workspaceArtifactLibraryAvailable =
+    workspace.capabilities?.features?.includes(
+      WORKSPACE_ARTIFACT_LIBRARY_FEATURE,
+    ) === true;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -8515,6 +8527,49 @@ export function App({
     sessionWorktree?.path,
     workspace.client,
   ]);
+  const [pendingJumpArtifactOpen, setPendingJumpArtifactOpenState] = useState<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const pendingJumpArtifactOpenRef = useRef<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const setPendingJumpArtifactOpen = useCallback(
+    (request: PendingArtifactJumpOpenRequest | undefined) => {
+      pendingJumpArtifactOpenRef.current = request;
+      setPendingJumpArtifactOpenState(request);
+    },
+    [],
+  );
+  useEffect(() => {
+    const decision = resolvePendingArtifactJumpOpen(pendingJumpArtifactOpen, {
+      currentSessionId: connection.sessionId,
+      switchingSessionId: sidebarSwitchingSessionId,
+      panelStateKey,
+      restoredSessionKey: artifactPanelRestoredSessionKeyRef.current,
+      panelRestoring: artifactPanelRestoring,
+      loadingTranscript: Boolean(connection.loadingTranscript),
+      artifactsLoading,
+      connected: connection.status === 'connected',
+    });
+    if (decision === 'cancel') {
+      setPendingJumpArtifactOpen(undefined);
+    } else if (decision === 'open' && pendingJumpArtifactOpen) {
+      const targetArtifactId = pendingJumpArtifactOpen.artifactId;
+      setPendingJumpArtifactOpen(undefined);
+      openArtifactPanel(targetArtifactId);
+    }
+  }, [
+    artifactPanelRestoring,
+    artifactsLoading,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    openArtifactPanel,
+    panelStateKey,
+    pendingJumpArtifactOpen,
+    setPendingJumpArtifactOpen,
+    sidebarSwitchingSessionId,
+  ]);
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -9265,6 +9320,7 @@ export function App({
       : null
     : null;
   const pendingAskUserApprovalRef = useRef(pendingAskUserApproval);
+  const askUserOverlayRef = useRef<HTMLDivElement>(null);
   pendingAskUserApprovalRef.current = pendingAskUserApproval;
   const pendingToolApproval =
     pendingApproval && !isAskUserPermission(pendingApproval)
@@ -11042,6 +11098,10 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   const splitClassificationGenerationRef = useRef(0);
+  const artifactLibraryJumpGenRef = useRef(0);
+  const artifactLibraryJumpDispatchingRef = useRef<string | undefined>(
+    undefined,
+  );
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
@@ -11256,6 +11316,7 @@ export function App({
         (mainView === 'scheduledTasks' ||
           mainView === 'prWatches' ||
           mainView === 'goals' ||
+          mainView === 'artifacts' ||
           mainView === 'split'))
     ) {
       setMainView('chat');
@@ -11362,6 +11423,27 @@ export function App({
       showChat();
     }
   }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
+  const openArtifacts = useCallback(() => {
+    if (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable) return;
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    if (!navigationRef.current) showChat();
+    setMainView('artifacts');
+    navigationRef.current?.openPage('artifacts');
+  }, [projectFeaturesAvailable, showChat, workspaceArtifactLibraryAvailable]);
+  useEffect(() => {
+    if (
+      mainView === 'artifacts' &&
+      (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable)
+    ) {
+      showChat();
+    }
+  }, [
+    mainView,
+    projectFeaturesAvailable,
+    showChat,
+    workspaceArtifactLibraryAvailable,
+  ]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -11380,6 +11462,7 @@ export function App({
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
+        if (item === 'artifacts') return workspaceArtifactLibraryAvailable;
         return true;
       }),
     );
@@ -11594,7 +11677,9 @@ export function App({
           ? 'pr-watches'
           : mainView === 'goals'
             ? 'goals'
-            : undefined;
+            : mainView === 'artifacts'
+              ? 'artifacts'
+              : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -11620,6 +11705,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
           (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
@@ -11647,7 +11733,9 @@ export function App({
           ? 'prWatches'
           : nextPage === 'goals'
             ? 'goals'
-            : 'chat',
+            : nextPage === 'artifacts'
+              ? 'artifacts'
+              : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -11659,6 +11747,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    workspaceArtifactLibraryAvailable,
     channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
@@ -12418,6 +12507,7 @@ export function App({
           // `/clear` carry so the pane session's lineage never inherits the
           // cleared session's title.
           pendingManualTitleRef.current = undefined;
+          artifactLibraryJumpGenRef.current += 1;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -12529,7 +12619,8 @@ export function App({
       mainView === 'scheduledTasks' ||
       mainView === 'prWatches' ||
       mainView === 'workflows' ||
-      mainView === 'goals'
+      mainView === 'goals' ||
+      mainView === 'artifacts'
     ) {
       setMainView('chat');
     }
@@ -12709,21 +12800,32 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const workflowTaskDialogTargetRef = useRef<{
+    id: string;
+    toolUseId?: string;
+    hadToolMessage: boolean;
+  } | null>(null);
+  const tasksPanelRequestIdRef = useRef(0);
+  const closeTasksPanel = useCallback(() => {
+    tasksPanelRequestIdRef.current += 1;
+    workflowTaskDialogTargetRef.current = null;
+    setTasksDialogMessage(null);
+  }, []);
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openMonitorPanel(task);
     },
-    [openMonitorPanel],
+    [closeTasksPanel, openMonitorPanel],
   );
   const handleOpenShellDetails = useCallback(
     (task: DaemonSessionShellTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openShellPanel(task);
     },
-    [openShellPanel],
+    [closeTasksPanel, openShellPanel],
   );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
@@ -14948,9 +15050,9 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     lastRecapBlockCountRef.current = 0;
-  }, [connection.sessionId, connection.workspaceCwd]);
+  }, [closeTasksPanel, connection.sessionId, connection.workspaceCwd]);
 
   useEffect(() => {
     const scope = {
@@ -17330,6 +17432,7 @@ export function App({
         ? { displayName: opts.carryManualTitle }
         : undefined;
       splitClassificationGenerationRef.current += 1;
+      artifactLibraryJumpGenRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
       let availableWorkspaces = workspacesRef.current;
@@ -18509,6 +18612,18 @@ export function App({
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
     ) => {
+      // Suppress the generation bump for the jump's own load so a rejection
+      // from `loadSidebarSession` stays current in `runArtifactLibrarySessionJump`'s
+      // catch block and still clears pending state and surfaces the error.
+      if (artifactLibraryJumpDispatchingRef.current !== sessionId) {
+        artifactLibraryJumpGenRef.current += 1;
+      }
+      if (
+        pendingJumpArtifactOpenRef.current &&
+        pendingJumpArtifactOpenRef.current.sessionId !== sessionId
+      ) {
+        setPendingJumpArtifactOpen(undefined);
+      }
       setManagedHome(false);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
@@ -18584,7 +18699,54 @@ export function App({
       closePanel,
       isKnownLiveWorkspaceCwd,
       sessionActions,
+      setPendingJumpArtifactOpen,
       setPendingSessionContext,
+    ],
+  );
+
+  const openSessionFromArtifactLibrary = useCallback(
+    (
+      sessionId: string,
+      archiveState: 'active' | 'archived',
+      artifactId?: string,
+    ) => {
+      const jumpGen = ++artifactLibraryJumpGenRef.current;
+      const targetCwd =
+        resolveWorkspaceMaintenanceTargetCwd() ??
+        workspace.capabilities?.workspaceCwd;
+      void runArtifactLibrarySessionJump({
+        sessionId,
+        archiveState,
+        artifactId,
+        targetCwd,
+        primaryCwd: workspace.capabilities?.workspaceCwd,
+        showChat,
+        unarchivePrimarySession: (id) => workspaceActions.unarchiveSession(id),
+        unarchiveWorkspaceSessions: (cwd, ids) =>
+          workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+        getPendingJumpArtifactOpen: () => pendingJumpArtifactOpenRef.current,
+        setPendingJumpArtifactOpen,
+        isCurrent: () => artifactLibraryJumpGenRef.current === jumpGen,
+        loadSidebarSession: (id, cwd) => {
+          artifactLibraryJumpDispatchingRef.current = id;
+          try {
+            return loadSidebarSession(id, cwd);
+          } finally {
+            artifactLibraryJumpDispatchingRef.current = undefined;
+          }
+        },
+        reportError,
+      });
+    },
+    [
+      loadSidebarSession,
+      reportError,
+      resolveWorkspaceMaintenanceTargetCwd,
+      setPendingJumpArtifactOpen,
+      showChat,
+      workspace.capabilities?.workspaceCwd,
+      workspace.client,
+      workspaceActions,
     ],
   );
 
@@ -19207,39 +19369,67 @@ export function App({
     tryFireBoundRun,
   ]);
 
-  const openTasksPanel = useCallback(() => {
-    if (!requireActiveSessionForLocalCommand()) return;
-    const owner = sessionOwnerGuard.capture();
-    const request = workflowsEnabled
-      ? sessionActions.getWorkflowTasks()
-      : sessionActions.getTasks();
-    request
-      .then((snapshot) => {
-        if (!owner.isCurrent()) return;
-        setTasksDialogMessage({ snapshot });
-      })
-      .catch((error: unknown) => {
-        if (!owner.isCurrent()) return;
-        if (isSessionDisconnectedError(error)) return;
-        reportError(error, 'Failed to load tasks');
-      });
-  }, [
-    reportError,
-    requireActiveSessionForLocalCommand,
-    sessionActions,
-    sessionOwnerGuard,
-    workflowsEnabled,
-  ]);
+  const openTasksPanel = useCallback(
+    (
+      workflowTaskId?: string,
+      workflowToolUseId?: string,
+      hadToolMessage = false,
+    ) => {
+      if (!requireActiveSessionForLocalCommand()) return;
+      const owner = sessionOwnerGuard.capture();
+      const requestId = ++tasksPanelRequestIdRef.current;
+      workflowTaskDialogTargetRef.current =
+        workflowTaskId === undefined
+          ? null
+          : {
+              id: workflowTaskId,
+              toolUseId: workflowToolUseId,
+              hadToolMessage,
+            };
+      const request = workflowsEnabled
+        ? sessionActions.getWorkflowTasks()
+        : sessionActions.getTasks();
+      request
+        .then((snapshot) => {
+          if (
+            !owner.isCurrent() ||
+            tasksPanelRequestIdRef.current !== requestId
+          ) {
+            return;
+          }
+          setTasksDialogMessage({ snapshot });
+        })
+        .catch((error: unknown) => {
+          if (
+            !owner.isCurrent() ||
+            tasksPanelRequestIdRef.current !== requestId
+          ) {
+            return;
+          }
+          workflowTaskDialogTargetRef.current = null;
+          if (isSessionDisconnectedError(error)) return;
+          reportError(error, 'Failed to load tasks');
+        });
+    },
+    [
+      reportError,
+      requireActiveSessionForLocalCommand,
+      sessionActions,
+      sessionOwnerGuard,
+      workflowsEnabled,
+    ],
+  );
   const openCockpit = useCallback((): boolean => {
     if (!sessionWorkflowEnabled || approvalOverlayActive) return false;
     if (!requireActiveSessionForLocalCommand()) return false;
     if (!cockpitViewRequested()) updateCockpitLocation(true);
     setActivePanel(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     setMainView('cockpit');
     return true;
   }, [
     approvalOverlayActive,
+    closeTasksPanel,
     requireActiveSessionForLocalCommand,
     sessionWorkflowEnabled,
   ]);
@@ -19408,6 +19598,53 @@ export function App({
     },
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
+  function findComposerTaskTab(
+    tabs: readonly ArtifactPanelTab[],
+    task: ComposerChipTask,
+    sourceSessionId?: string,
+    activeTabId?: string | null,
+  ): ArtifactPanelTab | undefined {
+    if (!sourceSessionId) return undefined;
+    let ids: string[];
+    switch (task.kind) {
+      case 'workflow':
+        return undefined;
+      case 'session':
+        ids = [`session:${task.sessionId}`];
+        break;
+      case 'shell':
+        ids = [`shell:${task.id}`, `background:${sourceSessionId}:${task.id}`];
+        break;
+      case 'monitor':
+        ids = [
+          `monitor:${task.id}`,
+          `background:${sourceSessionId}:${task.id}`,
+        ];
+        break;
+      case 'agent': {
+        ids = [
+          `subagent:${sourceSessionId}:${task.id}`,
+          `background:${sourceSessionId}:${task.id}`,
+        ];
+        if (task.toolUseId) {
+          ids.push(
+            `subagent:${sourceSessionId}:${task.toolUseId}`,
+            `background:${sourceSessionId}:${task.toolUseId}`,
+          );
+        }
+        break;
+      }
+    }
+    const taskTabKind = task.kind === 'agent' ? 'subagent' : task.kind;
+    return tabs.find(
+      (tab) =>
+        (activeTabId === undefined || tab.id === activeTabId) &&
+        (tab.kind === taskTabKind ||
+          (tab.kind === 'pending' && tab.targetKind === taskTabKind)) &&
+        ids.includes(tab.id),
+    );
+  }
+
   // A workflow chip scrolls the transcript to the call that started the run
   // and opens its inline view. A run with no row in this transcript (started
   // from the runs page, a rerun, or history that is not loaded) opens in the
@@ -19423,18 +19660,69 @@ export function App({
         if (messageListRef.current?.scrollToMessage(messageId, callId)) return;
         toolRevealStore.cancel(callId);
       }
-      openTasksPanel();
+      openTasksPanel(task.id, task.toolUseId, messageId !== undefined);
     },
     [messages, openTasksPanel, toolRevealStore],
   );
+  const isComposerTaskOpen = useCallback(
+    (task: ComposerChipTask): boolean => {
+      if (task.kind === 'workflow') {
+        const target = workflowTaskDialogTargetRef.current;
+        if (target?.id !== task.id || target.toolUseId !== task.toolUseId) {
+          return false;
+        }
+        return (
+          target.hadToolMessage ||
+          !task.toolUseId ||
+          findToolMessageId(messages, task.toolUseId) === undefined
+        );
+      }
+      if (!artifactPanelOpen) return false;
+      const tab = findComposerTaskTab(
+        artifactPanelTabs,
+        task,
+        connection.sessionId,
+        activeArtifactPanelTabId,
+      );
+      return tab !== undefined && tab.id === activeArtifactPanelTabId;
+    },
+    [
+      activeArtifactPanelTabId,
+      artifactPanelOpen,
+      artifactPanelTabs,
+      connection.sessionId,
+      messages,
+    ],
+  );
+
   const openComposerTask = useCallback(
-    (task: ComposerChipTask) => {
+    (task: ComposerChipTask, toggle = false) => {
+      const isOpen = isComposerTaskOpen(task);
+      if (toggle && isOpen) {
+        closeTasksPanel();
+        if (task.kind === 'workflow') return;
+        closeArtifactPanel();
+        return;
+      }
+      if (!toggle && isOpen && task.kind === 'workflow') return;
+      closeTasksPanel();
+      if (task.kind === 'workflow') {
+        locateWorkflowTask(task);
+        return;
+      }
+      const existingTab = findComposerTaskTab(
+        artifactPanelTabs,
+        task,
+        connection.sessionId,
+      );
+      if (existingTab) {
+        selectArtifactPanelTab(existingTab.id);
+        setArtifactPanelOpen(true);
+        return;
+      }
       switch (task.kind) {
         case 'session':
           openSessionPanel(task);
-          return;
-        case 'workflow':
-          locateWorkflowTask(task);
           return;
         case 'shell':
           handleOpenShellDetails(task);
@@ -19457,14 +19745,19 @@ export function App({
       }
     },
     [
+      artifactPanelTabs,
+      closeArtifactPanel,
+      closeTasksPanel,
       connection.sessionId,
       connection.workspaceCwd,
       handleOpenMonitorDetails,
       handleOpenShellDetails,
+      isComposerTaskOpen,
       locateWorkflowTask,
       messages,
       openSessionPanel,
       openSubagentPanelForSession,
+      selectArtifactPanelTab,
     ],
   );
 
@@ -23620,6 +23913,43 @@ export function App({
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
+  const reserveQuestionSpaceForEnvironmentPanel =
+    environmentPanelVisible &&
+    !environmentPanelFits &&
+    !artifactPanelFullscreen &&
+    pendingAskUserApproval !== null;
+  // The floating panel and the question are in separate stacking contexts.
+  // Give the panel a real scroll boundary above the question, not a z-index
+  // that makes either surface cover the other.
+  useLayoutEffect(() => {
+    if (!reserveQuestionSpaceForEnvironmentPanel) return;
+    const body = contextBodyRef.current;
+    const footer = footerRef.current;
+    const question = askUserOverlayRef.current;
+    if (!body || !footer || !question) return;
+
+    const property = '--web-shell-environment-panel-bottom-inset';
+    const updateInset = () => {
+      const bounds = body.getBoundingClientRect();
+      if (!bounds.height) return;
+      // Convert viewport coordinates back to the panel's CSS pixels if an
+      // embedding host scaled the shell.
+      const inset =
+        ((bounds.bottom - question.getBoundingClientRect().top) *
+          body.offsetHeight) /
+        bounds.height;
+      body.style.setProperty(property, `${Math.max(0, Math.ceil(inset))}px`);
+    };
+    updateInset();
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(body);
+    observer.observe(footer);
+    observer.observe(question);
+    return () => {
+      observer.disconnect();
+      body.style.removeProperty(property);
+    };
+  }, [reserveQuestionSpaceForEnvironmentPanel]);
   const workspaceGitStatusEnabled =
     !managedMode &&
     !activePanel &&
@@ -24467,7 +24797,7 @@ export function App({
                   : t('tasks.title')
               }
               size="auto"
-              onClose={() => setTasksDialogMessage(null)}
+              onClose={closeTasksPanel}
             >
               <TasksStatusMessage
                 message={tasksDialogMessage}
@@ -24477,13 +24807,13 @@ export function App({
                 onWorkflowRunStarted={() =>
                   setBackgroundTasksRefreshTrigger((value) => value + 1)
                 }
-                onClose={() => setTasksDialogMessage(null)}
+                onClose={closeTasksPanel}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
                 agentTools={
                   sessionWorkflowEnabled ? tasksDialogAgentTools : []
                 }
                 onOpenSubagent={(tool, parentSessionId) => {
-                  setTasksDialogMessage(null);
+                  closeTasksPanel();
                   openSubagentPanel(tool, parentSessionId);
                 }}
                 onOpenMonitor={handleOpenMonitorDetails}
@@ -24935,6 +25265,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  {...(workspaceArtifactLibraryAvailable
+                    ? {
+                        onOpenArtifacts: () => {
+                          closeMobileDrawer();
+                          openArtifacts();
+                        },
+                      }
+                    : {})}
                   {...(prWatchesAvailable
                     ? {
                         onOpenPrWatches: () => {
@@ -26239,6 +26577,68 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                workspaceArtifactLibraryAvailable &&
+                mainView === 'artifacts' && (
+                  <div
+                    className={styles.fullPage}
+                    data-testid="artifacts-library-page"
+                  >
+                    <div className={styles.fullPageHeader}>
+                      {!navigationRailVisible && (
+                        <button
+                          type="button"
+                          className={styles.fullPageBack}
+                          onClick={returnToChat}
+                          aria-label={t('common.back')}
+                          title={t('common.back')}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="18"
+                            height="18"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+                      )}
+                      <div className={styles.fullPageTitle}>
+                        {t('workspaceArtifactLibrary.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <WorkspaceArtifactLibraryPage
+                        workspaceCwd={
+                          resolveWorkspaceMaintenanceTargetCwd() ??
+                          workspace.capabilities?.workspaceCwd
+                        }
+                        onOpenSession={(sessionId, archiveState) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                          )
+                        }
+                        onJumpToSessionArtifact={(
+                          sessionId,
+                          artifactId,
+                          archiveState,
+                        ) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                            artifactId,
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
               {workspaceContextActive && mainView === 'cockpit' && (
                 <div className={styles.fullPage} data-testid="cockpit-page">
                   <SessionWorkflowCockpit
@@ -26850,6 +27250,7 @@ export function App({
                         )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
+                          ref={askUserOverlayRef}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -26881,7 +27282,7 @@ export function App({
                               {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
                             </span>
                             <button type="button" className={styles.composerActionTipButton}
-                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                              onClick={() => { if (connection.sessionId) { artifactLibraryJumpGenRef.current += 1; void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); } }}>
                               {t('capacityChoice.resume')}
                             </button>
                           </div>
@@ -27156,6 +27557,7 @@ export function App({
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            isTaskOpen={isComposerTaskOpen}
                             onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />

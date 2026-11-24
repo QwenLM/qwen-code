@@ -2,14 +2,16 @@
 
 ## 1. 背景与决策
 
-当 ripgrep 缺失时，Qwen Code 已经提供了主要的回退链路：
+启用内置回退时，Qwen Code 的默认选择链如下：
 
 ```text
-内置 ripgrep -> 系统 ripgrep -> GrepTool
+通过探测的 PATH rg -> 内置 ripgrep -> GrepTool
                                  -> git grep
                                  -> 系统 grep
                                  -> JavaScript 文件遍历
 ```
+
+系统 rg 必须用实际搜索参数在一行合成标准输入上返回 JSON 匹配；找不到或探测失败时才尝试内置二进制。`tools.useBuiltinRipgrep: false` 仅使用系统 rg。探测不扫描工作区，也不对每次搜索重复执行。
 
 剩余的高 ROI 工作是保证运行时结果的完整性，而不是再引入一个二进制依赖或另一套通用回退层。本方案将以下四项相关改进作为一项有明确边界的改动来实施：
 
@@ -21,7 +23,6 @@
 ### 不在范围内
 
 - 不引入 `@vscode/ripgrep`；Qwen Code 已经随包提供了针对不同平台的二进制文件。
-- 不改变当前“内置版本优先、系统版本其次”的选择顺序。
 - 不永久降低 ripgrep 的线程数。
 - 不在每一种运行时失败后都自动切换到 `GrepTool`。权限、参数和文件系统错误必须保持可见，不能隐藏在语义不同且速度更慢的搜索之后。
 - 不重试 Node.js 子进程启动阶段的 `EAGAIN`。尚未成功启动的进程无法从 ripgrep 的 `--threads 1` 参数中获益；这类问题仍应作为明确的 `spawn` 失败处理。

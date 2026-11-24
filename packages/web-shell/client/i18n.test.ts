@@ -1008,6 +1008,27 @@ describe('web-shell zh-TW locale', () => {
       'managed.artifactLibrary.refresh',
       'managed.artifactLibrary.close',
       'userMessage.automatic.title',
+      'workspaceArtifactLibrary.title',
+      'workspaceArtifactLibrary.description',
+      'workspaceArtifactLibrary.filterPlaceholder',
+      'workspaceArtifactLibrary.scanning',
+      'workspaceArtifactLibrary.enumerationComplete',
+      'workspaceArtifactLibrary.finishedWithErrors',
+      'workspaceArtifactLibrary.partialBanner',
+      'workspaceArtifactLibrary.empty',
+      'workspaceArtifactLibrary.filterEmpty',
+      'workspaceArtifactLibrary.persistenceUnavailable',
+      'workspaceArtifactLibrary.runtimeUnavailable',
+      'workspaceArtifactLibrary.loadFailed',
+      'workspaceArtifactLibrary.sessionErrorsTitle',
+      'workspaceArtifactLibrary.sessionFallback',
+      'workspaceArtifactLibrary.archivedBadge',
+      'workspaceArtifactLibrary.activeBadge',
+      'workspaceArtifactLibrary.openSession',
+      'workspaceArtifactLibrary.jumpToPreview',
+      'workspaceArtifactLibrary.loadMore',
+      'workspaceArtifactLibrary.refresh',
+      'workspaceArtifactLibrary.retry',
     ]) {
       expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
     }
@@ -1060,5 +1081,31 @@ describe('web-shell zh-TW locale', () => {
         omittedColumns: 2,
       }),
     ).toBe('顯示 5/10 行，3/3 欄');
+  });
+});
+
+// The catalog checks above pin named key lists, so newly added keys are not
+// swept automatically. The touch follow-up keys are pinned here across every
+// shipped catalog: a missing entry would silently fall back to EN in the UI.
+const TOUCH_FOLLOWUP_KEYS = [
+  'composerMobile.acceptFollowup',
+  'composerMobile.dismissFollowup',
+  'composerMobile.caretUp',
+  'composerMobile.caretDown',
+  'composerMobile.caretRight',
+  'composerMobile.insertSlash',
+] as const;
+
+describe('touch follow-up catalog parity', () => {
+  it('carries the six touch follow-up keys in every shipped catalog', () => {
+    for (const key of TOUCH_FOLLOWUP_KEYS) {
+      const en = getTranslator('en')(key);
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key);
+        expect(translated).not.toBe(key);
+        expect(translated).not.toBe(en);
+      }
+    }
   });
 });
