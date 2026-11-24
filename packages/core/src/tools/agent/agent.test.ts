@@ -4516,13 +4516,17 @@ describe('AgentTool', () => {
         'hook_context',
         expect.stringMatching(/.+/),
       );
-      // The dispatch wrote the task prompt once; with no context the hook
-      // adds nothing, not even a bare separator.
+      // No context means the hook writes neither `undefined` nor a second
+      // task prompt: the dispatch's own prompt is the only write.
+      expect(mockContextState.set).not.toHaveBeenCalledWith(
+        'hook_context',
+        undefined,
+      );
       expect(
         vi
           .mocked(mockContextState.set)
           .mock.calls.filter(([key]) => key === 'task_prompt'),
-      ).toHaveLength(1);
+      ).toEqual([['task_prompt', 'Find all TypeScript files']]);
     });
 
     it('should continue execution when SubagentStart hook fails', async () => {
