@@ -5740,4 +5740,40 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(textOf(retryContents[1]!)).not.toContain('q'.repeat(100));
     expect(textOf(retryContents[1]!)).not.toContain('r'.repeat(5_000));
   });
+
+  it('does not retry a clamped-budget truncation when reduction cannot free any budget', async () => {
+    // Every part is below PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP (4,000 chars),
+    // so reduceColdInput() cannot shrink the request or raise the clamped
+    // budget. The growth guards must stop a pointless (or unbounded) retry.
+    configureWindow(65_536);
+    const budgets: number[] = [];
+    const generateText = vi.fn().mockImplementation(async (args) => {
+      const maxOut = args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+      budgets.push(maxOut);
+      if (budgets.length > 5) {
+        throw new Error('unbounded clamped-budget retry loop');
+      }
+      return {
+        text: '<analysis>exhausted clamped budget without shrinking room',
+        usage: {
+          promptTokenCount: 54_000,
+          candidatesTokenCount: maxOut,
+          totalTokenCount: 54_000 + maxOut,
+        },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(toolSession(60, 3_500), 54_000);
+
+    expect(budgets).toHaveLength(1);
+    expect(budgets[0]!).toBeGreaterThanOrEqual(MIN_COMPACTION_OUTPUT_TOKENS);
+    expect(budgets[0]!).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
 });
