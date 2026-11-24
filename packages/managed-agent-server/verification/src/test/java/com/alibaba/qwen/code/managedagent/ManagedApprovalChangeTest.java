@@ -75,7 +75,7 @@ class ManagedApprovalChangeTest {
 
     @BeforeEach
     void setup() {
-        tenant = "approval-change-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -123,9 +123,9 @@ class ManagedApprovalChangeTest {
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
         jdbc.update("UPDATE ma_turn SET error_code = ?, retry_after = 1234 WHERE tenant_id = ? AND session_id = ?"
                 + " AND turn_id = ?", TurnExecutionStore.HARNESS_ACTION_PARKED, tenant, session, turn.turnId());
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
+                + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?)", tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).liveSupported()).isTrue();
         assertThat(change("actor", "live-change", "yolo", 0).approvalRevision()).isEqualTo(1);
@@ -188,10 +188,10 @@ class ManagedApprovalChangeTest {
     void aForeignRequestedActionKeepsTheParkedCertificateFromExemptingTheApprovalChange() {
         when(harness.supportsLiveApprovalSelection()).thenReturn(true);
         String turnId = parkedApprovalTurn();
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json,prompt_id)"
-                + " VALUES (?,?,?,'action','action2',1,1,'ACTION','requested','action2',1,'{}','other-prompt')",
-                "c".repeat(64), tenant, session);
+                + " VALUES (?,?,'action','action2',1,1,'ACTION','requested','action2',1,'{}','other-prompt')",
+                tenant, session);
 
         assertCode(() -> change("actor", "parked-foreign-action", "yolo", 0), "session_context_busy");
 
@@ -254,10 +254,10 @@ class ManagedApprovalChangeTest {
                 + " wake_seal_parked_until=?, wake_seal_parked_approval_revision=0"
                 + " WHERE tenant_id=? AND session_id=?",
                 prompt, System.currentTimeMillis() + 100_000, tenant, session);
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json,prompt_id)"
-                + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?,?)",
-                "a".repeat(64), tenant, session,
+                + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?,?)",
+                tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}", prompt);
         assertThat(store.parkTurnForAction(tenant, session, turnId, "owner")).isTrue();
         return turnId;
@@ -845,9 +845,9 @@ class ManagedApprovalChangeTest {
             when(harness.supportsApprovalSelection()).thenReturn(false);
         }
         if (shape.equals("approval")) {
-            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+            jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                     + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                    + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
+                    + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?)", tenant, session,
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
