@@ -90,12 +90,11 @@ final class AgentActionParking {
                 now, tenantId, sessionId, AgentStateStore.HARNESS_ACTION_PARKED);
     }
 
-    /**
-     * Makes a wake-started Turn's park due now: it has no Turn row to
-     * unpark, so the wake-recovery scan claims its head on the next pass.
-     */
-    static void dueWakeParks(JdbcTemplate jdbc, String tenantId,
+    static void unparkForApprovalChange(JdbcTemplate jdbc, String tenantId,
             String sessionId, long now) {
+        unparkActionTurns(jdbc, tenantId, sessionId, now);
+        // A wake-started Turn has no Turn row to unpark. Make its head due
+        // now so the wake-recovery scan can claim it on the next pass.
         jdbc.update("UPDATE ma_session_head SET wake_retry_at = ?, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND harness_session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION' AND wake_seal_parked_owner = 'wake'"
