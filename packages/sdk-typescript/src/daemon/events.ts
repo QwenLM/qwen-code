@@ -685,6 +685,8 @@ export interface DaemonAuthDeviceFlowCancelledData {
  */
 export interface DaemonApprovalModeChangedData {
   sessionId: string;
+  /** Origin of an ACP notification whose sessionId identifies its recipient. */
+  originSessionId?: string;
   planExecutionMode?: string;
   previous: string;
   next: string;

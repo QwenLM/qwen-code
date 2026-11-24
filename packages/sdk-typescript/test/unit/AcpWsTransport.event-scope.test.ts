@@ -131,7 +131,7 @@ describe('ACP notification envelope session scope', () => {
     'terminal_sequence',
     'settings_changed',
     'approval_mode_changed',
-  ])('routes %s to its origin on a shared socket', async (kind) => {
+  ])('routes %s to its recipient on a shared socket', async (kind) => {
     vi.stubGlobal('WebSocket', FakeWebSocket);
     const transport = new AcpWsTransport('ws://daemon/acp');
     const abort = new AbortController();
@@ -141,8 +141,7 @@ describe('ACP notification envelope session scope', () => {
     const pending = iterators.map((iterator) => iterator.next());
     await new Promise<void>((resolve) => setImmediate(resolve));
     try {
-      const payloadScoped =
-        kind === 'settings_changed' || kind === 'approval_mode_changed';
+      const payloadScoped = kind === 'settings_changed';
       FakeWebSocket.latest.receive({
         jsonrpc: '2.0',
         method: '_qwen/notify',
@@ -169,6 +168,67 @@ describe('ACP notification envelope session scope', () => {
         type: 'workspace_changed',
         data: { marker: 'sentinel' },
       });
+    } finally {
+      abort.abort();
+      await Promise.all(
+        iterators.map((iterator) => iterator.return(undefined)),
+      );
+      transport.dispose();
+    }
+  });
+
+  it('delivers approval-mode fanout once to each addressed session and preserves its origin', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+    const transport = new AcpWsTransport('ws://daemon/acp');
+    const abort = new AbortController();
+    const iterators = ['origin', 'peer', 'foreign'].map((sessionId) =>
+      transport.subscribeEvents(sessionId, { signal: abort.signal }),
+    );
+    const pending = iterators.map((iterator) => iterator.next());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      for (const sessionId of ['origin', 'peer']) {
+        FakeWebSocket.latest.receive({
+          jsonrpc: '2.0',
+          method: '_qwen/notify',
+          params: {
+            sessionId,
+            kind: 'approval_mode_changed',
+            data: {
+              sessionId: 'origin',
+              originSessionId: 'origin',
+              previous: 'default',
+              next: 'yolo',
+              persisted: true,
+            },
+          },
+        });
+      }
+      FakeWebSocket.latest.receive({
+        jsonrpc: '2.0',
+        method: 'workspace_changed',
+        params: { marker: 'sentinel' },
+      });
+      const [origin, peer, foreign] = await Promise.all(pending);
+      for (const [sessionId, received] of [
+        ['origin', origin],
+        ['peer', peer],
+      ] as const) {
+        expect(received!.value).toMatchObject({
+          type: 'approval_mode_changed',
+          data: {
+            sessionId,
+            originSessionId: 'origin',
+            previous: 'default',
+            next: 'yolo',
+            persisted: true,
+          },
+        });
+      }
+      expect(foreign!.value?.type).toBe('workspace_changed');
+      for (const iterator of iterators.slice(0, 2)) {
+        expect((await iterator.next()).value?.type).toBe('workspace_changed');
+      }
     } finally {
       abort.abort();
       await Promise.all(

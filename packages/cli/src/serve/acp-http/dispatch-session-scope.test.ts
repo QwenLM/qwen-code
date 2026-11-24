@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, it, vi } from 'vitest';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   makeBridge,
@@ -154,27 +155,85 @@ describe('real dispatch notification session scope', () => {
     }
   });
 
-  it('preserves the origin of a workspace-fanned approval-mode change', () => {
-    const sendSession = vi.fn();
-    const dispatcher = Object.create(AcpDispatcher.prototype) as {
-      translateEvent: (
-        conn: unknown,
-        sessionId: string,
-        event: BridgeEvent,
-      ) => void;
-    };
-    const data = { sessionId: 'origin', mode: 'default' };
-    dispatcher.translateEvent({ sendSession }, 'peer', {
-      v: 1,
-      type: 'approval_mode_changed',
-      data,
-    });
-    const notification = sendSession.mock.calls[0]![1];
-    expect(notification.params).toEqual({
-      kind: 'approval_mode_changed',
-      data,
-    });
-    expect(notification.params.sessionId).toBeUndefined();
-    expect(notification.params.data.sessionId).toBe('origin');
-  });
+  it.each([true, false])(
+    'routes real approval-mode publications with persist=%s to their recipients and retains the origin',
+    async (persist) => {
+      let channelIndex = 0;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            sessionIdPrefix: `session-${++channelIndex}`,
+            extMethodImpl: (method, params) =>
+              method === 'qwen/control/session/approval_mode'
+                ? { previous: 'default', current: params['mode'] }
+                : {},
+          }).channel,
+        persistApprovalMode: async () => {},
+      });
+      const abort = new AbortController();
+      try {
+        const sessions = await Promise.all([
+          bridge.spawnOrAttach({ workspaceCwd: WS_A, sessionScope: 'thread' }),
+          bridge.spawnOrAttach({ workspaceCwd: WS_A, sessionScope: 'thread' }),
+        ]);
+        const origin = sessions[0]!.sessionId;
+        expect(sessions[1]!.sessionId).not.toBe(origin);
+        const received = sessions.map(async ({ sessionId }) => {
+          const changes: BridgeEvent[] = [];
+          for await (const event of bridge.subscribeEvents(sessionId, {
+            signal: abort.signal,
+          })) {
+            if (event.type === 'settings_changed') return changes;
+            if (event.type === 'approval_mode_changed') changes.push(event);
+          }
+          throw new Error('workspace sentinel was not received');
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        await bridge.setSessionApprovalMode(origin, ApprovalMode.YOLO, {
+          persist,
+        });
+        bridge.publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: { marker: 'sentinel' },
+        });
+
+        for (const [index, events] of (await Promise.all(received)).entries()) {
+          // Persisted changes reach each bus once; ephemeral changes stay local.
+          expect(events).toHaveLength(persist || index === 0 ? 1 : 0);
+          for (const event of events) {
+            const data = {
+              sessionId: origin,
+              previous: 'default',
+              next: 'yolo',
+              persisted: persist,
+            };
+            expect(event.data).toEqual(data);
+            const sendSession = vi.fn();
+            const dispatcher = Object.create(AcpDispatcher.prototype) as {
+              translateEvent: (
+                conn: unknown,
+                sessionId: string,
+                event: BridgeEvent,
+              ) => void;
+            };
+            dispatcher.translateEvent(
+              { sendSession },
+              sessions[index]!.sessionId,
+              event,
+            );
+            expect(sendSession).toHaveBeenCalledTimes(1);
+            expect(sendSession.mock.calls[0]![1].params).toEqual({
+              sessionId: sessions[index]!.sessionId,
+              kind: 'approval_mode_changed',
+              data: { ...data, originSessionId: origin },
+            });
+            expect(event.data).toEqual(data);
+          }
+        }
+      } finally {
+        abort.abort();
+        await bridge.shutdown();
+      }
+    },
+  );
 });

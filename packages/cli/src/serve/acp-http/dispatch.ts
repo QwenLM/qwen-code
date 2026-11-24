@@ -6269,9 +6269,9 @@ export class AcpDispatcher {
         return;
       }
       default: {
-        // Session buses also carry workspace broadcasts. Only stamp event
-        // kinds whose producer is session-scoped; e.g. persisted approval
-        // mode changes may fan out and must retain their original scope.
+        // Session buses also carry workspace broadcasts. Approval-mode fanout
+        // is addressed to each recipient bus; retain its origin separately
+        // because SDK normalization uses the envelope as the delivery scope.
         const sessionScoped = [
           'client_evicted',
           'slow_client_warning',
@@ -6283,7 +6283,14 @@ export class AcpDispatcher {
           'mcp_child_refused_batch',
           'history_truncated',
           'terminal_sequence',
+          'approval_mode_changed',
         ].includes(event.type);
+        const data =
+          event.type === 'approval_mode_changed' &&
+          isObject(event.data) &&
+          typeof event.data['sessionId'] === 'string'
+            ? { ...event.data, originSessionId: event.data['sessionId'] }
+            : event.data;
         // `event.id` is undefined for the synthetic control frames (no SSE
         // `id:` line, so they don't burn a slot in the resume sequence) and
         // set for ring-backed daemon events.
@@ -6292,7 +6299,7 @@ export class AcpDispatcher {
           notification(`${QWEN_METHOD_NS}notify`, {
             ...(sessionScoped ? { sessionId } : {}),
             kind: event.type,
-            data: event.data,
+            data,
           }),
           event.id,
         );
