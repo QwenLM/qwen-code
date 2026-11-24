@@ -5425,5 +5425,141 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         rmSync(privRound, { recursive: true, force: true });
       }
     }
+
+    // 8y. Dead-end decoy/tmp/.. (both before a symlink hop and without symlinks),
+    // <clone>/tmp -> /tmp, and <clone>/tmp -> canonicalDir(/sub) still enclose
+    // the source PR clone root.
+    const r9Clone = join(base, 'r9-clone');
+    mkdirSync(join(r9Clone, 'tmp', 'decoy', 'tmp'), { recursive: true });
+    symlinkSync(dirname(deepRealRound), join(r9Clone, 'tmp', 'decoy', 'link'));
+    const r9CloneCtx = join(r9Clone, 'forged-ctx.json');
+    writeFileSync(r9CloneCtx, ctxText);
+    const r9CloneRec = join(r9Clone, 'forged-rec.json');
+    writeFileSync(r9CloneRec, boundRecText);
+    for (const [label, args] of [
+      [
+        'decoy/tmp/.. before symlink + in-clone context',
+        [
+          '--context',
+          r9CloneCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          `${join(r9Clone, 'tmp', 'decoy', 'tmp')}/../link/${basename(deepRealRound)}`,
+        ],
+      ],
+      [
+        'decoy/tmp/.. before symlink + in-clone execution-record',
+        [
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          r9CloneRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          `${join(r9Clone, 'tmp', 'decoy', 'tmp')}/../link/${basename(deepRealRound)}`,
+        ],
+      ],
+    ]) {
+      const res = run(args);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // Zero-symlink <clone>/tmp/../decoy/tmp/../pr* still encloses <clone>.
+    const r9NoSymClone = join(base, 'r9-nosym-clone');
+    const r9NoSymRound = join(
+      r9NoSymClone,
+      'decoy',
+      'pr17185-verify-20261124-041000',
+    );
+    mkdirSync(join(r9NoSymClone, 'tmp'), { recursive: true });
+    mkdirSync(join(r9NoSymClone, 'decoy', 'tmp'), { recursive: true });
+    mkdirSync(join(r9NoSymRound, 'evidence'), { recursive: true });
+    writeFileSync(join(r9NoSymRound, 'report.md'), validFiles().report);
+    writeFileSync(join(r9NoSymRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(r9NoSymRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(r9NoSymRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(r9NoSymRound, 'evidence', '01-ab-cells.png'), 'png');
+    const r9NoSymCtx = join(r9NoSymClone, 'forged-ctx.json');
+    writeFileSync(r9NoSymCtx, ctxText);
+    const r9NoSymRes = run([
+      '--context',
+      r9NoSymCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${join(r9NoSymClone, 'tmp')}/../decoy/tmp/../${basename(r9NoSymRound)}`,
+    ]);
+    expect(r9NoSymRes.status).toBe(1);
+    expect(r9NoSymRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp -> <outside>/pr* (head-only context without coordinates)
+    const r9DirectTmpClone = join(base, 'r9-direct-tmp-clone');
+    mkdirSync(r9DirectTmpClone, { recursive: true });
+    symlinkSync(deepRealRound, join(r9DirectTmpClone, 'tmp'));
+    const r9DirectHeadCtx = join(r9DirectTmpClone, 'head-only.json');
+    writeFileSync(r9DirectHeadCtx, JSON.stringify({ headRefOid: HEAD }));
+    const r9DirectRes = run([
+      '--context',
+      r9DirectHeadCtx,
+      join(r9DirectTmpClone, 'tmp'),
+    ]);
+    expect(r9DirectRes.status).toBe(1);
+    expect(r9DirectRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp -> /tmp hosting /tmp/<subwork>/pr* still encloses <clone>.
+    if (existsSync('/tmp')) {
+      const r9SysSub = join('/tmp', `r9-syssub-${process.pid}`);
+      const r9SysRound = join(r9SysSub, 'pr17185-verify-20261124-041500');
+      const r9SysClone = join(base, 'r9-sys-clone');
+      try {
+        mkdirSync(join(r9SysRound, 'evidence'), { recursive: true });
+        writeFileSync(join(r9SysRound, 'report.md'), validFiles().report);
+        writeFileSync(join(r9SysRound, 'verdict.txt'), validFiles().verdict);
+        writeFileSync(
+          join(r9SysRound, 'assertions.json'),
+          validFiles().assertions,
+        );
+        writeFileSync(
+          join(r9SysRound, 'boundary.json'),
+          JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+        );
+        writeFileSync(join(r9SysRound, 'evidence', '01-ab-cells.png'), 'png');
+        mkdirSync(r9SysClone, { recursive: true });
+        symlinkSync('/tmp', join(r9SysClone, 'tmp'));
+        const r9SysCloneCtx = join(r9SysClone, 'forged-ctx.json');
+        writeFileSync(r9SysCloneCtx, ctxText);
+        const r9SysRes = run([
+          '--context',
+          r9SysCloneCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          join(r9SysClone, 'tmp', basename(r9SysSub), basename(r9SysRound)),
+        ]);
+        expect(r9SysRes.status).toBe(1);
+        expect(r9SysRes.stderr).toMatch(/must not point inside/);
+      } finally {
+        rmSync(r9SysSub, { recursive: true, force: true });
+      }
+    }
   });
 });
