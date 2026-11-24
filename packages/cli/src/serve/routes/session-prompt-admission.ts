@@ -64,6 +64,7 @@ interface PromptReceipt {
   sessionSkillEffectsChecked?: true;
   skillPromptHash?: string;
   extensionGeneration?: number;
+  replayCursor?: { lastEventId: number; eventEpoch: string };
 }
 const promptIdempotencyBySession = new Map<
   string,
@@ -100,9 +101,13 @@ function rememberPromptIdempotencyKey(
   }
 }
 
-function forgetPromptIdempotencyKey(sessionId: string, key: string): void {
+function forgetPromptIdempotencyKey(
+  sessionId: string,
+  key: string,
+  promptId: string,
+): void {
   const keys = promptIdempotencyBySession.get(sessionId);
-  if (!keys) return;
+  if (keys?.get(key)?.promptId !== promptId) return;
   keys.delete(key);
   if (keys.size === 0) promptIdempotencyBySession.delete(sessionId);
 }
@@ -345,16 +350,18 @@ export function admitSessionPrompt(
       // lost 202 on the caller side): return the original admission
       // without enqueueing a second turn — and before any delivery
       // authorization is minted for the unused new promptId. The
-      // cursor/epoch are fresh so the caller can still seed SSE
-      // resume from this response.
+      // pinned receipt preserves its pre-enqueue cursor so terminal events
+      // remain replayable after a lost response.
       return {
         deduplicated: true,
         promptId: receipt.promptId,
         skillDigest: receipt.skillDigest,
         sessionSkillEffectsChecked: receipt.sessionSkillEffectsChecked,
         extensionGeneration: receipt.extensionGeneration,
-        lastEventId: ownerBridge.getSessionLastEventId(sessionId),
-        eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
+        ...(receipt.replayCursor ?? {
+          lastEventId: ownerBridge.getSessionLastEventId(sessionId),
+          eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
+        }),
       };
     }
   }
@@ -474,6 +481,9 @@ export function admitSessionPrompt(
       sessionSkillEffectsChecked: input.sessionSkillEffectsChecked,
       extensionGeneration: input.extensionGeneration,
       skillPromptHash: input.skillPromptHash,
+      ...(input.skillDigest
+        ? { replayCursor: { lastEventId, eventEpoch } }
+        : {}),
     });
   }
 
@@ -561,7 +571,7 @@ export function admitSessionPrompt(
         // already consumed by the caller and only subsequent retries
         // can be protected.
         if (idempotencyKey !== undefined && !promptAdmitted) {
-          forgetPromptIdempotencyKey(sessionId, idempotencyKey);
+          forgetPromptIdempotencyKey(sessionId, idempotencyKey, promptId);
         }
         if (daemonLog) {
           daemonLog.warn(

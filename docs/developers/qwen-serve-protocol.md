@@ -4210,7 +4210,7 @@ snapshots for sessions on compatible trusted local runtimes. Send
 
 Retry the same prompt under the same key to recover its admission receipt
 within the daemon's bounded in-memory idempotency window. A repeat returns the
-same `promptId` and `skillDigest` with `deduplicated: true`. An incompatible
+same `promptId`, `skillDigest`, and pre-admission event cursor with `deduplicated: true`, so the caller can replay an already published terminal event. If the live event epoch changed, the old receipt cannot attest to a turn in the new session generation. An incompatible
 retry receives `409 turn_skill_receipt_conflict`, a new request whose expected
 digest differs receives `409 turn_skill_digest_mismatch`, and an unsupported
 runtime responds with `409 turn_skill_snapshot_unavailable`. These receipts
@@ -4300,7 +4300,7 @@ The daemon records a source workspace fence before sending the strict close
 request. It admits the operation only when queued prompts, runtime holds,
 permission requests, and native attachment activity are absent. Committed
 attachments in the native attachment store are also a refusal because the
-workspace export does not transport that store. Files managed directly in the
+workspace export does not transport that store. The owning ACP child must negotiate operation-bound retirement receipts. An older child receives no close request. A live session without a recorder can explicitly decline the operation and stay open. Files managed directly in the
 workspace remain the integrator's responsibility. An external writer must be
 fenced by that integrator before treating an archived workspace as consistent.
 
@@ -4310,7 +4310,7 @@ The response identifies `sessionId`, `operationId`, `eventEpoch`, and
 `GET /session/:id/retirements/:operationId` for that exact receipt. An unknown
 outcome retains the source fence, including across daemon restart. The owning
 daemon can record a delayed strict close confirmation for up to 120 seconds.
-Only a matching acknowledgement confirms retirement. Transport loss, restart
+Only an acknowledgement for the same session and operation, from the owner that flushed and closed the live recorder, confirms retirement. Its late explicit refusal reopens the live source. Transport loss, restart
 before that acknowledgement, and expiry of that observation window leave the
 source fenced for reconciliation. A `404`
 means no matching receipt is available. It does not certify an attempted

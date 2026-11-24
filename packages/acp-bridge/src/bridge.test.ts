@@ -104,6 +104,7 @@ import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
+  SESSION_RETIREMENT_RECEIPT_META_KEY,
   ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
@@ -36741,6 +36742,142 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'reopens a source when the owning child confirms a late idle-retirement refusal',
+      async () => {
+        const runtime = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-retirement-busy-'),
+        );
+        const reply = deferred<Record<string, unknown>>();
+        const handle = makeChannel({
+          initializeImpl: () => {
+            const response = activeWorkInitializeResponse();
+            return {
+              ...response,
+              _meta: {
+                ...response._meta,
+                [SESSION_RETIREMENT_RECEIPT_META_KEY]: 1,
+              },
+            };
+          },
+          extMethodImpl: async (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? reply.promise
+              : {},
+        });
+        const bridge = makeBridge({
+          artifactSnapshotRuntimeBaseDir: runtime,
+          channelFactory: async () => handle.channel,
+        });
+        try {
+          const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          await sendActiveWorkSnapshot(handle, 1, [
+            { sessionId: session.sessionId, holds: [] },
+          ]);
+          const identity = {
+            sessionId: session.sessionId,
+            operationId: 'c7910c8b-ff96-4022-a9cc-bb47cf5df066',
+            eventEpoch: bridge.getSessionEventEpoch(session.sessionId),
+          };
+          vi.useFakeTimers();
+          const observation = bridge.retireSessionIfIdle!(identity);
+          await vi.advanceTimersByTimeAsync(10_001);
+          await expect(observation).resolves.toMatchObject({
+            state: 'result_unknown',
+          });
+          expect(bridge.getSessionRetirement!(session.sessionId)).toMatchObject(
+            { state: 'result_unknown' },
+          );
+          reply.resolve({
+            sessionId: identity.sessionId,
+            retirementOperationId: identity.operationId,
+            closed: false,
+            holds: [agentHold('late-work')],
+          });
+          vi.useRealTimers();
+          await vi.waitFor(() =>
+            expect(
+              bridge.getSessionRetirement!(session.sessionId),
+            ).toBeUndefined(),
+          );
+          expect(bridge.sessionCount).toBe(1);
+        } finally {
+          vi.useRealTimers();
+          reply.resolve({ closed: false });
+          await bridge.shutdown();
+          await fsp.rm(runtime, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'never closes an old child for retirement or accepts an unbound close reply',
+      async () => {
+        const runtime = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-retirement-proof-'),
+        );
+        try {
+          for (const capable of [false, true]) {
+            const handle = makeChannel({
+              initializeImpl: () => {
+                const response = activeWorkInitializeResponse();
+                return {
+                  ...response,
+                  _meta: {
+                    ...response._meta,
+                    [SESSION_RETIREMENT_RECEIPT_META_KEY]: capable ? 1 : 0,
+                  },
+                };
+              },
+              extMethodImpl: async () => ({ closed: true }),
+            });
+            const bridge = makeBridge({
+              artifactSnapshotRuntimeBaseDir: runtime,
+              channelFactory: async () => handle.channel,
+            });
+            try {
+              const session = await bridge.spawnOrAttach({
+                workspaceCwd: WS_A,
+              });
+              await sendActiveWorkSnapshot(handle, 1, [
+                { sessionId: session.sessionId, holds: [] },
+              ]);
+              const identity = {
+                sessionId: session.sessionId,
+                operationId: 'f5f5ae2e-0151-43c7-8fab-216a689ffb66',
+                eventEpoch: bridge.getSessionEventEpoch(session.sessionId),
+              };
+              const result = bridge.retireSessionIfIdle!(identity);
+              if (capable) {
+                await expect(result).resolves.toMatchObject({
+                  state: 'result_unknown',
+                });
+                expect(
+                  bridge.getSessionRetirement!(session.sessionId),
+                ).toMatchObject({ state: 'result_unknown' });
+              } else {
+                await expect(result).rejects.toMatchObject({
+                  code: 'session_retire_unavailable',
+                });
+                expect(
+                  handle.agent.extMethodCalls.filter(
+                    (x) => x.method === SERVE_CONTROL_EXT_METHODS.sessionClose,
+                  ),
+                ).toHaveLength(0);
+                expect(
+                  bridge.getSessionRetirement!(session.sessionId),
+                ).toBeUndefined();
+              }
+            } finally {
+              await bridge.shutdown();
+            }
+          }
+        } finally {
+          await fsp.rm(runtime, { recursive: true, force: true });
+        }
+      },
+    );
 
     it('keeps a required-idle session when child work starts after the cached snapshot', async () => {
       let childBusy = true;

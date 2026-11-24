@@ -987,8 +987,6 @@ export interface PromptRequest {
   expectedSkillDigest?: string;
   pinExtensions?: boolean;
   expectedExtensionGeneration?: number;
-  /** Identifies a REST admission retry in the current daemon session. */
-  idempotencyKey?: string;
   /** Deliver the successful final answer directly through a channel worker. */
   delivery?: DaemonChannelDelivery;
   /** Optional ACP _meta passthrough. */
@@ -1026,8 +1024,6 @@ export interface NonBlockingPromptAccepted {
   skillDigest?: string;
   sessionSkillEffectsChecked?: true;
   extensionGeneration?: number;
-  /** The same process-local admission receipt was returned for this key. */
-  deduplicated?: boolean;
   lastEventId: number;
   /**
    * Epoch token of the bus that produced `lastEventId`. Clients that seed
@@ -7478,7 +7474,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    await this.requirePinnedPromptCapability(req, signal);
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const releasePromptSlot = this.reservePromptSlot(sessionId);
     let releaseOnExit = true;
     try {
@@ -7551,7 +7548,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
-    await this.requirePinnedPromptCapability(req, signal);
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const res = await this.transport.fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
@@ -7574,22 +7572,50 @@ export class DaemonClient {
     return (await res.json()) as PromptResult;
   }
 
-  private async requirePinnedPromptCapability(
+  private requirePinnedPromptCapability(
     req: PromptRequest,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<void> | undefined {
     signal?.throwIfAborted();
-    if (req.requireSessionSkillEffects) {
-      if (!req.pinSkills)
-        throw new Error('requireSessionSkillEffects requires pinSkills');
-      await this.requireCapability('turn_skill_session_effects_check');
-    }
-    if (req.pinExtensions)
-      await this.requireCapability('turn_extension_store_lease');
-    if (req.pinSkills) {
-      await this.requireCapability('turn_skill_file_snapshot');
+    if (
+      req.expectedSkillDigest !== undefined &&
+      (!req.pinSkills ||
+        typeof req.expectedSkillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(req.expectedSkillDigest))
+    )
+      throw new Error(
+        'expectedSkillDigest requires pinSkills and a lowercase SHA-256 digest',
+      );
+    const generation = req.expectedExtensionGeneration;
+    if (
+      req.pinExtensions
+        ? !req.pinSkills ||
+          typeof generation !== 'number' ||
+          !Number.isSafeInteger(generation) ||
+          generation < 0
+        : generation !== undefined
+    )
+      throw new Error(
+        'pinExtensions requires pinSkills and a nonnegative safe expectedExtensionGeneration',
+      );
+    if (req.requireSessionSkillEffects && !req.pinSkills)
+      throw new Error('requireSessionSkillEffects requires pinSkills');
+    if (!req.pinSkills) return undefined;
+    const features = ['turn_skill_file_snapshot'];
+    if (req.pinExtensions) features.push('turn_extension_store_lease');
+    if (req.requireSessionSkillEffects)
+      features.push('turn_skill_session_effects_check');
+    return this.capabilities().then((caps) => {
       signal?.throwIfAborted();
-    }
+      for (const feature of features) {
+        if (!Array.isArray(caps.features) || !caps.features.includes(feature)) {
+          throw new DaemonCapabilityMissingError(
+            feature,
+            `daemon does not advertise the ${feature} feature`,
+          );
+        }
+      }
+    });
   }
 
   private async readPromptAcceptance(
@@ -7597,6 +7623,15 @@ export class DaemonClient {
     req: PromptRequest,
   ): Promise<NonBlockingPromptAccepted> {
     const accepted = (await res.json()) as NonBlockingPromptAccepted;
+    if (
+      req.pinSkills &&
+      (!accepted ||
+        typeof accepted.promptId !== 'string' ||
+        !accepted.promptId ||
+        !Number.isSafeInteger(accepted.lastEventId) ||
+        accepted.lastEventId < 0)
+    )
+      throw new Error('Daemon did not return a usable pinned prompt receipt');
     if (
       req.requireSessionSkillEffects &&
       accepted.sessionSkillEffectsChecked !== true

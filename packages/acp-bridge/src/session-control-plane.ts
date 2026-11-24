@@ -2604,7 +2604,7 @@ export function createSessionControlPlane(
           opts.boundWorkspace,
         )
       : undefined;
-  const retiringSessions = new Set<string>();
+  const retiringSessions = new Map<string, 'retiring' | 'result_unknown'>();
 
   function getSessionRetirement(sessionId: string, operationId?: string) {
     const receipt = retirementLedger?.read(sessionId);
@@ -2613,7 +2613,10 @@ export function createSessionControlPlane(
       (operationId !== undefined && receipt.operationId !== operationId)
     )
       return undefined;
-    if (receipt.state === 'retiring' && !retiringSessions.has(sessionId)) {
+    if (
+      receipt.state === 'retiring' &&
+      retiringSessions.get(sessionId) !== 'retiring'
+    ) {
       return { ...receipt, state: 'result_unknown' as const };
     }
     return receipt;
@@ -7320,6 +7323,7 @@ export function createSessionControlPlane(
       onlyIfUnheld?: boolean;
       timeoutMs?: number;
       receiptTimeoutMs?: number;
+      retirement?: SessionRetirementIdentity;
       cancelReason?: 'user';
     },
   ): Promise<boolean> => {
@@ -7348,6 +7352,9 @@ export function createSessionControlPlane(
             ? { [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true }
             : {}),
           ...(opts?.cancelReason ? { cancelReason: opts.cancelReason } : {}),
+          ...(opts?.retirement
+            ? { retirementOperationId: opts.retirement.operationId }
+            : {}),
         },
       );
       const receiptTimeoutMs = opts?.receiptTimeoutMs ?? opts?.timeoutMs;
@@ -7364,6 +7371,23 @@ export function createSessionControlPlane(
             ),
         getTransportClosedReject(entry),
       );
+      if (
+        opts?.retirement &&
+        (response['sessionId'] !== entry.sessionId ||
+          response['retirementOperationId'] !== opts.retirement.operationId ||
+          typeof response['closed'] !== 'boolean')
+      )
+        throw new Error('Missing native retirement acknowledgement');
+      if (
+        opts?.retirement &&
+        response['closed'] === false &&
+        response['retirementUnavailable'] === true
+      )
+        throw new SessionRetirementError(
+          'session_retire_unavailable',
+          'The native session cannot provide a strict recorder receipt',
+          opts.retirement,
+        );
       return response['closed'] === true;
     } catch (err) {
       // The child's close refusal crosses the ACP wire as a JSON-RPC
@@ -10280,7 +10304,10 @@ export function createSessionControlPlane(
             ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
             : {}),
           ...(retirement
-            ? { receiptTimeoutMs: RETIREMENT_NATIVE_RECEIPT_WAIT_MS }
+            ? {
+                retirement,
+                receiptTimeoutMs: RETIREMENT_NATIVE_RECEIPT_WAIT_MS,
+              }
             : {}),
         },
       );
@@ -10299,12 +10326,17 @@ export function createSessionControlPlane(
       // unknown outcome because the close RPC may already have succeeded.
       // Terminate that process so its leases become stale and channel-exit
       // cleanup removes every bridge entry it owned.
-      if (retirement) {
+      const retirementRefused =
+        retirement &&
+        error instanceof SessionRetirementError &&
+        error.code === 'session_retire_unavailable';
+      if (retirement && !retirementRefused) {
         // The durable fence remains authoritative after any ambiguous close.
         // Do not terminate a shared ACP child and disturb other sessions.
         throw error;
       }
-      if (isDefinitiveAcpRequestError(error)) {
+      if (retirementRefused || isDefinitiveAcpRequestError(error)) {
+        if (retirementRefused) retirementLedger?.releaseNotStarted(retirement);
         entry.closing = false;
         // DAEMON-005: the child refused the close and the session remains live.
         // Restore the prompt-settled grace stamp so the grace window continues
@@ -13901,7 +13933,13 @@ export function createSessionControlPlane(
                 identity,
               );
             }
-            retiringSessions.add(sessionId);
+            if (!channelInfoForEntry(entry)?.harness.retirementReceipts)
+              throw new SessionRetirementError(
+                'session_retire_unavailable',
+                'The native owner cannot confirm a strict retirement',
+                identity,
+              );
+            retiringSessions.set(sessionId, 'retiring');
 
             const observeNativeReceipt =
               async (): Promise<SessionRetirementReceipt> => {
@@ -13947,9 +13985,11 @@ export function createSessionControlPlane(
                 recorded.eventEpoch !== eventEpoch
               )
                 throw error;
-              return recorded.state === 'retiring'
-                ? retirementLedger.settle(identity, 'result_unknown')
-                : recorded;
+              if (recorded.state !== 'retiring') return recorded;
+              // Keep the durable fence. Only the outstanding native call can
+              // later confirm a close or explicitly refuse before starting.
+              retiringSessions.set(sessionId, 'result_unknown');
+              return { ...recorded, state: 'result_unknown' };
             }
           },
         }

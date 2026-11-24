@@ -37,6 +37,7 @@ export class SessionRetirementError extends Error {
   constructor(
     readonly code:
       | 'session_retire_busy'
+      | 'session_retire_unavailable'
       | 'session_retire_epoch_mismatch'
       | 'session_retire_identity_conflict'
       | 'session_retirement_fenced',

@@ -7358,6 +7358,7 @@ export function registerSessionRoutes(
           : undefined;
       if (
         code === 'session_retire_busy' ||
+        code === 'session_retire_unavailable' ||
         code === 'session_retire_epoch_mismatch' ||
         code === 'session_retire_identity_conflict'
       ) {
@@ -9954,6 +9955,8 @@ export function registerSessionRoutes(
               !previous ||
               (pinSkills !== true && previous.skillDigest === undefined) ||
               (previous.skillDigest !== undefined &&
+                previous.replayCursor?.eventEpoch ===
+                  runtime.bridge.getSessionEventEpoch(sessionId) &&
                 previous.extensionGeneration === extensionGeneration &&
                 (previous.sessionSkillEffectsChecked === true) ===
                   (requireSessionSkillEffects === true) &&

@@ -1632,6 +1632,8 @@ export interface BridgeClientRequestContext {
 }
 
 export const TURN_SKILL_LEASE_META_KEY = 'qwen.daemon.turnSkillLease';
+export const SESSION_RETIREMENT_RECEIPT_META_KEY =
+  'qwen.dev/sessionRetirementReceipt';
 export const TURN_SKILL_LEASE_METHOD = 'qwen/control/session/turnSkillLease';
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =

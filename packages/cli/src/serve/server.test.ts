@@ -21591,6 +21591,47 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
     });
 
+    it('replays the pinned admission cursor after later events and fences an epoch change', async () => {
+      let cursor = 3;
+      let epoch = 'first-epoch';
+      const bridge = fakeBridge({
+        getSessionLastEventIdImpl: () => cursor,
+        getSessionEventEpochImpl: () => epoch,
+      });
+      bridge.updateTurnSkillLease = vi.fn(async () => ({
+        digest: 'a'.repeat(64),
+      }));
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const submit = () =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            pinSkills: true,
+            idempotencyKey: 'pin-replay-cursor',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+      const first = await submit();
+      expect(first.status).toBe(202);
+      cursor = 10;
+      const replay = await submit();
+      expect(replay.body).toMatchObject({
+        promptId: first.body.promptId,
+        lastEventId: 3,
+        eventEpoch: epoch,
+        deduplicated: true,
+      });
+      epoch = 'another-epoch';
+      const stale = await submit();
+      expect(stale.status).toBe(409);
+      expect(stale.body.code).toBe('turn_skill_receipt_conflict');
+      expect(stale.body.definitivelyNotStarted).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
     it('pins one skill snapshot for concurrent retries and returns its original receipt', async () => {
       const digest = 'a'.repeat(64);
       const bridge = fakeBridge();

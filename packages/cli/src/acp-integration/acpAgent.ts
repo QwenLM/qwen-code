@@ -534,6 +534,7 @@ import {
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   TURN_SKILL_LEASE_META_KEY,
   TURN_SKILL_LEASE_METHOD,
+  SESSION_RETIREMENT_RECEIPT_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -5049,6 +5050,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     opts?: {
       requireFlush?: boolean;
+      retirement?: boolean;
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
@@ -5067,15 +5069,23 @@ class QwenAgent implements Agent {
       skipMemoryFlush?: boolean;
       cancelReason?: 'user';
     },
-  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
+  ): Promise<{
+    closed: boolean;
+    holds: ActiveWorkHoldV1[];
+    retirementUnavailable?: true;
+  }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
+      if (opts?.retirement)
+        throw new Error('Retirement requires a live native session');
       this.mcpPool?.releaseSession(sessionId);
       // Already gone is the outcome the caller wanted, not a refusal.
       return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
+    if (opts?.retirement && !recorder)
+      return { closed: false, holds: [], retirementUnavailable: true };
     const requireFlush = opts?.requireFlush === true;
     if (requireFlush) await recorder?.flush();
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
@@ -5190,6 +5200,8 @@ class QwenAgent implements Agent {
         sessionId,
         async () => {
           if (this.sessions.get(sessionId) !== session) {
+            if (opts?.retirement)
+              throw new Error('Native session changed during retirement');
             removedFromStore = true;
             return undefined;
           }
@@ -5235,6 +5247,7 @@ class QwenAgent implements Agent {
           } catch (error) {
             closeError = error;
           }
+          if (opts?.retirement && closeError !== undefined) throw closeError;
           if (recorder?.hasWriteOwnership()) {
             throw closeError ?? new SessionWriterUnavailableError();
           }
@@ -5857,6 +5870,9 @@ class QwenAgent implements Agent {
     }
 
     const responseMeta: Record<string, unknown> = {
+      ...(args._meta?.[SESSION_RETIREMENT_RECEIPT_META_KEY] === 1
+        ? { [SESSION_RETIREMENT_RECEIPT_META_KEY]: 1 }
+        : {}),
       ...(this.managedToolInvocationGuard
         ? {
             [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
@@ -13279,7 +13295,21 @@ class QwenAgent implements Agent {
             'Invalid session close cancellation reason',
           );
         }
+        const operationId = params['retirementOperationId'];
+        if (
+          operationId !== undefined &&
+          (typeof operationId !== 'string' ||
+            operationId.length !== 36 ||
+            params['requireFlush'] !== true ||
+            params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true ||
+            cancelReason !== undefined)
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid strict retirement request',
+          );
         const outcome = await this.closeStoredSession(sessionId, {
+          retirement: operationId !== undefined,
           ...(cancelReason === 'user' ? { cancelReason } : {}),
           requireFlush: params['requireFlush'] === true,
           onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
@@ -13289,9 +13319,17 @@ class QwenAgent implements Agent {
         });
         // `holds` rides along only on a refusal, so the response every existing
         // caller already parses keeps its exact shape.
-        return outcome.closed
-          ? { sessionId, closed: true }
-          : { sessionId, closed: false, holds: outcome.holds };
+        return {
+          sessionId,
+          closed: outcome.closed,
+          ...(outcome.closed ? {} : { holds: outcome.holds }),
+          ...(outcome.retirementUnavailable
+            ? { retirementUnavailable: true }
+            : {}),
+          ...(operationId === undefined
+            ? {}
+            : { retirementOperationId: operationId }),
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
