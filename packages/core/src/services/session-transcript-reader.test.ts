@@ -2446,7 +2446,6 @@ describe('SessionTranscriptReader', () => {
         name: 'SessionTranscriptTooLargeError',
         dimension: 'index',
       });
-      expect(outcome.retryable).toBeUndefined();
       expect(outcome.maxBytes).toBeLessThan(512 * 1024 * 1024);
       expect(outcome.memorySamples).toBeGreaterThan(0);
       expect(outcome.memorySamples).toBeLessThan(200_000 / 10);
@@ -2510,10 +2509,13 @@ describe('SessionTranscriptReader', () => {
       parent = uuid;
     }
     await writeRecords(records);
-    // Loop structural estimate (~56 KiB) stays below 60 KiB; final estimate
-    // adds runtimeUuids/replayUuids/navigationTurns and crosses 72 KiB.
-    setSessionTranscriptMaxIndexEstimateBytesForTest(72 * 1024);
-    setSessionTranscriptAvailableHeapBudgetForTest(60 * 1024);
+    // Freeze heapUsed so cold-heap noise cannot trip maxHeapGrowthBytes first;
+    // loop structural estimate stays under 140 KiB, while final estimate adds
+    // runtimeUuids/replayUuids/navigationTurns (~199 KiB) and crosses 150 KiB.
+    const fixedUsage = process.memoryUsage();
+    const memSpy = vi.spyOn(process, 'memoryUsage').mockReturnValue(fixedUsage);
+    setSessionTranscriptMaxIndexEstimateBytesForTest(150 * 1024);
+    setSessionTranscriptAvailableHeapBudgetForTest(140 * 1024);
     try {
       let caught: unknown;
       try {
@@ -2524,9 +2526,10 @@ describe('SessionTranscriptReader', () => {
       expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
       const err = caught as SessionTranscriptTooLargeError;
       expect(err.dimension).toBe('index');
-      expect(err.measuredBytes).toBeGreaterThan(72 * 1024);
+      expect(err.measuredBytes).toBeGreaterThan(150 * 1024);
       expect(err.retryable).toBeUndefined();
     } finally {
+      memSpy.mockRestore();
       setSessionTranscriptMaxIndexEstimateBytesForTest(undefined);
       setSessionTranscriptAvailableHeapBudgetForTest(undefined);
     }
@@ -2551,6 +2554,92 @@ describe('SessionTranscriptReader', () => {
       });
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  it('keeps heap-limited structural rejections terminal on an idle reduced-heap process', async () => {
+    const readerUrl = pathToFileURL(
+      path.resolve('dist/src/services/session-transcript-reader.js'),
+    ).href;
+    const { createWriteStream } = await import('node:fs');
+    const runtime = await fs.mkdtemp(path.join(os.tmpdir(), 'heap-idle-512-'));
+    try {
+      const workspace = path.join(runtime, 'workspace');
+      await fs.mkdir(workspace, { recursive: true });
+      const denseSessionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      const chats = path.join(
+        runtime,
+        'projects',
+        workspace.replace(/[^a-zA-Z0-9]/g, '-'),
+        'chats',
+      );
+      await fs.mkdir(chats, { recursive: true });
+      const target = path.join(chats, denseSessionId + '.jsonl');
+      const out = createWriteStream(target);
+      let parent: string | null = null;
+      for (let i = 0; i < 340000; i += 1) {
+        const uuid = 'idle-' + String(i).padStart(7, '0');
+        const rec = {
+          uuid,
+          parentUuid: parent,
+          sessionId: denseSessionId,
+          timestamp: '2026-11-24T00:00:00.000Z',
+          type: i % 2 === 0 ? 'user' : 'assistant',
+          cwd: workspace,
+          version: '0.28.3',
+          message: {
+            role: i % 2 === 0 ? 'user' : 'model',
+            parts: [{ text: 't' }],
+          },
+        };
+        if (!out.write(JSON.stringify(rec) + '\n')) {
+          await new Promise<void>((resolve) => out.once('drain', resolve));
+        }
+        parent = uuid;
+      }
+      await new Promise<void>((resolve, reject) =>
+        out.end((error: Error | null) => (error ? reject(error) : resolve())),
+      );
+      const probe = `
+        import { SessionTranscriptReader } from ${JSON.stringify(readerUrl)};
+        try {
+          await new SessionTranscriptReader(${JSON.stringify(workspace)}, undefined, ${JSON.stringify(runtime)}).readPage(${JSON.stringify(denseSessionId)}, { limit: 10 });
+          console.log(JSON.stringify({ result: 'served' }));
+        } catch (error) {
+          console.log(JSON.stringify({ result: 'rejected', name: error.name, dimension: error.dimension, retryable: error.retryable, maxBytes: error.maxBytes }));
+        }
+      `;
+      const cleanEnv = { ...process.env };
+      for (const name of Object.keys(cleanEnv)) {
+        if (name.startsWith('QWEN_')) delete cleanEnv[name];
+      }
+      delete cleanEnv['NODE_OPTIONS'];
+      const child = spawnSync(
+        process.execPath,
+        ['--max-old-space-size=512', '--input-type=module', '-e', probe],
+        { encoding: 'utf8', env: cleanEnv, maxBuffer: 2 * 1024 * 1024 },
+      );
+      if (child.status !== 0) {
+        throw new Error(
+          `Idle 512 MiB probe failed (${child.status}/${child.signal}): ${child.stderr}`,
+        );
+      }
+      const outcome = JSON.parse(child.stdout.trim()) as {
+        result: string;
+        name?: string;
+        dimension?: string;
+        retryable?: boolean;
+        maxBytes?: number;
+      };
+      expect(outcome).toMatchObject({
+        result: 'rejected',
+        name: 'SessionTranscriptTooLargeError',
+        dimension: 'index',
+      });
+      expect(outcome.retryable).toBeUndefined();
+      expect(outcome.maxBytes).toBeLessThan(512 * 1024 * 1024);
+    } finally {
+      await fs.rm(runtime, { recursive: true, force: true });
     }
   });
 

@@ -19131,6 +19131,69 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('does not reset the retryable 413 counter on intervening non-413 transport errors', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const pressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'dense-alternating-502',
+        dimension: 'index',
+        measuredBytes: 326_447_504,
+        maxBytes: 326_446_972,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    const badGateway = new DaemonHttpError(
+      502,
+      { error: 'Bad Gateway' },
+      'Bad Gateway',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* alternatingErrors() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          // Odd calls return retryable 413, even calls return 502. The 4th 413
+          // (call 7) must still terminate instead of resetting on each 502.
+          throw eventsCalls % 2 === 1 ? pressure : badGateway;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(160);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBe(7);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      errorStatus: 413,
+    });
+  });
+
   it('keeps a plain 409 conflict error retriable (not terminal)', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,

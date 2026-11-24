@@ -5037,8 +5037,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const isRetryable413 = isRetryablePayloadTooLargeHttpError(error);
           if (isRetryable413) {
             retryablePayloadTooLargeAttempts += 1;
-          } else {
-            retryablePayloadTooLargeAttempts = 0;
           }
           const isTerminal =
             isTerminalSessionHttpError(error) ||

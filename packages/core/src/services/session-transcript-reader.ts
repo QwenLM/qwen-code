@@ -2654,12 +2654,23 @@ async function buildIndex(params: {
   const remainingHeapBudget =
     availableHeapBudgetForTest ??
     Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
-  // Sampled V8 heapUsed includes uncollected JSON.parse garbage, so give the
-  // real-heap OOM backstop 3/4 of free heap (above the 1/2 structural budget)
-  // and mark backstop rejections retryable (bounded by the client retry cap).
+  // V8's heap_size_limit sits ~96 MiB above --max-old-space-size, so derive
+  // the real-heap OOM backstop from estimated old-space headroom (3/4 of
+  // available - 96 MiB, capped at 5/8 of available): tight 192/256 MiB heaps
+  // stop safely below Mark-Compact OOM while 512+ MiB heaps stay above GC noise.
+  const estimatedOldSpaceAvailableBytes = Math.max(
+    0,
+    availableHeapBytes - 96 * 1024 * 1024,
+  );
   const maxHeapGrowthBytes =
     availableHeapBudgetForTest ??
-    Math.max(64 * 1024, Math.floor((availableHeapBytes * 3) / 4));
+    Math.max(
+      64 * 1024,
+      Math.min(
+        Math.floor((availableHeapBytes * 5) / 8),
+        Math.floor((estimatedOldSpaceAvailableBytes * 3) / 4),
+      ),
+    );
   const maxIndexBuildBytes = Math.min(
     maxIndexEstimateBytes,
     remainingHeapBudget,
