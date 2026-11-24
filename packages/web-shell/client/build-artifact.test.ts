@@ -322,9 +322,9 @@ describe('build artifact — package boundary', () => {
       }
     });
 
-    expect(scrollbarRootRule?.selector).toContain(
-      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))',
-    );
+    const rootScope =
+      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))';
+    expect(scrollbarRootRule?.selectors).toEqual([rootScope, `${rootScope} *`]);
   });
 
   it('keeps component resets and utilities above plain host selectors', () => {
@@ -893,6 +893,9 @@ describe('build artifact — transcript entry (#11031)', () => {
       );
 
       expect(preflightIndex).toBeGreaterThanOrEqual(0);
+      expect(rules[preflightIndex]?.selectors).toContain(
+        ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn])) ::backdrop',
+      );
       expect(katexIndex).toBeGreaterThan(preflightIndex);
     }
   });
