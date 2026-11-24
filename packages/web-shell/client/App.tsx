@@ -10484,7 +10484,8 @@ export function App({
             if (
               request !== loadedSkillsRequestRef.current ||
               connectionRef.current.sessionId !== sessionId
-            ) return;
+            )
+              return;
             if (status.sessionId !== sessionId)
               throw new Error('Skills belong to another session');
             setLoadedSkills(
@@ -13237,10 +13238,13 @@ export function App({
       if (currentSessionId) return Promise.resolve(undefined);
       const pendingManualTitle = pendingManualTitleRef.current;
       const preparationOwner = { retainOnNavigation };
-      const promise: Promise<{
-        sessionId: string;
-        detachedSession?: DaemonSessionClient;
-      } | undefined> = (async () => {
+      const promise: Promise<
+        | {
+            sessionId: string;
+            detachedSession?: DaemonSessionClient;
+          }
+        | undefined
+      > = (async () => {
         let allocatedSessionId: string | undefined;
         let detachedSessionResult: DaemonSessionClient | undefined;
         const draftSelection = subscriptionDraftModelRef.current;
@@ -13477,10 +13481,7 @@ export function App({
         if (!allocatedSessionId) return undefined;
         // A menu alone does not own background work after navigation. A prompt
         // sharing this preparation keeps the detached client for admission.
-        if (
-          detachedSessionResult &&
-          !preparationOwner.retainOnNavigation
-        ) {
+        if (detachedSessionResult && !preparationOwner.retainOnNavigation) {
           await detachedSessionResult.detach();
           throw new DOMException('The composer changed', 'AbortError');
         }
