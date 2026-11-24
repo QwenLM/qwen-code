@@ -1663,7 +1663,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (v2 && !("hosted-workspace-shell/1".equals(request.get("toolProfile"))
                 || "hosted-workspace-shell/3".equals(request.get("toolProfile"))
                 || "hosted-workspace-shell/4".equals(request.get("toolProfile"))
-                || "hosted-workspace-mcp/1".equals(request.get("toolProfile")))) {
+                || "hosted-workspace-mcp/1".equals(request.get("toolProfile"))
+                || "hosted-workspace-files/1".equals(request.get("toolProfile")))) {
             throw new DaemonProtocolException("Unsupported Hosted lifecycle profile");
         }
         if (v2 ? !capabilities.getLifecycleV2Profiles().contains(request.get("toolProfile"))
