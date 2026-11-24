@@ -836,12 +836,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 'off',
         description:
-          'Run the REVIEWED repository\'s own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside a container instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process\'s whole environment (on CI that includes the model and GitHub credentials). "auto" uses a container when docker or podman answers and runs directly when neither does; "required" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`) unavailable for that run rather than ending the review; "off" is today\'s behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it.',
+          'Run the REVIEWED repository\'s own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside an isolated boundary instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process\'s whole environment (on CI that includes the model and GitHub credentials). "auto" uses a hardened container when docker or podman answers and runs directly when neither does; "required" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`, host tmux probes) unavailable for that run rather than ending the review; "tiered" classifies PR trust and high-risk changed files into `trusted-shared-kernel` (hardened container, no host fallback) vs `hardware-isolated` (firecracker / vfkit / provider-vm, fail-closed with no downgrade to container or host); "off" is today\'s behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it.',
         showInDialog: true,
         options: [
           { value: 'off', label: 'Off (run the reviewed code directly)' },
-          { value: 'auto', label: 'Auto (container when one is available)' },
+          { value: 'auto', label: 'Auto (hardened container when available)' },
           { value: 'required', label: 'Required (never run it unsandboxed)' },
+          {
+            value: 'tiered',
+            label:
+              'Tiered (trust-classified container vs hardware-isolated, fail-closed)',
+          },
         ],
       },
       effort: {
