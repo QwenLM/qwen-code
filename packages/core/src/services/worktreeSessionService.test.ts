@@ -26,6 +26,7 @@ import {
   clearWorktreeSessionDurable,
   restoreWorktreeContext,
   getSessionRuntimeLiveness,
+  inspectSessionRuntimeLiveness,
   isSessionRuntimeActive,
   WorktreeSessionReadInconclusiveError,
   WorktreeRestoreRefusedError,
@@ -875,6 +876,172 @@ describe('isSessionRuntimeActive', () => {
     ).resolves.toBe('inactive');
   });
 
+  it('distinguishes missing evidence from unverifiable records across project dirs and candidate bases', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    const worktreeRoot = path.join(tmpDir, 'worktree');
+    await fs.mkdir(repoRoot, { recursive: true });
+    await fs.mkdir(worktreeRoot, { recursive: true });
+    const runtimeBase = path.join(repoRoot, '.qwen-runtime');
+    Storage.setRuntimeBaseDir(runtimeBase);
+
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('missing');
+    await expect(
+      getSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('unknown');
+
+    const foreignRecord = (workDir: string) =>
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        proc_start: null,
+        pid_ns: null,
+        session_id: 'owner-session',
+        work_dir: workDir,
+        hostname: 'unverifiable-owner.invalid',
+        started_at: Date.now() / 1000,
+        qwen_version: null,
+      });
+
+    // A1: unverifiable record under another project directory in the same base.
+    const otherProjectRecord = path.join(
+      runtimeBase,
+      'projects',
+      'subdir-project-hash',
+      'chats',
+      'owner-session.runtime.json',
+    );
+    await fs.mkdir(path.dirname(otherProjectRecord), { recursive: true });
+    await fs.writeFile(otherProjectRecord, foreignRecord(worktreeRoot));
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('unknown');
+    await fs.rm(otherProjectRecord);
+
+    // A2: unverifiable record under a candidate runtime base derived from roots.
+    const candidateBaseRecord = path.join(
+      worktreeRoot,
+      '.qwen-runtime',
+      'projects',
+      'candidate-project-hash',
+      'chats',
+      'owner-session.runtime.json',
+    );
+    await fs.mkdir(path.dirname(candidateBaseRecord), { recursive: true });
+    await fs.writeFile(candidateBaseRecord, foreignRecord(worktreeRoot));
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot]),
+    ).resolves.toBe('unknown');
+    await fs.rm(candidateBaseRecord);
+
+    // Corrupt JSON, unknown schema_version, and mismatched session_id must
+    // fail closed as 'unknown' rather than collapsing into 'missing'.
+    const hashedPath = new Storage(repoRoot).getRuntimeStatusPath(
+      'owner-session',
+    );
+    await fs.mkdir(path.dirname(hashedPath), { recursive: true });
+    await fs.writeFile(hashedPath, '{corrupt json');
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('unknown');
+
+    await fs.writeFile(
+      hashedPath,
+      JSON.stringify({
+        schema_version: 99,
+        pid: process.pid,
+        session_id: 'owner-session',
+        work_dir: repoRoot,
+        hostname: os.hostname(),
+        started_at: Date.now() / 1000,
+      }),
+    );
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('unknown');
+
+    await fs.writeFile(
+      hashedPath,
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        proc_start: null,
+        pid_ns: null,
+        session_id: 'different-session',
+        work_dir: repoRoot,
+        hostname: os.hostname(),
+        started_at: Date.now() / 1000,
+        qwen_version: null,
+      }),
+    );
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('unknown');
+    await fs.rm(hashedPath);
+
+    // Confirmed dead record returns inactive, not missing.
+    await writeRuntimeStatus(hashedPath, {
+      sessionId: 'owner-session',
+      workDir: repoRoot,
+      pid: 2147483647,
+    });
+    await expect(
+      inspectSessionRuntimeLiveness('owner-session', [repoRoot, worktreeRoot], {
+        scanProjectRoots: false,
+      }),
+    ).resolves.toBe('inactive');
+  });
+
+  it('finds active owners across symlinked repo roots inside a pinned runtime storage scope', async () => {
+    const realRepo = path.join(tmpDir, 'real-repo');
+    const linkRepo = path.join(tmpDir, 'link-repo');
+    const worktreeRoot = path.join(realRepo, '.qwen', 'worktrees', 'wt-linked');
+    await fs.mkdir(worktreeRoot, { recursive: true });
+    await fs.symlink(realRepo, linkRepo);
+
+    const pinnedBaseThroughLink = path.join(linkRepo, '.qwen-rel-rt');
+    const worktreeLocalBase = path.join(worktreeRoot, '.qwen-rel-rt');
+    const statusPath = new Storage(
+      worktreeRoot,
+      worktreeLocalBase,
+    ).getRuntimeStatusPath('owner-session');
+    await writeRuntimeStatus(statusPath, {
+      sessionId: 'owner-session',
+      workDir: worktreeRoot,
+      pid: process.pid,
+    });
+
+    const liveState = await Storage.runWithResolvedRuntimeBaseDir(
+      pinnedBaseThroughLink,
+      () =>
+        inspectSessionRuntimeLiveness(
+          'owner-session',
+          [realRepo, worktreeRoot],
+          { scanProjectRoots: false },
+        ),
+    );
+    expect(liveState).toBe('active');
+
+    await fs.rm(statusPath);
+    const missingState = await Storage.runWithResolvedRuntimeBaseDir(
+      pinnedBaseThroughLink,
+      () =>
+        inspectSessionRuntimeLiveness(
+          'owner-session',
+          [realRepo, worktreeRoot],
+          { scanProjectRoots: false },
+        ),
+    );
+    expect(missingState).toBe('missing');
+  });
+
   it('treats EPERM from the local pid probe as active', async () => {
     const repoRoot = path.join(tmpDir, 'repo');
     await fs.mkdir(repoRoot, { recursive: true });
@@ -1499,6 +1666,116 @@ describe('restoreWorktreeContext', () => {
     // daemon reset route's redirect and interrupted-transfer evidence.
     expect(await readWorktreeSession(filePath)).toEqual(superseded);
     expect(warnings).toHaveLength(1);
+  });
+
+  it('restores context when .qwen/worktrees is a symlink and sidecar stores its realpath', async () => {
+    const repoDir = path.join(tmpDir, 'repo-symlink');
+    const externalWorktrees = path.join(tmpDir, 'external-wt-store');
+    await fs.mkdir(path.join(repoDir, '.qwen'), { recursive: true });
+    await fs.mkdir(externalWorktrees, { recursive: true });
+    await fs.symlink(
+      externalWorktrees,
+      path.join(repoDir, '.qwen', 'worktrees'),
+    );
+    const realWorktreePath = path.join(externalWorktrees, 'my-feature');
+    await fs.mkdir(realWorktreePath, { recursive: true });
+    await fs.writeFile(
+      path.join(realWorktreePath, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const live: WorktreeSession = {
+      ...sample,
+      originalCwd: repoDir,
+      worktreePath: realWorktreePath,
+    };
+    await writeWorktreeSession(filePath, live);
+
+    const { result, warnings } = await restoreWithWarnings();
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain(`"${live.slug}"`);
+    expect(warnings).toEqual([]);
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('rejects and clears a sidecar whose worktreePath leaf is a symlink escaping outside the managed subtree', async () => {
+    const repoDir = path.join(tmpDir, 'repo-leaf-escape');
+    const outsideDir = path.join(tmpDir, 'outside-secret-dir');
+    await fs.mkdir(path.join(repoDir, '.qwen', 'worktrees'), {
+      recursive: true,
+    });
+    await fs.mkdir(outsideDir, { recursive: true });
+    const symlinkLeaf = path.join(repoDir, '.qwen', 'worktrees', 'my-feature');
+    await fs.symlink(outsideDir, symlinkLeaf);
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: repoDir,
+      worktreePath: symlinkLeaf,
+    });
+
+    const warnings: unknown[] = [];
+    const result = await restoreWorktreeContext(
+      filePath,
+      (e) => warnings.push(e),
+      'session-owner',
+    );
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(await readWorktreeSession(filePath)).toBeNull();
+    await expect(
+      fs.lstat(path.join(outsideDir, '.qwen-session')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects and clears a sidecar with a relative originalCwd', async () => {
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: '.',
+      worktreePath: path.resolve('.', '.qwen', 'worktrees', 'my-feature'),
+    });
+
+    const { result, warnings } = await restoreWithWarnings();
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('rejects and clears a sidecar using <symlink>/.. traversal inside worktreePath', async () => {
+    const repoDir = path.join(tmpDir, 'repo-dotdot-escape');
+    const outsideRoot = path.join(tmpDir, 'outside-victim');
+    const outsideSub = path.join(outsideRoot, 'sub');
+    const outsideTarget = path.join(outsideRoot, 'target');
+    await fs.mkdir(path.join(repoDir, '.qwen', 'worktrees', 'target'), {
+      recursive: true,
+    });
+    await fs.mkdir(outsideSub, { recursive: true });
+    await fs.mkdir(outsideTarget, { recursive: true });
+    await fs.symlink(
+      outsideSub,
+      path.join(repoDir, '.qwen', 'worktrees', 'link'),
+    );
+    const traversalPath = `${path.join(repoDir, '.qwen', 'worktrees', 'link')}/../target`;
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: repoDir,
+      worktreePath: traversalPath,
+    });
+
+    const warnings: unknown[] = [];
+    const result = await restoreWorktreeContext(
+      filePath,
+      (e) => warnings.push(e),
+      'session-owner',
+    );
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(await readWorktreeSession(filePath)).toBeNull();
+    await expect(
+      fs.lstat(path.join(outsideTarget, '.qwen-session')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('rejects and clears a sidecar whose worktreePath escapes the managed subtree', async () => {

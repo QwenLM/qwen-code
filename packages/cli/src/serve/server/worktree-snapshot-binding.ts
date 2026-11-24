@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
@@ -14,11 +15,46 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type { SessionService } from '@qwen-code/qwen-code-core';
 import {
-  canonicalPathForTesting,
   preclassifyWorktreeCleanup,
   type WorktreeCleanupPlan,
 } from './worktree-orphan-cleanup.js';
 import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
+
+/**
+ * Resolves a managed worktree path consistently before and after checkout
+ * removal: resolves existing paths via `fs.realpathSync`, and when the leaf is
+ * absent (`ENOENT`) resolves the nearest existing ancestor so a symlinked
+ * `.qwen/worktrees` parent yields the same coordinate before and after removal.
+ * Used for coordinate/owner matching and pre-locking, never to replace the
+ * raw-fallback ownership lock key the reset route depends on.
+ */
+export function resolveManagedWorktreePath(candidate: string): string {
+  if (candidate.length === 0) return candidate;
+  const resolved = path.resolve(candidate);
+  try {
+    return fsSync.realpathSync(resolved);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return resolved;
+    }
+  }
+  const trailing: string[] = [];
+  let current = resolved;
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) return resolved;
+    trailing.push(path.basename(current));
+    current = parent;
+    try {
+      const realAncestor = fsSync.realpathSync(current);
+      return path.join(realAncestor, ...trailing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return resolved;
+      }
+    }
+  }
+}
 
 export async function assertRestoreCoordinates(
   plan: WorktreeCleanupPlan,
@@ -29,10 +65,10 @@ export async function assertRestoreCoordinates(
     );
   }
   const source = new GitWorktreeService(plan.sidecar.originalCwd);
-  const expected = canonicalPathForTesting(
+  const expected = resolveManagedWorktreePath(
     source.getUserWorktreePath(plan.sidecar.slug),
   );
-  if (expected !== canonicalPathForTesting(plan.sidecar.worktreePath)) {
+  if (expected !== resolveManagedWorktreePath(plan.sidecar.worktreePath)) {
     throw new WorktreeRestoreUnavailableError(
       'Snapshot restore path does not match the managed slug',
     );
@@ -51,6 +87,7 @@ export async function assertNoConflictingWorktreeOwners(
   expected: string,
   isSessionLive: (sessionId: string) => boolean,
 ): Promise<void> {
+  const expectedResolved = resolveManagedWorktreePath(expected);
   const olderTombstones: string[] = [];
   for (const state of ['active', 'archived'] as const) {
     const directory = path.dirname(
@@ -74,7 +111,10 @@ export async function assertNoConflictingWorktreeOwners(
           'Other worktree records have become unavailable',
         );
       }
-      if (canonicalPathForTesting(other.session.worktreePath) !== expected) {
+      if (
+        resolveManagedWorktreePath(other.session.worktreePath) !==
+        expectedResolved
+      ) {
         continue;
       }
       if (other.session.supersededBy === sessionId) continue;
@@ -113,11 +153,16 @@ export async function reconcileUnrecordedRemovedWorktree(
   if (
     !latest ||
     latest.sidecarPath !== sidecarPath ||
-    latest.lockKey !== expectedWorktreePath ||
+    resolveManagedWorktreePath(latest.lockKey) !==
+      resolveManagedWorktreePath(expectedWorktreePath) ||
     latest.sidecar.worktreeRemoved !== undefined ||
-    canonicalPathForTesting(
-      new GitWorktreeService(latest.sidecar.originalCwd).getUserWorktreesDir(),
-    ) !== expectedManagedRoot
+    (expectedManagedRoot === undefined
+      ? true
+      : resolveManagedWorktreePath(
+          new GitWorktreeService(
+            latest.sidecar.originalCwd,
+          ).getUserWorktreesDir(),
+        ) !== resolveManagedWorktreePath(expectedManagedRoot))
   ) {
     return false;
   }

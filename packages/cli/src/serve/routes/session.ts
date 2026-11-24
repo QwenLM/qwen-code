@@ -4505,6 +4505,11 @@ export function registerSessionRoutes(
       });
       return new WorktreeResetInvalidStateError(sessionId);
     };
+    if (sidecar.worktreeRemoved !== undefined) {
+      throw new WorktreeRestoreUnavailableError(
+        'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+      );
+    }
     const realWorkspace = fs.realpathSync(workspaceCwd);
     if (sidecar.workspaceCwd !== undefined) {
       let realSidecarWorkspace: string;
@@ -4722,6 +4727,50 @@ export function registerSessionRoutes(
                 const newSidecarPath =
                   sessionService.getWorktreeSessionPath(replacementId);
                 const newRead = await readWorktreeSessionStrict(newSidecarPath);
+                const archivedNewSidecarPath =
+                  sessionService.getWorktreeSessionPathForArchiveState(
+                    replacementId,
+                    'archived',
+                  );
+                const archivedNewRead =
+                  archivedNewSidecarPath !== newSidecarPath
+                    ? await readWorktreeSessionStrict(archivedNewSidecarPath)
+                    : ({ state: 'missing' } as const);
+                if (
+                  newRead.state !== 'missing' &&
+                  archivedNewRead.state !== 'missing'
+                ) {
+                  // Active/archived conflict on the replacement session; keep
+                  // any existing resetPending fence armed.
+                  barrierArmed = false;
+                  throw new WorktreeResetInvalidStateError(sessionId);
+                }
+                const effectiveNewRead =
+                  newRead.state === 'missing' ? archivedNewRead : newRead;
+                if (
+                  effectiveNewRead.state === 'valid' &&
+                  effectiveNewRead.session.worktreeRemoved !== undefined
+                ) {
+                  // Ownership already moved to the replacement session; never
+                  // disarm the superseded session's resetPending fence here.
+                  barrierArmed = false;
+                  throw new WorktreeRestoreUnavailableError(
+                    'The replacement session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+                  );
+                }
+                if (
+                  (effectiveNewRead.state === 'valid' &&
+                    (effectiveNewRead.session.supersededBy !== undefined ||
+                      newRead.state === 'missing')) ||
+                  (newRead.state === 'missing' &&
+                    archivedNewRead.state === 'invalid')
+                ) {
+                  // Ownership already moved past the direct replacement (or the
+                  // replacement lives in archived state); never disarm the
+                  // superseded session's resetPending fence.
+                  barrierArmed = false;
+                  throw new WorktreeResetInvalidStateError(sessionId);
+                }
                 // Sidecar-link agreement only. The marker is the authority on
                 // what committed, so neither branch may consult the
                 // replacement's transcript record: a crash can leave the
@@ -4729,7 +4778,8 @@ export function registerSessionRoutes(
                 // it never converges.
                 const linksAgree =
                   newRead.state === 'valid' &&
-                  newRead.session.supersedes === storageSessionId;
+                  newRead.session.supersedes === storageSessionId &&
+                  newRead.session.supersededBy === undefined;
                 const marker =
                   await readWorktreeSessionMarkerStrict(realTarget);
                 if (marker.state === 'invalid') {
@@ -4896,6 +4946,9 @@ export function registerSessionRoutes(
                     'worktree reset resume found a marker naming another session',
                     { sessionId },
                   );
+                  // Ownership already moved past this superseded session; keep
+                  // any existing resetPending fence armed.
+                  barrierArmed = false;
                   throw new WorktreeResetInvalidStateError(sessionId);
                 }
               }
@@ -5246,17 +5299,26 @@ export function registerSessionRoutes(
         throw new SessionNotFoundError(sessionId);
       }
       let busy = false;
-      try {
-        const summary = runtime.bridge.getSessionSummary(storedSessionId);
-        busy =
-          summary.hasActivePrompt || (summary.pendingInteractionCount ?? 0) > 0;
-      } catch (error) {
-        // An offline retained chat has no live summary to be busy in.
-        if (
-          !isSessionNotFoundError(error) ||
-          (error as SessionNotFoundError).code === 'session_closing'
-        ) {
-          throw error;
+      const busyCandidateIds =
+        storedSessionId === sessionId
+          ? [sessionId]
+          : [sessionId, storedSessionId];
+      for (const candidateId of busyCandidateIds) {
+        try {
+          const summary = runtime.bridge.getSessionSummary(candidateId);
+          busy =
+            summary.hasActivePrompt ||
+            (summary.pendingPromptCount ?? 0) > 0 ||
+            (summary.pendingInteractionCount ?? 0) > 0;
+          break;
+        } catch (error) {
+          // An offline retained chat has no live summary to be busy in.
+          if (
+            !isSessionNotFoundError(error) ||
+            (error as SessionNotFoundError).code === 'session_closing'
+          ) {
+            throw error;
+          }
         }
       }
       if (busy) {
@@ -5293,6 +5355,7 @@ export function registerSessionRoutes(
       )(req, res);
     } catch (err) {
       if (res.headersSent) return;
+      if (sendConversationRuntimeError(res, err)) return;
       if (err instanceof WorktreeRestoreUnavailableError) {
         res.status(409).json({
           error: err.message,
@@ -5422,6 +5485,11 @@ export function registerSessionRoutes(
               throw new WorktreeResetInvalidStateError(storageSessionId);
             }
             const sidecar = lockedRead.session;
+            if (sidecar.worktreeRemoved !== undefined) {
+              throw new WorktreeRestoreUnavailableError(
+                'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+              );
+            }
             if (sidecar.worktreeBranch !== '') {
               res.status(409).json({
                 error: 'Worktree already has a branch',
@@ -5611,6 +5679,11 @@ export function registerSessionRoutes(
               const sidecar = lockedRead.session;
               // A superseded sidecar means a reset moved the checkout to a
               // replacement session; the marker must still name this session.
+              if (sidecar.worktreeRemoved !== undefined) {
+                throw new WorktreeRestoreUnavailableError(
+                  'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+                );
+              }
               if (sidecar.supersededBy !== undefined) {
                 throw new WorktreeResetInvalidStateError(storageSessionId);
               }
@@ -6216,6 +6289,11 @@ export function registerSessionRoutes(
             // orphaned the previous checkout.
             const preRead = await readWorktreeSessionStrict(sidecarPath);
             if (preRead.state === 'valid') {
+              if (preRead.session.worktreeRemoved !== undefined) {
+                throw new WorktreeRestoreUnavailableError(
+                  'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+                );
+              }
               res.status(409).json({
                 error: 'Session already has a managed worktree',
                 code: 'worktree_handoff_unsupported',

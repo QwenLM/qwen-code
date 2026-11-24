@@ -547,19 +547,34 @@ async function deletePersistedSessionWithLease(
 }
 
 export function sessionLiveOnBridge(
-  bridge: Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>,
+  bridge: Partial<
+    Pick<
+      AcpSessionBridge,
+      'getSessionSummary' | 'hasSessionOrPendingRegistration'
+    >
+  >,
   candidate: string,
 ): boolean {
-  if (!bridge.getSessionSummary) return true;
-  try {
-    bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
+  if (bridge.hasSessionOrPendingRegistration?.(candidate)) {
     return true;
-  } catch (error) {
-    return !(
-      isSessionNotFoundError(error) &&
-      (error as SessionNotFoundError).code !== 'session_closing'
-    );
   }
+  if (!bridge.getSessionSummary) return true;
+  const normalized = normalizeSessionIdForLookup(candidate);
+  const ids = normalized === candidate ? [candidate] : [normalized, candidate];
+  for (const id of ids) {
+    try {
+      bridge.getSessionSummary(id);
+      return true;
+    } catch (error) {
+      if (
+        !isSessionNotFoundError(error) ||
+        (error as SessionNotFoundError).code === 'session_closing'
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 async function prepareWorktreeCleanup(

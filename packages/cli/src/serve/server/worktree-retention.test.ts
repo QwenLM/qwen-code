@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   GitWorktreeService,
+  SessionService,
   readWorktreeSnapshotMeta,
   readWorktreeSessionStrict,
   WORKTREE_SESSION_FILE,
@@ -44,7 +45,10 @@ function git(cwd: string, home: string, ...args: string[]): string {
     stdio: 'pipe',
   }).trim();
 }
-import { createWorkspaceRegistry } from '../workspace-registry.js';
+import {
+  createWorkspaceGenerationGuard,
+  createWorkspaceRegistry,
+} from '../workspace-registry.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
@@ -268,12 +272,11 @@ function writeUnverifiableOwnerRecord(
   target: RetentionTestRuntime,
   sessionId: string,
   worktreePath: string,
-): void {
-  const storage = new Storage(
+  statusPath = new Storage(
     worktreePath,
     target.runtime.sessionRuntimeBaseDir,
-  );
-  const statusPath = storage.getRuntimeStatusPath(sessionId);
+  ).getRuntimeStatusPath(sessionId),
+): void {
   fs.mkdirSync(path.dirname(statusPath), { recursive: true });
   fs.writeFileSync(
     statusPath,
@@ -717,21 +720,496 @@ describe('worktree retention with real repositories', () => {
       dirty: true,
       activity: '2026-01-01T00:00:00.000Z',
     });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-eligible',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
     const newest = await makeRetainedSession(target, {
       slug: 'newest',
-      activity: '2026-01-02T00:00:00.000Z',
+      activity: '2026-01-03T00:00:00.000Z',
     });
     writeUnverifiableOwnerRecord(target, foreign.id, foreign.worktreePath);
 
-    expect((await sweep(target)).removed).toEqual([]);
+    expect((await sweep(target)).removed).toEqual([evicted.id]);
     expect(fs.existsSync(foreign.worktreePath)).toBe(true);
     const read = await readWorktreeSessionStrict(foreign.sidecarPath);
     expect(read.state).toBe('valid');
     if (read.state === 'valid') {
       expect(read.session.worktreeRemoved).toBeUndefined();
     }
+    await expectRetainedSnapshot(target, evicted);
     expect(fs.existsSync(newest.worktreePath)).toBe(true);
   });
+
+  it('preserves a checkout whose unverifiable owner record lives under another project directory', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const foreign = await makeRetainedSession(target, {
+      slug: 'foreign-subdir-owner',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-eligible',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const otherProjectStatusPath = path.join(
+      target.runtime.sessionRuntimeBaseDir,
+      'projects',
+      'resumed-from-worktree-subdir',
+      'chats',
+      `${foreign.id}.runtime.json`,
+    );
+    writeUnverifiableOwnerRecord(
+      target,
+      foreign.id,
+      foreign.worktreePath,
+      otherProjectStatusPath,
+    );
+
+    expect((await sweep(target)).removed).toEqual([evicted.id]);
+    expect(fs.existsSync(foreign.worktreePath)).toBe(true);
+    const read = await readWorktreeSessionStrict(foreign.sidecarPath);
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.worktreeRemoved).toBeUndefined();
+    }
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves a checkout whose unverifiable owner record lives in a candidate runtime base', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const nestedRuntimeBase = path.join(target.repo, '.qwen-nested-runtime');
+    target.runtime = {
+      ...target.runtime,
+      sessionRuntimeBaseDir: nestedRuntimeBase,
+      env: {
+        ...target.runtime.env,
+        effectiveEnv: {
+          ...target.runtime.env.effectiveEnv,
+          QWEN_RUNTIME_DIR: nestedRuntimeBase,
+        },
+      },
+    };
+    target.service = new SessionService(target.repo, {
+      runtimeBaseDir: nestedRuntimeBase,
+    });
+    configureRetention(target, 1);
+    const foreign = await makeRetainedSession(target, {
+      slug: 'foreign-candidate-base',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-eligible',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const candidateStatusPath = path.join(
+      foreign.worktreePath,
+      '.qwen-nested-runtime',
+      'projects',
+      'candidate-base-project',
+      'chats',
+      `${foreign.id}.runtime.json`,
+    );
+    writeUnverifiableOwnerRecord(
+      target,
+      foreign.id,
+      foreign.worktreePath,
+      candidateStatusPath,
+    );
+
+    expect((await sweep(target)).removed).toEqual([evicted.id]);
+    expect(fs.existsSync(foreign.worktreePath)).toBe(true);
+    const read = await readWorktreeSessionStrict(foreign.sidecarPath);
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.worktreeRemoved).toBeUndefined();
+    }
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves a checkout when the owner runtime record is corrupt or uses a newer schema version', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const corrupt = await makeRetainedSession(target, {
+      slug: 'corrupt-owner-record',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newerSchema = await makeRetainedSession(target, {
+      slug: 'newer-schema-record',
+      dirty: true,
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-eligible',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-04T00:00:00.000Z',
+    });
+
+    const corruptPath = new Storage(
+      corrupt.worktreePath,
+      target.runtime.sessionRuntimeBaseDir,
+    ).getRuntimeStatusPath(corrupt.id);
+    fs.mkdirSync(path.dirname(corruptPath), { recursive: true });
+    fs.writeFileSync(corruptPath, '{half-written');
+
+    const newerPath = new Storage(
+      newerSchema.worktreePath,
+      target.runtime.sessionRuntimeBaseDir,
+    ).getRuntimeStatusPath(newerSchema.id);
+    fs.mkdirSync(path.dirname(newerPath), { recursive: true });
+    fs.writeFileSync(
+      newerPath,
+      JSON.stringify({
+        schema_version: 99,
+        pid: process.pid,
+        session_id: newerSchema.id,
+        work_dir: newerSchema.worktreePath,
+        hostname: os.hostname(),
+        started_at: Date.now() / 1000,
+      }),
+    );
+
+    expect((await sweep(target)).removed).toEqual([evicted.id]);
+    expect(fs.existsSync(corrupt.worktreePath)).toBe(true);
+    expect(fs.existsSync(newerSchema.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves a checkout that contains another registered workspace', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const hosted = await makeRetainedSession(target, {
+      slug: 'registered-nested-ws',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-eligible',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const nestedWorkspaceSubdir = path.join(hosted.worktreePath, 'packages');
+    fs.mkdirSync(nestedWorkspaceSubdir, { recursive: true });
+    const nestedRuntime = {
+      ...target.runtime,
+      workspaceId: 'nested-worktree-ws',
+      workspaceCwd: nestedWorkspaceSubdir,
+      primary: false,
+      generationGuard: createWorkspaceGenerationGuard(),
+    };
+    const registry = createWorkspaceRegistry([target.runtime, nestedRuntime]);
+
+    const report = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      sweepWorktreeRetentionOnce(target.runtime, registry, coordinator),
+    );
+    expect(report.removed).toEqual([evicted.id]);
+    expect(fs.existsSync(hosted.worktreePath)).toBe(true);
+    const read = await readWorktreeSessionStrict(hosted.sidecarPath);
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.worktreeRemoved).toBeUndefined();
+    }
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves a monorepo subdir workspace checkout with a live process in a pinned worktree-local runtime base', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const subdir = path.join(target.repo, 'packages', 'app');
+    fs.mkdirSync(subdir, { recursive: true });
+    const relativeRuntimeBase = path.join(subdir, '.qwen-local-rt');
+    const subRuntime = {
+      ...target.runtime,
+      workspaceCwd: subdir,
+      sessionRuntimeBaseDir: relativeRuntimeBase,
+      env: {
+        ...target.runtime.env,
+        effectiveEnv: {
+          ...target.runtime.env.effectiveEnv,
+          QWEN_RUNTIME_DIR: relativeRuntimeBase,
+        },
+      },
+    };
+    const subTarget: RetentionTestRuntime = {
+      ...target,
+      repo: subdir,
+      runtime: subRuntime,
+      service: new SessionService(subdir, {
+        runtimeBaseDir: relativeRuntimeBase,
+      }),
+      git: new GitWorktreeService(subdir),
+    };
+    configureRetention(subTarget, 1);
+
+    const activeOwner = await makeRetainedSession(subTarget, {
+      slug: 'subdir-live-owner',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    // Record originalCwd at repo root while workspaceCwd remains subdir,
+    // pinning that ownerProcessActive inspects sidecar.workspaceCwd too.
+    await writeWorktreeSession(activeOwner.sidecarPath, {
+      ...activeOwner.sidecar,
+      originalCwd: target.repo,
+      workspaceCwd: subdir,
+    });
+    const evicted = await makeRetainedSession(subTarget, {
+      slug: 'subdir-evicted',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(subTarget, {
+      slug: 'subdir-newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+
+    const worktreeLocalBase = path.join(
+      activeOwner.worktreePath,
+      '.qwen-local-rt',
+    );
+    const statusPath = new Storage(
+      activeOwner.worktreePath,
+      worktreeLocalBase,
+    ).getRuntimeStatusPath(activeOwner.id);
+    await writeRuntimeStatus(statusPath, {
+      sessionId: activeOwner.id,
+      workDir: activeOwner.worktreePath,
+      pid: process.pid,
+    });
+
+    const outcome = await sweep(subTarget);
+    expect(outcome.removed).toEqual([evicted.id]);
+    expect(fs.existsSync(activeOwner.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(subTarget, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves a checkout under a symlinked worktrees root when a registered nested workspace uses the symlink alias', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const externalWorktrees = path.join(root, 'external-worktrees-store');
+    fs.mkdirSync(externalWorktrees, { recursive: true });
+    fs.mkdirSync(path.join(target.repo, '.qwen'), { recursive: true });
+    fs.symlinkSync(
+      externalWorktrees,
+      path.join(target.repo, '.qwen', 'worktrees'),
+    );
+    configureRetention(target, 1);
+
+    const hosted = await makeRetainedSession(target, {
+      slug: 'hosted-symlink-leaf',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'evicted-symlink-leaf',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-symlink-leaf',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+
+    const nestedWorkspaceViaSymlink = path.join(
+      target.repo,
+      '.qwen',
+      'worktrees',
+      'hosted-symlink-leaf',
+      'packages',
+    );
+    fs.mkdirSync(nestedWorkspaceViaSymlink, { recursive: true });
+    const nestedRuntime = {
+      ...target.runtime,
+      workspaceId: 'nested-symlink-alias-ws',
+      workspaceCwd: nestedWorkspaceViaSymlink,
+      primary: false,
+      generationGuard: createWorkspaceGenerationGuard(),
+    };
+    const registry = createWorkspaceRegistry([target.runtime, nestedRuntime]);
+
+    const report = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      sweepWorktreeRetentionOnce(target.runtime, registry, coordinator),
+    );
+    expect(report.removed).toEqual([evicted.id]);
+    expect(fs.existsSync(hosted.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('protects uppercase legacy UUID sessions pinned or bound to cron tasks under normalized lowercase keys', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const pinnedUpperId = '550E8400-E29B-41D4-A716-446655440101';
+    const boundUpperId = '550E8400-E29B-41D4-A716-446655440102';
+    const pinnedSession = await makeRetainedSession(target, {
+      sessionId: pinnedUpperId,
+      slug: 'legacy-upper-pinned',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const boundSession = await makeRetainedSession(target, {
+      sessionId: boundUpperId,
+      slug: 'legacy-upper-bound',
+      dirty: true,
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-evicted-control',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-control',
+      activity: '2026-01-04T00:00:00.000Z',
+    });
+
+    await runWithWorkspaceRuntimeStorage(target.runtime, async () => {
+      const org = new SessionOrganizationService(target.repo);
+      await org.updateSessionOrganization(pinnedUpperId.toLowerCase(), {
+        isPinned: true,
+      });
+    });
+
+    await writeScheduledTaskFile(target, [
+      persistentTask(boundUpperId.toLowerCase()),
+    ]);
+
+    const outcome = await sweep(target);
+    expect(outcome.issues).toEqual([]);
+    expect(outcome.removed).toEqual([evicted.id]);
+    expect(fs.existsSync(pinnedSession.worktreePath)).toBe(true);
+    expect(fs.existsSync(boundSession.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('protects an uppercase legacy UUID session that is live on bridge under its original casing', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const liveUpperId = '550E8400-E29B-41D4-A716-446655440201';
+    const liveSession = await makeRetainedSession(target, {
+      sessionId: liveUpperId,
+      slug: 'legacy-upper-live-bridge',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-evicted-live-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-live-control',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+
+    const getSessionSummary = target.runtime.bridge.getSessionSummary.bind(
+      target.runtime.bridge,
+    );
+    vi.spyOn(target.runtime.bridge, 'getSessionSummary').mockImplementation(
+      (id: string) => {
+        if (id === liveUpperId) {
+          return {
+            sessionId: liveUpperId,
+            hasActivePrompt: false,
+            pendingPromptCount: 0,
+            pendingInteractionCount: 0,
+          } as ReturnType<typeof getSessionSummary>;
+        }
+        return getSessionSummary(id);
+      },
+    );
+
+    const outcome = await sweep(target);
+    expect(outcome.issues).toEqual([]);
+    expect(outcome.removed).toEqual([evicted.id]);
+    expect(fs.existsSync(liveSession.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('skips a session with a case-variant duplicate in the other archive state', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const upperId = '550E8400-E29B-41D4-A716-446655440301';
+    const conflicting = await makeRetainedSession(target, {
+      sessionId: upperId,
+      slug: 'legacy-upper-cross-state-conflict',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-evicted-conflict-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-conflict-control',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+
+    const archivedLowerTranscript = path.join(
+      path.dirname(
+        target.service.getWorktreeSessionPathForArchiveState(
+          upperId.toLowerCase(),
+          'archived',
+        ),
+      ),
+      `${upperId.toLowerCase()}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(archivedLowerTranscript), { recursive: true });
+    fs.copyFileSync(conflicting.transcriptPath, archivedLowerTranscript);
+
+    const outcome = await sweep(target);
+    expect(outcome.skipped).toContain(
+      `session archive location is not unique: ${upperId}`,
+    );
+    expect(outcome.removed).toEqual([evicted.id]);
+    expect(fs.existsSync(conflicting.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'sweeps excess checkouts even when the repository contains an unreadable unrelated subdirectory',
+    async () => {
+      const target = makeRetentionRepo(root, 'primary');
+      configureRetention(target, 1);
+      const evicted = await makeRetainedSession(target, {
+        slug: 'evicted-with-unreadable-repo-dir',
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      const newest = await makeRetainedSession(target, {
+        slug: 'newest',
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+      const lockedDir = path.join(target.repo, 'unreadable-unrelated-dir');
+      fs.mkdirSync(lockedDir, { recursive: true });
+      fs.chmodSync(lockedDir, 0o000);
+      try {
+        expect((await sweep(target)).removed).toEqual([evicted.id]);
+        await expectRetainedSnapshot(target, evicted);
+        expect(fs.existsSync(newest.worktreePath)).toBe(true);
+      } finally {
+        fs.chmodSync(lockedDir, 0o755);
+      }
+    },
+  );
 
   it('discards only a failed attempt snapshot after proving the checkout intact', async () => {
     const target = makeRetentionRepo(root, 'primary');
@@ -2219,6 +2697,39 @@ describe('worktree retention with real repositories', () => {
 
       expect(report.removed).toEqual([]);
       expect(report.skipped).toContain('management root is shared');
+      expect(fs.existsSync(old.worktreePath)).toBe(true);
+    },
+  );
+
+  it.each([false, null, 'off', []] as const)(
+    'pauses retention instead of falling back to default when worktree settings is %j',
+    async (invalidSection) => {
+      const target = makeRetentionRepo(root, 'primary');
+      const userSettings = path.join(target.home, '.qwen', 'settings.json');
+      fs.mkdirSync(path.dirname(userSettings), { recursive: true });
+      fs.writeFileSync(
+        userSettings,
+        JSON.stringify({ worktree: { maxRetained: 0 } }),
+      );
+      const workspaceSettings = path.join(
+        target.repo,
+        '.qwen',
+        'settings.json',
+      );
+      fs.mkdirSync(path.dirname(workspaceSettings), { recursive: true });
+      fs.writeFileSync(
+        workspaceSettings,
+        JSON.stringify({ worktree: invalidSection }),
+      );
+      const old = await makeRetainedSession(target, {
+        slug: `invalid-section-${String(invalidSection)}`,
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+
+      await expect(sweep(target)).rejects.toThrow(
+        'worktree settings must be an object; retention is paused',
+      );
       expect(fs.existsSync(old.worktreePath)).toBe(true);
     },
   );

@@ -42,7 +42,7 @@ P7 可配置 worktree 根、既有按龄期的 tool/agent 清扫、arena/managed
 
 清扫前会针对全部合规 siblings runtime 建立归属图。任何一个 root、环境或 settings 不可读时，自动清扫都会暂停，直到相关归属证据恢复；否则无法排除这个无法验证的 runtime 与其它 runtime 共享候选管理根。各 workspace 的 settings、storage 与上限仍独立适用，但「独立」不意味着在归属图不完整时也能继续删除。这是有意选择的保守暂停，不是借此静默忽略 secondary workspace。
 
-仅符合条件且通过 ownership 校验的记录计入 `N`。活跃及置顶 chat 受到额外保护，且不占用可删除配额：最近 `N` 个合规记录和这些受保护记录均存活。若某会话的 runtime 状态记录指向另一个进程中的存活 owner（例如在 TUI 中恢复了该会话），则视为活跃并保留；记录存在但本进程无法核验（另一 PID 命名空间，或共享 runtime base 的另一主机）时同样保留。daemon 创建的会话通常没有 runtime 记录，把缺失也当作活跃会让保留清扫完全失效。保留最新 `N` 个合规记录后，对更旧的合规记录优先清扫。chat 记录及 sidecar 存活，只有合规 checkout 被回收。
+仅符合条件且通过 ownership 校验的记录计入 `N`。活跃及置顶 chat 受到额外保护，且不占用可删除配额：最近 `N` 个合规记录和这些受保护记录均存活。若某会话在当前或候选 runtime base 中的 runtime 状态记录指向另一个进程中的存活 owner（例如在 TUI 中恢复了该会话），则视为活跃并保留；记录存在但本进程无法核验（损坏、不可读、更高 schema 版本、另一 PID 命名空间，或共享 runtime base 的另一主机）时同样保留。包含任何已注册 daemon workspace 的 checkout 同样保留。daemon 创建的会话通常没有 runtime 记录，把缺失也当作活跃会让保留清扫完全失效。保留最新 `N` 个合规记录后，对更旧的合规记录优先清扫。chat 记录及 sidecar 存活，只有合规 checkout 被回收。
 
 最后活动时间采用已有持久化 session/transcript 时间戳；如已有 live 活动时间，取较新的值。若无法读取 session 时间戳但已确认 sidecar 的 ownership，则使用经校验的 sidecar/快照时间戳作为已定义的 fallback。目录 mtime 不是活动时间；不可读或非法时间戳不能静默变成「最旧、最该删除」的候选。
 

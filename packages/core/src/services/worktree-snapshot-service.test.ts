@@ -2859,4 +2859,154 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     });
     await expect(fs.access(canary)).rejects.toThrow();
   });
+
+  it('refuses an archive member nested under the protected session marker path', async () => {
+    const stage = path.join(root, 'marker-subdir-stage');
+    await fs.mkdir(path.join(stage, WORKTREE_SESSION_FILE), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(stage, WORKTREE_SESSION_FILE, 'evil.txt'),
+      'nope\n',
+    );
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const archivePath = path.join(snapshotDir, 'marker-subdir.tar.gz');
+    await tar.create({ gzip: true, cwd: stage, file: archivePath }, [
+      `${WORKTREE_SESSION_FILE}/evil.txt`,
+    ]);
+    const meta: WorktreeSnapshotMeta = {
+      version: 1,
+      createdAt: Date.now(),
+      sessionId: 'session-marker-subdir',
+      slug: 'marker-subdir',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      headCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: '',
+      dirty: { tracked: 0, untracked: 1, deleted: [] },
+    };
+
+    await expect(
+      restoreWorktreeSnapshot(archivePath, worktree, meta),
+    ).rejects.toThrow(/protected/i);
+    await expect(
+      fs.lstat(path.join(worktree, WORKTREE_SESSION_FILE)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses tar Link entries targeting committed relative symlinks or non-archived files', async () => {
+    await fs.mkdir(path.join(worktree, 'a', 'b', 'c'), { recursive: true });
+    await fs.symlink('../../..', path.join(worktree, 'a', 'b', 'c', 'rel'));
+    await fs.mkdir(path.join(worktree, 'sub'), { recursive: true });
+    await fs.symlink('.', path.join(worktree, 'sub', 'self'));
+    git(worktree, 'add', 'a/b/c/rel', 'sub/self');
+    git(worktree, 'commit', '-qm', 'add relative symlinks', '--no-verify');
+
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    const meta: WorktreeSnapshotMeta = {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      sessionId: 'session-hardlink-symlink-escape',
+      slug: 'hardlink-symlink-escape',
+      baseCommit: head,
+      headCommit: head,
+      branch: '',
+      dirty: { tracked: 0, untracked: 2, deleted: [] },
+    };
+
+    const escapeTar = path.join(root, 'hardlink-escape-rel.tar');
+    await fs.writeFile(
+      escapeTar,
+      Buffer.concat([
+        ...rawTarMember('escape', '1', 'a/b/c/rel'),
+        ...rawTarMember('escape/pwned.txt', '0', '', Buffer.from('OWNED\n')),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await expect(
+      restoreWorktreeSnapshot(escapeTar, worktree, meta),
+    ).rejects.toThrow(/not an archived regular file/i);
+    await expect(
+      fs.lstat(path.join(path.dirname(worktree), 'pwned.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const gitOverwriteTar = path.join(root, 'hardlink-overwrite-git.tar');
+    await fs.writeFile(
+      gitOverwriteTar,
+      Buffer.concat([
+        ...rawTarMember('escape', '1', 'sub/self'),
+        ...rawTarMember(
+          `escape/${WORKTREE_SESSION_FILE}`,
+          '0',
+          '',
+          Buffer.from('hijacked-session\n'),
+        ),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await expect(
+      restoreWorktreeSnapshot(gitOverwriteTar, worktree, meta),
+    ).rejects.toThrow(/not an archived regular file/i);
+    await expect(
+      fs.lstat(path.join(worktree, WORKTREE_SESSION_FILE)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await fs.lstat(path.join(worktree, '.git'))).isDirectory()).toBe(
+      true,
+    );
+  });
+
+  it('refuses archive members containing internal dot segments', async () => {
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    const meta: WorktreeSnapshotMeta = {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      sessionId: 'session-dot-segment',
+      slug: 'dot-segment',
+      baseCommit: head,
+      headCommit: head,
+      branch: '',
+      dirty: { tracked: 0, untracked: 1, deleted: [] },
+    };
+    const dotTar = path.join(root, 'internal-dot.tar');
+    await fs.writeFile(
+      dotTar,
+      Buffer.concat([
+        ...rawTarMember('sub/file.txt', '0', '', Buffer.from('first\n')),
+        ...rawTarMember('sub/./file.txt', '0', '', Buffer.from('second\n')),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await expect(
+      restoreWorktreeSnapshot(dotTar, worktree, meta),
+    ).rejects.toThrow(/Unsafe path/i);
+  });
+
+  it('rejects invalid or empty baseCommit before writing any snapshot files', async () => {
+    await expect(
+      buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-empty-base',
+        slug: 'empty-base',
+        baseCommit: '',
+      }),
+    ).rejects.toThrow(/invalid baseCommit/i);
+
+    const head = git(worktree, 'rev-parse', 'HEAD');
+    const emptySnapDir = path.join(root, 'empty-commit-snaps');
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir: emptySnapDir,
+        meta: {
+          sessionId: 'session-empty-base',
+          slug: 'empty-base',
+          baseCommit: '',
+          headCommit: head,
+          branch: '',
+          dirty: { tracked: 0, untracked: 0, deleted: [] },
+        },
+      }),
+    ).rejects.toThrow(/invalid commit id/i);
+    await expect(fs.lstat(emptySnapDir)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
 });

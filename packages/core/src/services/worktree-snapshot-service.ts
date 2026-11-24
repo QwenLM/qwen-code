@@ -73,14 +73,18 @@ export interface WorktreeSnapshotPaths {
   checkoutMatchesCapture: boolean;
 }
 
+const COMMIT_OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 /**
  * A repo-relative path safe to join under a worktree root: relative, no
- * `..` segment, no drive/leading separator. The header is validated input
- * to a destructive restore step, so a traversal path is refused.
+ * `..` or `.` segment, no backslash or drive/leading separator. The header is
+ * validated input to a destructive restore step, so a traversal path is refused.
  */
 function isSafeRelativePath(p: string): boolean {
-  if (p.length === 0 || path.isAbsolute(p)) return false;
-  return !p.split('/').some((segment) => segment === '..' || segment === '');
+  if (p.length === 0 || path.isAbsolute(p) || p.includes('\\')) return false;
+  return !p
+    .split('/')
+    .some((segment) => segment === '..' || segment === '.' || segment === '');
 }
 
 /**
@@ -107,12 +111,16 @@ function isProtectedRel(norm: string): boolean {
   // Case-fold: on APFS/NTFS a '.GIT/config' entry aliases '.git/config', so
   // a case-sensitive comparison would let a restore remove the git link
   // (round-6 containment). Capture refuses case variants before starting tar
-  // so it cannot create an archive its own reader would reject (R8-7).
+  // so it cannot create an archive its own reader would reject (R8-7). Also
+  // block descendants of the session marker name so an archive cannot
+  // pre-create a directory at WORKTREE_SESSION_FILE.
   const lower = norm.toLowerCase();
+  const markerLower = WORKTREE_SESSION_FILE.toLowerCase();
   return (
     lower === '.git' ||
     lower.startsWith('.git/') ||
-    lower === WORKTREE_SESSION_FILE.toLowerCase()
+    lower === markerLower ||
+    lower.startsWith(`${markerLower}/`)
   );
 }
 
@@ -231,6 +239,11 @@ export async function buildWorktreeSnapshotMeta(
     baseCommit: string;
   },
 ): Promise<Omit<WorktreeSnapshotMeta, 'version' | 'createdAt'>> {
+  if (!COMMIT_OID_PATTERN.test(info.baseCommit)) {
+    throw new Error(
+      `Worktree snapshot meta: invalid baseCommit id (${info.baseCommit})`,
+    );
+  }
   await fs.access(path.join(worktreePath, '.git'));
   // A hidden index bit (assume-unchanged / skip-worktree) hides a second file
   // version — a staged draft or a tracked deletion — from `git status`, so the
@@ -567,7 +580,11 @@ async function checkoutMatchesCapture(
       } else if (entry.type === 'SymbolicLink') {
         captureEntry(rel, `symlink:${JSON.stringify(entry.linkpath ?? '')}`);
       } else if (entry.type === 'Link') {
-        hardlinks.set(rel, canonicalArchiveMemberName(entry.linkpath ?? ''));
+        if (hardlinks.has(rel)) {
+          archiveValid = false;
+        } else {
+          hardlinks.set(rel, canonicalArchiveMemberName(entry.linkpath ?? ''));
+        }
       } else if (entry.type === 'Directory') {
         captureEntry(`${rel}/`, 'directory');
       } else {
@@ -577,7 +594,7 @@ async function checkoutMatchesCapture(
   });
   for (const [rel, target] of hardlinks) {
     const content = captured.get(target);
-    if (content === undefined || content === 'directory') {
+    if (content === undefined || !content.startsWith('file:')) {
       archiveValid = false;
     } else {
       captureEntry(rel, content);
@@ -728,6 +745,12 @@ export async function captureWorktreeSnapshot(
   options: CaptureWorktreeSnapshotOptions,
 ): Promise<WorktreeSnapshotPaths> {
   const { worktreePath, snapshotDir, meta } = options;
+  if (
+    !COMMIT_OID_PATTERN.test(meta.baseCommit) ||
+    !COMMIT_OID_PATTERN.test(meta.headCommit)
+  ) {
+    throw new Error('Worktree snapshot: invalid commit id');
+  }
   await fs.access(path.join(worktreePath, '.git'));
   const matcher = await readSnapshotExclusions(worktreePath);
   const fullMeta: WorktreeSnapshotMeta = {
@@ -775,9 +798,14 @@ export async function captureWorktreeSnapshot(
     );
   });
 
-  await atomicWriteFile(metaPath, async (tmp) => {
-    await fs.writeFile(tmp, serializedMeta, 'utf8');
-  });
+  try {
+    await atomicWriteFile(metaPath, async (tmp) => {
+      await fs.writeFile(tmp, serializedMeta, 'utf8');
+    });
+  } catch (error) {
+    await fs.rm(snapshotPath, { force: true }).catch(() => {});
+    throw error;
+  }
 
   return {
     snapshotPath,
@@ -933,8 +961,8 @@ export async function selectWorktreeSnapshot(options: {
     }
     const meta = await readWorktreeSnapshotMeta(metaPath);
     if (
-      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(meta.baseCommit) ||
-      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(meta.headCommit)
+      !COMMIT_OID_PATTERN.test(meta.baseCommit) ||
+      !COMMIT_OID_PATTERN.test(meta.headCommit)
     ) {
       throw new Error(`Snapshot pair has invalid commit ids: ${metaPath}`);
     }
@@ -1023,6 +1051,23 @@ export async function restoreWorktreeSnapshot(
         );
         return;
       }
+      if (
+        entry.type !== 'File' &&
+        entry.type !== 'Directory' &&
+        entry.type !== 'SymbolicLink' &&
+        entry.type !== 'Link'
+      ) {
+        unsafeEntryError = new Error(
+          `Unsupported entry type in snapshot archive: ${entry.type}`,
+        );
+        return;
+      }
+      if (archived.has(norm)) {
+        unsafeEntryError = new Error(
+          `Duplicate path in snapshot archive: ${entry.path}`,
+        );
+        return;
+      }
       archived.set(norm, entry.type);
       if (entry.type === 'Link') {
         hardlinks.push([norm, entry.linkpath ?? '']);
@@ -1107,8 +1152,14 @@ export async function restoreWorktreeSnapshot(
   for (const [rel] of archived) {
     await assertRealContained(confine(rel), rel);
   }
-  for (const [, targetRel] of hardlinks) {
+  for (const [, rawTarget] of hardlinks) {
+    const targetRel = canonicalArchiveMemberName(rawTarget);
     const target = confine(targetRel);
+    if (archived.get(targetRel) !== 'File') {
+      throw new Error(
+        `Snapshot hardlink target is not an archived regular file: ${rawTarget}`,
+      );
+    }
     await assertRealContained(target, targetRel);
     const realTarget = await fs.realpath(target).catch(() => null);
     if (realTarget !== null) {
@@ -1266,13 +1317,40 @@ export async function restoreWorktreeSnapshot(
     // Replace existing HEAD files so creation applies the archived mode.
     unlink: true,
     // Keep absolute and ../ link targets (R8-5), but never materialize an
-    // archived symlink during extraction: a later member could traverse it as
-    // a parent and escape through a link created by the archive itself.
-    filter: (_path, entry) => 'type' in entry && entry.type !== 'SymbolicLink',
+    // archived SymbolicLink or Link during extraction: a later member could
+    // traverse a newly created symlink (or a hardlink to a HEAD relative
+    // symlink) as a parent and escape the worktree root.
+    filter: (_path, entry) =>
+      'type' in entry && entry.type !== 'SymbolicLink' && entry.type !== 'Link',
     // Lexical member checks and real-ancestor checks above remain the
     // OUT-OF-ROOT gate alongside the deferred link creation below.
     preservePaths: true,
   });
+  for (const [memberRel, rawTarget] of hardlinks) {
+    const targetRel = canonicalArchiveMemberName(rawTarget);
+    const memberPath = confine(memberRel);
+    const targetPath = confine(targetRel);
+    await assertRealContained(memberPath, memberRel);
+    await assertRealContained(targetPath, targetRel);
+    const targetStat = await fs.lstat(targetPath);
+    if (!targetStat.isFile()) {
+      throw new Error(
+        `Snapshot hardlink target is not a regular file: ${rawTarget}`,
+      );
+    }
+    await fs.mkdir(path.dirname(memberPath), { recursive: true });
+    const memberStat = await fs.lstat(memberPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+    if (memberStat?.isDirectory()) {
+      throw new Error(
+        `Snapshot hardlink conflicts with a directory: ${memberRel}`,
+      );
+    }
+    if (memberStat !== null) await fs.unlink(memberPath);
+    await fs.link(targetPath, memberPath);
+  }
   for (const [rel, linkTarget] of archivedSymlinks) {
     const target = confine(rel);
     await assertRealContained(target, rel);

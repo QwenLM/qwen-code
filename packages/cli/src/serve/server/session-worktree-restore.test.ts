@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   GitWorktreeService,
   readWorktreeSessionStrict,
+  restoreWorktreeContext,
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -774,6 +775,173 @@ describe('session worktree snapshot restore', () => {
     }
   });
 
+  it('restores a retained checkout through a symlinked worktrees parent when the sidecar recorded the realpath', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const externalWorktrees = path.join(root, 'real-worktrees-prod-shape');
+    fs.mkdirSync(externalWorktrees, { recursive: true });
+    fs.mkdirSync(path.join(target.repo, '.qwen'), { recursive: true });
+    fs.symlinkSync(
+      externalWorktrees,
+      path.join(target.repo, '.qwen', 'worktrees'),
+      'dir',
+    );
+    const created = await makeRetainedSession(target, {
+      slug: 'symlink-realpath-sidecar',
+      dirty: true,
+    });
+    // Mirror production POST /session which stores fs.realpathSync(worktree.path).
+    const realWorktreePath = fs.realpathSync(created.worktreePath);
+    await writeWorktreeSession(created.sidecarPath, {
+      ...created.sidecar,
+      worktreePath: realWorktreePath,
+    });
+    const state = await snapshotAndRemove(target, {
+      ...created,
+      worktreePath: realWorktreePath,
+      sidecar: { ...created.sidecar, worktreePath: realWorktreePath },
+    });
+
+    let handedOff: { worktreeKey: string; release: () => void } | undefined;
+    try {
+      const restored = await restoreWorktreeFromSessionSnapshot({
+        runtime: target.runtime,
+        sessionId: state.id,
+        archiveCoordinator: new SessionArchiveCoordinator(),
+        handoffWorktreeOwnership: (handoff) => {
+          handedOff = handoff;
+        },
+      });
+      expect(restored.reconstructed).toBe(true);
+      expect(handedOff?.worktreeKey).toBe(realWorktreePath);
+      expect(
+        fs.readFileSync(path.join(realWorktreePath, 'tracked.txt'), 'utf8'),
+      ).toBe('dirty-symlink-realpath-sidecar\n');
+      // Verify the follow-up loadSession -> restoreWorktreeContext check
+      // accepts the realpath sidecar instead of clearing it as tampered.
+      const resumeWarnings: unknown[] = [];
+      const resumedContext = await restoreWorktreeContext(
+        state.sidecarPath,
+        (warning) => resumeWarnings.push(warning),
+        state.id,
+      );
+      expect(resumeWarnings).toEqual([]);
+      expect(resumedContext.session?.worktreePath).toBe(realWorktreePath);
+      await expect(
+        readWorktreeSessionStrict(state.sidecarPath),
+      ).resolves.toMatchObject({ state: 'valid' });
+    } finally {
+      handedOff?.release();
+    }
+  });
+
+  it('heals an interrupted unarchive snapshot move before restoring', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'interrupted-unarchive-restore',
+        dirty: true,
+      }),
+    );
+    const activeDir = path.dirname(state.sidecarPath);
+    const archivedDir = path.dirname(
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      ),
+    );
+    fs.mkdirSync(archivedDir, { recursive: true });
+    const metaName = `${state.archiveKey.slice(0, -'.tar.gz'.length)}.json`;
+    // Simulate crash during unarchive Phase 1/2: sidecar is already active,
+    // snapshot pair is hardlinked across archived/ and active/ (nlink === 2).
+    fs.linkSync(
+      path.join(activeDir, state.archiveKey),
+      path.join(archivedDir, state.archiveKey),
+    );
+    fs.linkSync(
+      path.join(activeDir, metaName),
+      path.join(archivedDir, metaName),
+    );
+
+    const restored = await restore(target, state.id, true);
+    expect(restored.reconstructed).toBe(true);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-interrupted-unarchive-restore\n');
+    expect(fs.existsSync(path.join(archivedDir, state.archiveKey))).toBe(false);
+    expect(fs.existsSync(path.join(archivedDir, metaName))).toBe(false);
+    expect(
+      fs.lstatSync(path.join(activeDir, state.archiveKey), { bigint: true })
+        .nlink,
+    ).toBe(1n);
+  });
+
+  it('cleans up a newly created checkout under a symlinked worktrees parent when restore fails before marker creation', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const externalWorktrees = path.join(root, 'real-worktrees-rollback');
+    fs.mkdirSync(externalWorktrees, { recursive: true });
+    fs.mkdirSync(path.join(target.repo, '.qwen'), { recursive: true });
+    fs.symlinkSync(
+      externalWorktrees,
+      path.join(target.repo, '.qwen', 'worktrees'),
+      'dir',
+    );
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'symlink-rollback-retry',
+        dirty: true,
+      }),
+    );
+    const snapshotPath = path.join(
+      path.dirname(state.sidecarPath),
+      state.archiveKey,
+    );
+    const originalArchive = fs.readFileSync(snapshotPath);
+    fs.writeFileSync(snapshotPath, Buffer.from('corrupt-tar-bytes'));
+
+    await expect(restore(target, state.id, true)).rejects.toThrow();
+    // Rollback must remove the half-created checkout so a subsequent retry succeeds.
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+
+    fs.writeFileSync(snapshotPath, originalArchive);
+    const recovered = await restore(target, state.id, true);
+    expect(recovered.reconstructed).toBe(true);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-symlink-rollback-retry\n');
+  });
+
+  it('returns WorktreeRestoreUnavailableError when the snapshot base commit is missing from the repository', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'missing-commit-409',
+        dirty: true,
+      }),
+    );
+    const metaPath = path.join(
+      path.dirname(state.sidecarPath),
+      state.archiveKey.replace(/\.tar\.gz$/, '.json'),
+    );
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    meta['headCommit'] = 'f'.repeat(40);
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+
+    await expect(restore(target, state.id, true)).rejects.toBeInstanceOf(
+      WorktreeRestoreUnavailableError,
+    );
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+  });
+
   it('refuses restoration when the session has an active/archived conflict', async () => {
     const target = makeRetentionRepo(root, 'primary');
     configureRetention(target, 0);
@@ -824,5 +992,81 @@ describe('session worktree snapshot restore', () => {
     );
     expect(fs.existsSync(state.worktreePath)).toBe(false);
     expect(fs.readFileSync(archivedSidecar, 'utf8')).toBe(beforeArchived);
+  });
+
+  it('refuses to certify an existing checkout that switched onto an unrelated branch at the captured commit', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const created = await makeRetainedSession(target, {
+      slug: 'detached-no-branch-claim',
+      dirty: true,
+    });
+    // Detach HEAD so the snapshot is captured with meta.branch === ''.
+    git(target, created.worktreePath, 'checkout', '--detach', 'HEAD');
+    await writeWorktreeSession(created.sidecarPath, {
+      ...created.sidecar,
+      worktreeBranch: '',
+    });
+    const state = await snapshotAndRemove(target, {
+      ...created,
+      sidecar: { ...created.sidecar, worktreeBranch: '' },
+    });
+
+    // Reconstruct once so the checkout and marker exist, then restore the
+    // retained binding and switch the checkout to a branch at the same commit.
+    const first = await restore(target, state.id, true);
+    expect(first.branch).toBe('');
+    await writeWorktreeSession(state.sidecarPath, {
+      ...first.session,
+      worktreeRemoved: { archiveKey: state.archiveKey },
+    });
+    git(
+      target,
+      state.worktreePath,
+      'checkout',
+      '-b',
+      `qwen/${created.sidecar.slug}`,
+    );
+
+    await expect(restore(target, state.id, true)).rejects.toBeInstanceOf(
+      WorktreeRestoreUnavailableError,
+    );
+    const persisted = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(persisted.state).toBe('valid');
+    if (persisted.state === 'valid') {
+      expect(persisted.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+      expect(persisted.session.worktreeBranch).toBe('');
+    }
+  });
+
+  it('rolls back a newly created checkout when initial verification fails before marker creation so retry succeeds', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'rollback-initial-verify-mismatch',
+        dirty: true,
+      }),
+    );
+    const verifySpy = vi
+      .spyOn(snapshotVerification, 'verifyRestoredWorktreeSnapshot')
+      .mockResolvedValueOnce(false);
+
+    await expect(restore(target, state.id, true)).rejects.toBeInstanceOf(
+      WorktreeRestoreUnavailableError,
+    );
+    expect(verifySpy).toHaveBeenCalledTimes(1);
+    // Must cleanly roll back the newly created markerless checkout.
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+
+    verifySpy.mockRestore();
+    const recovered = await restore(target, state.id, true);
+    expect(recovered.reconstructed).toBe(true);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-rollback-initial-verify-mismatch\n');
   });
 });

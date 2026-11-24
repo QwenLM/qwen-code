@@ -626,11 +626,15 @@ export async function isSessionRuntimeActive(
 }
 
 export type SessionRuntimeLiveness = 'active' | 'inactive' | 'unknown';
+export type SessionRuntimeLivenessInspection =
+  | SessionRuntimeLiveness
+  | 'missing';
 
-export async function getSessionRuntimeLiveness(
+export async function inspectSessionRuntimeLiveness(
   sessionId: string,
   projectRoots: string | readonly string[],
-): Promise<SessionRuntimeLiveness> {
+  options?: { scanProjectRoots?: boolean },
+): Promise<SessionRuntimeLivenessInspection> {
   const roots = uniquePaths(
     (Array.isArray(projectRoots) ? projectRoots : [projectRoots]).map((root) =>
       path.resolve(root),
@@ -642,11 +646,12 @@ export async function getSessionRuntimeLiveness(
 
   for (const runtimeBase of runtimeBases) {
     for (const projectRoot of roots) {
-      const statusPath = await Storage.runWithRuntimeBaseDir(
+      // Pass runtimeBase directly instead of Storage.runWithRuntimeBaseDir,
+      // which is intentionally a no-op inside pinned workspace storage scopes.
+      const statusPath = new Storage(
+        projectRoot,
         runtimeBase,
-        undefined,
-        async () => new Storage(projectRoot).getRuntimeStatusPath(sessionId),
-      );
+      ).getRuntimeStatusPath(sessionId);
       const statusState = await getRuntimeStatusPathState(
         statusPath,
         sessionId,
@@ -666,27 +671,83 @@ export async function getSessionRuntimeLiveness(
     sawUnknownRuntimeStatus ||= baseState === 'unknown';
   }
 
-  const scanResult = await scanRuntimeStatusUnderRoots(roots, sessionId);
-  if (scanResult === 'active') {
-    return 'active';
+  if (options?.scanProjectRoots !== false) {
+    const scanResult = await scanRuntimeStatusUnderRoots(roots, sessionId);
+    if (scanResult === 'active') {
+      return 'active';
+    }
+    sawUnknownRuntimeStatus ||= scanResult === 'unknown';
   }
-  sawUnknownRuntimeStatus ||= scanResult === 'unknown';
 
-  if (sawUnknownRuntimeStatus || !sawDeadRuntimeStatus) return 'unknown';
-  return 'inactive';
+  if (sawUnknownRuntimeStatus) return 'unknown';
+  if (sawDeadRuntimeStatus) return 'inactive';
+  return 'missing';
+}
+
+export async function getSessionRuntimeLiveness(
+  sessionId: string,
+  projectRoots: string | readonly string[],
+): Promise<SessionRuntimeLiveness> {
+  const inspected = await inspectSessionRuntimeLiveness(
+    sessionId,
+    projectRoots,
+  );
+  return inspected === 'missing' ? 'unknown' : inspected;
+}
+
+function resolveExistingOrAncestor(candidate: string): string {
+  const resolved = path.resolve(candidate);
+  try {
+    return nodeFs.realpathSync(resolved);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'ENOENT') {
+      return resolved;
+    }
+  }
+  const trailing: string[] = [];
+  let current = resolved;
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) return resolved;
+    trailing.push(path.basename(current));
+    current = parent;
+    try {
+      const realAncestor = nodeFs.realpathSync(current);
+      return path.join(realAncestor, ...trailing.reverse());
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== 'ENOENT') {
+        return resolved;
+      }
+    }
+  }
 }
 
 function getRuntimeBaseCandidates(projectRoots: readonly string[]): string[] {
   const currentBase = path.resolve(Storage.getRuntimeBaseDir());
-  const candidates = [currentBase];
+  const realCurrentBase = resolveExistingOrAncestor(currentBase);
+  const baseVariants = uniquePaths([currentBase, realCurrentBase]);
+  const rootVariants = uniquePaths(
+    projectRoots.flatMap((root) => [
+      path.resolve(root),
+      resolveExistingOrAncestor(root),
+    ]),
+  );
+  const candidates = [...baseVariants];
 
-  for (const root of projectRoots) {
-    const rel = path.relative(root, currentBase);
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
-      continue;
-    }
-    for (const candidateRoot of projectRoots) {
-      candidates.push(path.resolve(candidateRoot, rel));
+  for (const baseVariant of baseVariants) {
+    for (const root of rootVariants) {
+      const rel = path.relative(root, baseVariant);
+      if (
+        rel === '' ||
+        rel === '..' ||
+        rel.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(rel)
+      ) {
+        continue;
+      }
+      for (const candidateRoot of rootVariants) {
+        candidates.push(path.resolve(candidateRoot, rel));
+      }
     }
   }
 
@@ -823,8 +884,21 @@ async function getRuntimeStatusPathState(
   sessionId: string,
 ): Promise<RuntimeStatusState> {
   const status = await readRuntimeStatus(statusPath);
-  if (!status || status.sessionId !== sessionId) {
-    return 'missing';
+  if (!status) {
+    // Distinguish genuine absence (ENOENT) from an unreadable, corrupt, or
+    // newer-schema record so callers that allow work on 'missing' stay
+    // fail-closed whenever a record file exists or cannot be inspected.
+    try {
+      await fs.lstat(statusPath);
+      return 'unknown';
+    } catch (error) {
+      return isNodeError(error) && error.code === 'ENOENT'
+        ? 'missing'
+        : 'unknown';
+    }
+  }
+  if (status.sessionId.toLowerCase() !== sessionId.toLowerCase()) {
+    return 'unknown';
   }
 
   if (status.hostname !== os.hostname()) {
@@ -1000,9 +1074,30 @@ export async function restoreWorktreeContext(
   // there. Restrict to the Qwen-managed worktrees subtree so a
   // tampered sidecar can't redirect file operations to /etc, ~/, etc.
   // (PR #4174 review #3256839787.)
+  const hasParentTraversalSegment = (value: string) =>
+    value.split(/[/\\]/).includes('..');
   const expectedParent = path.join(session.originalCwd, '.qwen', 'worktrees');
-  const resolvedWorktree = path.resolve(session.worktreePath);
-  if (!resolvedWorktree.startsWith(expectedParent + path.sep)) {
+  const foldsCase =
+    process.platform === 'win32' || process.platform === 'darwin';
+  const normalizeForContainment = (value: string) =>
+    foldsCase ? value.toLowerCase() : value;
+  const realExpectedParent = normalizeForContainment(
+    resolveExistingOrAncestor(expectedParent),
+  );
+  const realWorktree = normalizeForContainment(
+    resolveExistingOrAncestor(session.worktreePath),
+  );
+  const relWorktree = path.relative(realExpectedParent, realWorktree);
+  const isContained =
+    path.isAbsolute(session.originalCwd) &&
+    path.isAbsolute(session.worktreePath) &&
+    !hasParentTraversalSegment(session.originalCwd) &&
+    !hasParentTraversalSegment(session.worktreePath) &&
+    relWorktree.length > 0 &&
+    relWorktree !== '..' &&
+    !relWorktree.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relWorktree);
+  if (!isContained) {
     onWarn?.(
       new Error(
         `worktreePath ${session.worktreePath} is outside ${expectedParent}; ` +

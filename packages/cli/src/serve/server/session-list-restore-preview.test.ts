@@ -406,7 +406,7 @@ describe('worktree restoration preview metadata', () => {
     expect(invalid.worktree?.canRestore).toBe(false);
 
     fs.rmSync(record.sidecarPath);
-    expect((await load()).worktree?.worktreeRemoved).toBeUndefined();
+    expect((await load()).worktree).toBeUndefined();
   });
 
   it('attests the selected runtime root once for multiple preview records', async () => {

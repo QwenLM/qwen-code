@@ -26,7 +26,6 @@ import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import {
-  acquireWorktreeCleanupLock,
   canonicalPathForTesting,
   preclassifyWorktreeCleanup,
 } from './worktree-orphan-cleanup.js';
@@ -36,9 +35,11 @@ import {
 } from './session-archive.js';
 import type { WorktreeRestoreHandoff } from './session-restore.js';
 import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
+import { finishInterruptedSnapshotMove } from './worktree-snapshot-pairs.js';
 import {
   assertNoConflictingWorktreeOwners,
   assertRestoreCoordinates,
+  resolveManagedWorktreePath,
 } from './worktree-snapshot-binding.js';
 
 async function stateAt(directory: string): Promise<string | null> {
@@ -74,6 +75,16 @@ async function namedRefAtHead(
   head: string,
 ): Promise<boolean> {
   if (!branch) return false;
+  const validBranch = await runGit(sourceCwd, [
+    ...NO_EXEC_CONFIG,
+    'check-ref-format',
+    '--branch',
+    branch,
+  ]).then(
+    () => true,
+    () => false,
+  );
+  if (!validBranch) return false;
   const resolved = await runGit(sourceCwd, [
     ...NO_EXEC_CONFIG,
     'rev-parse',
@@ -123,12 +134,32 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
   const expected = canonicalPathForTesting(
     source.getUserWorktreePath(initial.sidecar.slug),
   );
-  // A missing checkout intentionally uses the raw managed-path lock key.
-  const release = await acquireWorktreeCleanupLock(initial);
+  // Pre-acquire both the missing-path raw key and the future resolved key in
+  // global lexicographic order BEFORE taking the archive exclusive lock. This
+  // matches withWorktreeArchiveMove's sorted lock order and eliminates ABBA
+  // deadlocks across symlinked worktrees parents without changing the
+  // raw-fallback lock key contract relied on by the reset route.
+  const sortedLockKeys = [
+    ...new Set([
+      initial.lockKey,
+      expected,
+      resolveManagedWorktreePath(expected),
+    ]),
+  ].sort();
+  const heldLockKeys = new Set<string>();
+  const releases: Array<() => void> = [];
+  const releaseAll = () => {
+    for (let i = releases.length - 1; i >= 0; i--) {
+      releases[i]!();
+    }
+  };
   let handedOff = false;
   let handoffKey = initial.lockKey;
-  let releaseRealKey: (() => void) | undefined;
   try {
+    for (const key of sortedLockKeys) {
+      releases.push(await acquireWorktreeOwnershipOp(key));
+      heldLockKeys.add(key);
+    }
     const task = archiveCoordinator.runExclusiveMany([sessionId], async () => {
       const location = await service.getMaintainableSessionLocation(sessionId);
       if (location === 'archived') {
@@ -171,6 +202,17 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
           'Snapshot restoration ownership changed',
         );
       }
+      if (
+        latest.otherStateSidecarDir !== undefined &&
+        latest.sidecar.worktreeRemoved !== undefined
+      ) {
+        await finishInterruptedSnapshotMove(
+          latest.otherStateSidecarDir,
+          path.dirname(latest.sidecarPath),
+          sessionId,
+          latest.sidecar.worktreeRemoved.archiveKey,
+        );
+      }
       const selected = await selectWorktreeSnapshot({
         directory: path.dirname(latest.sidecarPath),
         sessionId,
@@ -201,14 +243,21 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
           'Snapshot head is not a full object id for this repository',
         );
       }
-      await runGit(latest.sidecar.originalCwd, [
-        ...NO_EXEC_CONFIG,
-        'cat-file',
-        '-e',
-        `${selected.meta.headCommit}^{commit}`,
-      ]);
+      try {
+        await runGit(latest.sidecar.originalCwd, [
+          ...NO_EXEC_CONFIG,
+          'cat-file',
+          '-e',
+          `${selected.meta.headCommit}^{commit}`,
+        ]);
+      } catch {
+        throw new WorktreeRestoreUnavailableError(
+          'The snapshot base commit is no longer present in the repository',
+        );
+      }
 
       const existing = await stateAt(expected);
+      let expectedBranch = '';
       if (existing) {
         if (!(await preservedMarkerMatches(sessionId, expected))) {
           throw new WorktreeRestoreUnavailableError(
@@ -216,11 +265,35 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
           );
         }
         if (!latest.sidecar.worktreeRemoved) {
+          const canonicalKey = canonicalPathForTesting(expected);
+          if (!heldLockKeys.has(canonicalKey)) {
+            throw new WorktreeRestoreUnavailableError(
+              'Restored worktree path changed while restoring',
+            );
+          }
+          handoffKey = canonicalKey;
           return {
             session: latest.sidecar,
             branch: latest.sidecar.worktreeBranch,
             reconstructed: false,
           };
+        }
+        const current = await headAndBranch(expected);
+        if (current.branch !== '' && current.branch !== selected.meta.branch) {
+          throw new WorktreeRestoreUnavailableError(
+            'Restored worktree branch does not match the selected snapshot',
+          );
+        }
+        expectedBranch = current.branch;
+        const firstExistingMatch = await verifyRestoredWorktreeSnapshot({
+          worktreePath: expected,
+          snapshotPath: selected.snapshotPath,
+          meta: { ...selected.meta, branch: expectedBranch },
+        });
+        if (!firstExistingMatch) {
+          throw new WorktreeRestoreUnavailableError(
+            'Restored content does not match the selected snapshot',
+          );
         }
       } else {
         const attach =
@@ -242,11 +315,14 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
         }
         // The ref is attached only at the unchanged captured commit. It is
         // never reset, and a moved/inaccessible ref leaves a detached HEAD.
+        // Re-canonicalize `expected` now that the directory exists so a
+        // symlinked parent matches the newly created realpath.
         const canDiscardCreatedCheckout =
-          !existing &&
-          canonicalPathForTesting(created.worktree.path) === expected;
+          canonicalPathForTesting(created.worktree.path) ===
+          canonicalPathForTesting(expected);
         let hasOwnershipMarker = false;
         try {
+          let attachedBranch = false;
           if (
             attach &&
             (await namedRefAtHead(
@@ -255,24 +331,54 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
               selected.meta.headCommit,
             ))
           ) {
-            await source
+            attachedBranch = await source
               .checkoutBranchInCheckout(expected, selected.meta.branch, {
                 noOverwriteIgnore: true,
               })
-              .catch(() => undefined);
+              .then(
+                () => true,
+                () => false,
+              );
+            if (attachedBranch) {
+              const afterBranch = await headAndBranch(expected);
+              if (
+                afterBranch.head !== selected.meta.headCommit ||
+                (afterBranch.branch !== '' &&
+                  afterBranch.branch !== selected.meta.branch)
+              ) {
+                await runGit(expected, [
+                  ...NO_EXEC_CONFIG,
+                  'checkout',
+                  '--detach',
+                  selected.meta.headCommit,
+                ]);
+                attachedBranch = false;
+              } else if (afterBranch.branch !== selected.meta.branch) {
+                attachedBranch = false;
+              }
+            }
           }
+          expectedBranch = attachedBranch ? selected.meta.branch : '';
           await restoreWorktreeSnapshot(
             selected.snapshotPath,
             expected,
             selected.meta,
           );
+          // Verify restored content/HEAD before claiming the directory with
+          // the exclusive marker so a first-pass mismatch cleanly rolls back
+          // the newly created checkout instead of stranding retries.
+          const firstCreatedMatch = await verifyRestoredWorktreeSnapshot({
+            worktreePath: expected,
+            snapshotPath: selected.snapshotPath,
+            meta: { ...selected.meta, branch: expectedBranch },
+          });
+          if (!firstCreatedMatch) {
+            throw new WorktreeRestoreUnavailableError(
+              'Restored content does not match the selected snapshot',
+            );
+          }
           options.assertRuntimeGenerationOpen?.();
           if (!(await preservedMarkerMatches(sessionId, expected))) {
-            if (existing) {
-              throw new WorktreeRestoreUnavailableError(
-                'The retained target changed during restoration',
-              );
-            }
             await createWorktreeSessionMarkerExclusive(expected, sessionId);
           }
           hasOwnershipMarker = true;
@@ -311,21 +417,13 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
           throw error;
         }
       }
-      let actual = await headAndBranch(expected);
-      const matching = async () =>
-        verifyRestoredWorktreeSnapshot({
-          worktreePath: expected,
-          snapshotPath: selected.snapshotPath,
-          meta: { ...selected.meta, branch: actual.branch },
-        });
-      if (!(await matching())) {
-        throw new WorktreeRestoreUnavailableError(
-          'Restored content does not match the selected snapshot',
-        );
-      }
       options.assertRuntimeGenerationOpen?.();
-      actual = await headAndBranch(expected);
-      if (!(await matching())) {
+      const secondMatch = await verifyRestoredWorktreeSnapshot({
+        worktreePath: expected,
+        snapshotPath: selected.snapshotPath,
+        meta: { ...selected.meta, branch: expectedBranch },
+      });
+      if (!secondMatch) {
         throw new WorktreeRestoreUnavailableError(
           'Restored content changed before binding',
         );
@@ -336,50 +434,44 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
           'The restore target does not have the exclusive session marker',
         );
       }
+      const canonicalKey = canonicalPathForTesting(expected);
+      if (!heldLockKeys.has(canonicalKey)) {
+        throw new WorktreeRestoreUnavailableError(
+          'Restored worktree path changed while restoring',
+        );
+      }
       const session = {
         ...latest.sidecar,
-        worktreePath: expected,
-        worktreeBranch: actual.branch,
+        worktreePath: canonicalKey,
+        worktreeBranch: expectedBranch,
       };
       delete session.worktreeRemoved;
       await writeWorktreeSession(latest.sidecarPath, session);
       const persisted = await readWorktreeSessionForBinding(latest.sidecarPath);
       if (
         !persisted ||
-        persisted.worktreeBranch !== actual.branch ||
+        persisted.worktreeBranch !== expectedBranch ||
         Boolean(persisted.worktreeRemoved)
       ) {
         throw new WorktreeRestoreUnavailableError(
           'Restored binding failed its final state check',
         );
       }
-      // The lock key was taken while the checkout was missing, so a symlinked
-      // worktrees parent kept the raw spelling. Every operation after this
-      // point derives the resolved key; hold it before handing the checkout
-      // over so the raw key never outlives the reconstruction.
-      const canonicalKey = canonicalPathForTesting(expected);
-      if (canonicalKey !== initial.lockKey) {
-        releaseRealKey = await acquireWorktreeOwnershipOp(canonicalKey);
-        handoffKey = canonicalKey;
-      }
-      return { session, branch: actual.branch, reconstructed: !existing };
+      handoffKey = canonicalKey;
+      return { session, branch: expectedBranch, reconstructed: !existing };
     });
     const binding = await task;
     if (options.handoffWorktreeOwnership) {
       options.handoffWorktreeOwnership({
         worktreeKey: handoffKey,
-        release: () => {
-          releaseRealKey?.();
-          release();
-        },
+        release: releaseAll,
       });
       handedOff = true;
     }
     return binding;
   } finally {
     if (!handedOff) {
-      releaseRealKey?.();
-      release();
+      releaseAll();
     }
   }
 }

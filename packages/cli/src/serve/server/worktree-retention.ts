@@ -18,16 +18,15 @@ import {
   type WorktreeSnapshotPaths,
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
-  getSessionRuntimeLiveness,
+  inspectSessionRuntimeLiveness,
   readWorktreeSessionStrict,
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionOrganizationService } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { readCronTasks } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 import { collectBoundSessionIds } from '../scheduled-task-keepalive.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { readSettingsSnapshot } from '../../config/settings.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -42,7 +41,10 @@ import {
   type WorktreeCleanupPlan,
 } from './worktree-orphan-cleanup.js';
 import { sessionLiveOnBridge } from './session-archive.js';
-import { reconcileUnrecordedRemovedWorktree } from './worktree-snapshot-binding.js';
+import {
+  reconcileUnrecordedRemovedWorktree,
+  resolveManagedWorktreePath,
+} from './worktree-snapshot-binding.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
@@ -86,6 +88,26 @@ function retentionLimit(runtime: WorkspaceRuntime): number {
     environment: runtime.env.effectiveEnv,
     workspaceTrusted: runtime.trusted,
   });
+  const activeLayers = [
+    settings.systemDefaults.settings,
+    settings.user.settings,
+    ...(runtime.trusted ? [settings.workspace.settings] : []),
+    settings.system.settings,
+    settings.merged,
+  ];
+  for (const layer of activeLayers) {
+    const section: unknown = (layer as Record<string, unknown>)['worktree'];
+    if (
+      section !== undefined &&
+      (section === null ||
+        typeof section !== 'object' ||
+        Array.isArray(section))
+    ) {
+      throw new Error(
+        'worktree settings must be an object; retention is paused',
+      );
+    }
+  }
   const configuredLimit = settings.merged.worktree?.maxRetained;
   const value =
     configuredLimit === undefined ? DEFAULT_RETENTION_COUNT : configuredLimit;
@@ -103,7 +125,7 @@ async function retentionRoot(
   const service = new GitWorktreeService(workspaceCwd);
   const repoTop = await service.getRepoTopLevel();
   if (repoTop === null) {
-    let directory = path.resolve(workspaceCwd);
+    let directory = resolveManagedWorktreePath(workspaceCwd);
     for (;;) {
       try {
         await fs.lstat(path.join(directory, '.git'));
@@ -121,42 +143,74 @@ async function retentionRoot(
   const managedRootService = new GitWorktreeService(
     canonicalPathForTesting(repoTop),
   );
-  return canonicalPathForTesting(managedRootService.getUserWorktreesDir());
+  return resolveManagedWorktreePath(managedRootService.getUserWorktreesDir());
 }
 
 /**
  * A live owner outside this daemon (for example a TUI that resumed the same
  * session) never appears on this runtime's bridge, but its runtime record
- * names the checkout it is working in. `unknown` without any record is what
- * daemon-created chats return, and blocking those would disable retention;
- * `unknown` with a record means the owner exists but cannot be verified from
- * this process (another PID namespace or host sharing the runtime base), and
- * that must be preserved.
+ * names the checkout it is working in. Search only the runtime bases (not the
+ * arbitrary repository source tree, which would stall retention on large repos
+ * or unreadable source subdirectories): `missing` is what daemon-created chats
+ * return, while `active` or `unknown` (an unreadable, corrupt, newer-schema,
+ * or foreign-host/namespace record) preserves the checkout.
  */
 async function ownerProcessActive(
   sessionId: string,
-  sidecar: { originalCwd: string; worktreePath: string },
+  sidecar: { originalCwd: string; worktreePath: string; workspaceCwd?: string },
 ): Promise<boolean> {
   try {
-    const liveness = await getSessionRuntimeLiveness(sessionId, [
+    const roots = [
       sidecar.originalCwd,
       sidecar.worktreePath,
-    ]);
-    if (liveness === 'active') return true;
-    if (liveness === 'inactive') return false;
-    for (const root of [sidecar.originalCwd, sidecar.worktreePath]) {
-      const recordPath = new Storage(root).getRuntimeStatusPath(sessionId);
-      try {
-        await fs.lstat(recordPath);
+      ...(sidecar.workspaceCwd ? [sidecar.workspaceCwd] : []),
+    ];
+    const normalized = normalizeSessionIdForLookup(sessionId);
+    const ids =
+      normalized === sessionId ? [sessionId] : [sessionId, normalized];
+    for (const candidateId of ids) {
+      const inspected = await inspectSessionRuntimeLiveness(
+        candidateId,
+        roots,
+        { scanProjectRoots: false },
+      );
+      if (inspected === 'active' || inspected === 'unknown') {
         return true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
       }
     }
     return false;
   } catch {
     return true;
   }
+}
+
+/**
+ * A linked worktree (or a subdirectory inside it) can be registered as its own
+ * daemon workspace. Its own `git rev-parse --show-toplevel` names the linked
+ * worktree rather than the primary repository, so root equality does not detect
+ * it. Never sweep a checkout that contains any registered workspace.
+ */
+function hasRegisteredWorkspaceInsideCheckout(
+  registry: WorkspaceRegistry,
+  checkoutPath: string,
+): boolean {
+  const foldsCase =
+    process.platform === 'win32' || process.platform === 'darwin';
+  const normalizePath = (value: string) =>
+    foldsCase ? value.toLowerCase() : value;
+  const realCheckout = normalizePath(resolveManagedWorktreePath(checkoutPath));
+  for (const entry of registry.listEntries()) {
+    const realWorkspace = normalizePath(
+      resolveManagedWorktreePath(entry.workspaceCwd),
+    );
+    if (
+      realWorkspace === realCheckout ||
+      realWorkspace.startsWith(realCheckout + path.sep)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function assertCurrentRuntime(
@@ -201,7 +255,7 @@ async function loadScopes(
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
     }
-    const workspaceManagedRoot = canonicalPathForTesting(
+    const workspaceManagedRoot = resolveManagedWorktreePath(
       new GitWorktreeService(
         canonicalPathForTesting(candidate.workspaceCwd),
       ).getUserWorktreesDir(),
@@ -272,16 +326,39 @@ async function candidateActivityNs(
   }
 }
 
+async function isRetentionSessionPinned(
+  organization: SessionOrganizationService,
+  sessionId: string,
+): Promise<boolean> {
+  return organization.isSessionPinnedStrict(sessionId);
+}
+
 async function boundRetentionSessionIds(
   runtime: WorkspaceRuntime,
 ): Promise<ReadonlySet<string>> {
-  return new Set(
-    collectBoundSessionIds(await readCronTasks(runtime.workspaceCwd)),
+  const bound = new Set<string>();
+  for (const id of collectBoundSessionIds(
+    await readCronTasks(runtime.workspaceCwd),
+  )) {
+    bound.add(id);
+    bound.add(normalizeSessionIdForLookup(id));
+  }
+  return bound;
+}
+
+function isSessionBound(
+  boundSessions: ReadonlySet<string>,
+  sessionId: string,
+): boolean {
+  return (
+    boundSessions.has(sessionId) ||
+    boundSessions.has(normalizeSessionIdForLookup(sessionId))
   );
 }
 
 async function collectEligible(
   scope: RetentionScope,
+  registry: WorkspaceRegistry,
   service: ReturnType<typeof createWorkspaceRuntimeSessionService>,
   coordinator: SessionArchiveCoordinator,
   report: WorktreeRetentionReport,
@@ -289,22 +366,47 @@ async function collectEligible(
   const boundSessions = await boundRetentionSessionIds(scope.runtime);
   const candidates: Array<WorktreeCleanupPlan & { activityNs: bigint }> = [];
   const seen = new Set<string>();
-  for (const archiveState of ['active', 'archived'] as const) {
+  const archiveStates = ['active', 'archived'] as const;
+  const entriesByState = new Map<(typeof archiveStates)[number], string[]>();
+  const locationsByLowerId = new Map<string, Set<string>>();
+  for (const archiveState of archiveStates) {
     const directory = path.dirname(
       service.getWorktreeSessionPathForArchiveState('', archiveState),
     );
-    let entries;
+    let entries: string[];
     try {
-      entries = await fs.readdir(directory);
+      entries = (await fs.readdir(directory)).sort();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
     }
-    for (const entry of entries.sort()) {
+    entriesByState.set(archiveState, entries);
+    for (const entry of entries) {
+      let id: string | undefined;
+      if (entry.endsWith('.worktree.json')) {
+        id = entry.slice(0, -'.worktree.json'.length);
+      } else if (entry.endsWith('.jsonl')) {
+        id = entry.slice(0, -'.jsonl'.length);
+      }
+      if (!id) continue;
+      const lower = id.toLowerCase();
+      let set = locationsByLowerId.get(lower);
+      if (!set) {
+        set = new Set<string>();
+        locationsByLowerId.set(lower, set);
+      }
+      set.add(`${archiveState}:${id}`);
+    }
+  }
+  for (const archiveState of archiveStates) {
+    const entries = entriesByState.get(archiveState);
+    if (!entries) continue;
+    for (const entry of entries) {
       if (!entry.endsWith('.worktree.json')) continue;
       const sessionId = entry.slice(0, -'.worktree.json'.length);
       if (seen.has(sessionId)) continue;
       seen.add(sessionId);
+      const caseVariants = locationsByLowerId.get(sessionId.toLowerCase());
       const location = await service.getMaintainableSessionLocation(sessionId);
       const otherState = archiveState === 'active' ? 'archived' : 'active';
       const otherSidecar = await fs
@@ -315,7 +417,11 @@ async function collectEligible(
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
           throw error;
         });
-      if (location !== archiveState || otherSidecar !== null) {
+      if (
+        (caseVariants?.size ?? 0) > 1 ||
+        location !== archiveState ||
+        otherSidecar !== null
+      ) {
         report.skipped.push(
           `session archive location is not unique: ${sessionId}`,
         );
@@ -327,7 +433,7 @@ async function collectEligible(
         scope.runtime.workspaceCwd,
       );
       if (!plan || plan.sidecar.worktreeRemoved !== undefined) continue;
-      const planRoot = canonicalPathForTesting(
+      const planRoot = resolveManagedWorktreePath(
         new GitWorktreeService(plan.sidecar.originalCwd).getUserWorktreesDir(),
       );
       if (!scope.managedRoots.has(planRoot)) {
@@ -336,18 +442,14 @@ async function collectEligible(
       const organization = new SessionOrganizationService(
         scope.runtime.workspaceCwd,
       );
-      if (
-        sessionLiveOnBridge(
-          scope.runtime.bridge as Partial<
-            Pick<AcpSessionBridge, 'getSessionSummary'>
-          >,
-          sessionId,
-        )
-      ) {
+      if (sessionLiveOnBridge(scope.runtime.bridge, sessionId)) {
+        continue;
+      }
+      if (hasRegisteredWorkspaceInsideCheckout(registry, plan.lockKey)) {
         continue;
       }
       if (await ownerProcessActive(sessionId, plan.sidecar)) continue;
-      if (await organization.isSessionPinnedStrict(sessionId)) continue;
+      if (await isRetentionSessionPinned(organization, sessionId)) continue;
       const release = await acquireWorktreeCleanupLock(plan);
       try {
         const eligibility = await coordinator.runExclusiveMany(
@@ -358,7 +460,7 @@ async function collectEligible(
             );
             const claimed =
               sessionLiveOnBridge(scope.runtime.bridge, sessionId) ||
-              boundSessions.has(sessionId);
+              isSessionBound(boundSessions, sessionId);
             if (!claimed && ownership.ok) return 'eligible';
             if (claimed) return 'ineligible';
             return (await reconcileUnrecordedRemovedWorktree(
@@ -428,7 +530,7 @@ async function discardPreservedAttemptSnapshot(
     sessionLiveOnBridge(runtime.bridge, id),
   );
   if (!ownership.ok) return;
-  if (!(await assertCurrentRuntime(registry, runtime, canContinue))) {
+  if (!assertCurrentRuntime(registry, runtime, canContinue)) {
     return;
   }
   // Restrict deletion to the pair created by this attempt. Pre-existing or
@@ -464,7 +566,7 @@ async function discardPreservedAttemptSnapshot(
   // Pin/liveness vetoes checkout removal. It does not require keeping an
   // already redundant pair once ownership and the intact checkout are proven.
   if (
-    !(await assertCurrentRuntime(registry, runtime, canContinue)) ||
+    !assertCurrentRuntime(registry, runtime, canContinue) ||
     !(
       await verifyWorktreeCleanupOwnership(current, (id) =>
         sessionLiveOnBridge(runtime.bridge, id),
@@ -591,9 +693,11 @@ async function removeRetainedCheckout(
       const ownership = await verifyWorktreeCleanupOwnership(plan, (id) =>
         sessionLiveOnBridge(runtime.bridge, id),
       );
-      if (!ownership.ok) return false;
+      if (!ownership.ok || plan.sidecar.worktreeRemoved !== undefined) {
+        return false;
+      }
       const organization = new SessionOrganizationService(runtime.workspaceCwd);
-      if (await organization.isSessionPinnedStrict(plan.sessionId)) {
+      if (await isRetentionSessionPinned(organization, plan.sessionId)) {
         return false;
       }
       let attemptSnapshot: WorktreeSnapshotPaths | undefined;
@@ -606,14 +710,21 @@ async function removeRetainedCheckout(
             if (!assertCurrentRuntime(registry, runtime, canContinue)) {
               return false;
             }
-            if (await organization.isSessionPinnedStrict(plan.sessionId)) {
+            if (await isRetentionSessionPinned(organization, plan.sessionId)) {
               return false;
             }
             if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
               return false;
+            if (hasRegisteredWorkspaceInsideCheckout(registry, plan.lockKey))
+              return false;
             if (await ownerProcessActive(plan.sessionId, plan.sidecar))
               return false;
-            if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
+            if (
+              isSessionBound(
+                await boundRetentionSessionIds(runtime),
+                plan.sessionId,
+              )
+            ) {
               return false;
             }
             if (snapshot) {
@@ -689,14 +800,21 @@ async function removeRetainedCheckout(
             const organization = new SessionOrganizationService(
               runtime.workspaceCwd,
             );
-            if (await organization.isSessionPinnedStrict(plan.sessionId)) {
+            if (await isRetentionSessionPinned(organization, plan.sessionId)) {
               return false;
             }
             if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
               return false;
+            if (hasRegisteredWorkspaceInsideCheckout(registry, plan.lockKey))
+              return false;
             if (await ownerProcessActive(plan.sessionId, plan.sidecar))
               return false;
-            if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
+            if (
+              isSessionBound(
+                await boundRetentionSessionIds(runtime),
+                plan.sessionId,
+              )
+            ) {
               return false;
             }
             const allowed = runtime.trusted && canContinue();
@@ -756,6 +874,22 @@ export async function sweepWorktreeRetentionOnce(
   coordinator: SessionArchiveCoordinator,
   canContinue: () => boolean = () => true,
 ): Promise<WorktreeRetentionReport> {
+  return runWithWorkspaceRuntimeStorage(runtime, () =>
+    sweepWorktreeRetentionOnceInStorage(
+      runtime,
+      registry,
+      coordinator,
+      canContinue,
+    ),
+  );
+}
+
+async function sweepWorktreeRetentionOnceInStorage(
+  runtime: WorkspaceRuntime,
+  registry: WorkspaceRegistry,
+  coordinator: SessionArchiveCoordinator,
+  canContinue: () => boolean,
+): Promise<WorktreeRetentionReport> {
   const report: WorktreeRetentionReport = {
     removed: [],
     skipped: [],
@@ -796,7 +930,13 @@ export async function sweepWorktreeRetentionOnce(
   const service = createWorkspaceRuntimeSessionService(runtime);
   let candidates: WorktreeCleanupPlan[];
   try {
-    candidates = await collectEligible(scope, service, coordinator, report);
+    candidates = await collectEligible(
+      scope,
+      registry,
+      service,
+      coordinator,
+      report,
+    );
   } catch (error) {
     report.issues.push(error instanceof Error ? error.message : String(error));
     return report;

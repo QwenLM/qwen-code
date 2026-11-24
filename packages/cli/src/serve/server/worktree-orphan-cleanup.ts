@@ -726,7 +726,7 @@ export async function executeWorktreeCleanup(
       const meta = await buildWorktreeSnapshotMeta(plan.lockKey, {
         sessionId,
         slug: sidecar.slug,
-        baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
+        baseCommit: sidecar.worktreeBase || sidecar.originalHeadCommit,
       });
       snapshot = await captureWorktreeSnapshot({
         worktreePath: plan.lockKey,
@@ -844,7 +844,17 @@ export async function executeWorktreeCleanup(
     }
     return true;
   };
-  if (!(await checkoutRemovalGuardsPass())) return preserved();
+  try {
+    if (!(await checkoutRemovalGuardsPass())) return preserved();
+  } catch (error) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      `guard failed before removal: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return preserved();
+  }
   if (!checkoutMatchesCapture) {
     logWorktreeCleanupPreserve(sessionId, 'checkout changed during capture');
     return preserved();
@@ -887,7 +897,7 @@ export async function executeWorktreeCleanup(
     branchOwned:
       sidecar.worktreeBranch !== '' &&
       sidecar.worktreeBranch === worktreeBranchForSlug(sidecar.slug),
-    baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
+    baseCommit: sidecar.worktreeBase || sidecar.originalHeadCommit,
   });
   const remaining = await fsp
     .lstat(plan.lockKey)

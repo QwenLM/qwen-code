@@ -4435,6 +4435,428 @@ describe('retained snapshot archive lifecycle', () => {
     await expectOwnedPair(state, 'archived');
   });
 
+  it('refuses to unlink a replaced destination snapshot during rollback', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationSnapshot = path.join(
+      path.dirname(archivedSidecar),
+      path.basename(sourcePair.snapshotPath),
+    );
+    const destinationMeta = path.join(
+      path.dirname(archivedSidecar),
+      path.basename(sourcePair.metaPath),
+    );
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(archivedSidecar, record.session);
+
+    const replacementBytes = Buffer.from('replacement-owner-file');
+    const link = fs.promises.link.bind(fs.promises);
+    let swapped = false;
+    vi.spyOn(fs.promises, 'link').mockImplementation(
+      async (source, destination) => {
+        if (String(destination) === destinationMeta) {
+          fs.unlinkSync(destinationSnapshot);
+          fs.writeFileSync(destinationSnapshot, replacementBytes);
+          swapped = true;
+          throw Object.assign(new Error('injected second link failure'), {
+            code: 'EIO',
+          });
+        }
+        await link(source, destination);
+      },
+    );
+
+    const failure = await moveWorktreeSnapshotsWithSession(
+      target.service,
+      state.id,
+      'archived',
+    ).catch((error: unknown) => error);
+    expect(swapped).toBe(true);
+    expect(failure).toBeInstanceOf(AggregateError);
+    if (failure instanceof AggregateError) {
+      expect(failure.message).toBe(
+        'Worktree snapshot move failed and rollback was incomplete',
+      );
+      expect(
+        failure.errors.some(
+          (cause) =>
+            cause instanceof Error &&
+            cause.message.includes(
+              'Refusing to roll back a replaced snapshot link',
+            ),
+        ),
+      ).toBe(true);
+    }
+    expect(fs.readFileSync(destinationSnapshot)).toEqual(replacementBytes);
+    // Two-phase move keeps the source pair completely intact when phase-1 linking fails.
+    expect(fs.existsSync(sourcePair.snapshotPath)).toBe(true);
+    expect(fs.existsSync(sourcePair.metaPath)).toBe(true);
+    expect(fs.existsSync(destinationMeta)).toBe(false);
+    await expectOwnedPair(state, 'active');
+  });
+
+  it('completes interrupted two-phase snapshot moves across all crash boundaries and refuses foreign hardlinks', async () => {
+    for (const boundary of [
+      'phase1-mid',
+      'between-phases',
+      'phase2-mid',
+    ] as const) {
+      const target = makeRetentionRepo(root, `crash-${boundary}`);
+      const state = await removedBinding(target);
+      const sourcePair = await expectOwnedPair(state, 'active');
+      const archivedSidecar =
+        target.service.getWorktreeSessionPathForArchiveState(
+          state.id,
+          'archived',
+        );
+      const destinationDir = path.dirname(archivedSidecar);
+      const destinationSnapshot = path.join(
+        destinationDir,
+        path.basename(sourcePair.snapshotPath),
+      );
+      const destinationMeta = path.join(
+        destinationDir,
+        path.basename(sourcePair.metaPath),
+      );
+      const expectedArchiveBytes = fs.readFileSync(sourcePair.snapshotPath);
+      const expectedMetaBytes = fs.readFileSync(sourcePair.metaPath);
+      const record = await readWorktreeSessionStrict(state.sidecarPath);
+      if (record.state !== 'valid') throw new Error('Missing owner record');
+      await writeWorktreeSession(archivedSidecar, record.session);
+      fs.mkdirSync(destinationDir, { recursive: true });
+
+      if (boundary === 'phase1-mid') {
+        fs.linkSync(sourcePair.snapshotPath, destinationSnapshot);
+      } else if (boundary === 'between-phases') {
+        fs.linkSync(sourcePair.snapshotPath, destinationSnapshot);
+        fs.linkSync(sourcePair.metaPath, destinationMeta);
+      } else {
+        fs.linkSync(sourcePair.snapshotPath, destinationSnapshot);
+        fs.linkSync(sourcePair.metaPath, destinationMeta);
+        fs.unlinkSync(sourcePair.snapshotPath);
+      }
+
+      await moveWorktreeSnapshotsWithSession(
+        target.service,
+        state.id,
+        'archived',
+      );
+
+      expect(fs.existsSync(sourcePair.snapshotPath)).toBe(false);
+      expect(fs.existsSync(sourcePair.metaPath)).toBe(false);
+      expect(fs.lstatSync(destinationSnapshot, { bigint: true }).nlink).toBe(
+        1n,
+      );
+      expect(fs.lstatSync(destinationMeta, { bigint: true }).nlink).toBe(1n);
+      expect(fs.readFileSync(destinationSnapshot)).toEqual(
+        expectedArchiveBytes,
+      );
+      expect(fs.readFileSync(destinationMeta)).toEqual(expectedMetaBytes);
+      await expectOwnedPair(state, 'archived');
+    }
+
+    // Negative control 1: foreign hardlink outside source/destination stays fail-closed.
+    const foreignTarget = makeRetentionRepo(root, 'crash-foreign-link');
+    const foreignState = await removedBinding(foreignTarget);
+    const foreignPair = await expectOwnedPair(foreignState, 'active');
+    const foreignArchivedSidecar =
+      foreignTarget.service.getWorktreeSessionPathForArchiveState(
+        foreignState.id,
+        'archived',
+      );
+    const foreignRecord = await readWorktreeSessionStrict(
+      foreignState.sidecarPath,
+    );
+    if (foreignRecord.state !== 'valid') {
+      throw new Error('Missing foreign owner record');
+    }
+    await writeWorktreeSession(foreignArchivedSidecar, foreignRecord.session);
+    const thirdAlias = path.join(root, 'third-party-hardlink.tar.gz');
+    fs.linkSync(foreignPair.snapshotPath, thirdAlias);
+    await expect(
+      moveWorktreeSnapshotsWithSession(
+        foreignTarget.service,
+        foreignState.id,
+        'archived',
+      ),
+    ).rejects.toThrow(/not an owned regular file/i);
+    expect(fs.existsSync(foreignPair.snapshotPath)).toBe(true);
+
+    // Negative control 2: twin on one member + conflicting different-inode destination on the other.
+    const conflictTarget = makeRetentionRepo(root, 'crash-conflict');
+    const conflictState = await removedBinding(conflictTarget);
+    const conflictPair = await expectOwnedPair(conflictState, 'active');
+    const conflictArchivedSidecar =
+      conflictTarget.service.getWorktreeSessionPathForArchiveState(
+        conflictState.id,
+        'archived',
+      );
+    const conflictRecord = await readWorktreeSessionStrict(
+      conflictState.sidecarPath,
+    );
+    if (conflictRecord.state !== 'valid') {
+      throw new Error('Missing conflict owner record');
+    }
+    await writeWorktreeSession(conflictArchivedSidecar, conflictRecord.session);
+    const conflictDestDir = path.dirname(conflictArchivedSidecar);
+    fs.mkdirSync(conflictDestDir, { recursive: true });
+    const conflictDestSnapshot = path.join(
+      conflictDestDir,
+      path.basename(conflictPair.snapshotPath),
+    );
+    const conflictDestMeta = path.join(
+      conflictDestDir,
+      path.basename(conflictPair.metaPath),
+    );
+    fs.linkSync(conflictPair.snapshotPath, conflictDestSnapshot);
+    fs.writeFileSync(conflictDestMeta, '{"foreign":true}');
+    await expect(
+      moveWorktreeSnapshotsWithSession(
+        conflictTarget.service,
+        conflictState.id,
+        'archived',
+      ),
+    ).rejects.toThrow();
+    expect(fs.readFileSync(conflictDestMeta, 'utf8')).toBe('{"foreign":true}');
+  });
+
+  it('safely unlinks its twin without poisoning the replacement when source is atomically replaced before link', async () => {
+    const target = makeRetentionRepo(root, 'source-replaced-before-link');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationSnapshot = path.join(
+      path.dirname(archivedSidecar),
+      path.basename(sourcePair.snapshotPath),
+    );
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(archivedSidecar, record.session);
+
+    const replacementBytes = Buffer.from('atomically-replaced-source');
+    const link = fs.promises.link.bind(fs.promises);
+    let replaced = false;
+    vi.spyOn(fs.promises, 'link').mockImplementation(
+      async (source, destination) => {
+        if (!replaced && String(source) === sourcePair.snapshotPath) {
+          replaced = true;
+          const tempPath = `${sourcePair.snapshotPath}.replacement`;
+          fs.writeFileSync(tempPath, replacementBytes);
+          fs.renameSync(tempPath, sourcePair.snapshotPath);
+        }
+        await link(source, destination);
+      },
+    );
+
+    const failure = await moveWorktreeSnapshotsWithSession(
+      target.service,
+      state.id,
+      'archived',
+    ).catch((error: unknown) => error);
+    expect(replaced).toBe(true);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(AggregateError);
+    expect((failure as Error).message).toContain(
+      'Snapshot source changed during move',
+    );
+    expect(fs.existsSync(destinationSnapshot)).toBe(false);
+    expect(fs.readFileSync(sourcePair.snapshotPath)).toEqual(replacementBytes);
+    expect(fs.lstatSync(sourcePair.snapshotPath, { bigint: true }).nlink).toBe(
+      1n,
+    );
+  });
+
+  it('does not split an interrupted move when phase-2 second unlink fails during recovery', async () => {
+    const target = makeRetentionRepo(root, 'phase2-recovery-unlink-failure');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationDir = path.dirname(archivedSidecar);
+    const destinationSnapshot = path.join(
+      destinationDir,
+      path.basename(sourcePair.snapshotPath),
+    );
+    const destinationMeta = path.join(
+      destinationDir,
+      path.basename(sourcePair.metaPath),
+    );
+    const expectedArchiveBytes = fs.readFileSync(sourcePair.snapshotPath);
+    const expectedMetaBytes = fs.readFileSync(sourcePair.metaPath);
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(archivedSidecar, record.session);
+    fs.mkdirSync(destinationDir, { recursive: true });
+    // Phase 1 mid crash: tar is linked across source and destination, meta is sourceOnly.
+    fs.linkSync(sourcePair.snapshotPath, destinationSnapshot);
+
+    const unlink = fs.promises.unlink.bind(fs.promises);
+    let injected = false;
+    const unlinkSpy = vi
+      .spyOn(fs.promises, 'unlink')
+      .mockImplementation(async (targetPath) => {
+        if (!injected && String(targetPath) === sourcePair.metaPath) {
+          injected = true;
+          throw Object.assign(new Error('injected second unlink EBUSY'), {
+            code: 'EBUSY',
+          });
+        }
+        await unlink(targetPath);
+      });
+
+    await expect(
+      moveWorktreeSnapshotsWithSession(target.service, state.id, 'archived'),
+    ).rejects.toThrow('injected second unlink EBUSY');
+    expect(injected).toBe(true);
+    // Destination must still hold both members so the pair is not split.
+    expect(fs.existsSync(destinationSnapshot)).toBe(true);
+    expect(fs.existsSync(destinationMeta)).toBe(true);
+    expect(fs.existsSync(sourcePair.metaPath)).toBe(true);
+    expect(fs.lstatSync(destinationMeta, { bigint: true }).nlink).toBe(2n);
+
+    unlinkSpy.mockRestore();
+    await moveWorktreeSnapshotsWithSession(
+      target.service,
+      state.id,
+      'archived',
+    );
+    expect(fs.existsSync(sourcePair.snapshotPath)).toBe(false);
+    expect(fs.existsSync(sourcePair.metaPath)).toBe(false);
+    expect(fs.lstatSync(destinationSnapshot, { bigint: true }).nlink).toBe(1n);
+    expect(fs.lstatSync(destinationMeta, { bigint: true }).nlink).toBe(1n);
+    expect(fs.readFileSync(destinationSnapshot)).toEqual(expectedArchiveBytes);
+    expect(fs.readFileSync(destinationMeta)).toEqual(expectedMetaBytes);
+    await expectOwnedPair(state, 'archived');
+  });
+
+  it('keeps destination pair recoverable when phase-2 second unlink and source rollback both fail', async () => {
+    const target = makeRetentionRepo(root, 'move-phase2-rollback-failure');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationDir = path.dirname(archivedSidecar);
+    const destinationSnapshot = path.join(
+      destinationDir,
+      path.basename(sourcePair.snapshotPath),
+    );
+    const destinationMeta = path.join(
+      destinationDir,
+      path.basename(sourcePair.metaPath),
+    );
+    const expectedArchiveBytes = fs.readFileSync(sourcePair.snapshotPath);
+    const expectedMetaBytes = fs.readFileSync(sourcePair.metaPath);
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(archivedSidecar, record.session);
+
+    const unlink = fs.promises.unlink.bind(fs.promises);
+    const link = fs.promises.link.bind(fs.promises);
+    let sourceDirFaulted = false;
+    const unlinkSpy = vi
+      .spyOn(fs.promises, 'unlink')
+      .mockImplementation(async (targetPath) => {
+        if (String(targetPath) === sourcePair.metaPath) {
+          sourceDirFaulted = true;
+          throw Object.assign(new Error('source dir EACCES on second unlink'), {
+            code: 'EACCES',
+          });
+        }
+        await unlink(targetPath);
+      });
+    const linkSpy = vi
+      .spyOn(fs.promises, 'link')
+      .mockImplementation(async (existingPath, newPath) => {
+        if (sourceDirFaulted && String(newPath) === sourcePair.snapshotPath) {
+          throw Object.assign(new Error('source dir EACCES on rollback link'), {
+            code: 'EACCES',
+          });
+        }
+        await link(existingPath, newPath);
+      });
+
+    await expect(
+      moveWorktreeSnapshotsWithSession(target.service, state.id, 'archived'),
+    ).rejects.toBeInstanceOf(AggregateError);
+    expect(sourceDirFaulted).toBe(true);
+    // Pass-1 rollback failure must not unlink destinationMeta and split the pair.
+    expect(fs.existsSync(destinationSnapshot)).toBe(true);
+    expect(fs.existsSync(destinationMeta)).toBe(true);
+    expect(fs.existsSync(sourcePair.metaPath)).toBe(true);
+    expect(fs.lstatSync(destinationMeta, { bigint: true }).nlink).toBe(2n);
+
+    unlinkSpy.mockRestore();
+    linkSpy.mockRestore();
+    await moveWorktreeSnapshotsWithSession(
+      target.service,
+      state.id,
+      'archived',
+    );
+    expect(fs.existsSync(sourcePair.snapshotPath)).toBe(false);
+    expect(fs.existsSync(sourcePair.metaPath)).toBe(false);
+    expect(fs.lstatSync(destinationSnapshot, { bigint: true }).nlink).toBe(1n);
+    expect(fs.lstatSync(destinationMeta, { bigint: true }).nlink).toBe(1n);
+    expect(fs.readFileSync(destinationSnapshot)).toEqual(expectedArchiveBytes);
+    expect(fs.readFileSync(destinationMeta)).toEqual(expectedMetaBytes);
+    await expectOwnedPair(state, 'archived');
+  });
+
+  it('refuses to follow a symlinked destination directory during interrupted recovery or snapshot move', async () => {
+    const target = makeRetentionRepo(root, 'symlink-dest-dir-boundary');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const archivedDir = path.dirname(archivedSidecar);
+    const outsideDir = path.join(root, 'outside-archive-target');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.rmSync(archivedDir, { recursive: true, force: true });
+    fs.symlinkSync(outsideDir, archivedDir, 'dir');
+
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(
+      path.join(outsideDir, path.basename(archivedSidecar)),
+      record.session,
+    );
+    // Even if a matching twin exists in the symlink target, recovery must not
+    // follow the directory-level symlink or unlink source entries.
+    const outsideSnapshot = path.join(
+      outsideDir,
+      path.basename(sourcePair.snapshotPath),
+    );
+    fs.linkSync(sourcePair.snapshotPath, outsideSnapshot);
+
+    await expect(
+      moveWorktreeSnapshotsWithSession(target.service, state.id, 'archived'),
+    ).rejects.toThrow();
+    expect(fs.existsSync(sourcePair.snapshotPath)).toBe(true);
+    expect(fs.existsSync(sourcePair.metaPath)).toBe(true);
+    expect(
+      fs.existsSync(path.join(outsideDir, path.basename(sourcePair.metaPath))),
+    ).toBe(false);
+  });
+
   it('rolls back a post-link identity probe failure and retries', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const state = await removedBinding(target);

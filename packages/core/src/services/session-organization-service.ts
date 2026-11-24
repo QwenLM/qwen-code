@@ -511,8 +511,24 @@ export class SessionOrganizationService {
           throw new Error(`invalid session organization entry: ${id}`);
         }
       }
-      const entry = sessions[sessionId];
-      return isPlainRecord(entry) && typeof entry['pinnedAt'] === 'string';
+      const directEntry = sessions[sessionId];
+      if (
+        isPlainRecord(directEntry) &&
+        typeof directEntry['pinnedAt'] === 'string'
+      ) {
+        return true;
+      }
+      const lowerSessionId = sessionId.toLowerCase();
+      for (const [id, entry] of Object.entries(sessions)) {
+        if (
+          id.toLowerCase() === lowerSessionId &&
+          isPlainRecord(entry) &&
+          typeof entry['pinnedAt'] === 'string'
+        ) {
+          return true;
+        }
+      }
+      return false;
     });
   }
 

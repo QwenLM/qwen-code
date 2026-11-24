@@ -317,6 +317,11 @@ async function reconcileRestoredSessionWorktree({
           sidecar.supersededBy,
         );
       }
+      if (sidecar.worktreeRemoved !== undefined) {
+        throw new WorktreeRestoreUnavailableError(
+          'This session has a retained worktree. Use /session/:id/worktree-restore to restore its snapshot.',
+        );
+      }
       const realWorkspace = fs.realpathSync(workspaceCwd);
       if (sidecar.workspaceCwd !== undefined) {
         let realSidecarWorkspace: string;

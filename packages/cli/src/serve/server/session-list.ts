@@ -547,10 +547,9 @@ export async function enrichWorktreeSidecars(
         continue;
       }
       if (summary.worktree) {
-        const worktree = { ...summary.worktree };
-        delete worktree.worktreeRemoved;
-        delete worktree.canRestore;
-        bySessionId.set(sessionId, { ...summary, worktree });
+        const updated = { ...summary };
+        delete updated.worktree;
+        bySessionId.set(sessionId, updated);
       }
       continue;
     }
@@ -638,17 +637,15 @@ export async function enrichWorktreeSidecars(
     }
     // Normal metadata remains with its snapshot; lifecycle fields follow the
     // current sidecar read.
-    const worktree =
-      !removed && summary.worktree
-        ? { ...summary.worktree }
-        : {
-            slug: sidecar.slug,
-            path: sidecar.worktreePath,
-            branch: sidecar.worktreeBranch,
-            baseCommit:
-              sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
-            baseBranch: sidecar.originalBranch || undefined,
-          };
+    const worktree = {
+      ...(summary.worktree ?? {}),
+      slug: sidecar.slug,
+      path: sidecar.worktreePath,
+      branch: sidecar.worktreeBranch,
+      baseCommit:
+        sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+      baseBranch: sidecar.originalBranch || undefined,
+    };
     delete worktree.worktreeRemoved;
     delete worktree.canRestore;
     if (removed) {
