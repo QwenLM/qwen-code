@@ -96,6 +96,7 @@ import {
   splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import { splitCompoundCommand } from '../permissions/rule-parser.js';
 import { parse, type ControlOperator } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
@@ -442,7 +443,16 @@ const PIPELINE_ALLOWED_OPERATORS = new Set<ControlOperator['op']>([
 ]);
 
 function getExitStatusSegment(command: string): string | null {
-  const segments = splitCommands(command);
+  // #11882: segment with the rule-matching splitter (splitCompoundCommand,
+  // the projection splitCommandForRules falls through to) instead of the
+  // legacy comment-blind `splitCommands`. The two agree on the plain
+  // separators (`&&`, `||`, `;`, `|`, `|&`, `&`, newlines) and on quotes,
+  // backticks and `$()`-body protection; the new one additionally keeps
+  // redirection spellings whole (`build &> log`, `build &>> log`) that the
+  // legacy splitter over-split, so those now reach the exit-status analysis
+  // as the single segment bash runs them as, instead of tripping the
+  // non-pipeline bail below.
+  const segments = splitCompoundCommand(command);
   if (segments.length === 1) return segments[0]!;
 
   try {
