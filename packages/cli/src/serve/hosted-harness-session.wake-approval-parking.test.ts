@@ -184,6 +184,8 @@ describe('idle suspension', () => {
                 event.payload['turnId'] === turnId,
             )?.payload,
           ).toMatchObject({ outcome: 'completed' });
+          // The journal settles the Turn before its run releases the Runtime
+          // and frees the Session's active slot, which the close requires.
           expect(
             (await statusOf(replacement, clientId).expect(200)).body
               .hasActivePrompt,
