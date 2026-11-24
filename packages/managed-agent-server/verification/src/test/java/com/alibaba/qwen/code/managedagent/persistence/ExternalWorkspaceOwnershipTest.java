@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -23,18 +24,22 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import javax.sql.DataSource;
 
 import java.net.URI;
+import java.sql.SQLTimeoutException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -103,6 +108,56 @@ class ExternalWorkspaceOwnershipTest {
                 binding.getBindingId(), binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
         session = sessions.compareAndSet(session, session.withState(RuntimeSessionRecord.State.READY, Instant.now()));
         context = new ContextBinding("tenant", "workspace", 1, "workspace", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+    }
+
+    void verifyPlacementPredicateTimeouts() throws Exception {
+        var schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
+        assertThat(jdbc.queryForObject("SELECT @@session.innodb_lock_wait_timeout", Integer.class))
+                .isGreaterThan(15);
+        ownership.claim(context, session, binding, bindings);
+        var ownerBefore = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var sessionBefore = jdbc.queryForMap("SELECT * FROM ma_runtime_session");
+        try (var executor = Executors.newFixedThreadPool(2); var holder = jdbc.getDataSource().getConnection()) {
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, context.getTenantId());
+            try {
+                var isHeldWait = executor.submit(() -> measurePlacementTimeout(
+                        () -> ownership.isHeld(context, session, binding, bindings)));
+                var assertHeldWait = executor.submit(() -> measurePlacementTimeout(
+                        () -> ownership.assertHeld(context, session, binding, bindings)));
+                MySqlLockProbe.awaitLockWaits(jdbc, schema, 2, "external ownership predicates");
+                var locks = MySqlLockProbe.describeLockWaits(jdbc, schema);
+                assertThat(locks).contains("table_name=ma_tenant_guard", "ON DUPLICATE KEY UPDATE");
+                long isHeldMillis = isHeldWait.get(15, TimeUnit.SECONDS);
+                long assertHeldMillis = assertHeldWait.get(15, TimeUnit.SECONDS);
+                System.out.printf("External ownership placement timeout: isHeld=%d ms, assertHeld=%d ms%n",
+                        isHeldMillis, assertHeldMillis);
+                assertThat(isHeldMillis).isBetween(8_000L, 15_000L);
+                assertThat(assertHeldMillis).isBetween(8_000L, 15_000L);
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(ownerBefore);
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_session")).isEqualTo(sessionBefore);
+            } finally {
+                holder.rollback();
+            }
+
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "other-tenant");
+            try {
+                var unaffected = executor.submit(() -> {
+                    ownership.assertHeld(context, session, binding, bindings);
+                    return ownership.isHeld(context, session, binding, bindings);
+                });
+                assertThat(unaffected.get(5, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
+    private static long measurePlacementTimeout(Runnable check) {
+        long start = System.nanoTime();
+        assertThatThrownBy(check::run).isInstanceOf(QueryTimeoutException.class)
+                .hasRootCauseInstanceOf(SQLTimeoutException.class);
+        return Duration.ofNanos(System.nanoTime() - start).toMillis();
     }
 
     @Test

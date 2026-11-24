@@ -41,13 +41,18 @@ public final class JdbcExternalWorkspaceOwnership {
     }
 
     public static Owner lockOwner(Connection connection, RuntimeBindingRecord binding) throws SQLException {
+        return lockOwner(connection, binding, 0);
+    }
+
+    public static Owner lockOwner(Connection connection, RuntimeBindingRecord binding, int placementTimeoutSeconds)
+            throws SQLException {
         if (connection.getAutoCommit() || !isExternalWorkspaceRequest(binding.getRequest())) {
             throw unavailable();
         }
         var request = binding.getRequest();
         String tenant = request.getScope().getTenantId();
         String storage = request.getStorageId();
-        JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
+        JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, placementTimeoutSeconds);
         RegisteredExternalStorage registration;
         try (var statement = connection.prepareStatement("SELECT * FROM ma_storage WHERE tenant_id = ? AND storage_id = ? FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenant);
