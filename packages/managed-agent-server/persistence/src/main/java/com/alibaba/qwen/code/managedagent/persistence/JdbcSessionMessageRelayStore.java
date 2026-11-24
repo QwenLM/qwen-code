@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -164,10 +163,6 @@ public class JdbcSessionMessageRelayStore
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
-    private static String deliveryKey(String tenant, String sender, String message) {
-        return ManagedSchemaKeys.key("delivery", "SESSION_MESSAGE", ManagedSessionStore.sessionScopeKey(tenant, sender), message);
-    }
-
     /** Whether an older command of the same sender is still unclassified:
      * one sender's commands pass strictly in order. Older is the sender's
      * own commit order — each outbound's first_sequence in its journal,
@@ -186,7 +181,7 @@ public class JdbcSessionMessageRelayStore
                         + " AND c.domain = r.domain"
                         + " AND c.record_id = ?"
                         + " LEFT JOIN ma_delivery l"
-                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = ? AND l.tenant_id = r.tenant_id"
+                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_id = ? AND l.tenant_id = r.tenant_id"
                         + " AND l.source_session_id = r.session_id"
                         + " AND l.delivery_id = r.record_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
@@ -196,7 +191,7 @@ public class JdbcSessionMessageRelayStore
                         + " AND (l.transport_state IS NULL"
                         + " OR l.transport_state NOT IN ('done', 'unknown', 'orphaned'))"
                         + " LIMIT 1",
-                (result, row) -> result.getInt(1), commandId, ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId,
+                (result, row) -> result.getInt(1), commandId, ManagedSchemaKeys.identity(senderSessionId), tenantId,
                 senderSessionId).isEmpty();
     }
 
@@ -215,7 +210,7 @@ public class JdbcSessionMessageRelayStore
                         + " AND c.domain = r.domain"
                         + " AND c.record_id = ?"
                         + " LEFT JOIN ma_delivery l"
-                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = ? AND l.tenant_id = r.tenant_id"
+                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_id = ? AND l.tenant_id = r.tenant_id"
                         + " AND l.source_session_id = r.session_id"
                         + " AND l.delivery_id = r.record_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
@@ -224,30 +219,29 @@ public class JdbcSessionMessageRelayStore
                         + " AND r.delivery_state IN ('planned', 'accepting', 'unknown')"
                         + " AND " + LEDGER_OWES_WORK,
                 (result, row) -> result.getString("record_resource_id"), messageId,
-                ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId, senderSessionId);
+                ManagedSchemaKeys.identity(senderSessionId), tenantId, senderSessionId);
     }
 
     /** Insert-or-claim: returns the row this worker now owns, or null when
      * another live claim holds it. */
     public MessageRow claim(String tenantId, String senderSessionId,
             String messageId, String owner, long leaseUntil, long now) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId);
-        String key = deliveryKey(tenantId, senderSessionId, messageId);
-        jdbc.update("INSERT IGNORE INTO ma_delivery (delivery_key, delivery_kind, tenant_id, source_scope_key,"
+        jdbc.update("INSERT IGNORE INTO ma_delivery (delivery_kind, tenant_id, source_scope_id,"
                         + " source_session_id, delivery_id, payload_json, transport_state, reception_state,"
                         + " consumption_state, claim_owner, claim_until, available_at, gmt_create, gmt_modified)"
-                        + " VALUES (?, 'SESSION_MESSAGE', ?, ?, ?, ?, '{\"version\":1}', 'relaying', 'pending',"
+                        + " VALUES ('SESSION_MESSAGE', ?, ?, ?, ?, '{\"version\":1}', 'relaying', 'pending',"
                         + " 'pending', ?, ?, ?, ?, ?)",
-                key, tenantId, scope, senderSessionId, messageId, owner, leaseUntil, now, now, now);
+                tenantId, ManagedSchemaKeys.identity(senderSessionId), senderSessionId, messageId, owner, leaseUntil, now, now, now);
         int claimed = jdbc.update("UPDATE ma_delivery SET claim_owner = ?, claim_until = ?,"
-                        + " claim_generation = claim_generation + 1, gmt_modified = ? WHERE delivery_key = ?"
-                        + " AND delivery_kind = 'SESSION_MESSAGE' AND (claim_owner = ? OR claim_until < ?)",
-                owner, leaseUntil, now, key, owner, now);
+                        + " claim_generation = claim_generation + 1, gmt_modified = ? WHERE delivery_kind = 'SESSION_MESSAGE'"
+                        + " AND tenant_id = ? AND source_scope_id = ? AND delivery_id = ?"
+                        + " AND (claim_owner = ? OR claim_until < ?)",
+                owner, leaseUntil, now, tenantId, ManagedSchemaKeys.identity(senderSessionId), messageId, owner, now);
         return claimed == 1 ? find(tenantId, senderSessionId, messageId) : null;
     }
 
     public MessageRow find(String tenantId, String senderSessionId, String messageId) {
-        return jdbc.query("SELECT " + ManagedSchemaProjection.DELIVERY.columns() + " FROM ma_delivery WHERE delivery_key = ?"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.DELIVERY.columns() + " FROM ma_delivery WHERE source_scope_id = ?"
                         + " AND delivery_kind = 'SESSION_MESSAGE' AND tenant_id = ? AND source_session_id = ?"
                         + " AND delivery_id = ?",
                 (result, index) -> new MessageRow(result.getString("tenant_id"), result.getString("source_session_id"),
@@ -255,7 +249,7 @@ public class JdbcSessionMessageRelayStore
                         result.getString("transport_state"), result.getString("claim_owner"),
                         result.getLong("claim_until"), result.getInt("attempt_count"), result.getLong("available_at"),
                         result.getString("last_error"), result.getLong("claim_generation")),
-                deliveryKey(tenantId, senderSessionId, messageId), tenantId, senderSessionId, messageId)
+                ManagedSchemaKeys.identity(senderSessionId), tenantId, senderSessionId, messageId)
                 .stream().findFirst().orElse(null);
     }
 
@@ -266,27 +260,28 @@ public class JdbcSessionMessageRelayStore
         }
         jdbc.update("UPDATE ma_delivery SET transport_state = ?, target_session_id = ?, attempt_count = ?,"
                         + " reception_state = CASE WHEN ? = 'delivered' THEN 'accepted' ELSE reception_state END,"
-                        + " available_at = ?, claim_until = ?, gmt_modified = ? WHERE delivery_key = ?"
-                        + " AND delivery_kind = 'SESSION_MESSAGE' AND claim_owner = ? AND claim_generation = ?"
-                        + " AND claim_until > ?",
+                        + " available_at = ?, claim_until = ?, gmt_modified = ? WHERE delivery_kind = 'SESSION_MESSAGE'"
+                        + " AND tenant_id = ? AND source_scope_id = ? AND delivery_id = ?"
+                        + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 state, targetSessionId, Math.max(row.attempts(), 0), state, nextRetryAt, leaseUntil, now,
-                deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()), owner, row.claimGeneration(), now);
+                row.tenantId(), ManagedSchemaKeys.identity(row.senderSessionId()), row.messageId(), owner, row.claimGeneration(), now);
     }
 
     public void scheduleRetry(MessageRow row, String owner, long nextRetryAt, long leaseUntil, long now) {
         jdbc.update("UPDATE ma_delivery SET available_at = ?, claim_until = ?, gmt_modified = ?"
-                        + " WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE' AND claim_owner = ?"
-                        + " AND claim_generation = ? AND claim_until > ?",
-                nextRetryAt, leaseUntil, now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
-                owner, row.claimGeneration(), now);
+                        + " WHERE delivery_kind = 'SESSION_MESSAGE' AND tenant_id = ? AND source_scope_id = ?"
+                        + " AND delivery_id = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+                nextRetryAt, leaseUntil, now, row.tenantId(), ManagedSchemaKeys.identity(row.senderSessionId()),
+                row.messageId(), owner, row.claimGeneration(), now);
     }
 
     public void defer(MessageRow row, String owner, long nextRetryAt, String lastError, long leaseUntil, long now) {
         jdbc.update("UPDATE ma_delivery SET attempt_count = ?, available_at = ?, last_error = ?,"
-                        + " claim_until = ?, gmt_modified = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
+                        + " claim_until = ?, gmt_modified = ? WHERE delivery_kind = 'SESSION_MESSAGE'"
+                        + " AND tenant_id = ? AND source_scope_id = ? AND delivery_id = ?"
                         + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 row.attempts() + 1, nextRetryAt, StringUtils.truncate(lastError, 1024), leaseUntil, now,
-                deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()), owner, row.claimGeneration(), now);
+                row.tenantId(), ManagedSchemaKeys.identity(row.senderSessionId()), row.messageId(), owner, row.claimGeneration(), now);
     }
 
     public void classify(MessageRow row, String owner, String state, String lastError, long now) {
@@ -295,9 +290,10 @@ public class JdbcSessionMessageRelayStore
         }
         jdbc.update("UPDATE ma_delivery SET transport_state = ?, claim_owner = NULL, claim_until = NULL,"
                         + " consumption_state = CASE WHEN ? = 'done' THEN 'consumed' ELSE consumption_state END,"
-                        + " last_error = ?, gmt_modified = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
+                        + " last_error = ?, gmt_modified = ? WHERE delivery_kind = 'SESSION_MESSAGE'"
+                        + " AND tenant_id = ? AND source_scope_id = ? AND delivery_id = ?"
                         + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                state, state, StringUtils.truncate(lastError, 1024), now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
-                owner, row.claimGeneration(), now);
+                state, state, StringUtils.truncate(lastError, 1024), now, row.tenantId(),
+                ManagedSchemaKeys.identity(row.senderSessionId()), row.messageId(), owner, row.claimGeneration(), now);
     }
 }

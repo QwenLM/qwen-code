@@ -672,7 +672,7 @@ class ManagedSessionStoreIntegrationTest {
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id=?",
                 Integer.class, session)).isEqualTo(resourceCount);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id=? AND resource_id=X'7265736f757263652d636f6e74657874'",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id=? AND resource_id='resource-context'",
                 Integer.class, session)).isEqualTo(1);
         ObjectNode oversized = request.deepCopy();
         ArrayNode oversizedResources = oversized.withArray("resources");

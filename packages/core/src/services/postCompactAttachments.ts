@@ -23,6 +23,10 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  RESUME_TRAILER,
+  stripCompactionTranscriptHint,
+} from './compaction-transcript-hint.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -502,19 +506,6 @@ export function buildImageRestorationBlock(
  * naturally append the model's continuation response.
  */
 /**
- * Trailer appended to the post-compact summary message. Mirrors claude-code's
- * "Resume directly" guidance for the resuming agent: it must NOT acknowledge
- * the summary, re-greet, or recap — it picks up from where the prior turn
- * left off based on the summary.
- *
- * Lives in the wrapper (not in the compression system prompt) so the summary
- * model does not have to re-generate this text every compaction (saves
- * output tokens, prevents wording drift).
- */
-const RESUME_TRAILER =
-  'Resume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again.';
-
-/**
  * Strip the model's drafting scratchpad before the summary becomes the new
  * post-compact context. The compression prompt instructs the summary model
  * to wrap its chain-of-thought reasoning in an `<analysis>...</analysis>`
@@ -560,8 +551,13 @@ export function stripAnalysisBlock(rawSummary: string): string {
   return result.trim();
 }
 
-export function postProcessSummary(rawSummary: string): string {
-  const stripped = stripAnalysisBlock(rawSummary);
+export function postProcessSummary(
+  rawSummary: string,
+  transcriptHint?: string,
+): string {
+  const stripped = stripCompactionTranscriptHint(
+    stripAnalysisBlock(rawSummary),
+  ).trim();
   // Defensive sentinel only. Callers gate on `isSummaryEmpty`, which now
   // checks the STRIPPED summary — so a response that strips to nothing is
   // treated as an empty summary upstream (COMPRESSION_FAILED_EMPTY_SUMMARY)
@@ -569,7 +565,7 @@ export function postProcessSummary(rawSummary: string): string {
   // (a tiny `[Summary unavailable]` is smaller than the original, so the
   // guard wouldn't fire) — the upstream emptiness check is what prevents it.
   const body = stripped.length > 0 ? stripped : '[Summary unavailable]';
-  return `${body}\n\n${RESUME_TRAILER}`;
+  return [body, transcriptHint, RESUME_TRAILER].filter(Boolean).join('\n\n');
 }
 
 /**
@@ -588,6 +584,7 @@ export interface SubagentSnapshot {
 
 export interface ComposePostCompactOptions {
   verbatimCheckpoint?: boolean;
+  transcriptHint?: string;
   /**
    * Workspace root. When set, file paths from history that resolve
    * outside this root are silently skipped (Finding 4). Without this,
@@ -865,7 +862,7 @@ export async function composePostCompactHistory(
         {
           text: options.verbatimCheckpoint
             ? `${summary}\n\nResume the prior task using the notes above. Continue the work and use session_history to recover omitted evidence. Do not acknowledge the checkpoint or greet the user again.`
-            : postProcessSummary(summary),
+            : postProcessSummary(summary, options.transcriptHint),
         },
       ],
     },

@@ -135,6 +135,7 @@ import { SessionHistoryService } from '../services/session-history-service.js';
 import { SessionTranscriptReader } from '../services/session-transcript-reader.js';
 import { SESSION_CONTEXT_TOOL_NAMES } from '../services/session-notes-state.js';
 import { PostCompactTrigger } from '../hooks/types.js';
+import { withoutCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -2718,7 +2719,9 @@ export class LlmChat {
     payload: ChatCompressionRecordPayload,
   ): Promise<void> {
     if (this.compressionObserver) {
-      const compressedHistory = [...payload.compressedHistory];
+      const compressedHistory = [
+        ...withoutCompactionTranscriptHint(payload.compressedHistory),
+      ];
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
@@ -2815,8 +2818,11 @@ export class LlmChat {
     private readonly chatRecordingService?: ChatRecordingService,
     private readonly telemetryService?: UiTelemetryService,
   ) {
-    validateHistory(history);
-    markCompressedHistory(history);
+    if (!chatRecordingService) {
+      this.history = withoutCompactionTranscriptHint(history);
+    }
+    validateHistory(this.history);
+    markCompressedHistory(this.history);
     this.redactApprovedPlansFromLoadedHistory();
     this.markToolResultsInjected(this.history);
     if (
@@ -3406,6 +3412,10 @@ export class LlmChat {
       notesOnly: options?.notesRevision !== undefined,
       deferPostCompactEvent: notesRecorder !== undefined,
       restoreRecentFiles: this.compressionObserverOptions?.restoreRecentFiles,
+      getExistingTranscriptPath:
+        this.chatRecordingService && !this.isForkedChat
+          ? async () => this.chatRecordingService?.getExistingTranscriptPath?.()
+          : undefined,
     });
     let { newHistory } = result;
     const { info, postCompactSummary } = result;
@@ -7432,6 +7442,9 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    if (!this.chatRecordingService || this.isForkedChat) {
+      history = withoutCompactionTranscriptHint(history);
+    }
     this.toolBudgetUsageAnchor = undefined;
     this.toolBudgetFixedInputVersion++;
     this.historyReplacementRevision++;

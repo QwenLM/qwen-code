@@ -34,6 +34,7 @@ import {
   readPromptLedgerRecords,
 } from '@qwen-code/acp-bridge/promptLedger';
 import {
+  BridgeTimeoutError,
   SessionArchivedError,
   SessionArchivingError,
   SessionConflictError,
@@ -54,6 +55,12 @@ import {
   DaemonDrainingError,
 } from './session-archive.js';
 import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
+import {
+  acquireWorktreeCleanupLock,
+  preclassifyWorktreeCleanup,
+  verifyWorktreeCleanupOwnership,
+} from './worktree-orphan-cleanup.js';
+import * as worktreeOwnership from './worktree-ownership-op.js';
 
 describe('assertSessionLoadable', () => {
   let runtimeDir: string;
@@ -2283,6 +2290,27 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     ).not.toContain(worktreePath);
   });
 
+  it('preserves a checkout referenced by another archived session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400bd';
+    const siblingId = '550e8400-e29b-41d4-a716-4466554400be';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    writeSessionFile(workspaceDir, siblingId, 'archived');
+    fs.copyFileSync(
+      service.getWorktreeSessionPath(sessionId),
+      service.getWorktreeSessionPathForArchiveState(siblingId, 'archived'),
+    );
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('checkout shared with');
+  });
+
   it('preserves the synchronous coordinator prefix for delete without a sidecar', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440088';
     writeSessionFile(workspaceDir, sessionId, 'active');
@@ -2794,6 +2822,93 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(warnings()).toContain('is still live');
   });
 
+  it('preserves the checkout when only the owner was archived and an older predecessor is live', async () => {
+    const ids = {
+      sessionId: '550e8400-e29b-41d4-a716-44665544a0ea',
+      middleId: '550e8400-e29b-41d4-a716-44665544a0eb',
+      firstId: '550e8400-e29b-41d4-a716-44665544a0ec',
+    };
+    const { service, worktreePath } = setupTwoResetChain(ids);
+    expect(await service.archiveSessions([ids.sessionId])).toMatchObject({
+      archived: [ids.sessionId],
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [ids.sessionId],
+      service,
+      bridge: cleanupBridge([ids.firstId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([ids.sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain(
+      `superseded session ${ids.firstId} is still live`,
+    );
+  });
+
+  it.each(['archive', 'unarchive'] as const)(
+    'serializes %s of an older predecessor with checkout cleanup',
+    async (action) => {
+      const ids = {
+        sessionId: '550e8400-e29b-41d4-a716-4466554400e0',
+        middleId: '550e8400-e29b-41d4-a716-4466554400e1',
+        firstId: '550e8400-e29b-41d4-a716-4466554400e2',
+      };
+      const { service } = setupTwoResetChain(ids);
+      writeSessionFile(workspaceDir, ids.firstId, 'active');
+      const from = action === 'archive' ? 'active' : 'archived';
+      const to = action === 'archive' ? 'archived' : 'active';
+      if (from === 'archived') {
+        expect(await service.archiveSessions([ids.firstId])).toMatchObject({
+          archived: [ids.firstId],
+        });
+      }
+      const plan = await preclassifyWorktreeCleanup(service, ids.sessionId);
+      expect(plan).toBeDefined();
+      const release = await acquireWorktreeCleanupLock(plan!);
+      const acquire = vi.spyOn(worktreeOwnership, 'acquireWorktreeOwnershipOp');
+      const params = {
+        sessionIds: [ids.firstId],
+        service,
+        coordinator: new SessionArchiveCoordinator(),
+        bridge: cleanupBridge(),
+      };
+      const move =
+        action === 'archive'
+          ? archiveDaemonSessions(params)
+          : unarchiveDaemonSessions(params);
+      try {
+        await expect.poll(() => acquire.mock.calls.length).toBe(1);
+        expect(acquire).toHaveBeenCalledWith(plan!.lockKey);
+        expect(
+          fs.existsSync(
+            service.getWorktreeSessionPathForArchiveState(ids.firstId, from),
+          ),
+        ).toBe(true);
+        await expect(
+          verifyWorktreeCleanupOwnership(plan!, (id) => id === ids.middleId),
+        ).resolves.toEqual({
+          ok: false,
+          reason: `superseded session ${ids.middleId} is still live`,
+        });
+      } finally {
+        release();
+        await move;
+        acquire.mockRestore();
+      }
+      expect(await move).toMatchObject({
+        [to === 'archived' ? 'archived' : 'unarchived']: [ids.firstId],
+        errors: [],
+      });
+      expect(
+        fs.existsSync(
+          service.getWorktreeSessionPathForArchiveState(ids.firstId, to),
+        ),
+      ).toBe(true);
+    },
+  );
+
   it('keeps a checkout while its direct predecessor is live behind older tombstones', async () => {
     const ids = {
       sessionId: '550e8400-e29b-41d4-a716-44665544a0d6',
@@ -2914,7 +3029,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
       expect(fs.existsSync(worktreePath)).toBe(live);
       if (live) {
         expect(warnings()).toContain(
-          `session ${activeId} naming the checkout is still live`,
+          `superseded session ${activeId} is still live`,
         );
       }
     },
@@ -3337,6 +3452,35 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(result.errors).toEqual([
       { sessionId, error: expect.stringContaining('already closing') },
     ]);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+    expect(fs.existsSync(worktreePath)).toBe(true);
+  });
+
+  it('preserves the transcript and attachments if the deletion close times out', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400bf';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    const closeSession = vi
+      .fn()
+      .mockRejectedValue(new BridgeTimeoutError('closeSession', 10));
+    const deleteSessionAttachments = vi.fn();
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession, deleteSessionAttachments },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(result.errors).toEqual([
+      { sessionId, error: expect.stringContaining('timed out') },
+    ]);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      forDeletion: true,
+    });
+    expect(deleteSessionAttachments).not.toHaveBeenCalled();
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       true,
     );

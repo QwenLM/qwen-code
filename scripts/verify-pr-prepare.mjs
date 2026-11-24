@@ -51,10 +51,14 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -74,10 +78,11 @@ const FIELDS = [
   'baseRefName',
   'baseRefOid',
   'headRefOid',
+  'isCrossRepository',
   'commits',
 ].join(',');
 
-const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> [--context-out <path>] [--local-owner] [--sponsored]
        node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
@@ -141,6 +146,254 @@ export function artifactDirName(pr, now = new Date()) {
  * it is not the credential-free boundary the round needs.
  */
 export const SEATBELT = 'sandbox-exec';
+
+/**
+ * Host-side emergency switch (outside PR-controlled input). When set to `1`,
+ * every round is forced into `hardware-isolated`, disabling lightweight
+ * trusted exceptions during incident response (§4.4).
+ */
+export const FORCE_HARDWARE_ENV = 'QWEN_VERIFY_FORCE_HARDWARE';
+
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const WRITE_PERMISSIONS = new Set(['write', 'maintain', 'admin']);
+const NON_WRITE_PERMISSIONS = new Set(['read', 'triage', 'none']);
+
+const ESCALATION_RULES = [
+  {
+    reason: 'dependency-manifest',
+    test: (p) =>
+      /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?|npm-shrinkwrap\.json|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.[cm]?js|\.yarnrc(?:\.yml)?)$/i.test(
+        p,
+      ) || /^patches\//i.test(p),
+  },
+  {
+    reason: 'maven-build',
+    test: (p) =>
+      /(?:^|\/)(?:pom\.xml|mvnw(?:\.cmd)?)$/i.test(p) ||
+      /(?:^|\/)\.mvn\//i.test(p),
+  },
+  {
+    reason: 'ci-workflow',
+    test: (p) => /^\.github\/(?:workflows|actions)\//i.test(p),
+  },
+  {
+    reason: 'verify-or-sandbox-script',
+    test: (p) =>
+      /^scripts\/(?:verify-pr-|sandbox|lib\/)/i.test(p) ||
+      /^\.husky\//i.test(p) ||
+      /(?:^|\/)(?:\.gitmodules|\.gitattributes|Dockerfile(?:\.[^/]+)?|docker-compose(?:\.[^/]+)?\.ya?ml|Makefile|esbuild\.config\.[cm]?js|eslint\.config\.[cm]?js|vitest\.config\.[cm]?[jt]s)$/i.test(
+        p,
+      ),
+  },
+  {
+    reason: 'agent-control-config',
+    test: (p) => /(?:^|\/)\.(?:qwen|claude)\//i.test(p),
+  },
+  {
+    reason: 'executable-or-binary',
+    test: (p) =>
+      /\.(?:node|wasm|so|dylib|dll|exe|bin|sh|bash|zsh|ps1|bat|cmd)$/i.test(p),
+  },
+];
+
+/**
+ * Parses `git diff --raw --no-renames -z` output into changed paths plus
+ * git-mode escalation sets (100755 executables, 120000 symlinks, 160000
+ * submodules) and extensionless live files eligible for magic-byte sniffing.
+ */
+export function parseRawDiffEntries(rawStdout) {
+  const changedPaths = [];
+  const executablePaths = [];
+  const specialModePaths = [];
+  const extensionlessLivePaths = [];
+  if (typeof rawStdout !== 'string' || rawStdout.length === 0) {
+    return {
+      changedPaths,
+      executablePaths,
+      specialModePaths,
+      extensionlessLivePaths,
+    };
+  }
+  const tokens = rawStdout.split('\0');
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const header = tokens[i];
+    const filePath = tokens[i + 1];
+    if (!header.startsWith(':') || !filePath) continue;
+    const parts = header.slice(1).split(' ');
+    const newMode = parts[1] ?? '';
+    const status = (parts[4] ?? '').charAt(0);
+    changedPaths.push(filePath);
+    if (status === 'D') continue;
+    if (newMode === '100755') {
+      executablePaths.push(filePath);
+    } else if (newMode === '120000' || newMode === '160000') {
+      specialModePaths.push(filePath);
+    } else if (!/\.[^/]+$/.test(basename(filePath))) {
+      extensionlessLivePaths.push(filePath);
+    }
+  }
+  return {
+    changedPaths,
+    executablePaths,
+    specialModePaths,
+    extensionlessLivePaths,
+  };
+}
+
+/**
+ * Checks the first 4 bytes of a regular file without following symlinks for
+ * shebang (`#!`), ELF (`\x7fELF`), Mach-O, or PE (`MZ`) executable headers.
+ */
+export function hasExecutableMagic(filePath) {
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let fd;
+  try {
+    fd = openSync(filePath, flags);
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(4);
+    const n = readSync(fd, buf, 0, 4, 0);
+    if (n >= 2 && buf[0] === 0x23 && buf[1] === 0x21) return true; // #!
+    if (n >= 2 && buf[0] === 0x4d && buf[1] === 0x5a) return true; // MZ (PE)
+    if (
+      n >= 4 &&
+      buf[0] === 0x7f &&
+      buf[1] === 0x45 &&
+      buf[2] === 0x4c &&
+      buf[3] === 0x46
+    ) {
+      return true; // ELF
+    }
+    if (n >= 4) {
+      const hex = buf.toString('hex');
+      if (
+        hex === 'feedface' ||
+        hex === 'cefaedfe' ||
+        hex === 'feedfacf' ||
+        hex === 'cffaedfe' ||
+        hex === 'cafebabe'
+      ) {
+        return true; // Mach-O / fat binary
+      }
+    }
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Returns every mandatory high-assurance escalation trigger matched by the
+ * changed file paths in `base..head` (§4.3). These triggers force
+ * `hardware-isolated` regardless of author trust; their absence is NOT proof
+ * that other changes are benign.
+ */
+export function detectMandatoryEscalations(
+  changedPaths = [],
+  { executablePaths = [], specialModePaths = [] } = {},
+) {
+  const normalizePath = (p) =>
+    p.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  const execSet = new Set(
+    executablePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
+  const specialSet = new Set(
+    specialModePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
+  const hits = [];
+  for (const raw of changedPaths) {
+    if (typeof raw !== 'string') continue;
+    const normalized = normalizePath(raw);
+    if (!normalized) continue;
+    let matched = false;
+    for (const rule of ESCALATION_RULES) {
+      if (rule.test(normalized)) {
+        hits.push({ path: normalized, reason: rule.reason });
+        matched = true;
+        break;
+      }
+    }
+    if (!matched && specialSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'symlink-or-submodule' });
+    } else if (!matched && execSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'executable-or-binary' });
+    }
+  }
+  return hits;
+}
+
+/**
+ * Classifies a round into `(prTrust, executionClass)` per §4.1–§4.4.
+ * Fails closed to `hardware-isolated` on external/fork/unknown identity,
+ * missing changed-file data, mandatory escalation paths, or the host-side
+ * global hardware switch. `sponsored` authorizes execution budget only and
+ * never lowers `executionClass`.
+ */
+export function classifyPrTrust({
+  permission = null,
+  isLocalOwner = false,
+  isFork = null,
+  changedPaths = null,
+  executablePaths = [],
+  specialModePaths = [],
+  forceHardware = false,
+  sponsored = false,
+} = {}) {
+  let prTrust;
+  if (isFork === true) {
+    prTrust = 'external';
+  } else if (isLocalOwner === true) {
+    prTrust = 'local-owner';
+  } else if (typeof permission === 'string') {
+    const perm = permission.trim().toLowerCase();
+    if (WRITE_PERMISSIONS.has(perm)) {
+      prTrust = 'collaborator';
+    } else if (NON_WRITE_PERMISSIONS.has(perm)) {
+      prTrust = 'external';
+    } else {
+      prTrust = 'unknown';
+    }
+  } else {
+    prTrust = 'unknown';
+  }
+
+  const escalationReasons = [];
+  if (forceHardware === true) {
+    escalationReasons.push('global-hardware-only-switch');
+  }
+  if (!Array.isArray(changedPaths)) {
+    escalationReasons.push('changed-files-unavailable');
+  } else {
+    for (const hit of detectMandatoryEscalations(changedPaths, {
+      executablePaths,
+      specialModePaths,
+    })) {
+      escalationReasons.push(`${hit.reason}:${hit.path}`);
+    }
+  }
+
+  const eligibleForSharedKernel =
+    (prTrust === 'local-owner' || prTrust === 'collaborator') &&
+    escalationReasons.length === 0;
+  const executionClass = eligibleForSharedKernel
+    ? 'trusted-shared-kernel'
+    : 'hardware-isolated';
+
+  return {
+    prTrust,
+    executionClass,
+    escalationReasons,
+    sponsored: Boolean(sponsored),
+  };
+}
 
 /**
  * Set this only after confirming the boundary mounts no host credentials. A
@@ -348,6 +601,8 @@ export function parseArgs(argv) {
     requireIsolation: false,
     artifactDir: null,
     contextOut: null,
+    localOwner: false,
+    sponsored: false,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -356,6 +611,10 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--require-isolation') {
       options.requireIsolation = true;
+    } else if (arg === '--local-owner') {
+      options.localOwner = true;
+    } else if (arg === '--sponsored') {
+      options.sponsored = true;
     } else if (arg === '--artifact-dir') {
       options.artifactDir = argv[(index += 1)] ?? null;
       if (!options.artifactDir) {
@@ -392,6 +651,49 @@ export function parseArgs(argv) {
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: 'utf8', ...options });
+}
+
+/**
+ * Best-effort collaborator permission lookup for trust classification (§4.2).
+ * Never throws and never fails open: any lookup error returns permission: null,
+ * which classifyPrTrust maps to prTrust="unknown" -> hardware-isolated.
+ */
+function fetchAuthorPermission(owner, name, login) {
+  if (typeof login !== 'string' || !GITHUB_LOGIN.test(login)) {
+    return { permission: null, error: 'missing or invalid author login' };
+  }
+  const view = run('gh', [
+    'api',
+    `repos/${owner}/${name}/collaborators/${login}/permission`,
+  ]);
+  if (view.status !== 0) {
+    const detail =
+      (view.stderr || '').trim().split('\n')[0] ||
+      view.error?.message ||
+      `exit ${view.status}`;
+    return { permission: null, error: `gh api permission failed: ${detail}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(view.stdout);
+  } catch {
+    return {
+      permission: null,
+      error: 'gh api permission returned non-JSON output',
+    };
+  }
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    typeof parsed.permission === 'string'
+  ) {
+    return { permission: parsed.permission, error: null };
+  }
+  return {
+    permission: null,
+    error: 'gh api permission returned no permission field',
+  };
 }
 
 /** `{state}` on success, `{error}` naming why the review state is unknown. */
@@ -595,6 +897,9 @@ function main(argv) {
     return fail(3, 'not inside a git worktree — run this from the clone');
   }
   const root = toplevel.stdout.trim();
+  const rootFilterOverrides = localFilterOverrides(root);
+  const runGitRoot = (args) =>
+    run('git', [...rootFilterOverrides, ...GIT_HARDENING, '-C', root, ...args]);
 
   const view = run('gh', [
     'pr',
@@ -631,9 +936,7 @@ function main(argv) {
     ['head', context.head, `pull/${context.pr}/head`],
   ];
   for (const [label, oid, ref] of probes) {
-    if (
-      runGit(['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
-    ) {
+    if (runGitRoot(['cat-file', '-e', `${oid}^{commit}`]).status !== 0) {
       return fail(
         3,
         `${label} ${oid} is not in this clone — run: git fetch https://github.com/${slug}.git ${ref}`,
@@ -645,7 +948,7 @@ function main(argv) {
   // than the PR head or an uncommitted change would measure code the report
   // does not name. Checked before the artifact directory exists, so a refusal
   // leaves nothing behind.
-  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
+  const treeHead = runGitRoot(['rev-parse', 'HEAD']);
   if (treeHead.status !== 0) {
     return fail(3, 'could not read HEAD in this clone');
   }
@@ -667,7 +970,15 @@ function main(argv) {
   }
   // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
   // hide the untracked files this check exists to refuse.
-  const dirty = run('git', gitStatusArgs(root));
+  const dirty = run('git', [
+    ...rootFilterOverrides,
+    ...GIT_HARDENING,
+    '-C',
+    root,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ]);
   if (dirty.status !== 0) {
     const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
     return fail(3, `could not read the working tree status: ${detail}`);
@@ -685,7 +996,7 @@ function main(argv) {
   // git status trusts the index: skip-worktree / assume-unchanged entries
   // (a sparse checkout sets them en masse) hide tracked divergence from it,
   // so refuse anything that is not a plain cached 'H' entry.
-  const flagged = runGit(['-C', root, 'ls-files', '-v']);
+  const flagged = runGitRoot(['ls-files', '-v']);
   if (flagged.status !== 0) {
     const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
     return fail(3, `could not read the index flags: ${detail}`);
@@ -759,11 +1070,58 @@ function main(argv) {
       );
     }
   }
+  // Classify PR trust and mandatory hardware-isolation escalations host-side
+  // before writing the digest-bound snapshot (§4.1–§4.4). Failure to read
+  // permission or changed files fails closed to hardware-isolated.
+  // Use `--raw --no-renames -z` (NUL-delimited, never C-quoted) so non-ASCII
+  // filenames cannot bypass prefix rules via core.quotePath=true AND git file
+  // modes (100755 executables, 120000 symlinks, 160000 submodules) are captured
+  // in the same command. Extensionless 100644 files are also magic-sniffed
+  // (4 bytes, O_NOFOLLOW) for shebang/ELF/Mach-O/PE headers.
+  const diffRes = runGitRoot([
+    'diff',
+    '--raw',
+    '--no-renames',
+    '-z',
+    `${context.base}..${context.head}`,
+  ]);
+  let changedPaths = null;
+  let executablePaths = [];
+  let specialModePaths = [];
+  if (diffRes.status === 0) {
+    const parsedDiff = parseRawDiffEntries(diffRes.stdout);
+    changedPaths = parsedDiff.changedPaths;
+    executablePaths = [...parsedDiff.executablePaths];
+    specialModePaths = [...parsedDiff.specialModePaths];
+    for (const rel of parsedDiff.extensionlessLivePaths) {
+      if (hasExecutableMagic(join(root, rel))) {
+        executablePaths.push(rel);
+      }
+    }
+  }
+  const authorPerm = fetchAuthorPermission(owner, name, snapshot.author?.login);
+  const trust = classifyPrTrust({
+    permission: authorPerm.permission,
+    isLocalOwner: options.localOwner,
+    isFork: snapshot.isCrossRepository === true ? true : null,
+    changedPaths,
+    executablePaths,
+    specialModePaths,
+    forceHardware: process.env[FORCE_HARDWARE_ENV] === '1',
+    sponsored: options.sponsored,
+  });
+  const trustClassification = {
+    ...trust,
+    headRefOid: context.head,
+    permission: authorPerm.permission,
+    ...(authorPerm.error ? { permissionError: authorPerm.error } : {}),
+  };
+
   // The host-held snapshot carries the slug too: the checker compares a
   // waiver's approval permalink against these coordinates, and gh's field
   // selector has no repo member, so it is added where the snapshot is
   // written, not to FIELDS.
-  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
+  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug, trustClassification }, null, 2)}\n`;
   writeFileSync(contextPath, contextBytes);
   // Structural fix (R5-1): the authoritative snapshot also goes to a host
   // destination outside the clone (--context-out), so the trusted source the
@@ -858,6 +1216,7 @@ function main(argv) {
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
     `  artifacts  ${artifacts}`,
+    `  trust      ${trust.prTrust} -> ${trust.executionClass}${trust.escalationReasons.length > 0 ? ` (${trust.escalationReasons.slice(0, 3).join(', ')}${trust.escalationReasons.length > 3 ? ', …' : ''})` : ''}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
   ]);
   if (isolation.seatbelt) {

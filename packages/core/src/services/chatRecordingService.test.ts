@@ -32,6 +32,9 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import * as storageUtils from '../utils/sessionStorageUtils.js';
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
+import { postProcessSummary } from './postCompactAttachments.js';
 import {
   collectSessionTurnState,
   computeInitialTurnFromHistory,
@@ -277,6 +280,73 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('getExistingTranscriptPath', () => {
+    const transcript =
+      '/test/project/root/.gemini/projects/test-project/chats/test-session-id.jsonl';
+
+    beforeEach(() => {
+      vi.mocked(path.basename).mockImplementation(
+        (file) => file.split('/').at(-1)!,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation((file) =>
+        file.startsWith('/'),
+      );
+    });
+
+    it('returns an existing local file and never creates it', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      const stat = vi.spyOn(fs, 'lstatSync').mockReturnValue({
+        isFile: () => true,
+        size: 100,
+      } as fs.Stats);
+      const managed = vi
+        .spyOn(storageUtils, 'readManagedExecutionEvidenceSync')
+        .mockReturnValue(false);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBe(transcript);
+      expect(stat).toHaveBeenCalledWith(transcript);
+      managed.mockReturnValue(true);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(undefined);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(false);
+      stat.mockReturnValue({ isFile: () => true, size: 0 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockReturnValue({ isFile: () => false, size: 100 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(fs.mkdirSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('does not broaden the lookup for a glob metacharacter in a session ID', async () => {
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-*');
+      const recorder = new ChatRecordingService(mockConfig, undefined, false);
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await recorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
+
+    it('does not point a rotated recorder at the new session', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      legacyRecorder.pinSessionIdentity('test-session-id');
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
   });
 
   type UserArgs = Parameters<ChatRecordingService['recordUserMessage']>;
@@ -654,6 +724,138 @@ describe('ChatRecordingService', () => {
 
       const record = await flushed();
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
+    });
+
+    it('persists the summary without its live transcript pointer', async () => {
+      vi.mocked(path.basename).mockReturnValue('session.jsonl');
+      const hint = buildCompactionTranscriptHint('/host/session.jsonl');
+      const liveSummary = postProcessSummary('Task summary', hint);
+      svc.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [
+          {
+            role: 'user',
+            parts: [{ text: 'Startup prelude' }, { text: liveSummary }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ],
+      });
+      const record = await flushed();
+      const checkpoint = JSON.stringify(record.systemPayload);
+      expect(checkpoint).not.toContain('<compaction-transcript-hint>');
+      expect(checkpoint).not.toContain('/host');
+      expect(checkpoint).not.toContain('session.jsonl');
+      expect(record.systemPayload).toMatchObject({
+        compressedHistory: [
+          {
+            parts: [
+              { text: 'Startup prelude' },
+              { text: postProcessSummary('Task summary') },
+            ],
+          },
+          {},
+        ],
+      });
+      expect(liveSummary).toContain(hint);
+    });
+
+    it('strips the live hint from a notes-mode strict summary checkpoint without changing live or replay evidence', async () => {
+      const realFs =
+        await vi.importActual<typeof import('node:fs/promises')>(
+          'node:fs/promises',
+        );
+      const { tmpdir } = await import('node:os');
+      const runtime = await realFs.mkdtemp(
+        `${tmpdir()}/qwen-strict-summary-checkpoint-`,
+      );
+      try {
+        const transcript = `${runtime}/checkpoint.jsonl`;
+        Object.assign(mockConfig, {
+          getChatCompression: () => ({ strategy: 'notes' }),
+        });
+        vi.mocked(mockLease.appendJsonLine).mockImplementation(
+          async (record) => {
+            await realFs.appendFile(transcript, JSON.stringify(record) + '\n');
+          },
+        );
+        vi.mocked(path.basename).mockImplementation(
+          (file) => file.split('/').at(-1)!,
+        );
+        const hint = buildCompactionTranscriptHint('/live/session.jsonl');
+        const literal = buildCompactionTranscriptHint('/evidence/quoted.jsonl');
+        const summary: Content = {
+          role: 'user',
+          parts: [
+            { text: 'Startup prelude' },
+            { text: postProcessSummary('Fallback task summary', hint) },
+          ],
+        };
+        const retained: Content = {
+          role: 'user',
+          parts: [{ text: `Recorded user evidence:\n${literal}` }],
+        };
+        markApiHistoryPrompt(summary, 'summary-prompt');
+        markApiHistoryPrompt(retained, 'retained-prompt');
+        const liveHistory: Content[] = [
+          summary,
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+          retained,
+        ];
+        const before = JSON.stringify(liveHistory);
+        const uuid = await svc.recordChatCompressionStrict(
+          {
+            info: {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              compressionStatus: CompressionStatus.COMPRESSED,
+              strategy: 'summary',
+            },
+            summaryPrefixLength: 2,
+            compressedHistory: liveHistory,
+          },
+          undefined,
+          new AbortController().signal,
+          svc.getSessionNotesState(),
+        );
+        const lines = (await realFs.readFile(transcript, 'utf8'))
+          .trim()
+          .split('\n');
+        expect(lines).toHaveLength(1);
+        const record = JSON.parse(lines[0]) as ChatRecord;
+        const checkpoint = record.systemPayload as {
+          compressedHistory: Content[];
+          promptIds: Array<string | null>;
+        };
+        expect(record).toMatchObject({ uuid, subtype: 'chat_compression' });
+        expect(JSON.stringify(liveHistory)).toBe(before);
+        expect(checkpoint.promptIds).toEqual([
+          'summary-prompt',
+          null,
+          'retained-prompt',
+        ]);
+        expect(checkpoint.compressedHistory[0].parts?.[0]?.text).toBe(
+          'Startup prelude',
+        );
+        expect(checkpoint.compressedHistory.slice(1)).toEqual(
+          JSON.parse(before).slice(1),
+        );
+        expect
+          .soft(checkpoint.compressedHistory[0].parts?.[1]?.text)
+          .toBe(postProcessSummary('Fallback task summary'));
+        expect.soft(lines[0]).not.toContain('/live');
+      } finally {
+        await realFs.rm(runtime, { recursive: true, force: true });
+      }
     });
 
     it('freezes compression snapshot containers against later live-history mutation', async () => {
