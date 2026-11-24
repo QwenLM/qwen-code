@@ -129,6 +129,7 @@ import {
 import {
   HostedMcpRecoveryRequiredError,
   HostedMcpSession,
+  isHostedDurableMcpOwner,
 } from './hosted-mcp-session.js';
 import { installAccessLogMiddleware } from './server/access-log.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -51389,6 +51390,129 @@ describe('idle suspension', () => {
       .send(operation())
       .expect(202);
     expect(requests.some((r) => r.kind === 'mcp-configure')).toBe(!parkable);
+    // Do not leak this second idle teardown into the next test's mock scope.
+    await vi.waitFor(() => expect(statsOf(server).cleanSuspensions).toBe(2), {
+      timeout: 10_000,
+    });
+  });
+
+  // S6b pre-start check (#18149 Stage 4): a parked Turn's MCP tool
+  // definitions must deep-equal the ones it saw before the park. An MCP
+  // tool's model name digests its connection generation, so this holds only
+  // if a cold load after a parked suspension keeps the same durable owner and
+  // connection instead of configuring a new one.
+  it('keeps the MCP owner and tool declarations across a parked suspension', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const { server, authorize, requests } = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-mcp/1',
+      {},
+      { idleSuspendMs: 500 },
+    );
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    const acquired = acquire.getMockImplementation()!;
+    acquire.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      await acquired.call(this);
+      this.mcpParkable = true;
+    });
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const controlled = control.getMockImplementation()!;
+    control.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      operation,
+    ) {
+      const reply = await controlled.call(this, operation);
+      // The reply map keeps this object, so later discovers see the tool too.
+      if (operation.kind === 'mcp-configure' && reply.catalog)
+        Object.assign(reply.catalog, {
+          tools: [
+            {
+              name: 'echo',
+              description: 'Echo a message',
+              inputSchema: { type: 'object' },
+            },
+          ],
+        });
+      return reply;
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'idle-claim',
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockResolvedValue();
+    const seen: Array<{ owner: string; tools: unknown[] }> = [];
+    state.model.mockImplementation(async ({ toolTurn, signal }) => {
+      const tools = (await toolTurn!.declarations(signal)).filter((tool) =>
+        tool.name?.startsWith('mcp_'),
+      );
+      const configure = control.mock.calls.findLastIndex(
+        ([operation]) =>
+          operation.kind === 'mcp-configure' ||
+          operation.kind === 'mcp-discover',
+      );
+      seen.push({
+        owner: (control.mock.contexts[configure] as HostedWorkspaceBroker)
+          .runtimeSessionId,
+        tools,
+      });
+      return { text: 'listed', model: 'test-model' };
+    });
+    const prompt = (request: supertest.Test, promptId: string) => {
+      const parts = [{ type: 'text', text: 'list the tools' }];
+      return request
+        .send({
+          prompt: parts,
+          promptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(parts)).digest('hex')}`,
+        })
+        .expect(202);
+    };
+    await prompt(
+      authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)),
+      PROMPT_ID,
+    );
+    await vi.waitFor(() => expect(statsOf(server).cleanSuspensions).toBe(1), {
+      timeout: 10_000,
+    });
+    expect(requests.filter((r) => r.kind === 'mcp-release')).toEqual([]);
+
+    requests.length = 0;
+    const load = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-mcp/1',
+        mcpServers: [
+          {
+            serverId: 'demo',
+            serverRevision: 1,
+            definitionDigest: 'a'.repeat(64),
+          },
+        ],
+      })
+      .expect(200);
+    await prompt(
+      headers(supertest(server).post(`/session/${SESSION_ID}/prompt`)).set(
+        'X-Qwen-Client-Id',
+        load.body.clientId as string,
+      ),
+      randomUUID(),
+    );
+    await vi.waitFor(() => expect(seen).toHaveLength(2), { timeout: 10_000 });
+
+    expect(seen[0]!.tools).toHaveLength(1);
+    expect(isHostedDurableMcpOwner(seen[0]!.owner)).toBe(true);
+    expect(seen[1]).toEqual(seen[0]);
+    // The reload reused the parked connection: it revalidated discovery and
+    // configured nothing new.
+    expect(requests.some((r) => r.kind === 'mcp-configure')).toBe(false);
+    expect(requests.find((r) => r.kind === 'mcp-discover')).toMatchObject({
+      revalidate: true,
+    });
     // Do not leak this second idle teardown into the next test's mock scope.
     await vi.waitFor(() => expect(statsOf(server).cleanSuspensions).toBe(2), {
       timeout: 10_000,
