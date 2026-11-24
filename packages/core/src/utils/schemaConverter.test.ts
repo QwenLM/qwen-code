@@ -9,6 +9,7 @@ import {
   convertSchema,
   relaxSchemaForFunctionCalling,
 } from './schemaConverter.js';
+import { SchemaValidator } from './schemaValidator.js';
 
 describe('convertSchema', () => {
   describe('mode: auto (default)', () => {
@@ -310,6 +311,7 @@ describe('relaxSchemaForFunctionCalling', () => {
         },
         unprocessed: { type: 'array', items: { type: 'object' } },
         options: { type: 'object', properties: {} },
+        unevaluatedProperties: { type: 'string' },
       },
       required: ['segment', 'docs'],
     };
@@ -390,6 +392,36 @@ describe('relaxSchemaForFunctionCalling', () => {
       expect(
         JSON.stringify(relaxSchemaForFunctionCalling(docsSchema, true)),
       ).not.toContain('additionalProperties');
+    });
+
+    const itemSchema = { properties: { name: { type: 'string' } } };
+
+    it.each([
+      {
+        keyword: 'allOf',
+        composition: { allOf: [itemSchema], unevaluatedProperties: false },
+      },
+      {
+        keyword: '$ref',
+        composition: {
+          $defs: {
+            item: itemSchema,
+            closed: { $ref: '#/$defs/item', unevaluatedProperties: false },
+          },
+          $ref: '#/$defs/closed',
+        },
+      },
+    ])('preserves unevaluatedProperties across $keyword', ({ composition }) => {
+      const schema = { type: 'object', ...composition };
+      const wire = {
+        ...relaxSchemaForFunctionCalling(schema, true, true),
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+      };
+
+      expect(SchemaValidator.validate(wire, { name: 'apple' })).toBeNull();
+      expect(
+        SchemaValidator.validate(wire, { name: 'apple', color: 'red' }),
+      ).toContain('unevaluated properties');
     });
   });
 

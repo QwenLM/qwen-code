@@ -38,6 +38,7 @@ import { determineProvider } from './index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
+  DEFAULT_OPENAI_BASE_URL,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   MAX_STREAM_GUARD_TIMEOUT_MS,
@@ -283,6 +284,7 @@ describe('ContentGenerationPipeline', () => {
     mockReportOpenAiRequest.mockReturnValue(activeHandle);
 
     mockClient = {
+      baseURL: DEFAULT_OPENAI_BASE_URL,
       chat: {
         completions: {
           create: vi.fn(),
@@ -712,20 +714,28 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('opens undeclared object schemas for DashScope endpoints', async () => {
-      const request = userRequest('qwen4-max', {
-        tools: [{ functionDeclarations: [{ name: 'test-function' }] }],
-      });
-      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([]);
+    it.each([
+      { baseUrl: DASHSCOPE_URL, clientUrl: DASHSCOPE_URL, enabled: true },
+      { baseUrl: undefined, clientUrl: DASHSCOPE_URL, enabled: true },
+      { baseUrl: '', clientUrl: DEFAULT_OPENAI_BASE_URL, enabled: false },
+    ])(
+      'sets schema opening to $enabled for SDK endpoint $clientUrl (configured: $baseUrl)',
+      async ({ baseUrl, clientUrl, enabled }) => {
+        const request = userRequest('qwen4-max', {
+          tools: [{ functionDeclarations: [{ name: 'test-function' }] }],
+        });
+        mockClient.baseURL = clientUrl;
+        (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([]);
 
-      await executeWith({ baseUrl: DASHSCOPE_URL }, request);
+        await executeWith({ baseUrl }, request);
 
-      expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
-        request.config!.tools,
-        'auto',
-        true,
-      );
-    });
+        expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
+          request.config!.tools,
+          'auto',
+          enabled,
+        );
+      },
+    );
 
     it('should skip empty tools array in request', async () => {
       // tools: [] must NOT reach the API request
