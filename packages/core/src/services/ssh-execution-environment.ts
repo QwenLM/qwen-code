@@ -8,8 +8,8 @@ import path from 'node:path';
 import {
   buildShellExecWarnings,
   getCommandRoots,
-  splitCommands,
 } from '../utils/shell-utils.js';
+import { splitCompoundCommand } from '../permissions/rule-parser.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
 import { detectLineEnding } from './fileSystemService.js';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -390,8 +390,16 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
     }
     if (toolName === ToolNames.SHELL) {
       const command = stringParam(params, 'command');
+      // #11882: segment with the rule-matching splitter
+      // (splitCompoundCommand) instead of the legacy `splitCommands`, so the
+      // `Bash(...)` rules proposed here are extracted from the same segments
+      // the permission path (splitCommandForRules) evaluates. Both are
+      // comment-blind; the differences are fixes in the conservative
+      // direction — redirection spellings (`&>`, `&>>`) and arithmetic stay
+      // whole instead of over-splitting, and separators inside `$(...)`/
+      // backtick bodies, which bash executes, now yield their own segments.
       const rules = await Promise.all(
-        splitCommands(command).map(async (part) => {
+        splitCompoundCommand(command).map(async (part) => {
           try {
             const extracted = await extractCommandRules(part);
             return extracted.length ? extracted : [part];
