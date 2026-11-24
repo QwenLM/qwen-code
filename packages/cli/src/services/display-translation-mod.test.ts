@@ -269,6 +269,7 @@ describe('translateDisplayText', () => {
     ],
     ['Install it.', '安装它：https://evil.example/releases。'],
     ['Install from https://a.example/releases.', '安装它。'],
+    ['See https://a.example.', '参见 https://a.example。evil.example/x'],
   ])(
     'keeps the original when a bare URL changes: %s -> %j',
     async (original, translated) => {
