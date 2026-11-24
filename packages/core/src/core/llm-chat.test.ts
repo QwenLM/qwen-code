@@ -5055,6 +5055,42 @@ describe('LlmChat', async () => {
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
     });
 
+    it('reactively compresses and retries once after a Kimi longer-than-context-length error', async () => {
+      const compressedHistory = [
+        userText('summary'),
+        modelText('ack'),
+        userText('latest'),
+      ];
+      const expectedRequestContents = structuredClone(compressedHistory);
+      const compressSpy = reactiveCompaction(1_347_344, compressedHistory);
+      mockRequests(
+        new Error(
+          "400 The input (1347344 tokens) is longer than the model's context length (1048576 tokens).",
+        ),
+        textStream('answer after compact'),
+      );
+
+      const events = await sendCollect(
+        'latest',
+        'prompt-id-reactive-compact-kimi',
+      );
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      const reactiveOpts = compressSpy.mock.calls[1][1];
+      expect(reactiveOpts.force).toBe(true);
+      expect(reactiveOpts.trigger).toBe('auto');
+      expect(reactiveOpts.originalTokenCount).toBe(1_347_344);
+      expect(reactiveOpts.precomputedEffectiveTokens).toBe(1_347_344);
+      expect(reactiveOpts.observedServerCeiling).toBe(1_048_576);
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      expectStreamCalls(2);
+      expect(requestAt(1).contents).toEqual(expectedRequestContents);
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(infoOf(events[0]).originalTokenCountIsEstimated).toBe(false);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
+      expect(hasChunkText(events, 'answer after compact')).toBe(true);
+    });
+
     it('suppresses retained catalogs in advisor and non-cache follow-up inputs without changing raw history', async () => {
       const { AdvisorTool } = await import('../tools/advisor.js');
       const { runWithAgentChat } = await import(
