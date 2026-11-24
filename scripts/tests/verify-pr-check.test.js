@@ -5036,5 +5036,143 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         label,
       ).toMatch(/contradicts boundary\.json mode/);
     }
+
+    // 8r. Leaf-symlink round directory cannot bypass realArtifactDirectory via
+    // trailing "/." or "/evidence/..", and a <clone>/tmp/<symlink-round> or
+    // nested <clone>/tmp/sub/<round> or <clone>/tmp/link/../<round> still
+    // encloses the clone root for --context and --execution-record.
+    const leafAlias = join(base, 'pr99-verify-20261124-033500');
+    symlinkSync(deepRealRound, leafAlias);
+    for (const [label, candidateDir] of [
+      ['leaf symlink + /.', `${leafAlias}/.`],
+      ['leaf symlink + /evidence/..', `${leafAlias}/evidence/..`],
+    ]) {
+      const res = run([
+        '--context',
+        hostCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        candidateDir,
+      ]);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stdout, label).toMatch(/must be a real directory/);
+    }
+
+    const deepClone = join(base, 'deep-clone');
+    const deepSubRound = join(
+      deepClone,
+      'tmp',
+      'sub',
+      'pr17185-verify-20261124-034000',
+    );
+    mkdirSync(join(deepSubRound, 'evidence'), { recursive: true });
+    writeFileSync(join(deepSubRound, 'report.md'), validFiles().report);
+    writeFileSync(join(deepSubRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(deepSubRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(deepSubRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(deepSubRound, 'evidence', '01-ab-cells.png'), 'png');
+    const deepCloneCtx = join(deepClone, 'forged-ctx.json');
+    writeFileSync(deepCloneCtx, ctxText);
+    const deepSubRes = run([
+      '--context',
+      deepCloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      deepSubRound,
+    ]);
+    expect(deepSubRes.status).toBe(1);
+    expect(deepSubRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp/<symlink-round> -> <external-round> even with head-only ctx
+    const symChildClone = join(base, 'sym-child-clone');
+    mkdirSync(join(symChildClone, 'tmp'), { recursive: true });
+    const symChildLink = join(
+      symChildClone,
+      'tmp',
+      'pr17185-verify-20261124-034500',
+    );
+    symlinkSync(deepRealRound, symChildLink);
+    const symChildHeadOnlyCtx = join(symChildClone, 'head-only.json');
+    writeFileSync(symChildHeadOnlyCtx, JSON.stringify({ headRefOid: HEAD }));
+    const symChildRes = run(['--context', symChildHeadOnlyCtx, symChildLink]);
+    expect(symChildRes.status).toBe(1);
+    expect(symChildRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp/link/../pr17185-verify-... where link -> <clone>/other/sub
+    const splitClone = join(base, 'split-clone');
+    const splitTarget = join(
+      splitClone,
+      'other',
+      'pr17185-verify-20261124-035000',
+    );
+    mkdirSync(join(splitClone, 'tmp'), { recursive: true });
+    mkdirSync(join(splitClone, 'other', 'sub'), { recursive: true });
+    mkdirSync(join(splitTarget, 'evidence'), { recursive: true });
+    writeFileSync(join(splitTarget, 'report.md'), validFiles().report);
+    writeFileSync(join(splitTarget, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(splitTarget, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(splitTarget, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(splitTarget, 'evidence', '01-ab-cells.png'), 'png');
+    symlinkSync(
+      join(splitClone, 'other', 'sub'),
+      join(splitClone, 'tmp', 'link'),
+    );
+    const splitCloneCtx = join(splitClone, 'forged-ctx.json');
+    writeFileSync(splitCloneCtx, ctxText);
+    const splitRes = run([
+      '--context',
+      splitCloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${join(splitClone, 'tmp', 'link')}/../${basename(splitTarget)}`,
+    ]);
+    expect(splitRes.status).toBe(1);
+    expect(splitRes.stderr).toMatch(/must not point inside/);
+
+    // 8s. Host --context with executionApproval refuses missing boundary.json
+    // even when boundaryText is empty/null.
+    expect(
+      executionApprovalErrors(
+        null,
+        {
+          headRefOid: HEAD,
+          executionApproval: {
+            mode: 'waived',
+            source: 'local-trust',
+            basis: 'own-pr',
+            by: 'wenshao',
+            permission: 'admin',
+            head: HEAD,
+            round: 1,
+            reason: 'host round',
+          },
+        },
+        { contextProvided: true, contextDigestVerified: true },
+      ).join('\n'),
+    ).toMatch(/boundary\.json is missing or empty/);
   });
 });

@@ -1893,6 +1893,31 @@ function main(argv) {
     }
     const artifactContextPath = join(artifacts, 'context.json');
     const boundaryPath = join(artifacts, 'boundary.json');
+    let contextDirCanonical;
+    try {
+      const tmpStat = lstatSync(tmpDir);
+      if (tmpStat.isSymbolicLink() || !tmpStat.isDirectory()) {
+        return fail(
+          3,
+          `refusing to write through a redirected tmp container: ${tmpDir}`,
+        );
+      }
+      contextDirCanonical = join(realPath(root), 'tmp', 'verify-context');
+      if (
+        normalizeFsPath(realPath(contextDir)) !==
+        normalizeFsPath(contextDirCanonical)
+      ) {
+        return fail(
+          3,
+          `refusing to write through a redirected context directory: ${contextDir}`,
+        );
+      }
+    } catch (error) {
+      return fail(
+        3,
+        `could not validate the context directory ${contextDir}: ${error.message}`,
+      );
+    }
     try {
       const st = lstatSync(boundaryPath);
       if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
@@ -1910,7 +1935,12 @@ function main(argv) {
       }
     }
     const planned = [
-      { path: contextPath, label: 'host snapshot', next: contextBytes },
+      {
+        path: contextPath,
+        label: 'host snapshot',
+        expectedParent: contextDirCanonical,
+        next: contextBytes,
+      },
       {
         path: artifactContextPath,
         label: 'artifact context',
@@ -1939,6 +1969,7 @@ function main(argv) {
       {
         path: reviewPath,
         label: 'review snapshot',
+        expectedParent: contextDirCanonical,
         next: review.state
           ? `${JSON.stringify(review.state, null, 2)}\n`
           : null,

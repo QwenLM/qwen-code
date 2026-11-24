@@ -1149,6 +1149,15 @@ export function executionApprovalErrors(
   snapshot,
   { contextProvided = false, contextDigestVerified = false } = {},
 ) {
+  const hasSnapshotApproval =
+    snapshot?.executionApproval &&
+    typeof snapshot.executionApproval === 'object' &&
+    !Array.isArray(snapshot.executionApproval);
+  if (hasSnapshotApproval && (!boundaryText || !boundaryText.trim())) {
+    return [
+      `host --context carries a preflight executionApproval for mode ${JSON.stringify(snapshot.executionApproval.mode)}, but artifact boundary.json is missing or empty`,
+    ];
+  }
   let declared;
   try {
     declared = JSON.parse(boundaryText ?? '');
@@ -1156,9 +1165,7 @@ export function executionApprovalErrors(
     return [];
   }
   if (
-    snapshot?.executionApproval &&
-    typeof snapshot.executionApproval === 'object' &&
-    !Array.isArray(snapshot.executionApproval) &&
+    hasSnapshotApproval &&
     (declared?.mode === 'container' ||
       declared?.mode === 'microvm' ||
       (declared?.mode === 'vm' && declared?.backend === 'provider-vm'))
@@ -1945,8 +1952,9 @@ function main(argv) {
     process.stderr.write(`verify-pr check: ${dir} does not exist\n`);
     return 1;
   }
-  const dirTrimmed =
-    dir.length > 1 && !isFilesystemRoot(dir)
+  const dirTrimmed = /^[A-Za-z]:[\\/]+$/.test(dir)
+    ? `${dir.slice(0, 2)}${sep}`
+    : dir.length > 1 && !isFilesystemRoot(dir)
       ? dir.replace(/[\\/]+$/, '') || dir
       : dir;
   let canonicalDir;
@@ -1958,6 +1966,140 @@ function main(argv) {
     );
     return 1;
   }
+  const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(canonicalDir))?.[1];
+
+  // Walk the raw OS path once without lexically collapsing symlink/.. so we
+  // observe: (1) whether any symlink along the path resolved directly to
+  // canonicalDir (blocking <symlink>, <symlink>/., <symlink>/evidence/..), and
+  // (2) every traversed "tmp" container (case-insensitive on darwin/win32)
+  // whose subtree encloses canonicalDir or whose direct symlink child targets
+  // canonicalDir.
+  const inspectArtifactPath = () => {
+    try {
+      const roots = new Set([canonicalDir]);
+      const canonicalParent = dirname(canonicalDir);
+      const normCanonicalDir = normalizeFsPath(canonicalDir);
+      const normCanonicalParent = normalizeFsPath(canonicalParent);
+      const isTmpName = (p) => normalizeFsPath(basename(p)) === 'tmp';
+      let leafSymlink = false;
+
+      if (dirPrNumber) {
+        let ancestor = canonicalParent;
+        while (ancestor && !isFilesystemRoot(ancestor)) {
+          if (isTmpName(ancestor)) {
+            roots.add(dirname(ancestor));
+            roots.add(ancestor);
+          }
+          const next = dirname(ancestor);
+          if (next === ancestor) break;
+          ancestor = next;
+        }
+      }
+
+      const splitSegments = (p) => {
+        const parsed = parse(p);
+        const rest = p.slice(parsed.root.length);
+        return {
+          root: parsed.root,
+          parts: rest.split(/[\\/]+/).filter((part) => part !== ''),
+        };
+      };
+      const rawSpec = isAbsolute(dirTrimmed)
+        ? splitSegments(dirTrimmed)
+        : (() => {
+            const cwdSpec = splitSegments(process.cwd());
+            const relParts = dirTrimmed
+              .split(/[\\/]+/)
+              .filter((part) => part !== '');
+            return {
+              root: cwdSpec.root,
+              parts: [...cwdSpec.parts, ...relParts],
+            };
+          })();
+
+      const queue = [...rawSpec.parts];
+      let cur = rawSpec.root;
+      let linkHops = 0;
+      const tmpCandidates = [];
+      while (queue.length > 0) {
+        const part = queue.shift();
+        if (part === '.') continue;
+        if (part === '..') {
+          cur = dirname(cur);
+        } else {
+          cur = /[\\/]$/.test(cur) ? `${cur}${part}` : `${cur}${sep}${part}`;
+        }
+        if (isTmpName(cur)) {
+          tmpCandidates.push(cur);
+        }
+        const st = lstatSync(cur);
+        if (st.isSymbolicLink()) {
+          linkHops += 1;
+          if (linkHops > 40) {
+            return {
+              error: `could not resolve artifact directory ${dir}: too many symlink hops`,
+            };
+          }
+          try {
+            if (normalizeFsPath(realPath(cur)) === normCanonicalDir) {
+              leafSymlink = true;
+              if (dirPrNumber && isTmpName(dirname(cur))) {
+                const parentDir = dirname(cur);
+                roots.add(realPath(dirname(parentDir)));
+                roots.add(realPath(parentDir));
+              }
+            }
+          } catch {
+            // Broken intermediate link will fail below when traversed.
+          }
+          const target = readlinkSync(cur);
+          if (isAbsolute(target)) {
+            const targetSpec = splitSegments(target);
+            cur = targetSpec.root;
+            queue.unshift(...targetSpec.parts);
+          } else {
+            cur = dirname(cur);
+            const relTarget = target.split(/[\\/]+/).filter((p) => p !== '');
+            queue.unshift(...relTarget);
+          }
+        }
+      }
+      if (dirPrNumber) {
+        for (const candidate of tmpCandidates) {
+          let resolvedCandidate;
+          let cloneCandidate;
+          try {
+            resolvedCandidate = realPath(candidate);
+            cloneCandidate = realPath(dirname(candidate));
+          } catch {
+            continue;
+          }
+          if (isFilesystemRoot(cloneCandidate)) {
+            // Only root-level /tmp directly hosting the round dir turns the
+            // derived root into '/'. Do not treat an unrelated /tmp/link/..
+            // prefix whose final target is outside /tmp as root-level.
+            if (normalizeFsPath(resolvedCandidate) === normCanonicalParent) {
+              roots.add(cloneCandidate);
+              roots.add(resolvedCandidate);
+            }
+          } else if (
+            normalizeFsPath(resolvedCandidate) === normCanonicalParent ||
+            withinRoot(cloneCandidate, canonicalDir) ||
+            withinRoot(resolvedCandidate, canonicalDir)
+          ) {
+            roots.add(cloneCandidate);
+            roots.add(resolvedCandidate);
+          }
+        }
+      }
+      return { roots: [...roots], leafSymlink };
+    } catch (error) {
+      return {
+        error: `could not resolve artifact directory ${dir}: ${error.message}`,
+      };
+    }
+  };
+  const pathInfo = inspectArtifactPath();
   // A --context-root must resolve to a directory containing the artifact
   // dir; a root no path can be inside would disable the refusal entirely
   // (R15 R14-1). Validate it whenever supplied, not only with --context.
@@ -2057,7 +2199,6 @@ function main(argv) {
   // the artifact directory is writable by the PR code the round executed,
   // so its own context.json must not supply the coordinates that judge its
   // waiver. Without a trusted snapshot only the URL shape is checkable.
-  const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(canonicalDir))?.[1];
   const coordinatesFrom = (snapshot) => {
     const repoMatch =
       typeof snapshot?.repo === 'string'
@@ -2079,100 +2220,17 @@ function main(argv) {
       : null;
   };
   const deriveTrustRoots = () => {
-    try {
-      if (contextRoot) return { roots: [realPath(contextRoot)] };
-      const roots = new Set();
-      roots.add(canonicalDir);
-      if (!dirPrNumber) return { roots: [...roots] };
-
-      const canonicalParent = dirname(canonicalDir);
-      const normCanonicalParent = normalizeFsPath(canonicalParent);
-      const isTmpName = (p) => normalizeFsPath(basename(p)) === 'tmp';
-
-      if (isTmpName(canonicalParent)) {
-        roots.add(dirname(canonicalParent));
-        roots.add(canonicalParent);
-      }
-
-      // Walk the raw OS path without lexically collapsing symlink/.. so every
-      // traversed directory named "tmp" (case-insensitive on darwin/win32)
-      // whose resolved target is the artifact dir's actual parent contributes
-      // both its parent clone root and container dir — regardless of trailing
-      // "/.", "sub/..", "evidence/..", or nested symlink hops.
-      const splitSegments = (p) => {
-        const parsed = parse(p);
-        const rest = p.slice(parsed.root.length);
+    if (contextRoot) {
+      try {
+        return { roots: [realPath(contextRoot)] };
+      } catch (error) {
         return {
-          root: parsed.root,
-          parts: rest.split(/[\\/]+/).filter((part) => part !== ''),
+          error: `could not resolve --context-root ${contextRoot}: ${error.message}`,
         };
-      };
-      const rawSpec = isAbsolute(dirTrimmed)
-        ? splitSegments(dirTrimmed)
-        : (() => {
-            const cwdSpec = splitSegments(process.cwd());
-            const relParts = dirTrimmed
-              .split(/[\\/]+/)
-              .filter((part) => part !== '');
-            return {
-              root: cwdSpec.root,
-              parts: [...cwdSpec.parts, ...relParts],
-            };
-          })();
-
-      const queue = [...rawSpec.parts];
-      let cur = rawSpec.root;
-      let linkHops = 0;
-      const tmpCandidates = [];
-      while (queue.length > 0) {
-        const part = queue.shift();
-        if (part === '.') continue;
-        if (part === '..') {
-          cur = dirname(cur);
-        } else {
-          cur = cur.endsWith(sep) ? `${cur}${part}` : `${cur}${sep}${part}`;
-        }
-        if (isTmpName(cur)) {
-          tmpCandidates.push(cur);
-        }
-        const st = lstatSync(cur);
-        if (st.isSymbolicLink()) {
-          linkHops += 1;
-          if (linkHops > 40) {
-            return {
-              error: `could not resolve artifact directory ${dir}: too many symlink hops`,
-            };
-          }
-          const target = readlinkSync(cur);
-          if (isAbsolute(target)) {
-            const targetSpec = splitSegments(target);
-            cur = targetSpec.root;
-            queue.unshift(...targetSpec.parts);
-          } else {
-            cur = dirname(cur);
-            const relTarget = target.split(/[\\/]+/).filter((p) => p !== '');
-            queue.unshift(...relTarget);
-          }
-        }
       }
-      for (const candidate of tmpCandidates) {
-        let resolvedCandidate;
-        try {
-          resolvedCandidate = realPath(candidate);
-        } catch {
-          continue;
-        }
-        if (normalizeFsPath(resolvedCandidate) === normCanonicalParent) {
-          roots.add(realPath(dirname(candidate)));
-          roots.add(resolvedCandidate);
-        }
-      }
-      return { roots: [...roots] };
-    } catch (error) {
-      return {
-        error: `could not resolve artifact directory ${dir}: ${error.message}`,
-      };
     }
+    if (pathInfo.error) return { error: pathInfo.error };
+    return { roots: pathInfo.roots };
   };
   let coordinates = null;
   let trustedSnapshot = null;
@@ -2518,7 +2576,10 @@ function main(argv) {
     try {
       const rootStat = lstatSync(dirTrimmed);
       realArtifactDirectory =
-        rootStat.isDirectory() && !rootStat.isSymbolicLink();
+        !pathInfo.error &&
+        !pathInfo.leafSymlink &&
+        rootStat.isDirectory() &&
+        !rootStat.isSymbolicLink();
     } catch {
       // The real-directory refusal below also covers an unreadable root.
     }
