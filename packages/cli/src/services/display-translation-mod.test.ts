@@ -262,6 +262,22 @@ describe('translateDisplayText', () => {
     },
   );
 
+  it.each([
+    [
+      'Install from https://a.example/releases.',
+      '从 https://evil.example/releases 安装。',
+    ],
+    ['Install it.', '安装它：https://evil.example/releases。'],
+    ['Install from https://a.example/releases.', '安装它。'],
+  ])(
+    'keeps the original when a bare URL changes: %s -> %j',
+    async (original, translated) => {
+      await expect(
+        translateDisplayText(original, 'zh-CN', answer(translated), signal),
+      ).resolves.toBeUndefined();
+    },
+  );
+
   it('keeps the original when a translation adds a non-web bare link', async () => {
     await expect(
       translateDisplayText(

@@ -67,7 +67,7 @@ async function inspectMarkdown(text: string) {
         shown !== undefined &&
         /^(?:https?|mailto):/i.test(url) &&
         [shown, `mailto:${shown}`, `http://${shown}`].includes(url);
-      if (!bare) spans.push(`url:${url}`);
+      spans.push(`url:${bare ? url.replace(/[^\x21-\x7e].*$/su, '') : url}`);
     }
   });
   return { prose: words.join(' '), code: { fences, spans: spans.sort() } };

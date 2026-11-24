@@ -37,7 +37,7 @@ Mod 已经能改写回复块和展开的思考的显示，在 Ink、OpenTUI 终�
 
 ### 设置
 
-`general.displayLanguage` 是一个枚举，取值为 `off`、`zh-CN` 和 `en`，默认 `off`。它的标签是 "Language: Display Translation"，与 "Language: UI"（`general.language`）和 "Language: Model"（`general.outputLanguage`）并列。额外的模型调用由用户或系统设置控制。工作区设置不能启用它。
+`general.displayLanguage` 是一个枚举，取值为 `off`、`zh-CN` 和 `en`，默认 `off`。它的标签是 "Language: Display Translation"，与 "Language: UI"（`general.language`）和 "Language: Model"（`general.outputLanguage`）并列。额外的模型调用由用户或系统设置控制。工作区设置不能设置这个键。
 
 目标语言在会话开始时读取，并在该会话内保持不变，所以该设置需要重启。行的缓存答案以行的 component 和 props 为键，不包含目标语言，所以会话中途改变目标语言，会让缓存用旧语言回答这些行。Web Shell 把改动应用于改动之后启动的会话，与 `experimental.mods` 相同。它也不跟随 Web Shell 自己的界面语言：界面语言不同的两个标签页共享同一个会话和它的缓存。
 
