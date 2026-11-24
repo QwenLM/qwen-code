@@ -489,6 +489,8 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Caller-generated key used to deduplicate retried prompt admissions. */
+  idempotencyKey?: string;
   /** Revalidates the caller before every HTTP attempt, including client recovery. */
   beforeDispatch?: (clientId: string | undefined) => void;
   /**
@@ -617,6 +619,7 @@ export interface DaemonSessionActions {
       | 'files'
       | 'inputAnnotations'
       | 'retry'
+      | 'idempotencyKey'
       | 'onAdmissionStarted'
       | 'onAdmitted'
     >,
