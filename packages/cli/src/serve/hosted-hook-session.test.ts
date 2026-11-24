@@ -2956,7 +2956,7 @@ it.each(['decision', 'continue'] as const)(
     expect(await hooks.wasStopBlocked('prompt-1')).toBe(false);
     execute = async () => ({
       success: true,
-      outcome: 'blocking',
+      outcome: 'success',
       duration: 0,
       output:
         kind === 'decision'
@@ -2969,21 +2969,105 @@ it.each(['decision', 'continue'] as const)(
       { prompt_id: 'prompt-1' },
       signal(),
     );
-    const sessionKey = session.authority.sessionHeader.sessionKey;
-    await session.close();
-    session = await openManagedSession({
-      runtimeBaseDir: root,
-      cwd: root,
-      transcriptPath: path.join(root, 'session.jsonl'),
-      sessionId: sessionKey.sessionId,
-      sessionKey,
-      version: 'test',
-      workerId: 'replacement',
-      activationLeaseDurationMs: 60_000,
-    });
+    await reopenSession();
     const restored = new HostedHookSession(options, session, pin);
     expect(await restored.wasStopBlocked('prompt-1')).toBe(kind === 'decision');
     expect(await restored.wasStopBlocked('prompt-2')).toBe(false);
+  },
+);
+
+it('restores a legacy command exit 2 from a saved Stop result without dispatching it again', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Stop }],
+  };
+  const output = { continue: false, stopReason: 'Retry the checks.' };
+  const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+  execute = async () => ({
+    success: false,
+    outcome: 'blocking',
+    duration: 1,
+    stderr: JSON.stringify(output),
+    output,
+  });
+  const publish = session.resources.publish.bind(session.resources);
+  const legacyMarker = vi
+    .spyOn(session.resources, 'publish')
+    .mockImplementation((kind, bytes) => {
+      if (kind === 'managed-hook-result') {
+        const saved = JSON.parse(Buffer.from(bytes).toString()) as {
+          outcome?: string;
+        };
+        if (saved.outcome === undefined) {
+          return publish(kind, Buffer.from(JSON.stringify({ output })));
+        }
+      }
+      return publish(kind, bytes);
+    });
+  await hooks.fire(HookEventName.Stop, 'stop-1', fields, signal());
+  legacyMarker.mockRestore();
+  execute = async () => ({ success: true, outcome: 'success', duration: 1 });
+  await hooks.fire(
+    HookEventName.Stop,
+    'stop-2',
+    { ...fields, stop_hook_active: true },
+    signal(),
+  );
+
+  await reopenSession();
+  const restored = new HostedHookSession(options, session, pin);
+  const active = await restored.wasStopBlocked('prompt-1');
+  expect(active).toBe(true);
+  expect(await restored.wasStopBlocked('prompt-2')).toBe(false);
+  await expect(
+    restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+  ).resolves.toMatchObject({ ...output, decision: 'deny' });
+  await expect(
+    restored.fire(
+      HookEventName.Stop,
+      'stop-2',
+      { ...fields, stop_hook_active: active },
+      signal(),
+    ),
+  ).resolves.toBeUndefined();
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(2);
+});
+
+it.each(['status', 'fire'] as const)(
+  'restores a legacy command exit 2 from a saved Stop child via %s',
+  async (recovery) => {
+    catalog = {
+      ...catalog,
+      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Stop }],
+    };
+    const output = { continue: false, stopReason: 'Retry the checks.' };
+    const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+    execute = async () => ({
+      success: false,
+      outcome: 'blocking',
+      duration: 1,
+      stderr: JSON.stringify(output),
+      output,
+    });
+    const lost = loseFinalMarkerWrite();
+    await expect(
+      hooks.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).rejects.toThrow('lost final marker write');
+    lost.mockRestore();
+
+    await reopenSession();
+    const restored = new HostedHookSession(options, session, pin);
+    if (recovery === 'status') await restored.status('stop-1');
+
+    await expect(
+      restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).resolves.toMatchObject({ ...output, decision: 'deny' });
+    expect(await restored.wasStopBlocked('prompt-1')).toBe(true);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
   },
 );
 

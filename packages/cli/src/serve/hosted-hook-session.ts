@@ -99,6 +99,49 @@ interface HookPlan {
   readonly toolInputOrder?: HostedToolInputOrder;
 }
 
+function isSynchronousCommand(hook: ManagedHookDescriptor): boolean {
+  return !hook.async && hook.config.type === HookType.Command;
+}
+
+function synchronousCommandOrdinals(plan: HookPlan): number[] {
+  return plan.hooks.flatMap((hook, index) =>
+    isSynchronousCommand(hook) ? [index + 1] : [],
+  );
+}
+
+function isLegacyCommandStopBlock(receipt: ManagedHookResult): boolean {
+  // Older Stop consumers used the continue flag to recognize this block.
+  return (
+    !receipt.success &&
+    receipt.outcome === 'blocking' &&
+    receipt.output?.continue === false
+  );
+}
+
+function hookExecutionResult(
+  result: ManagedHookResult,
+  hook: ManagedHookDescriptor,
+  event: HookEventName,
+): HookExecutionResult {
+  const { error, ...receipt } = result;
+  const output = receipt.output;
+  if (
+    event === HookEventName.Stop &&
+    isSynchronousCommand(hook) &&
+    isLegacyCommandStopBlock(result) &&
+    output?.decision !== 'block' &&
+    output?.decision !== 'deny'
+  ) {
+    receipt.output = { ...output, decision: 'deny' };
+  }
+  return {
+    ...receipt,
+    hookConfig: hook.config as HookConfig,
+    eventName: event,
+    ...(error ? { error: new Error(error) } : {}),
+  };
+}
+
 const CONFIG_SCOPED_OWNER_PREFIX = 'extensions-components-';
 
 /**
@@ -404,7 +447,10 @@ export class HostedHookSession {
   >();
   private writes: Promise<void> = Promise.resolve();
   private occurrenceQueue: Promise<void> = Promise.resolve();
-  private readonly stopPlanPrompts = new Map<string, unknown>();
+  private readonly stopPlans = new Map<
+    string,
+    { promptId: unknown; commandOrdinals: number[] }
+  >();
   private children?: {
     readonly sequence: number;
     readonly byOccurrence: Map<string, HookExecution[]>;
@@ -847,16 +893,23 @@ export class HostedHookSession {
       // A plan never changes, so each one is read once rather than on
       // every turn of a long Session.
       const planId = record.planRef.resourceId;
-      if (!this.stopPlanPrompts.has(planId))
-        this.stopPlanPrompts.set(
-          planId,
-          (await this.read<HookPlan>(record.planRef)).input.prompt_id,
-        );
-      if (this.stopPlanPrompts.get(planId) !== promptId) continue;
-      const result = await this.read<{ output?: HookOutput }>(record.resultRef);
-      const output =
-        result.output && createHookOutput(HookEventName.Stop, result.output);
-      if (output?.isBlockingDecision()) return true;
+      let cached = this.stopPlans.get(planId);
+      if (!cached) {
+        const plan = await this.read<HookPlan>(record.planRef);
+        cached = {
+          promptId: plan.input.prompt_id,
+          commandOrdinals: synchronousCommandOrdinals(plan),
+        };
+        this.stopPlans.set(planId, cached);
+      }
+      if (cached.promptId !== promptId) continue;
+      const output = await this.readOccurrenceOutput(
+        record.occurrenceId,
+        record.resultRef,
+        cached.commandOrdinals,
+      );
+      if (output?.decision === 'block' || output?.decision === 'deny')
+        return true;
     }
     return false;
   }
@@ -1070,8 +1123,11 @@ export class HostedHookSession {
       if (marker.run.execution === 'not_started_proven')
         return cancelledResult().output;
       if (marker.resultRef)
-        return (await this.read<{ output?: HookOutput }>(marker.resultRef))
-          .output;
+        return this.readOccurrenceOutput(
+          occurrenceId,
+          marker.resultRef,
+          event === HookEventName.Stop ? synchronousCommandOrdinals(plan) : [],
+        );
     } else {
       if (this.hasPendingOperations) {
         // A recovery fence is not terminal: once an abandoned module
@@ -1246,12 +1302,7 @@ export class HostedHookSession {
         signal,
         prompt,
       );
-      return {
-        ...result,
-        hookConfig: hook.config as HookConfig,
-        eventName: event,
-        ...(result.error ? { error: new Error(result.error) } : {}),
-      } as HookExecutionResult;
+      return hookExecutionResult(result, hook, event);
     };
     if (plan.sequential) {
       for (const [index, hook] of plan.hooks.entries()) {
@@ -1927,12 +1978,7 @@ export class HostedHookSession {
       const result = child.resultRef
         ? await this.read<ManagedHookResult>(child.resultRef)
         : cancelledResult();
-      results.push({
-        ...result,
-        hookConfig: hook.config as HookConfig,
-        eventName: record.eventName as HookEventName,
-        ...(result.error ? { error: new Error(result.error) } : {}),
-      } as HookExecutionResult);
+      results.push(hookExecutionResult(result, hook, event));
       if (plan.sequential) {
         effectiveInput = sequentialInput(effectiveInput, result, event);
         if (malformedShellInput(effectiveInput, event)) break;
@@ -1992,6 +2038,32 @@ export class HostedHookSession {
     return exceedsHookResourceLimit({ output })
       ? byteLimitOutput(event)
       : output;
+  }
+
+  private async readOccurrenceOutput(
+    occurrenceId: string,
+    resultRef: ManagedSessionDurableRef,
+    commandOrdinals: readonly number[],
+  ): Promise<HookOutput | undefined> {
+    const { output } = await this.read<{ output?: HookOutput }>(resultRef);
+    if (
+      commandOrdinals.length === 0 ||
+      output?.continue !== false ||
+      output?.decision === 'block' ||
+      output?.decision === 'deny'
+    )
+      return output;
+
+    // Older aggregate results lack the decision for a command's exit 2.
+    // A detached command can settle after the Stop decision was committed.
+    for (const child of this.childrenOf(occurrenceId)) {
+      if (!child.resultRef || !commandOrdinals.includes(child.ordinal))
+        continue;
+      const receipt = await this.read<ManagedHookResult>(child.resultRef);
+      if (isLegacyCommandStopBlock(receipt))
+        return { ...output, decision: 'deny' };
+    }
+    return output;
   }
 
   async drain(
