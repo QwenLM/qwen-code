@@ -536,9 +536,23 @@ describe('git hardening', () => {
       ],
       { stdio: 'pipe' },
     );
-    execFileSync('git', ['-C', superDir, 'commit', '-m', 'add sub'], {
-      stdio: 'pipe',
-    });
+    execFileSync(
+      'git',
+      [
+        '-C',
+        superDir,
+        '-c',
+        'user.name=test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '-m',
+        'add sub',
+      ],
+      {
+        stdio: 'pipe',
+      },
+    );
     const subMarker = join(superDir, 'sub-filter-fired');
     const subDir = join(superDir, 'sub');
     execFileSync(
@@ -624,9 +638,23 @@ describe('git hardening', () => {
       ],
       { stdio: 'pipe' },
     );
-    execFileSync('git', ['-C', superRepo, 'commit', '-m', 'add sub'], {
-      stdio: 'pipe',
-    });
+    execFileSync(
+      'git',
+      [
+        '-C',
+        superRepo,
+        '-c',
+        'user.name=test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '-m',
+        'add sub',
+      ],
+      {
+        stdio: 'pipe',
+      },
+    );
     const subBase = execFileSync(
       'git',
       ['-C', superRepo, 'rev-parse', 'HEAD'],
@@ -636,9 +664,23 @@ describe('git hardening', () => {
     ).trim();
     writeFileSync(join(subSrc, 'new.txt'), 'bump\n');
     execFileSync('git', ['-C', subSrc, 'add', 'new.txt'], { stdio: 'pipe' });
-    execFileSync('git', ['-C', subSrc, 'commit', '-m', 'bump'], {
-      stdio: 'pipe',
-    });
+    execFileSync(
+      'git',
+      [
+        '-C',
+        subSrc,
+        '-c',
+        'user.name=test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '-m',
+        'bump',
+      ],
+      {
+        stdio: 'pipe',
+      },
+    );
     execFileSync(
       'git',
       [
@@ -652,9 +694,23 @@ describe('git hardening', () => {
       { stdio: 'pipe' },
     );
     execFileSync('git', ['-C', superRepo, 'add', 'sub'], { stdio: 'pipe' });
-    execFileSync('git', ['-C', superRepo, 'commit', '-m', 'bump sub'], {
-      stdio: 'pipe',
-    });
+    execFileSync(
+      'git',
+      [
+        '-C',
+        superRepo,
+        '-c',
+        'user.name=test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '-m',
+        'bump sub',
+      ],
+      {
+        stdio: 'pipe',
+      },
+    );
     const subHead = execFileSync(
       'git',
       ['-C', superRepo, 'rev-parse', 'HEAD'],
