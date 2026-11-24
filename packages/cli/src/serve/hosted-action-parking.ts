@@ -28,20 +28,24 @@ export type HostedApprovalResumeShapeRefusal =
   | 'mcp'
   | 'no_tool_owner';
 
+/** Why cold recovery cannot resume a command-step wait on this Session shape. */
+export type HostedCommandStepResumeShapeRefusal =
+  | 'extensions_disabled'
+  | 'no_tool_owner';
+
 export type HostedActionParkRefusal =
   | HostedContinuationCaptureRefusal
   | HostedApprovalResumeShapeRefusal
-  | 'command_step'
+  | HostedCommandStepResumeShapeRefusal
   | 'turn_mismatch'
   | 'recovered_turn'
-  | 'lineage'
   | 'capability_not_advertised'
   | 'input_missing'
   | 'wake_owned'
   | 'other_unsettled_input'
   | 'action_not_requested'
   | 'no_continuation'
-  | 'prompt_text_missing'
+  | 'original_prompt_missing'
   | 'approval_selection_unavailable'
   | 'approval_mode_allows';
 
@@ -74,6 +78,23 @@ export function hostedApprovalResumeShapeRefusal(
   if (session.mcp) return 'mcp';
   if (!((session.toolProfile && brokerOptions) || session.memory))
     return 'no_tool_owner';
+  return undefined;
+}
+
+/**
+ * The Session-shape terms cold recovery requires before it resumes a saved
+ * extension command-step plan. Unlike a native batch, a Hook catalog does not
+ * stop it: the takeover recovery arm admits the plan with one.
+ */
+export function hostedCommandStepResumeShapeRefusal(
+  session: {
+    readonly extensions?: { readonly enabled: boolean };
+    readonly toolProfile?: string;
+  },
+  brokerOptions: unknown,
+): HostedCommandStepResumeShapeRefusal | undefined {
+  if (!session.extensions?.enabled) return 'extensions_disabled';
+  if (!(session.toolProfile && brokerOptions)) return 'no_tool_owner';
   return undefined;
 }
 

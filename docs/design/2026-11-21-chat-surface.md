@@ -70,8 +70,10 @@ revision` (`updatedAt + title + option ids`, no payload serialization): a
   non-accepted admission (reporting through `onError`), because `ToolApproval`
   re-arms only through rejection — resolving would latch the card inert.
   `AskUserQuestion` confirmation routes by the chosen option: the submit
-  (`allow_once`) option normalizes its index-keyed answers record into
-  `QuestionAnswer[]` and goes to `respondQuestion`; the reject option is a decision
+  (`allow_once`) option forwards structured `QuestionAnswer[]` when every
+  question and its options carry backend ids, otherwise normalizes the legacy
+  index-keyed answers record into that shape, then goes to `respondQuestion`;
+  the reject option is a decision
   vote and goes to `respondApproval` (`respondQuestion` always votes the submit
   option and cannot express a rejection). Both return `admission === 'accepted'`
   as the component's success boolean.
