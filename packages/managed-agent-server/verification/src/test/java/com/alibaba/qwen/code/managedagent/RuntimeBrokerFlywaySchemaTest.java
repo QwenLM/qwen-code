@@ -85,10 +85,10 @@ class RuntimeBrokerFlywaySchemaTest {
         assertThat(shape.get("ma_runtime_binding").indexes()).contains(
                 "INDEX [binding_state, last_active_at, binding_id]", "INDEX [tenant_id, binding_state]");
         assertThat(shape.get("ma_storage_owner").indexes())
-                .contains("INDEX [binding_id, runtime_generation, storage_key]");
-        assertThat(shape.get("ma_output_capture").indexes()).contains("INDEX [execution_key]");
+                .contains("INDEX [binding_id, runtime_generation, physical_id]");
+        assertThat(shape.get("ma_output_capture").indexes()).contains("INDEX [execution_call_id]");
         assertThat(shape.get("ma_operation_work").indexes())
-                .contains("INDEX [work_kind, target_key, operation_key]");
+                .contains("INDEX [work_kind, target_id, operation_ref]");
     }
 
     @org.junit.jupiter.params.ParameterizedTest

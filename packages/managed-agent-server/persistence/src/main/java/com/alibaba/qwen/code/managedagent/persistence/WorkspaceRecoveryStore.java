@@ -4,10 +4,10 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -134,7 +134,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 for (Map<String, Object> source : page) {
                     String session = (String) source.get("session_id");
                     check(currentSource(jdbc, tenant, storage, session, true).toString().equals(source.get("source_json")), "source_drift");
-                    operations.insertWork(KIND, id, "SESSION", hash(session), session, session,
+                    operations.insertWork(KIND, id, "SESSION", session, session,
                             WorkspaceOperations.values("source_digest", source.get("source_digest"),
                                     "source_json", source.get("source_json")), "PENDING");
                     after = session;
@@ -310,15 +310,15 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             } else {
                 insertWork("REF", key, session, ref, "PENDING");
             }
-            String state = (String) operations.findWork(KIND, id, "RECOVERY_EVIDENCE", hash(key), false).get("state");
+            String state = (String) operations.findWork(KIND, id, "RECOVERY_EVIDENCE", key, false).get("state");
             return JSON.createObjectNode().put("complete", "COMPLETE".equals(state));
         });
     }
 
     private JsonNode nextRef(String session) {
         pinned(session);
-        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ?"
-                + " AND work_kind = 'RECOVERY_EVIDENCE' AND session_id = ? AND state = 'PENDING' ORDER BY target_key LIMIT 1",
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_ref = ?"
+                + " AND work_kind = 'RECOVERY_EVIDENCE' AND session_id = ? AND state = 'PENDING' ORDER BY target_id LIMIT 1",
                 (row, index) -> WorkspaceOperations.work(row), operations.key(KIND, id), session);
         return rows.isEmpty() ? JSON.nullNode() : parse((String) rows.getFirst().get("metadata_json"));
     }
@@ -332,7 +332,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             recheckSession(session);
             String key = session + ":" + text(ref, "resourceId");
             check(ref.equals(work(id, "REF", key)), "reference_conflict");
-            operations.updateWork(KIND, id, "RECOVERY_EVIDENCE", hash(key), WorkspaceOperations.values("state", "COMPLETE"));
+            operations.updateWork(KIND, id, "RECOVERY_EVIDENCE", key, WorkspaceOperations.values("state", "COMPLETE"));
             return JSON.createObjectNode().put("complete", true);
         });
     }
@@ -370,8 +370,8 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
     }
 
     private JsonNode assetPage(String after) {
-        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ?"
-                + " AND work_kind = 'RESOURCE' AND target_key > ? ORDER BY target_key LIMIT ?",
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_ref = ?"
+                + " AND work_kind = 'RESOURCE' AND target_id > ? ORDER BY target_id LIMIT ?",
                 (row, index) -> WorkspaceOperations.work(row), operations.key(KIND, assetOperation()), after, PAGE + 1);
         ObjectNode page = JSON.createObjectNode();
         ArrayNode assets = page.putArray("assets");
@@ -394,14 +394,14 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
         return transactions.execute(status -> {
             mutable();
             recheckSession(session);
-            check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE operation_key = ?"
+            check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE operation_ref = ?"
                     + " AND work_kind = 'RECOVERY_EVIDENCE' AND session_id = ? AND state <> 'COMPLETE'",
                     Long.class, operations.key(KIND, id), session) == 0, "references_incomplete");
-            var saved = operations.findWork(KIND, id, "SESSION", hash(session), true);
+            var saved = operations.findWork(KIND, id, "SESSION", session, true);
             if (saved.get("summary_json") != null) {
                 check(summary.equals(parse((String) saved.get("summary_json"))), "summary_conflict");
             }
-            operations.updateWork(KIND, id, "SESSION", hash(session),
+            operations.updateWork(KIND, id, "SESSION", session,
                     WorkspaceOperations.values("state", "COMPLETE", "summary_json", summary.toString()));
             return JSON.createObjectNode().put("complete", true);
         });
@@ -508,7 +508,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 digest.update(bytes.getBytes(StandardCharsets.UTF_8));
                 digest.update((byte) '\n');
                 if (save) {
-                    operations.insertWork(KIND, id, "SESSION", hash(session), session, session,
+                    operations.insertWork(KIND, id, "SESSION", session, session,
                             WorkspaceOperations.values("source_digest", hash(bytes), "source_json", bytes), "PENDING");
                 }
                 count++;
@@ -545,8 +545,8 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
                 .contains(row.get("status")), "source_drift");
         var receipts = WorkspaceOperations.rows(jdbc, "SELECT actor_id, idempotency_key, request_digest, turn_id, gmt_create, result_json"
-                + " FROM ma_request_receipt WHERE tenant_key = ? AND session_id = ? AND namespace = 'SESSION_CREATE_ACTOR' AND tenant_id = ?",
-                WorkspaceOperations.hash(tenant), session, tenant);
+                + " FROM ma_request_receipt WHERE tenant_id = ? AND session_id = ? AND namespace = 'SESSION_CREATE_ACTOR'",
+                tenant, session);
         check(receipts.size() == 1, "source_drift");
         check(count(jdbc, "SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                 + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')", tenant, session) == 0, "source_drift");
@@ -575,7 +575,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 "harnessLastEventId", "harness_last_event_id", "deletedAt", "deleted_at");
         Map<String, Object> receipt = receipts.getFirst();
         ObjectNode creation = source.putObject("creation")
-                .put("actorIdHex", HexFormat.of().formatHex((byte[]) receipt.get("actor_id")));
+                .put("actorIdHex", HexFormat.of().formatHex(((String) receipt.get("actor_id")).getBytes(StandardCharsets.UTF_8)));
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
                 "turnId", "turn_id", "createdAt", "gmt_create");
         if (receipt.get("result_json") != null) {
@@ -625,20 +625,19 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                     "latestCheckpointResourceId", "latest_checkpoint_resource_id", "compactedThroughRevision", "compacted_through_revision",
                     "recoveryStatus", "recovery_status", "recoveryDetailCode", "recovery_detail_code");
         }
-        String privateScope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String currentRead = lockSources ? " FOR UPDATE" : "";
-        check(jdbc.queryForList("SELECT r.resource_key FROM ma_resource r JOIN ma_resource_ref f"
-                + " ON f.resource_key = r.resource_key AND f.tenant_id = r.tenant_id AND f.session_id = r.session_id"
-                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.state = 'REFERENCED' AND r.deletion_operation_key IS NOT NULL"
+        check(jdbc.queryForList("SELECT r.resource_id FROM ma_resource r JOIN ma_resource_ref f"
+                + " ON f.resource_id = r.resource_id AND f.tenant_id = r.tenant_id AND f.session_id = r.session_id"
+                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.state = 'REFERENCED' AND r.deletion_operation_ref IS NOT NULL"
                 + " AND f.owner_kind IN ('JOURNAL','SESSION_RECORD') LIMIT 1" + currentRead, String.class, tenant, session).isEmpty(),
                 "source_drift");
         var captureScopes = new java.util.LinkedHashSet<String>();
-        captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) row.get("workspace_id"), session));
+        captureScopes.add(ManagedIdentityRefs.publicationScopeRef(tenant, (String) row.get("workspace_id"), session));
         if (!heads.isEmpty()) {
-            captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) heads.getFirst().get("workspace_id"), session));
+            captureScopes.add(ManagedIdentityRefs.publicationScopeRef(tenant, (String) heads.getFirst().get("workspace_id"), session));
         }
         for (String captureScope : captureScopes) {
-            check(jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_key = ?"
+            check(jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_ref = ?"
                     + " AND retention_state = 'DELETING' LIMIT 1" + currentRead, String.class, captureScope).isEmpty(), "source_drift");
         }
         var retirements = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, retirement_operation_id AS operation_id,"
@@ -674,9 +673,9 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             if (compacted > 0 || revision == 0 && "DELETED".equals(head.get("state"))) {
                 check(!retirements.isEmpty() && "DELETED".equals(head.get("state")) && compacted == revision, "source_drift");
                 var completedGc = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
-                        + " AND scope_key = ? AND target_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' AND state = 'SUCCEEDED'"
+                        + " AND scope_kind = 'SESSION' AND scope_id = ? AND target_id = ? AND operation_kind = 'SESSION_RESOURCE_GC' AND state = 'SUCCEEDED'"
                         + " AND operation_id = ? LIMIT 1" + currentRead, String.class,
-                        tenant, session, privateScope, privateScope, "session-resources-" + privateScope);
+                        tenant, session, session, session, "session-resources-" + session);
                 check(completedGc.size() == 1, "source_drift");
                 source.set("retiredHead", source.path("head").deepCopy());
                 source.putNull("head");
@@ -686,7 +685,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
     }
 
     private JsonNode pinned(String session) {
-        var row = operations.findWork(KIND, id, "SESSION", hash(session), false);
+        var row = operations.findWork(KIND, id, "SESSION", session, false);
         check(row != null && session.equals(row.get("session_id")), "session_out_of_scope");
         return parse((String) row.get("source_json"));
     }
@@ -728,7 +727,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
     }
 
     private JsonNode work(String operation, String kind, String key) {
-        var row = operations.findWork(KIND, operation, workKind(kind), workTarget(kind, key), false);
+        var row = operations.findWork(KIND, operation, workKind(kind), key, false);
         if (row == null) {
             return null;
         }
@@ -737,8 +736,11 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
     }
 
     private void insertWork(String kind, String key, String session, JsonNode metadata, String state) {
-        check(key.length() <= 640, "invalid_work_key");
-        operations.insertWork(KIND, id, workKind(kind), workTarget(kind, key), key, session,
+        // target_id is VARBINARY(512) bound as UTF-8 bytes, so the guard must
+        // measure bytes, not UTF-16 units, or a multi-byte key passes here and
+        // fails at INSERT as a raw DataAccessException instead of invalid_work_key.
+        check(key.getBytes(StandardCharsets.UTF_8).length <= 512, "invalid_work_key");
+        operations.insertWork(KIND, id, workKind(kind), key, session,
                 WorkspaceOperations.values("metadata_json", metadata.toString()), state);
     }
 
@@ -750,17 +752,13 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
         };
     }
 
-    private static String workTarget(String kind, String key) {
-        return "ASSET".equals(kind) ? key : hash(key);
-    }
-
     private long workCount(String operation, String kind, String condition) {
-        return count("SELECT COUNT(*) FROM ma_operation_work WHERE operation_key = ? AND work_kind = ? AND " + condition,
+        return count("SELECT COUNT(*) FROM ma_operation_work WHERE operation_ref = ? AND work_kind = ? AND " + condition,
                 operations.key(KIND, operation), kind);
     }
 
     private List<Map<String, Object>> sessionRows(String operation, String after, int limit) {
-        return jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ? AND work_kind = 'SESSION'"
+        return jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_ref = ? AND work_kind = 'SESSION'"
                 + " AND session_id > ? ORDER BY session_id LIMIT ?", (row, index) -> WorkspaceOperations.work(row),
                 operations.key(KIND, operation), after, limit);
     }

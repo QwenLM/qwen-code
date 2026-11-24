@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -56,7 +57,7 @@ public final class ToolPublicationAdmissionStore {
         JsonNode expected = request.path("toolOutcomeRef");
         var rows = jdbc.query("SELECT publication_id, admission_resource_id,"
                 + " receipt_sequence, receipt_revision FROM ma_output_capture"
-                + " WHERE scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
+                + " WHERE scope_ref = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
                 + " AND admission_resource_id = ? AND producer_phase = 'REFERENCED'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope(key), text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"),
                 text(expected, "resourceId"));
@@ -96,9 +97,9 @@ public final class ToolPublicationAdmissionStore {
         var candidates = jdbc.query("SELECT o.resource_id, o.byte_length, o.sha256,"
                 + " o.capture_object_key AS object_key, o.capture_state AS state, p.producer_phase, p.terminal_resource_id,"
                 + " p.admission_resource_id, p.binding_json FROM ma_output_capture p"
-                + " JOIN ma_resource o ON o.scope_key = p.scope_key"
-                + " AND o.publication_id = p.publication_id AND o.slot_key = X'61646d697373696f6e'"
-                + " WHERE p.scope_key = ? AND p.publication_id = ? AND p.tenant_id = ?"
+                + " JOIN ma_resource o ON o.scope_ref = p.scope_ref"
+                + " AND o.publication_id = p.publication_id AND o.slot_key = 'admission'"
+                + " WHERE p.scope_ref = ? AND p.publication_id = ? AND p.tenant_id = ?"
                 + " AND p.workspace_id = ? AND p.session_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
                 text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
         require(candidates.size() == 1, "Admission candidate is missing");
@@ -157,7 +158,7 @@ public final class ToolPublicationAdmissionStore {
             Map<String, Object> publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
-                    + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
+                    + " FROM ma_output_capture WHERE scope_ref = ? AND publication_id = ? AND tenant_id = ?"
                     + " AND workspace_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
                     text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId")).getFirst();
             ToolPublicationStore.requireLockedBinding(publication, finished.path("binding"));
@@ -166,8 +167,8 @@ public final class ToolPublicationAdmissionStore {
                     && ((Number) publication.get("is_quarantined")).intValue() == 0,
                     "Admission root changed");
             var object = jdbc.query("SELECT capture_state AS state, sha256, byte_length, capture_object_key AS object_key"
-                    + " FROM ma_resource WHERE scope_key = ? AND publication_id = ?"
-                    + " AND slot_key = X'61646d697373696f6e'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
+                    + " FROM ma_resource WHERE scope_ref = ? AND publication_id = ?"
+                    + " AND slot_key = 'admission'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
             require("VERIFIED".equals(object.get("state"))
                     && candidate.get("sha256").equals(object.get("sha256"))
                     && ((Number) candidate.get("byte_length")).longValue()
@@ -191,7 +192,7 @@ public final class ToolPublicationAdmissionStore {
             }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
                     writerToken, request, authority);
-            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, is_accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, is_accepted_complete = ? WHERE scope_ref = ? AND publication_id = ?",
                     request.lastSequence(), receipt.journalRevision(),
                     "committed".equals(outcome.path("decision").asText())
                             && "complete".equals(outcome.path("envelope").path("capture").path("captureStatus").asText()),
@@ -339,8 +340,7 @@ public final class ToolPublicationAdmissionStore {
     }
 
     private static String scope(JsonNode key) {
-        return ToolPublicationContract.sha256(JSON.createArrayNode().add(text(key, "tenantId"))
-                .add(text(key, "workspaceId")).add(text(key, "sessionId"))
-                .toString().getBytes(StandardCharsets.UTF_8));
+        return ManagedIdentityRefs.publicationScopeRef(text(key, "tenantId"),
+                text(key, "workspaceId"), text(key, "sessionId"));
     }
 }

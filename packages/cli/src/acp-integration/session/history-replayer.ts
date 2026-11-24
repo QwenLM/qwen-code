@@ -276,10 +276,6 @@ export class HistoryReplayer {
   private async sendUpdate(
     update: Parameters<SessionEmitterContext['sendUpdate']>[0],
   ): Promise<void> {
-    if (this.ctx.messageRewriter) {
-      await this.ctx.messageRewriter.interceptUpdate(update);
-      return;
-    }
     await this.ctx.sendUpdate(update);
   }
 
