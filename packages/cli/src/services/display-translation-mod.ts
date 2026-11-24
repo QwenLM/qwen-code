@@ -52,11 +52,20 @@ async function inspectMarkdown(text: string) {
   }> = [];
   // Translation may reorder spans and links, but must keep each one.
   const spans: string[] = [];
-  walkMarkdown(root, ({ type, value, lang, meta, url }) => {
+  walkMarkdown(root, ({ type, value, lang, meta, url, children }) => {
     if (type === 'text' && value) words.push(value);
     else if (type === 'code') fences.push({ value, lang, meta });
     else if (type === 'inlineCode') spans.push(`code:${value}`);
-    else if (url !== undefined) spans.push(`url:${url}`);
+    else if (url !== undefined) {
+      // A bare URL shows its own target, and CJK punctuation after it
+      // parses as part of it.
+      const shown = children?.length === 1 ? children[0].value : undefined;
+      const bare =
+        type === 'link' &&
+        shown !== undefined &&
+        [shown, `mailto:${shown}`, `http://${shown}`].includes(url);
+      if (!bare) spans.push(`url:${url}`);
+    }
   });
   return { prose: words.join(' '), code: { fences, spans: spans.sort() } };
 }

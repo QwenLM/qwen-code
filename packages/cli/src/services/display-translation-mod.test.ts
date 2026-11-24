@@ -132,6 +132,27 @@ describe('translateDisplayText', () => {
     ).resolves.toBe(translated);
   });
 
+  it.each([
+    ['See https://a.example/docs.', '详见 https://a.example/docs。'],
+    [
+      'Visit https://a.example/docs, then run it.',
+      '请访问 https://a.example/docs，然后运行。',
+    ],
+    [
+      '详细的使用说明请参见 https://a.example/docs。',
+      'See https://a.example/docs for details.',
+    ],
+    ['Mail a@b.example.', '发邮件到 a@b.example。'],
+  ])(
+    'accepts a bare URL next to other punctuation in %s',
+    async (original, translated) => {
+      const target = /\p{Script=Han}/u.test(translated) ? 'zh-CN' : 'en';
+      await expect(
+        translateDisplayText(original, target, answer(translated), signal),
+      ).resolves.toBe(translated);
+    },
+  );
+
   it('translates Traditional Chinese when the target is Simplified Chinese', async () => {
     const complete = answer('请先确认这个文件是否存在。');
     await expect(
