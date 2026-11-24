@@ -674,6 +674,13 @@ describe('fetchGitDiffHunksForFile', () => {
     expect(lines).not.toContain('+PLAIN-MODIFIED');
   });
 
+  it('does not treat an unchanged bracketed file as untracked when a sibling matches its glob', async () => {
+    await commit(repo, { 'config[1].json': 'tracked\n' });
+    await write(repo, { 'config1.json': 'untracked sibling\n' });
+
+    expect(await fetchGitDiffHunksForFile(repo, 'config[1].json')).toBeNull();
+  });
+
   it('returns null outside a git repo', () =>
     inPlainDir(async (plain) => {
       expect(await fetchGitDiffHunksForFile(plain, 'a.txt')).toBeNull();

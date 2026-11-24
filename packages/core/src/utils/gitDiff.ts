@@ -396,6 +396,7 @@ export async function fetchGitDiffHunksForFile(
   const untrackedOut = await runGit(
     [
       '--no-optional-locks',
+      '--literal-pathspecs',
       'ls-files',
       '--others',
       '--exclude-standard',
