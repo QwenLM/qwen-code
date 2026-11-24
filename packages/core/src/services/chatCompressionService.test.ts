@@ -5218,4 +5218,174 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       'u'.repeat(PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP + 1),
     );
   });
+
+  it('strips unsigned historical thought parts on the cold path to preserve output budget', async () => {
+    // Long reasoning sessions accumulate hundreds of thousands of unsigned
+    // `thought: true` tokens. Cold compression does not share prompt cache, so
+    // stripping them keeps the request well under the window and preserves the
+    // full output budget while keeping visible turns intact.
+    mockBackend();
+    const history: Content[] = [userText('original request: port the parser')];
+    for (let i = 0; i < 12; i++) {
+      history.push({
+        role: 'model',
+        parts: [
+          { text: 'r'.repeat(16_000), thought: true },
+          { text: `visible reply ${i}` },
+        ],
+      });
+      history.push(userText(`follow up ${i}`));
+    }
+    history.push(modelText('done'));
+
+    const result = await compressHistory(history, 55_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    const wireText = textOf(sent[0]!.contents);
+    expect(wireText).not.toContain('r'.repeat(100));
+    expect(wireText).toContain('visible reply 0');
+    expect(result.info.newTokenCount).toBeLessThan(10_000);
+  });
+
+  it.each([
+    {
+      name: 'empty visible text with budget spent on thoughts',
+      text: '',
+      thoughtsTokenCount: 9_800,
+    },
+    {
+      name: 'unclosed <analysis> block with no <state_snapshot>',
+      text: '<analysis>still summarizing long history without closing tag',
+      thoughtsTokenCount: 3,
+    },
+  ])(
+    'reports OUTPUT_TRUNCATED when reported output exhausts the budget on $name',
+    async ({ text, thoughtsTokenCount }) => {
+      // Provider-reported usage reaching the requested budget means output was
+      // cut off even when stripping <analysis> leaves an empty summary.
+      const generateText = vi.fn().mockImplementation(async (args) => {
+        const maxOut =
+          args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+        return {
+          text,
+          usage: {
+            promptTokenCount: 30_000,
+            candidatesTokenCount: maxOut,
+            thoughtsTokenCount,
+            totalTokenCount: 30_000 + maxOut,
+          },
+        };
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as BaseLlmClient);
+
+      const result = await compressHistory(
+        [userText('fix the bug'), modelText('investigating')],
+        30_000,
+      );
+
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      );
+    },
+  );
+
+  it('still reports EMPTY_SUMMARY for an unclosed <analysis> well below the output budget', async () => {
+    const generateText = vi.fn().mockResolvedValue({
+      text: '<analysis>only draft analysis, stopped early',
+      usage: {
+        promptTokenCount: 10_000,
+        candidatesTokenCount: 120,
+        totalTokenCount: 10_120,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(
+      [userText('fix the bug'), modelText('investigating')],
+      10_000,
+    );
+
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+    );
+  });
+
+  it('retries once with reduced input when a clamped output budget is exhausted before producing a summary', async () => {
+    // Without thoughts, oversized tool outputs can clamp the cold budget below
+    // COMPACT_MAX_OUTPUT_TOKENS (yet above MIN_COMPACTION_OUTPUT_TOKENS). If
+    // the model spends that entire clamped budget inside <analysis> or
+    // thinking, retrying once with reduced input restores the full output
+    // budget and lets compression succeed.
+    configureWindow(65_536);
+    const budgets: number[] = [];
+    const generateText = vi.fn().mockImplementation(async (args) => {
+      const maxOut = args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+      budgets.push(maxOut);
+      if (budgets.length === 1) {
+        return {
+          text: '<analysis>exhausted clamped budget before snapshot...',
+          usage: {
+            promptTokenCount: 54_000,
+            candidatesTokenCount: maxOut,
+            totalTokenCount: 54_000 + maxOut,
+          },
+        };
+      }
+      return {
+        text: '<state_snapshot><overall_goal>recovered after input reduction</overall_goal></state_snapshot>',
+        usage: {
+          promptTokenCount: 18_000,
+          candidatesTokenCount: 600,
+          totalTokenCount: 18_600,
+        },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(toolSession(12, 17_500), 54_000);
+
+    expectCompressed(result);
+    expect(budgets).toHaveLength(2);
+    expect(budgets[0]!).toBeGreaterThanOrEqual(MIN_COMPACTION_OUTPUT_TOKENS);
+    expect(budgets[0]!).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(budgets[1]!).toBeGreaterThan(budgets[0]!);
+  });
+
+  it('caps the clamped-budget empty-truncation retry to one attempt', async () => {
+    configureWindow(65_536);
+    const budgets: number[] = [];
+    const generateText = vi.fn().mockImplementation(async (args) => {
+      const maxOut = args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+      budgets.push(maxOut);
+      return {
+        text: '<analysis>still cut off even after reduction...',
+        usage: {
+          promptTokenCount: budgets.length === 1 ? 54_000 : 18_000,
+          candidatesTokenCount: maxOut,
+          totalTokenCount: (budgets.length === 1 ? 54_000 : 18_000) + maxOut,
+        },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(toolSession(12, 17_500), 54_000);
+
+    expect(budgets).toHaveLength(2);
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
 });

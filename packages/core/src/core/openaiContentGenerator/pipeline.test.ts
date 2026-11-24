@@ -1404,6 +1404,101 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('flips explicit extra_body.enable_thinking to false on custom non-Qwen gateways when thoughts are disabled', async () => {
+      const model = 'custom-reasoning-model';
+      providerAdds({ enable_thinking: true });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+          extra_body: { enable_thinking: true },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('flips explicit chat_template_kwargs.enable_thinking to false on custom non-Qwen gateways while preserving sibling keys', async () => {
+      const model = 'custom-reasoning-model';
+      providerAdds({
+        chat_template_kwargs: { enable_thinking: true, preserve_flag: 'yes' },
+      });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+          extra_body: {
+            chat_template_kwargs: {
+              enable_thinking: true,
+              preserve_flag: 'yes',
+            },
+          },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.chat_template_kwargs).toEqual({
+        enable_thinking: false,
+        preserve_flag: 'yes',
+      });
+    });
+
+    it('does not invent enable_thinking on custom non-Qwen gateways that did not declare it', async () => {
+      const model = 'custom-plain-model';
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.chat_template_kwargs).toBeUndefined();
+    });
+
+    it('keeps explicit extra_body.enable_thinking true when thinkingMandatory is set on a custom gateway', async () => {
+      const model = 'custom-mandatory-model';
+      providerAdds({ enable_thinking: true });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://custom-gateway.example.com/v1',
+          model,
+          thinkingMandatory: true,
+          extra_body: { enable_thinking: true },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.enable_thinking).toBe(true);
+    });
+
+    it('learns required thinking and retries when a custom gateway rejects the flipped enable_thinking: false', async () => {
+      const model = 'custom-secretly-mandatory-model';
+      pipelineWith({
+        baseUrl: 'https://custom-gateway.example.com/v1',
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      createMock().mockRejectedValueOnce(
+        requiredThinkingError('enable_thinking must be true for this model'),
+      );
+
+      await pipeline.execute(sideQuery(model), 'side-query:chat-compression');
+
+      const calls = createMock().mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0].enable_thinking).toBe(false);
+      expect(calls[1][0].enable_thinking).toBe(true);
+    });
+
     it.each([
       ['max_tokens', 111, 8],
       ['max_completion_tokens', 111, 8],

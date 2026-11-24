@@ -893,8 +893,11 @@ export class ChatCompressionService {
         sideQueryHistory,
         undefined,
         opts.requestPayloadTooLarge
-          ? { maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP }
-          : undefined,
+          ? {
+              maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+              stripUnsignedThoughts: true,
+            }
+          : { stripUnsignedThoughts: true },
       );
       return coldInput;
     };
@@ -1077,6 +1080,7 @@ export class ChatCompressionService {
         ? getColdInput().slimmedHistory
         : slimCompactionInput(sideQueryHistory, undefined, {
             maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+            stripUnsignedThoughts: true,
           }).slimmedHistory;
     // A context-length rejection means the estimate ran low for this request.
     // The one retry is sized from the local estimate alone. The rejection's
@@ -1315,21 +1319,65 @@ export class ChatCompressionService {
       }
     }
 
+    const computeReportedOutputSpent = (
+      usage:
+        | {
+            promptTokenCount?: number;
+            candidatesTokenCount?: number;
+            thoughtsTokenCount?: number;
+            totalTokenCount?: number;
+          }
+        | undefined,
+    ): number | undefined => {
+      const prompt = usage?.promptTokenCount;
+      const reportedCandidates = usage?.candidatesTokenCount;
+      if (
+        typeof reportedCandidates === 'number' &&
+        typeof prompt === 'number'
+      ) {
+        return outputTokenCount(
+          {
+            input: prompt,
+            output: reportedCandidates,
+            thoughts: Math.max(0, usage?.thoughtsTokenCount ?? 0),
+            total: usage?.totalTokenCount ?? 0,
+          },
+          compactionAuthType,
+        );
+      }
+      if (typeof reportedCandidates === 'number') {
+        return reportedCandidates;
+      }
+      if (
+        typeof usage?.totalTokenCount === 'number' &&
+        typeof prompt === 'number'
+      ) {
+        return Math.max(0, usage.totalTokenCount - prompt);
+      }
+      return undefined;
+    };
+
     if (!summaryResult) {
       abortSignal.throwIfAborted();
       const slim = getColdInput();
       if (
         slim.stats.imagesStripped > 0 ||
         slim.stats.documentsStripped > 0 ||
-        slim.stats.textPartsTruncated > 0
+        slim.stats.textPartsTruncated > 0 ||
+        slim.stats.thoughtsStripped > 0
       ) {
         config
           .getDebugLogger()
           .debug(
             `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
-              `${slim.stats.documentsStripped} document(s), and truncated ` +
-              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
+              `${slim.stats.documentsStripped} document(s), stripped ` +
+              `${slim.stats.thoughtsStripped} unsigned thought part(s), and ` +
+              `truncated ${slim.stats.textPartsTruncated} text part(s) in ` +
+              `side-query payload`,
           );
+      }
+      if (slim.stats.thoughtsStripped > 0) {
+        coldInputReduced = true;
       }
       let coldHistory = slim.slimmedHistory;
       let coldSizing = initialSizing;
@@ -1417,6 +1465,48 @@ export class ChatCompressionService {
           if (!sameInput) coldInputReduced = true;
           coldHistory = retry.history;
           coldSizing = retry.sizing;
+          continue;
+        }
+        // When a clamped output budget was completely exhausted inside
+        // thinking or an unclosed <analysis> block, retrying once with the
+        // reduced input frees headroom up to the full output reserve instead
+        // of deadlocking at the same clamped cap on every /compress attempt.
+        if (
+          attempt === 0 &&
+          coldOutputBudget < compactionOutputReserve(coldWindow)
+        ) {
+          const candidateText = summaryResult.text;
+          const candidateEmpty =
+            !candidateText ||
+            stripAnalysisBlock(candidateText).trim().length === 0;
+          const spent = computeReportedOutputSpent(summaryResult.usage);
+          if (
+            candidateEmpty &&
+            typeof spent === 'number' &&
+            spent >= coldOutputBudget
+          ) {
+            const reduced = reduceColdInput();
+            const reducedBudget = computeCompactionOutputBudget(
+              estimateColdRequest(reduced),
+              coldWindow,
+            );
+            if (
+              estimateColdRequest(reduced) < estimateColdRequest(coldHistory) &&
+              reducedBudget > coldOutputBudget
+            ) {
+              config
+                .getDebugLogger()
+                .warn(
+                  `[chat-compression] clamped output budget (${coldOutputBudget}) ` +
+                    `was exhausted before producing a summary; retrying once ` +
+                    `with reduced input (budget ${reducedBudget}).`,
+                );
+              coldInputReduced = true;
+              coldHistory = reduced;
+              coldSizing = { window: coldWindow };
+              summaryResult = undefined;
+            }
+          }
         }
       }
     }
@@ -1503,30 +1593,15 @@ export class ChatCompressionService {
     // once: where the output count already holds it, it is not added again.
     // This check and the room check below read the same count (#15936 R8-2,
     // R11-2).
-    const reportedOutputTokenCount =
-      compressionUsageMetadata?.candidatesTokenCount;
-    const outputSpentTokenCount =
-      typeof reportedOutputTokenCount === 'number' &&
-      typeof compressionInputTokenCount === 'number'
-        ? outputTokenCount(
-            {
-              input: compressionInputTokenCount,
-              output: reportedOutputTokenCount,
-              thoughts: Math.max(
-                0,
-                compressionUsageMetadata?.thoughtsTokenCount ?? 0,
-              ),
-              total: compressionUsageMetadata?.totalTokenCount ?? 0,
-            },
-            compactionAuthType,
-          )
-        : compressionOutputTokenCount;
+    const outputSpentTokenCount = outputCountIsEstimated
+      ? compressionOutputTokenCount
+      : computeReportedOutputSpent(compressionUsageMetadata);
     const truncationThreshold = outputCountIsEstimated
       ? COMPACT_MAX_OUTPUT_TOKENS
       : coldOutputBudget;
     if (
       !usedCacheSharing &&
-      !isSummaryEmpty &&
+      (!outputCountIsEstimated || !isSummaryEmpty) &&
       typeof outputSpentTokenCount === 'number' &&
       outputSpentTokenCount >= truncationThreshold
     ) {

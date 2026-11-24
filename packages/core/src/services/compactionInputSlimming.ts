@@ -292,6 +292,8 @@ interface SlimResult {
 /** Appended to text payloads truncated by `maxTextChars`. */
 export const SLIM_TEXT_TRUNCATION_MARKER = '\n[...truncated for compaction]';
 
+const OMITTED_THOUGHT_PLACEHOLDER = '[thought omitted]';
+
 export interface SlimOptions {
   /**
    * When set, text payloads larger than this (top-level `text` parts,
@@ -303,12 +305,21 @@ export interface SlimOptions {
    * nothing and keep text intact.
    */
   maxTextChars?: number;
+  /**
+   * When true, strip historical `thought: true` parts that do not carry a
+   * `thoughtSignature`. Cold compression side-queries do not share prompt
+   * cache and do not need prior unsigned reasoning transcripts, which can
+   * otherwise crowd out the compaction output budget. Signed thought parts
+   * stay intact for providers that validate replayed signatures.
+   */
+  stripUnsignedThoughts?: boolean;
 }
 
 interface SlimStats {
   imagesStripped: number;
   documentsStripped: number;
   textPartsTruncated: number;
+  thoughtsStripped: number;
 }
 
 /**
@@ -325,6 +336,7 @@ export function slimCompactionInput(
     imagesStripped: 0,
     documentsStripped: 0,
     textPartsTruncated: 0,
+    thoughtsStripped: 0,
   };
   let anyChange = false;
 
@@ -332,7 +344,17 @@ export function slimCompactionInput(
     if (!content.parts || content.parts.length === 0) return content;
 
     let touched = false;
-    const newParts: Part[] = content.parts.map((part) => {
+    const newParts: Part[] = [];
+    for (const part of content.parts) {
+      if (
+        options?.stripUnsignedThoughts &&
+        part.thought === true &&
+        typeof part.thoughtSignature !== 'string'
+      ) {
+        stats.thoughtsStripped++;
+        touched = true;
+        continue;
+      }
       const replacement = transformPart(
         part,
         stats,
@@ -341,14 +363,19 @@ export function slimCompactionInput(
       );
       if (replacement !== part) {
         touched = true;
-        return replacement;
       }
-      return part;
-    });
+      newParts.push(replacement);
+    }
 
     if (!touched) return content;
     anyChange = true;
-    return { ...content, parts: newParts };
+    return {
+      ...content,
+      parts:
+        newParts.length > 0
+          ? newParts
+          : [{ text: OMITTED_THOUGHT_PLACEHOLDER }],
+    };
   });
 
   return {

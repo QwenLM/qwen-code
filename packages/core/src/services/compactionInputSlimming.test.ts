@@ -383,6 +383,7 @@ describe('compactionInputSlimming', () => {
         imagesStripped: 1,
         documentsStripped: 0,
         textPartsTruncated: 0,
+        thoughtsStripped: 0,
       });
     });
 
@@ -1364,6 +1365,63 @@ describe('compactionInputSlimming', () => {
         expect(output.charCodeAt(499)).not.toBeGreaterThanOrEqual(0xd800);
         expect(output.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
       }
+    });
+  });
+
+  describe('stripUnsignedThoughts', () => {
+    it('keeps unsigned thought parts by default', () => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [{ text: 'scratchpad', thought: true }, { text: 'reply' }],
+        },
+      ];
+
+      const result = slimCompactionInput(history);
+
+      expect(result.slimmedHistory).toBe(history);
+      expect(result.stats.thoughtsStripped).toBe(0);
+    });
+
+    it('strips unsigned thoughts, preserves signed thoughts, and keeps turn count stable', () => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            { text: 'unsigned reasoning', thought: true },
+            { text: 'visible answer' },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'only unsigned reasoning', thought: true }],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              text: 'signed reasoning',
+              thought: true,
+              thoughtSignature: 'sig-123',
+            },
+            { text: 'signed reply' },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, undefined, {
+        stripUnsignedThoughts: true,
+      });
+
+      expect(result.slimmedHistory).toHaveLength(3);
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { text: 'visible answer' },
+      ]);
+      expect(result.slimmedHistory[1]!.parts).toEqual([
+        { text: '[thought omitted]' },
+      ]);
+      expect(result.slimmedHistory[2]).toBe(history[2]);
+      expect(result.stats.thoughtsStripped).toBe(2);
     });
   });
 });

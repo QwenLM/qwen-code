@@ -1727,6 +1727,25 @@ export class ContentGenerationPipeline {
       }
     }
 
+    if (reasoningDisabled && !thinkingMandatory) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      // User `extra_body` can explicitly enable thinking on custom/non-Qwen
+      // gateways (e.g. `enable_thinking: true`). Flip explicit opt-ins to false
+      // when reasoning is disabled without inventing the field on endpoints
+      // that never declared it; if the server requires thinking, the
+      // `isRequiredThinkingError` retry path learns and recovers automatically.
+      if (typed['enable_thinking'] === true) {
+        typed['enable_thinking'] = false;
+      }
+      const chatTemplateKwargs = asObject(typed['chat_template_kwargs']);
+      if (chatTemplateKwargs?.['enable_thinking'] === true) {
+        typed['chat_template_kwargs'] = {
+          ...chatTemplateKwargs,
+          enable_thinking: false,
+        };
+      }
+    }
+
     if (thinkingMandatory) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       if (typed['enable_thinking'] === false) {
