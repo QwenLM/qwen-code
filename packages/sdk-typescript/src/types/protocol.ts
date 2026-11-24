@@ -95,6 +95,7 @@ export interface APIAssistantMessage {
 
 export interface SDKUserMessage {
   type: 'user';
+  origin?: { kind: 'human' };
   uuid?: string;
   session_id: string;
   message: APIUserMessage;
@@ -242,6 +243,7 @@ export type AuthType =
   | 'openai-responses'
   | 'anthropic'
   | 'qwen-oauth'
+  | 'qwen-subscription'
   | 'gemini'
   | 'vertex-ai';
 
@@ -306,6 +308,8 @@ export interface MCPServerConfig {
   tcp?: string;
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -365,6 +369,7 @@ export interface CLIControlInitializeRequest {
    * Applied at session start via config.setReasoningEffort().
    */
   effort?: string;
+  workflowMode?: boolean;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -413,6 +418,15 @@ export interface CLIControlSetEffortRequest {
   effort: string;
 }
 
+export interface CLIControlGetWorkflowModeRequest {
+  subtype: 'get_workflow_mode';
+}
+
+export interface CLIControlSetWorkflowModeRequest {
+  subtype: 'set_workflow_mode';
+  enabled: boolean;
+}
+
 export interface CLIControlGetAvailableModelsRequest {
   subtype: 'get_available_models';
 }
@@ -435,6 +449,8 @@ export type ControlRequestPayload =
   | CLIControlSupportedCommandsRequest
   | CLIControlGetContextUsageRequest
   | CLIControlSetEffortRequest
+  | CLIControlGetWorkflowModeRequest
+  | CLIControlSetWorkflowModeRequest
   | CLIControlGetAvailableModelsRequest
   | CLIControlGetUsageInfoRequest;
 
@@ -604,6 +620,8 @@ export interface SubagentConfig {
   model?: string;
   runConfig?: Partial<RunConfig>;
   color?: string;
+  /** Requires container execution; cannot lower the operator's backend policy. */
+  executionBackend?: 'container';
   readonly isBuiltin?: boolean;
 }
 
@@ -629,6 +647,8 @@ export enum ControlRequestType {
   INTERRUPT = 'interrupt',
   CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
+  GET_WORKFLOW_MODE = 'get_workflow_mode',
+  SET_WORKFLOW_MODE = 'set_workflow_mode',
   SET_EFFORT = 'set_effort',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',

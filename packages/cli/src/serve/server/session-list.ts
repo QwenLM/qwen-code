@@ -11,14 +11,25 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  readWorktreeSessionMarker,
   canonicalSessionPrUrl,
-  readSessionPrs,
+  readSessionPrsDetailed,
+  readSessionArtifactSummarySidecarAsync,
+  readSessionGoalSidecar,
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
+import {
+  GROUP_COLOR_OPTIONS,
+  type SessionGroupCatalog,
+} from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  isPromptLedgerTerminalRecord,
+  readPromptLedgerRecords,
+} from '@qwen-code/acp-bridge/promptLedger';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -27,11 +38,17 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   PersistedSessionListCache,
+  waitForSessionListLoad,
   type PersistedSessionListSnapshot,
+  type SessionListLoad,
 } from './persisted-session-list-cache.js';
 import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  HIDDEN_CATALOG_SOURCE_TYPES,
+  isHiddenCatalogSource,
+} from '../../runtime/agent-session-source.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
@@ -44,8 +61,14 @@ const persistedSessionListCache = new PersistedSessionListCache(
   PERSISTED_SESSION_LIST_CACHE_TTL_MS,
   MAX_ORGANIZED_SESSIONS,
 );
+// Each row is owned by one persisted snapshot. Its sidecars expire with it.
+const persistedSidecarLoads = new WeakMap<
+  Readonly<BridgeSessionSummary>,
+  SessionListLoad<BridgeSessionSummary>
+>();
 
 export interface ListWorkspaceSessionsOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   cursor?: string;
   size?: number;
   archiveState?: SessionArchiveState;
@@ -70,6 +93,7 @@ export interface ListWorkspaceSessionsOptions {
 
 export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
+  groups?: SessionGroupCatalog;
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
@@ -98,6 +122,9 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Paginate the combined persisted/live catalog, including unfiltered reads. */
+  paginateMerged?: boolean;
+  includeGroups?: boolean;
   /** Runtime root owned by the selected managed workspace. */
   runtimeBaseDir?: string;
   /** Aborts this caller's wait without cancelling other shared waiters. */
@@ -106,6 +133,8 @@ export interface ListWorkspaceSessionsReadOptions {
 
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
+  paginateMerged?: boolean;
+  includeGroups?: boolean;
   runtimeBaseDir: string;
   signal?: AbortSignal;
 }
@@ -131,29 +160,60 @@ export function invalidateWorkspaceSessionListCache(
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
-    kind: 'numeric' | 'organized' | 'live' | 'parent' | 'metadata' = 'numeric',
+    kind:
+      | 'numeric'
+      | 'persisted'
+      | 'organized'
+      | 'live'
+      | 'parent'
+      | 'metadata' = 'numeric',
   ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
   }
 }
 
-function parseSessionCursor(cursor: string): number | undefined {
-  if (cursor === '') return undefined;
+/**
+ * True when `cursor` addresses a position in the persisted session store: a
+ * bare page offset, or one of the composite `"<mtime>|<name>"` cursors minted
+ * by listSessions when a page ends inside a group of files sharing an mtime.
+ * Callers use this to pick the persisted listing path over the live one; it
+ * only classifies the shape, `parseSessionCursor` still rejects bad values.
+ */
+export function isPersistedSessionCursor(cursor: string): boolean {
+  if (cursor === '') return false;
   const trimmed = cursor.trim();
-  const parsed = Number(trimmed);
-  if (
-    trimmed === '' ||
-    !Number.isFinite(parsed) ||
-    parsed < 0 ||
-    parsed > Number.MAX_SAFE_INTEGER
-  ) {
-    throw new InvalidCursorError(cursor);
+  if (trimmed === '') return false;
+  // Composite cursors are opaque to this layer beyond their mtime prefix. An
+  // empty prefix ("|name") is malformed: Number('') is 0, so without this
+  // guard it would pass as a real position and answer 200 with an empty page.
+  const parts = trimmed.split('|');
+  if (parts.length === 2 && parts[0].trim() !== '' && parts[1].length > 0) {
+    const mtime = Number(parts[0]);
+    if (Number.isFinite(mtime) && mtime >= 0) return true;
   }
-  return parsed;
+  const parsed = Number(trimmed);
+  return (
+    Number.isFinite(parsed) && parsed >= 0 && parsed <= Number.MAX_SAFE_INTEGER
+  );
+}
+
+function parseSessionCursor(cursor: string): number | string | undefined {
+  if (cursor === '') return undefined;
+  if (!isPersistedSessionCursor(cursor)) {
+    throw new InvalidCursorError(cursor, 'persisted');
+  }
+  const trimmed = cursor.trim();
+  // A bare offset parses as a number; a composite cursor stays opaque so it
+  // can be handed back to the persisted listing layer verbatim.
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : trimmed;
 }
 
 interface OrganizedCursor {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
+  catalogKind?: 'organized';
+  paginateMerged?: boolean;
   group: string;
   archiveState: SessionArchiveState;
   sourceType?: string;
@@ -194,6 +254,8 @@ function parseOrganizedCursor(
   expected: {
     group: string;
     archiveState: SessionArchiveState;
+    paginateMerged: boolean;
+    sortBy?: 'updatedAt' | 'lastUserPromptAt';
     sourceType?: string;
     sourceId?: string;
     conversationKind?: 'standalone-top-level';
@@ -216,6 +278,13 @@ function parseOrganizedCursor(
       !Number.isFinite(last.activityTime) ||
       typeof last.sessionId !== 'string' ||
       last.sessionId.length === 0 ||
+      ((parsed as OrganizedCursor).catalogKind !== undefined &&
+        (parsed as OrganizedCursor).catalogKind !== 'organized') ||
+      ((parsed as OrganizedCursor).paginateMerged !== undefined &&
+        (parsed as OrganizedCursor).paginateMerged !==
+          expected.paginateMerged) ||
+      ((parsed as OrganizedCursor).sortBy ?? 'updatedAt') !==
+        (expected.sortBy ?? 'updatedAt') ||
       (parsed as OrganizedCursor).group !== expected.group ||
       (parsed as OrganizedCursor).archiveState !== expected.archiveState ||
       (parsed as OrganizedCursor).sourceType !== expected.sourceType ||
@@ -238,13 +307,18 @@ function encodeOrganizedCursor(
   last: OrganizedCursorKey,
   group: string,
   archiveState: SessionArchiveState,
+  paginateMerged: boolean,
   sourceType?: string,
   sourceId?: string,
   conversationKind?: 'standalone-top-level',
   emitted: readonly string[] = [],
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): string {
   return Buffer.from(
     JSON.stringify({
+      catalogKind: 'organized',
+      sortBy,
+      paginateMerged,
       group,
       archiveState,
       sourceType,
@@ -288,6 +362,7 @@ function encodeLiveSessionCursor(last: LiveSessionCursorKey): string {
 
 /** Binds an opaque cursor to the metadata filter that produced it. */
 interface SessionMetadataFilter {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
@@ -322,7 +397,10 @@ function matchesSessionMetadataSource(
 
 function parseMetadataSessionCursor(
   cursor: string,
-  expected: SessionMetadataFilter & { archiveState: SessionArchiveState },
+  expected: SessionMetadataFilter & {
+    archiveState: SessionArchiveState;
+    paginateMerged: boolean;
+  },
 ): { last: LiveSessionCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
   try {
@@ -341,6 +419,13 @@ function parseMetadataSessionCursor(
       !Number.isFinite(last.activityTime) ||
       typeof last.sessionId !== 'string' ||
       last.sessionId.length === 0 ||
+      ((parsed as { catalogKind?: unknown }).catalogKind !== undefined &&
+        (parsed as { catalogKind?: unknown }).catalogKind !== 'metadata') ||
+      ((parsed as { paginateMerged?: unknown }).paginateMerged !== undefined &&
+        (parsed as { paginateMerged?: unknown }).paginateMerged !==
+          expected.paginateMerged) ||
+      ((parsed as { sortBy?: unknown }).sortBy ?? 'updatedAt') !==
+        (expected.sortBy ?? 'updatedAt') ||
       (parsed as { parentSessionId?: unknown }).parentSessionId !==
         expected.parentSessionId ||
       (parsed as { sourceType?: unknown }).sourceType !== expected.sourceType ||
@@ -365,7 +450,7 @@ function parseMetadataSessionCursor(
   } catch {
     throw new InvalidCursorError(
       cursor,
-      expected.sourceType === undefined ? 'parent' : 'metadata',
+      expected.parentSessionId !== undefined ? 'parent' : 'metadata',
     );
   }
 }
@@ -374,10 +459,13 @@ function encodeMetadataSessionCursor(
   last: LiveSessionCursorKey,
   filter: SessionMetadataFilter,
   archiveState: SessionArchiveState,
+  paginateMerged: boolean,
   emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
     JSON.stringify({
+      catalogKind: 'metadata',
+      paginateMerged,
       ...filter,
       archiveState,
       last,
@@ -414,13 +502,19 @@ async function enrichWorktreeSidecars(
       signal?.throwIfAborted();
       sidecar = null;
     }
-    if (sidecar) {
+    if (
+      sidecar &&
+      (await readWorktreeSessionMarker(sidecar.worktreePath)) === sessionId
+    ) {
       bySessionId.set(sessionId, {
         ...summary,
         worktree: {
           slug: sidecar.slug,
           path: sidecar.worktreePath,
           branch: sidecar.worktreeBranch,
+          baseCommit:
+            sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+          baseBranch: sidecar.originalBranch || undefined,
         },
       });
     }
@@ -445,15 +539,91 @@ async function enrichPrSidecars(
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
-    let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
+    let result: Awaited<ReturnType<typeof readSessionPrsDetailed>>;
     try {
       const sidecarPath = sessionService.getPrSessionPathForArchiveState(
         sessionId,
         archiveState,
       );
+      result = signal
+        ? await readSessionPrsDetailed(sidecarPath, { signal })
+        : await readSessionPrsDetailed(sidecarPath);
+    } catch {
+      signal?.throwIfAborted();
+      result = { status: 'invalid' };
+    }
+    if (result.status === 'ok') {
+      bySessionId.set(sessionId, {
+        ...summary,
+        prs: sidecarToPrInfos(result.prs),
+      });
+    }
+    // An unreadable sidecar is UNKNOWN bindings, not an unbind: leave `prs`
+    // unset rather than projecting an empty list. The PR-bindings snapshot
+    // reads the sidecars itself and reports such a session as partial.
+  }
+}
+
+/**
+ * Enrich persisted session summaries with the restorable artifact count from
+ * the summary sidecar so the header entry can show it at click time. Same
+ * best-effort pattern as {@link enrichPrSidecars}: a missing or unreadable
+ * sidecar is an UNKNOWN count, not zero artifacts, and leaves the field
+ * unset. Runs before the live merge; a live entry's own count supersedes it.
+ */
+async function enrichArtifactSummaries(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    let count: number | undefined;
+    try {
+      const sidecarPath = sessionService.getArtifactSummaryPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      // Yield between reads so a cancelled page stops doing work promptly.
+      const sidecar = signal
+        ? await readSessionArtifactSummarySidecarAsync(sidecarPath, { signal })
+        : await readSessionArtifactSummarySidecarAsync(sidecarPath);
+      count = sidecar?.artifactCount;
+    } catch {
+      signal?.throwIfAborted();
+      count = undefined;
+    }
+    if (count !== undefined && count > 0) {
+      bySessionId.set(sessionId, { ...summary, artifactCount: count });
+    }
+  }
+}
+
+/**
+ * Enrich persisted session summaries with the goal list projection from
+ * sidecar files, so the sidebar marker survives daemon restarts and shows
+ * for unloaded/archived sessions the live-only Goals listing cannot see.
+ * Same pattern as {@link enrichPrSidecars}; disk-only, no IPC probes. An
+ * absent or unreadable sidecar leaves `goal` unset (no marker).
+ */
+async function enrichGoalSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    let sidecar: Awaited<ReturnType<typeof readSessionGoalSidecar>>;
+    try {
+      const sidecarPath = sessionService.getGoalSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
       sidecar = signal
-        ? await readSessionPrs(sidecarPath, { signal })
-        : await readSessionPrs(sidecarPath);
+        ? await readSessionGoalSidecar(sidecarPath, { signal })
+        : await readSessionGoalSidecar(sidecarPath);
     } catch {
       signal?.throwIfAborted();
       sidecar = null;
@@ -461,8 +631,80 @@ async function enrichPrSidecars(
     if (sidecar) {
       bySessionId.set(sessionId, {
         ...summary,
-        prs: sidecarToPrInfos(sidecar),
+        goal: {
+          status: sidecar.status,
+          objective: sidecar.objective,
+          updatedAt: new Date(sidecar.updatedAt).toISOString(),
+        },
       });
+    }
+  }
+}
+
+/**
+ * Teardown flush codes: `flushPromptTerminals` publishes an `error` terminal
+ * with one of these codes for every still-pending prompt when the daemon
+ * shuts down, the agent channel exits, or the session is closed/killed. The
+ * turn was cut off by teardown, not by a model failure, so the session can
+ * offer "Continue execution" on its next load.
+ */
+const CONTINUATION_TEARDOWN_CODES = new Set([
+  'daemon_shutdown',
+  'channel_closed',
+  'session_closed',
+  'session_killed',
+]);
+
+/**
+ * Only the ledger's last record decides, so a small tail window suffices;
+ * the reader drops a torn final line and falls back to the previous record.
+ */
+const CONTINUATION_LEDGER_TAIL_BYTES = 4 * 1024;
+
+/**
+ * Enrich persisted summaries with prompt-ledger continuation evidence so the
+ * sidebar can mark sessions whose latest prompt was cut off mid-flight. Same
+ * pattern as {@link enrichPrSidecars}; active sessions only — the ledger path
+ * is the active one, and archived conversations are closed. Fail-closed: an
+ * unreadable ledger leaves the field absent.
+ */
+async function enrichPromptContinuation(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (archiveState !== 'active') return;
+  let scanned = 0;
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    // The ledger reads are synchronous; yield periodically so a large
+    // catalog scan does not stall the daemon's event loop (the async PR
+    // sidecar enrichment interleaves naturally).
+    if (++scanned % 64 === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      signal?.throwIfAborted();
+    }
+    let records: ReturnType<typeof readPromptLedgerRecords>;
+    try {
+      records = readPromptLedgerRecords(
+        sessionService.getPromptLedgerPath(sessionId),
+        { tailBytes: CONTINUATION_LEDGER_TAIL_BYTES },
+      );
+    } catch {
+      signal?.throwIfAborted();
+      continue;
+    }
+    const last = records[records.length - 1];
+    if (!last) continue;
+    const cutOff = !isPromptLedgerTerminalRecord(last)
+      ? true // dangling admission: no terminal ever landed
+      : last.terminal === 'interrupted' ||
+        (last.terminal === 'error' &&
+          last.code !== undefined &&
+          CONTINUATION_TEARDOWN_CODES.has(last.code));
+    if (cutOff) {
+      bySessionId.set(sessionId, { ...summary, needsContinuation: true });
     }
   }
 }
@@ -529,6 +771,17 @@ function mergeLiveSessionSummary(
     hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
+  // Work in flight supersedes the persisted cut-off evidence: the running
+  // turn owns the transcript tail now, so a fresh catalog read of a running
+  // session must not carry the continuation hint.
+  if (
+    merged.hasActivePrompt ||
+    merged.activeWorkState === 'active' ||
+    merged.hasRunningBackgroundTasks ||
+    merged.backgroundTurn
+  ) {
+    delete merged.needsContinuation;
+  }
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history. The sidecar is
   // the append-only binding-time record (last = latest — the order the badge
@@ -540,6 +793,15 @@ function mergeLiveSessionSummary(
   // it there, while the live entry is frozen at bind-time.
   if (existing.prs || live.prs) {
     merged.prs = mergeSummaryPrs(existing.prs, live.prs);
+  }
+  // The live entry is authoritative for its artifact count (the spread above
+  // already overlays a non-zero one). When it omits the field — count zero —
+  // a stale sidecar-derived count from the persisted summary must not survive.
+  // The exception is a pending restore: the entry is live but its store is
+  // not hydrated yet, so the omission is unknown, not zero, and the
+  // sidecar-enriched count stays until the restore settles.
+  if (live.artifactCount === undefined && live.artifactCountPending !== true) {
+    delete merged.artifactCount;
   }
   return merged;
 }
@@ -645,22 +907,24 @@ async function liveOnlySummary(
     hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
-  let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
+  let result: Awaited<ReturnType<typeof readSessionPrsDetailed>>;
   try {
     const sidecarPath = sessionService.getPrSessionPathForArchiveState(
       live.sessionId,
       'active',
     );
-    sidecar = signal
-      ? await readSessionPrs(sidecarPath, { signal })
-      : await readSessionPrs(sidecarPath);
+    result = signal
+      ? await readSessionPrsDetailed(sidecarPath, { signal })
+      : await readSessionPrsDetailed(sidecarPath);
   } catch {
     signal?.throwIfAborted();
-    sidecar = null;
+    result = { status: 'invalid' };
   }
-  if (sidecar) {
-    summary.prs = mergeSummaryPrs(sidecarToPrInfos(sidecar), live.prs);
+  if (result.status === 'ok') {
+    summary.prs = mergeSummaryPrs(sidecarToPrInfos(result.prs), live.prs);
   }
+  // Invalid: unknown bindings, not an unbind; the live entry's own bindings
+  // (if any) survive via the spread above.
   return summary;
 }
 
@@ -671,6 +935,95 @@ function clonePersistedSummary(
     ...session,
     ...(session.worktree ? { worktree: { ...session.worktree } } : {}),
   };
+}
+
+function readPersistedSidecars(
+  session: Readonly<BridgeSessionSummary>,
+  service: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<BridgeSessionSummary> {
+  signal?.throwIfAborted();
+  let load = persistedSidecarLoads.get(session);
+  if (!load || load.controller.signal.aborted) {
+    const controller = new AbortController();
+    const read = async () => {
+      const readSignal = controller.signal;
+      readSignal.throwIfAborted();
+      const rows = new Map([[session.sessionId, { ...session }]]);
+      await enrichWorktreeSidecars(rows, service, archiveState, readSignal);
+      await enrichPrSidecars(rows, service, archiveState, readSignal);
+      await enrichArtifactSummaries(rows, service, archiveState, readSignal);
+      await enrichGoalSidecars(rows, service, archiveState, readSignal);
+      readSignal.throwIfAborted();
+      return rows.get(session.sessionId)!;
+    };
+    const started: SessionListLoad<BridgeSessionSummary> = {
+      controller,
+      waiterCount: 0,
+      settled: false,
+      promise: Promise.resolve()
+        .then(read)
+        .catch((error: unknown) => {
+          if (persistedSidecarLoads.get(session) === started) {
+            persistedSidecarLoads.delete(session);
+          }
+          throw error;
+        })
+        .finally(() => {
+          started.settled = true;
+        }),
+    };
+    persistedSidecarLoads.set(session, started);
+    load = started;
+  }
+  return waitForSessionListLoad(load, signal);
+}
+
+async function enrichCatalogPage(
+  page: BridgeSessionSummary[],
+  persistedById: ReadonlyMap<string, Readonly<BridgeSessionSummary>>,
+  liveRows: readonly BridgeSessionSummary[],
+  service: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  const selectedIds = new Set(page.map((session) => session.sessionId));
+  const detailsById = new Map<string, BridgeSessionSummary>();
+  for (const { sessionId } of page) {
+    const stored = persistedById.get(sessionId);
+    if (stored) {
+      detailsById.set(
+        sessionId,
+        clonePersistedSummary(
+          await readPersistedSidecars(stored, service, archiveState, signal),
+        ),
+      );
+    }
+  }
+  // Replay live merges on the enriched rows. The selected summaries keep
+  // their organization, sort keys, and cursor identity.
+  for (const live of liveRows) {
+    signal?.throwIfAborted();
+    if (!selectedIds.has(live.sessionId)) continue;
+    const stored = detailsById.get(live.sessionId);
+    detailsById.set(
+      live.sessionId,
+      stored
+        ? mergeLiveSessionSummary(stored, live)
+        : await liveOnlySummary(live, service, signal),
+    );
+  }
+  signal?.throwIfAborted();
+  for (const session of page) {
+    const details = detailsById.get(session.sessionId);
+    if (!details) continue;
+    if (details.worktree !== undefined) session.worktree = details.worktree;
+    if (details.prs !== undefined) session.prs = details.prs;
+    if (details.artifactCount !== undefined)
+      session.artifactCount = details.artifactCount;
+    if (details.goal !== undefined) session.goal = details.goal;
+  }
 }
 
 async function loadAllPersistedSummaries(
@@ -685,7 +1038,8 @@ async function loadAllPersistedSummaries(
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
   let scanPages = 0;
-  let cursor: number | undefined;
+  let catalogReadFallbacks = 0;
+  let cursor: number | string | undefined;
   do {
     scanPages += 1;
     const page = await sessionService.listSessions({
@@ -693,8 +1047,11 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
+      forCatalog: true,
+      excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     });
     signal.throwIfAborted();
+    catalogReadFallbacks += page.catalogReadFallbacks ?? 0;
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
     sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
@@ -715,18 +1072,18 @@ async function loadAllPersistedSummaries(
   const bySessionId = new Map(
     sessions.map((session) => [session.sessionId, session]),
   );
-  await enrichWorktreeSidecars(
+  await enrichPromptContinuation(
     bySessionId,
     sessionService,
     archiveState,
     signal,
   );
-  await enrichPrSidecars(bySessionId, sessionService, archiveState, signal);
   signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
     truncated,
     scanPages,
+    catalogReadFallbacks,
     scanDurationMs: Math.max(0, performance.now() - scanStartedAt),
   };
 }
@@ -783,20 +1140,32 @@ async function listAllPersistedSummaries(
       'qwen-code.daemon.session_list.scan_duration_ms',
       snapshot.scanDurationMs,
     );
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.catalog_read_fallbacks',
+      snapshot.catalogReadFallbacks ?? 0,
+    );
   }
   return snapshot;
 }
 
-function getSummaryActivityTime(session: BridgeSessionSummary): number {
+function getSummaryActivityTime(
+  session: BridgeSessionSummary,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
+): number {
+  if (sortBy === 'lastUserPromptAt') {
+    const time = Date.parse(session.lastUserPromptAt ?? '');
+    return Number.isFinite(time) ? time : Number.MIN_SAFE_INTEGER;
+  }
   const time = Date.parse(session.updatedAt ?? session.createdAt);
   return Number.isFinite(time) ? time : 0;
 }
 
 function getLiveSessionCursorKey(
   session: BridgeSessionSummary,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): LiveSessionCursorKey {
   return {
-    activityTime: getSummaryActivityTime(session),
+    activityTime: getSummaryActivityTime(session, sortBy),
     sessionId: session.sessionId,
   };
 }
@@ -957,7 +1326,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const cursor =
     options.cursor !== undefined
       ? parseOrganizedCursor(options.cursor, {
+          paginateMerged: readOptions.paginateMerged === true,
           group,
+          sortBy: options.sortBy,
           archiveState,
           sourceType: options.sourceType,
           sourceId: options.sourceId,
@@ -979,11 +1350,13 @@ async function listOrganizedWorkspaceSessionsForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
+  const persistedById = new Map<string, Readonly<BridgeSessionSummary>>();
   for (const session of persisted.sessions) {
+    persistedById.set(session.sessionId, session);
     bySessionId.set(
       session.sessionId,
       applyOrganization(
-        clonePersistedSummary(session),
+        { ...session },
         snapshot.sessions.get(session.sessionId),
       ),
     );
@@ -996,6 +1369,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     ]),
   );
   const liveSessionIds = new Set<string>();
+  const liveRows: BridgeSessionSummary[] = [];
 
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
@@ -1017,9 +1391,13 @@ async function listOrganizedWorkspaceSessionsForResponse(
             ),
           );
         } else if (
-          // A live-only row has no persisted key to page by, so it stays a
-          // first-page-only insertion as before.
-          isFirstPage &&
+          // Preserve legacy first-page-only insertion unless the caller
+          // requests pagination across the complete merged catalog. Question
+          // sorting also needs later pages: a live-only row has no question
+          // time yet, so it sorts last and would otherwise be unreachable.
+          (isFirstPage ||
+            readOptions.paginateMerged ||
+            options.sortBy === 'lastUserPromptAt') &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
@@ -1037,12 +1415,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
         ) {
           bySessionId.set(
             live.sessionId,
-            applyOrganization(
-              await liveOnlySummary(live, sessionService, readOptions.signal),
-              organization,
-            ),
+            applyOrganization({ ...live, isArchived: false }, organization),
           );
+        } else {
+          continue;
         }
+        liveRows.push(live);
       }
     } catch (error) {
       readOptions.signal?.throwIfAborted();
@@ -1056,6 +1434,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
 
   const filtered = [...bySessionId.values()].filter((session) => {
+    if (isHiddenCatalogSource(session.sourceType)) return false;
     if (!matchesSessionMetadataSource(session, options)) return false;
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
@@ -1068,10 +1447,24 @@ async function listOrganizedWorkspaceSessionsForResponse(
     return session.color == null && session.groupId === group;
   });
   readOptions.signal?.throwIfAborted();
+  if (options.sortBy === 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      filtered,
+      sessionService,
+      archiveState,
+      readOptions,
+      true,
+    );
+    for (const session of filtered)
+      persistedTimeById.set(
+        session.sessionId,
+        getSummaryActivityTime(session, options.sortBy),
+      );
+  }
   const activityTimeById = new Map(
     filtered.map((session) => [
       session.sessionId,
-      getSummaryActivityTime(session),
+      getSummaryActivityTime(session, options.sortBy),
     ]),
   );
   filtered.sort((a, b) => compareOrganizedSessions(activityTimeById, a, b));
@@ -1123,14 +1516,32 @@ async function listOrganizedWorkspaceSessionsForResponse(
       boundary,
       group,
       archiveState,
+      readOptions.paginateMerged === true,
       options.sourceType,
       options.sourceId,
       options.conversationKind,
       emitted,
+      options.sortBy,
     );
   }
+  await enrichCatalogPage(
+    page,
+    persistedById,
+    liveRows,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
   return {
     sessions: page,
+    ...(readOptions.includeGroups
+      ? {
+          groups: {
+            groups: snapshot.groups,
+            colorOptions: [...GROUP_COLOR_OPTIONS],
+          },
+        }
+      : {}),
     ...(nextCursor !== undefined ? { nextCursor } : {}),
     ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
     ...(persisted.truncated ? { truncated: true } : {}),
@@ -1164,6 +1575,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const canonicalizeStandaloneIds =
     filter.conversationKind === 'standalone-top-level';
   const conflictedStandaloneIds = new Set<string>();
+  const persistedById = new Map<string, Readonly<BridgeSessionSummary>>();
   const persistedTimeById = new Map<string, number>();
   for (const session of persisted.sessions) {
     let sessionId = session.sessionId;
@@ -1174,19 +1586,22 @@ async function listWorkspaceSessionsByMetadataForResponse(
       if (conflictedStandaloneIds.has(sessionId)) continue;
       if (bySessionId.has(sessionId)) {
         bySessionId.delete(sessionId);
+        persistedById.delete(sessionId);
         persistedTimeById.delete(sessionId);
         conflictedStandaloneIds.add(sessionId);
         continue;
       }
     }
+    persistedById.set(sessionId, session);
     bySessionId.set(sessionId, {
-      ...clonePersistedSummary(session),
+      ...session,
       sessionId,
     });
     persistedTimeById.set(sessionId, getSummaryActivityTime(session));
   }
   // Activity floors: the key a row falls back to once its live entry is gone.
   const liveSessionIds = new Set<string>();
+  const liveRows: BridgeSessionSummary[] = [];
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
@@ -1224,15 +1639,11 @@ async function listWorkspaceSessionsByMetadataForResponse(
               })
             : sessionService.sessionExists(sessionId)))
         ) {
-          bySessionId.set(
-            sessionId,
-            await liveOnlySummary(
-              canonicalLive,
-              sessionService,
-              readOptions.signal,
-            ),
-          );
+          bySessionId.set(sessionId, { ...canonicalLive, isArchived: false });
+        } else {
+          continue;
         }
+        liveRows.push(canonicalLive);
       }
     } catch (error) {
       readOptions.signal?.throwIfAborted();
@@ -1245,27 +1656,43 @@ async function listWorkspaceSessionsByMetadataForResponse(
     }
   }
 
-  const matches = [...bySessionId.values()]
-    .filter(
-      (session) =>
-        (filter.parentSessionId === undefined ||
-          session.parentSessionId === filter.parentSessionId) &&
-        matchesSessionMetadataSource(session, filter),
-    )
-    .sort((a, b) =>
-      compareLiveSessionCursorKeys(
-        getLiveSessionCursorKey(a),
-        getLiveSessionCursorKey(b),
-      ),
-    );
+  const matches = [...bySessionId.values()].filter(
+    (session) =>
+      !isHiddenCatalogSource(session.sourceType) &&
+      (filter.parentSessionId === undefined ||
+        session.parentSessionId === filter.parentSessionId) &&
+      matchesSessionMetadataSource(session, filter),
+  );
   readOptions.signal?.throwIfAborted();
+  // Reject a cross-sort cursor before paying for any transcript read.
   const cursor =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
+          paginateMerged: readOptions.paginateMerged === true,
           ...filter,
           archiveState,
         })
       : undefined;
+  if (options.sortBy === 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      matches,
+      sessionService,
+      archiveState,
+      readOptions,
+      true,
+    );
+    for (const session of matches)
+      persistedTimeById.set(
+        session.sessionId,
+        getSummaryActivityTime(session, options.sortBy),
+      );
+  }
+  matches.sort((a, b) =>
+    compareLiveSessionCursorKeys(
+      getLiveSessionCursorKey(a, options.sortBy),
+      getLiveSessionCursorKey(b, options.sortBy),
+    ),
+  );
   const cursorKey = cursor?.last;
   const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const afterCursor =
@@ -1278,13 +1705,16 @@ async function listWorkspaceSessionsByMetadataForResponse(
             !emittedBeforePage.has(session.sessionId) &&
             compareLiveSessionCursorKeys(
               cursorKey,
-              getLiveSessionCursorKey(session),
+              getLiveSessionCursorKey(session, options.sortBy),
             ) < 0,
         );
   const page = afterCursor.slice(0, pageSize);
   let nextCursor: string | undefined;
   if (page.length < afterCursor.length) {
-    const boundary = getLiveSessionCursorKey(page[page.length - 1]!);
+    const boundary = getLiveSessionCursorKey(
+      page[page.length - 1]!,
+      options.sortBy,
+    );
     const emitted = nextEmittedSessionIds({
       carried: emittedBeforePage,
       page,
@@ -1303,15 +1733,49 @@ async function listWorkspaceSessionsByMetadataForResponse(
       boundary,
       filter,
       archiveState,
+      readOptions.paginateMerged === true,
       emitted,
     );
   }
+  await enrichCatalogPage(
+    page,
+    persistedById,
+    liveRows,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
     ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
     ...(persisted.truncated ? { truncated: true } : {}),
   };
+}
+
+function waitForQuestionTime(
+  promise: Promise<string | undefined>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    void promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 export async function listWorkspaceSessionsForResponse(
@@ -1332,6 +1796,12 @@ export async function listWorkspaceSessionsForResponse(
         ...(readOptions.mergeLive !== undefined
           ? { mergeLive: readOptions.mergeLive }
           : {}),
+        ...(readOptions.paginateMerged !== undefined
+          ? { paginateMerged: readOptions.paginateMerged }
+          : {}),
+        ...(readOptions.includeGroups !== undefined
+          ? { includeGroups: readOptions.includeGroups }
+          : {}),
         ...(readOptions.signal !== undefined
           ? { signal: readOptions.signal }
           : {}),
@@ -1339,7 +1809,48 @@ export async function listWorkspaceSessionsForResponse(
       }),
   );
   readOptions.signal?.throwIfAborted();
+  if (options?.sortBy !== 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      result.sessions,
+      new SessionService(workspaceCwd, { runtimeBaseDir }),
+      options?.archiveState ?? 'active',
+      readOptions,
+    );
+  }
   return result;
+}
+
+async function enrichPromptTimes(
+  sessions: BridgeSessionSummary[],
+  service: SessionService,
+  archiveState: SessionArchiveState,
+  readOptions: Pick<ListWorkspaceSessionsReadOptions, 'signal'>,
+  preferCache = false,
+): Promise<void> {
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(2, sessions.length) }, async () => {
+      while (nextIndex < sessions.length) {
+        readOptions.signal?.throwIfAborted();
+        const session = sessions[nextIndex++]!;
+        try {
+          session.lastUserPromptAt = await waitForQuestionTime(
+            preferCache
+              ? service.getLastUserPromptAt(session.sessionId, archiveState, {
+                  preferCache: true,
+                })
+              : service.getLastUserPromptAt(session.sessionId, archiveState),
+            readOptions.signal,
+          );
+        } catch {
+          // One unreadable transcript must not fail the page; abort still wins.
+          readOptions.signal?.throwIfAborted();
+          session.lastUserPromptAt = undefined;
+        }
+      }
+    }),
+  );
+  readOptions.signal?.throwIfAborted();
 }
 
 async function listWorkspaceSessionsForResponseInRuntime(
@@ -1367,6 +1878,8 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   if (
+    readOptions.paginateMerged ||
+    options?.sortBy === 'lastUserPromptAt' ||
     options?.parentSessionId !== undefined ||
     options?.sourceType !== undefined ||
     options?.conversationKind !== undefined
@@ -1374,19 +1887,20 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return listWorkspaceSessionsByMetadataForResponse(
       bridge,
       workspaceCwd,
-      options,
+      options ?? {},
       pageSize,
       {
-        ...(options.parentSessionId !== undefined
+        ...(options?.sortBy !== undefined ? { sortBy: options.sortBy } : {}),
+        ...(options?.parentSessionId !== undefined
           ? { parentSessionId: options.parentSessionId }
           : {}),
-        ...(options.sourceType !== undefined
+        ...(options?.sourceType !== undefined
           ? { sourceType: options.sourceType }
           : {}),
-        ...(options.sourceId !== undefined
+        ...(options?.sourceId !== undefined
           ? { sourceId: options.sourceId }
           : {}),
-        ...(options.conversationKind !== undefined
+        ...(options?.conversationKind !== undefined
           ? { conversationKind: options.conversationKind }
           : {}),
       },
@@ -1394,18 +1908,19 @@ async function listWorkspaceSessionsForResponseInRuntime(
     );
   }
 
-  let numericCursor: number | undefined;
+  let persistedCursor: number | string | undefined;
   if (options?.cursor != null) {
-    numericCursor = parseSessionCursor(options.cursor);
+    persistedCursor = parseSessionCursor(options.cursor);
   }
-  const isFirstPage = numericCursor === undefined;
+  const isFirstPage = persistedCursor === undefined;
 
   const sessionService = new SessionService(workspaceCwd);
   const archiveState = options?.archiveState ?? 'active';
   const persisted = await sessionService.listSessions({
-    cursor: numericCursor,
+    cursor: persistedCursor,
     size: pageSize,
     archiveState,
+    excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     ...(readOptions.signal ? { signal: readOptions.signal } : {}),
   });
   readOptions.signal?.throwIfAborted();
@@ -1427,6 +1942,24 @@ async function listWorkspaceSessionsForResponseInRuntime(
     archiveState,
     readOptions.signal,
   );
+  await enrichArtifactSummaries(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  await enrichGoalSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  await enrichPromptContinuation(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
   readOptions.signal?.throwIfAborted();
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
@@ -1436,7 +1969,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return { sessions, nextCursor };
   }
 
-  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  const liveSessions = bridge
+    .listWorkspaceSessions(workspaceCwd)
+    .filter((session) => !isHiddenCatalogSource(session.sourceType));
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
     if (existing) {
@@ -1503,6 +2038,7 @@ export async function listLiveWorkspaceSessionsForResponse(
         : undefined;
     const sessions = bridge
       .listWorkspaceSessions(workspaceCwd)
+      .filter((session) => !isHiddenCatalogSource(session.sourceType))
       .sort((a, b) =>
         compareLiveSessionCursorKeys(
           getLiveSessionCursorKey(a),
@@ -1583,7 +2119,7 @@ export async function searchWorkspaceSessionsForResponse(
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item)
+      if (item && !isHiddenCatalogSource(item.sourceType))
         bySessionId.set(
           hit.sessionId,
           applyOrganization(
@@ -1599,6 +2135,24 @@ export async function searchWorkspaceSessionsForResponse(
       readOptions.signal,
     );
     await enrichPrSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichArtifactSummaries(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichGoalSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichPromptContinuation(
       bySessionId,
       sessionService,
       'active',
@@ -1626,14 +2180,21 @@ export async function getWorkspaceSessionInfoForResponse(
   workspaceCwd: string,
   options: { includeLive?: boolean } = {},
 ): Promise<WorkspaceSessionInfoResult> {
-  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts();
+  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts({
+    excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
+  });
   return {
     active: counts.active,
     archived: counts.archived,
     total: counts.total,
     ...(options.includeLive === false
       ? {}
-      : { live: bridge.listWorkspaceSessions(workspaceCwd).length }),
+      : {
+          live: bridge
+            .listWorkspaceSessions(workspaceCwd)
+            .filter((session) => !isHiddenCatalogSource(session.sourceType))
+            .length,
+        }),
     expensive: true,
     cost: 'disk_scan',
     ...(counts.truncated ? { truncated: true } : {}),

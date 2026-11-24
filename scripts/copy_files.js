@@ -46,15 +46,21 @@ function copyFilesRecursive(source, target, rootSourceDir) {
   for (const item of items) {
     const sourcePath = path.join(source, item.name);
     const targetPath = path.join(target, item.name);
+    const relativePath = path.relative(rootSourceDir, sourcePath);
+    const normalizedPath = relativePath.replace(/\\/g, '/');
 
     if (item.isDirectory()) {
+      if (
+        ['skills/bundled/browser-use', 'skills/bundled/computer-use'].includes(
+          normalizedPath,
+        )
+      )
+        continue;
       copyFilesRecursive(sourcePath, targetPath, rootSourceDir);
     } else {
       const ext = path.extname(item.name);
       // Copy standard extensions, or .js files in i18n/locales directory
       // Use path.relative for precise matching to avoid false positives
-      const relativePath = path.relative(rootSourceDir, sourcePath);
-      const normalizedPath = relativePath.replace(/\\/g, '/');
       const isLocaleJs =
         ext === '.js' && normalizedPath.startsWith('i18n/locales/');
       if (
@@ -76,10 +82,16 @@ export function copyFiles({ root = process.cwd() } = {}) {
     process.exit(1);
   }
 
+  for (const name of ['browser-use', 'computer-use']) {
+    fs.rmSync(path.join(targetDir, 'skills/bundled', name), {
+      recursive: true,
+      force: true,
+    });
+  }
   copyFilesRecursive(sourceDir, targetDir, sourceDir);
 
-  // Copy example extensions into the bundle.
   const packageName = path.basename(root);
+  // Copy example extensions into the bundle.
   if (packageName === 'cli') {
     const examplesSource = path.join(
       sourceDir,

@@ -40,6 +40,7 @@ import {
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import {
+  normalizeOpenAiWireBaseUrl,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   DISABLED_REQUEST_TIMEOUT_MS,
@@ -50,11 +51,24 @@ import {
 } from '../openaiContentGenerator/constants.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
+import {
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../dashscope-source-config.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
+import { retryContext } from '../../utils/retryContext.js';
+import { filterIsolatedModelOverrides } from '../openaiContentGenerator/provider/utils.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
+import { applyResponsesPromptCaching } from './prompt-caching.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
+
+// Re-exported for existing consumers; the definition lives in the
+// dependency-free constants leaf so config/model modules can import it
+// without this module's SDK closure.
+export { normalizeOpenAiWireBaseUrl };
 
 /**
  * Thrown when the SSE read loop goes silent past the inactivity timeout.
@@ -310,6 +324,7 @@ export class ResponsesPipeline {
     try {
       return await this.connect(apiRequest, signal);
     } catch (error) {
+      if (retryContext.getStore()?.singleAttempt) throw error;
       retryRequest = this.buildReasoningReplayRetry(apiRequest, error);
       if (!retryRequest) throw error;
     }
@@ -399,9 +414,10 @@ export class ResponsesPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): ResponsesApiRequest {
-    const { instructions, input } =
-      convertGeminiContentsToResponsesInput(request);
-    const tools = convertGeminiToolsToResponsesTools(request);
+    const freeformExec = this.cliConfig.getFreeform();
+    const { instructions, input, cacheBoundary } =
+      convertGeminiContentsToResponsesInput(request, freeformExec);
+    const tools = convertGeminiToolsToResponsesTools(request, freeformExec);
 
     // History is always re-derived in full from this app's own Content[]
     // (matching every other content generator in this codebase) rather than
@@ -412,7 +428,7 @@ export class ResponsesPipeline {
 
     const apiRequest: ResponsesApiRequest = {
       model: this.config.model,
-      input: cleanOrphanedFunctionCalls(input),
+      input,
       instructions,
       tools,
       stream: true,
@@ -489,16 +505,26 @@ export class ResponsesPipeline {
       apiRequest.max_output_tokens = maxOut;
     }
 
-    if (this.config.extra_body) {
+    const extraBody = filterIsolatedModelOverrides(this.config.extra_body);
+    if (extraBody) {
       const thinkingOptOut =
         request.config?.thinkingConfig?.includeThoughts === false;
       const requestRecord = apiRequest as unknown as Record<string, unknown>;
-      for (const [key, value] of Object.entries(this.config.extra_body)) {
+      const singleAttempt = retryContext.getStore()?.singleAttempt;
+      for (const [key, value] of Object.entries(extraBody)) {
         // `enable_thinking` is a DashScope/Qwen-specific knob with no meaning
         // on the Responses API; buildReasoning() above already translates it
         // into `reasoning.effort` when present, so forwarding it verbatim
         // would only add an undefined field to the wire body.
         if (key === 'enable_thinking') continue;
+        if (
+          singleAttempt &&
+          (key === 'max_tokens' ||
+            key === 'max_completion_tokens' ||
+            key === 'max_new_tokens')
+        ) {
+          continue;
+        }
         // An explicit per-send `thinkingConfig.includeThoughts:false` is
         // authoritative for the whole build, not just buildReasoning(): the
         // opt-out is precisely what leaves `reasoning`/`include` off the
@@ -519,7 +545,15 @@ export class ResponsesPipeline {
       }
     }
 
-    return apiRequest;
+    const cachedRequest = applyResponsesPromptCaching(
+      apiRequest,
+      this.config,
+      cacheBoundary,
+    );
+    return {
+      ...cachedRequest,
+      input: cleanOrphanedFunctionCalls(cachedRequest.input),
+    };
   }
 
   private buildReasoning(
@@ -583,9 +617,7 @@ export class ResponsesPipeline {
     apiRequest: ResponsesApiRequest,
     signal?: AbortSignal,
   ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-    const baseUrl = (this.config.baseUrl || 'https://api.openai.com')
-      .replace(/\/v1\/?$/, '')
-      .replace(/\/$/, '');
+    const baseUrl = normalizeOpenAiWireBaseUrl(this.config.baseUrl);
     const url = `${baseUrl}/v1/responses`;
 
     const version = this.cliConfig.getCliVersion() || 'unknown';
@@ -641,7 +673,11 @@ export class ResponsesPipeline {
 
     const fetchOpts: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
-      headers,
+      headers: withDashScopeSourceConfig(
+        headers,
+        this.config.baseUrl,
+        this.cliConfig.getChannel?.(),
+      ),
       body,
       signal: connectController.signal,
     };
@@ -670,7 +706,7 @@ export class ResponsesPipeline {
     const fetchFn = buildSessionAwareFetch(
       pinnedFetch,
       this.cliConfig,
-      this.config.customHeaders,
+      withoutDashScopeSourceConfig(this.config.customHeaders),
     );
 
     // Connect-phase timeout: fetch() resolves once response headers arrive, so
@@ -684,6 +720,7 @@ export class ResponsesPipeline {
       connectTimeoutMs > 0 && connectTimeoutMs < DISABLED_REQUEST_TIMEOUT_MS;
 
     let response: Response;
+    markRequestDispatched();
     if (timeoutActive) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {

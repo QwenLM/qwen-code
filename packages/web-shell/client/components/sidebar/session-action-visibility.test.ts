@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SESSION_ACTION_ITEMS } from './WebShellSidebar';
+import {
+  DEFAULT_INLINE_ACTION_ITEMS,
+  DEFAULT_SESSION_ACTION_ITEMS,
+} from './WebShellSidebar';
 import type {
   WebShellSidebarSessionActionItem,
   WebShellSidebarSessionInlineActionItem,
@@ -8,12 +11,13 @@ import type {
 const ALL_ITEMS = DEFAULT_SESSION_ACTION_ITEMS;
 
 const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin'];
+  DEFAULT_INLINE_ACTION_ITEMS;
 
 /** Items that can never appear as inline buttons. */
 const DROPDOWN_ONLY_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
   'archive',
   'group',
+  'split',
 ];
 
 interface VisibilityResult {
@@ -63,17 +67,20 @@ function computeVisibility(
 
 describe('session action visibility matrix', () => {
   describe('defaults (no consumer config)', () => {
-    it('shows details on hover, pin inline, and archive plus mutations in the dropdown', () => {
+    it('shows details on hover and all optional actions in the dropdown', () => {
       const { inline, dropdown, hover, showDropdownTrigger } =
         computeVisibility(ALL_ITEMS, DEFAULT_INLINE_ITEMS);
 
-      expect([...inline].sort()).toEqual(['pin']);
+      expect(inline.size).toBe(0);
       expect([...dropdown].sort()).toEqual([
         'archive',
+        'bindPr',
         'delete',
         'export',
         'group',
+        'pin',
         'rename',
+        'split',
       ]);
       expect([...hover]).toEqual(['details']);
       expect(showDropdownTrigger).toBe(true);
@@ -113,10 +120,12 @@ describe('session action visibility matrix', () => {
       expect([...inline].sort()).toEqual(['delete']);
       expect([...dropdown].sort()).toEqual([
         'archive',
+        'bindPr',
         'export',
         'group',
         'pin',
         'rename',
+        'split',
       ]);
     });
 

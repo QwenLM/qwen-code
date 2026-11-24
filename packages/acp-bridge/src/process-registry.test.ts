@@ -19,7 +19,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
-import { ProcessRegistry } from './process-registry.js';
+import { ProcessRegistry, ProcessExitError } from './process-registry.js';
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 const PS = '/bin/ps';
@@ -123,6 +123,8 @@ describe('ProcessRegistry', () => {
     const registry = new ProcessRegistry();
     const child = fakeChild(4321);
     const tracked = registry.reserve().attach(child);
+    const released = vi.fn();
+    void tracked.registryReleased.then(released);
     expect(registry.committedProcessCount).toBe(1);
 
     // Winding down still occupies the pool: the process is alive and its
@@ -131,8 +133,11 @@ describe('ProcessRegistry', () => {
     await Promise.resolve();
     expect(registry.committedProcessCount).toBe(1);
 
+    expect(released).not.toHaveBeenCalled();
     child.emit('exit', 0, null);
     await terminating;
+    await tracked.registryReleased;
+    expect(released).toHaveBeenCalledOnce();
     expect(registry.committedProcessCount).toBe(0);
   });
 
@@ -251,6 +256,7 @@ describe('ProcessRegistry', () => {
     expect(killSpy).toHaveBeenCalledWith(-1234, 'SIGTERM');
 
     await vi.advanceTimersByTimeAsync(5_000);
+    await expect(terminating).resolves.toBeInstanceOf(ProcessExitError);
     await expect(terminating).resolves.toMatchObject({
       message: expect.stringContaining('exited uncleanly during shutdown'),
     });
@@ -381,6 +387,8 @@ describe('ProcessRegistry', () => {
       }
       if (signal === 'SIGKILL') aliveGroups.delete(group);
     });
+    const released = vi.fn();
+    void tracked.registryReleased.then(released);
     let settled = false;
     const terminating = tracked.terminate().then(() => {
       settled = true;
@@ -388,10 +396,13 @@ describe('ProcessRegistry', () => {
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(settled).toBe(false);
+    expect(released).not.toHaveBeenCalled();
     expect(registry.activeProcessCount).toBe(1);
 
     await vi.advanceTimersByTimeAsync(4_000);
     await terminating;
+    await tracked.registryReleased;
+    expect(released).toHaveBeenCalledOnce();
     expect(registry.activeProcessCount).toBe(0);
   });
 

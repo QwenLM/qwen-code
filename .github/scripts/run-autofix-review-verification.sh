@@ -731,7 +731,7 @@ sensitive_class_of() {
     scripts/tests/*) ;;
     scripts/*) echo 'repo-scripts' ;;
     .npmrc | .nvmrc | */.npmrc | */.nvmrc) echo 'toolchain-config' ;;
-    package-lock.json | npm-shrinkwrap.json | */package-lock.json | */npm-shrinkwrap.json | patches/*) echo 'supply-chain' ;;
+    package-lock.json | npm-shrinkwrap.json | */package-lock.json | */npm-shrinkwrap.json | pnpm-lock.yaml | pnpm-workspace.yaml | .pnpmfile.mjs | patches/*) echo 'supply-chain' ;;
     .gitattributes | */.gitattributes) echo 'measurement-config' ;;
     *) case "${f##*/}" in
       eslint.config.* | eslint.legacy-filenames.mjs | eslint.legacy-core-barrel-imports.mjs | vitest.config.* | tsconfig.json | tsconfig.*.json)

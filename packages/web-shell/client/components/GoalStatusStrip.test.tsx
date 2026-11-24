@@ -4,7 +4,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
+import {
+  GoalStatusStrip,
+  getGoalActiveTimeMs,
+  goalStatusTone,
+  hasVisibleGoal,
+} from './GoalStatusStrip';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
@@ -65,6 +70,18 @@ describe('GoalStatusStrip', () => {
     });
     return handlers;
   }
+
+  it('keeps the goal-status attribute on the outermost element for the stack CSS', () => {
+    render('active');
+    // ComposerStatusStack.module.css selects `.root > [data-web-shell-goal-status]`
+    // and the adjacent-sibling divider, so the attribute must ride on the strip's
+    // outermost element. I18nProvider renders no DOM node, so the container's
+    // first element child is the strip itself; querySelector would match at any
+    // depth and miss an extra wrapper that breaks the direct-child contract.
+    const strip = container.firstElementChild as HTMLElement | null;
+    expect(strip?.getAttribute('data-testid')).toBe('goal-status-strip');
+    expect(strip?.hasAttribute('data-web-shell-goal-status')).toBe(true);
+  });
 
   it('shows pause for an active Goal and wires actions', () => {
     const handlers = render('active');
@@ -245,44 +262,153 @@ describe('GoalStatusStrip', () => {
     ).toBe('2.5M / 30.0M tokens');
   });
 
-  it('shows a running checkpoint stall streak, like the terminal footer pill', () => {
+  it('shows active time against its ceiling when the Goal has one', () => {
+    render('paused', { activeTimeMs: 723_000, activeTimeBudgetMs: 1_800_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s / 30m 0s');
+  });
+
+  it('shows active time alone when the Goal has no time ceiling', () => {
+    render('paused', { activeTimeMs: 723_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s');
+  });
+
+  it('shows finished turns against the turn ceiling', () => {
+    render('active', { turnCount: 3, turnBudget: 20 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]')?.textContent,
+    ).toBe('3 / 20 turns');
+  });
+
+  it('shows no turn figure without a turn ceiling, or before a turn finishes', () => {
+    render('active', { turnCount: 3 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+
+    render('active', { turnCount: 0, turnBudget: 20 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+  });
+
+  it('shows no checkpoint streak, even for a snapshot an older daemon filled in', () => {
     render('active', {
       checkpointStalls: 2,
       lastCheckpointFailure: 'Error: provider failed',
     });
 
     expect(
-      container.querySelector('[data-testid="goal-checkpoint-stalls"]')
-        ?.textContent,
-    ).toBe('2/3 checks stalled');
-    // The label is ellipsized on a narrow pane, so it is also the tooltip.
-    expect(
-      container
-        .querySelector('[data-testid="goal-checkpoint-stalls"]')
-        ?.getAttribute('title'),
-    ).toBe('2/3 checks stalled');
-    // The failure text belongs to the Goals dialog; the strip has no room.
-    expect(container.textContent).not.toContain('provider failed');
+      container.querySelector('[data-testid="goal-checkpoint-stalls"]'),
+    ).toBeNull();
   });
 
-  it('keeps the streak on a Goal the stall breaker stopped', () => {
-    render('usage_limited', {
-      checkpointStalls: 3,
-      lastCheckpointFailure: 'Error: provider failed',
+  it('opens the goals page when the affordance is wired', () => {
+    const onOpenGoals = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={snapshot('active')}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+            onOpenGoals={onOpenGoals}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(button).not.toBeNull();
+    // Navigation wears the link cue, not the grey control class: the blue
+    // tint itself is painted-proofed in the goals E2E; here pin the class
+    // wiring so dropping it reds a unit case too.
+    expect(button!.className).toContain('goalsAction');
+    act(() => button!.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('hides the goals-page affordance when the page is unavailable', () => {
+    render('active');
+
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+  });
+
+  it('keeps the Goals jump enabled while a control is in flight', () => {
+    // Navigation is not a control: the busy gate that locks edit/pause/
+    // clear must never lock the jump to the Goals page.
+    const onOpenGoals = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={snapshot('active')}
+            busy
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+            onOpenGoals={onOpenGoals}
+          />
+        </I18nProvider>,
+      );
     });
 
     expect(
-      container.querySelector('[data-testid="goal-checkpoint-stalls"]')
-        ?.textContent,
-    ).toBe('3/3 checks stalled');
-    expect(container.textContent).not.toContain('provider failed');
+      container.querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.disabled,
+    ).toBe(true);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(button?.disabled).toBe(false);
+    act(() => button!.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
   });
 
-  it('shows no streak when no checkpoint has stalled', () => {
-    render('active', { lastCheckpointFailure: 'Error: provider failed' });
+  it('tones the status text by lifecycle state', () => {
+    render('active');
+    expect(container.querySelector('[data-status="running"]')).not.toBeNull();
 
-    expect(
-      container.querySelector('[data-testid="goal-checkpoint-stalls"]'),
-    ).toBeNull();
+    render('paused');
+    expect(container.querySelector('[data-status="attention"]')).not.toBeNull();
+  });
+
+  it('maps every lifecycle state onto the shared status tones', () => {
+    expect(goalStatusTone('active')).toBe('running');
+    expect(goalStatusTone('paused')).toBe('attention');
+    expect(goalStatusTone('blocked')).toBe('attention');
+    expect(goalStatusTone('usage_limited')).toBe('attention');
+    expect(goalStatusTone('complete')).toBe('done');
+  });
+
+  it('hides only absent and completed goals from the list-facing surfaces', () => {
+    // The strip, the sidebar reservation and the marker guard all read this
+    // one predicate, so every non-complete state must stay visible.
+    for (const status of [
+      'active',
+      'paused',
+      'blocked',
+      'usage_limited',
+    ] as const) {
+      expect(hasVisibleGoal({ status })).toBe(true);
+    }
+    expect(hasVisibleGoal({ status: 'complete' })).toBe(false);
+    expect(hasVisibleGoal(null)).toBe(false);
+    expect(hasVisibleGoal(undefined)).toBe(false);
   });
 });

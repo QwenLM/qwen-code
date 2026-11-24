@@ -171,7 +171,7 @@ pub fn would_be_silently_dropped(hwnd: u64, kind: EventKind) -> bool {
         // genuine keyboard input for the focused widget. The messages can be
         // accepted by PostMessage while the Entry receives nothing, so refuse
         // instead of reporting a false background success.
-        return matches!(kind, Keystroke | KeyCombo | TextInput);
+        return matches!(kind, MouseClick | Keystroke | KeyCombo | TextInput);
     }
     // NB: WinUI3 (`WinUIDesktopWin32WindowClass`) is deliberately NOT flagged
     // here. It looks WPF-like, but its composition input-site does NOT consume
@@ -338,6 +338,7 @@ pub fn background_unavailable_error(
     );
     cua_driver_core::protocol::ToolResult::error(text).with_structured(serde_json::json!({
         "code": "background_unavailable",
+        "sent": false,
         "target_class": class,
         "event_kind": kind.name(),
         "suggestion": "Retry this action with delivery_mode:\"foreground\".",
@@ -371,23 +372,17 @@ pub fn background_unavailable_error_with_cause(
         "background_unavailable"
     };
     let text = format!(
-        "Background delivery is not available for target window class \
-         '{class}' on this event kind ({}): {cause}. Retry this action with \
-         delivery_mode:\"foreground\"; Cua Driver will activate the target for \
-         the action and restore the previous foreground afterward.",
+        "Background actuator failed for target window class '{class}' on {}: {cause}. Input may have been sent. Observe before deciding on another action.",
         kind.name()
     );
     cua_driver_core::protocol::ToolResult::error(text).with_structured(serde_json::json!({
         "code": code,
+        "sent": true,
         "target_class": class,
         "event_kind": kind.name(),
         "cause": cause,
-        "suggestion": "Retry this action with delivery_mode:\"foreground\".",
-        "escalation": {
-            "recommended": "foreground",
-            "reason": "background input could not be delivered by the coordinate \
-                       actuator; retry this action with delivery_mode:\"foreground\".",
-        },
+        "suggestion": "Input may have been sent. Observe before retrying.",
+
     }))
 }
 
@@ -511,7 +506,8 @@ mod tests {
             _ => panic!("expected text content"),
         };
         assert!(text.contains("occluded"), "result text lost cause: {text}");
-        assert!(text.contains("Retry this action with delivery_mode:\"foreground\""));
+        assert!(!text.contains("Retry this action"));
+        assert_eq!(structured["sent"], true);
         assert!(!text.contains("bring_to_front"));
         assert!(!structured["suggestion"]
             .as_str()

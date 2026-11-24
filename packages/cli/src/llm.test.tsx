@@ -37,7 +37,13 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  InputFormat,
+  OutputFormat,
+  Storage,
+} from '@qwen-code/qwen-code-core';
+import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
@@ -58,10 +64,12 @@ const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const mockConstructExtensionFileWatcher = vi.hoisted(() => vi.fn());
 const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
 const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
   vi.fn(async () => {}),
 );
+const mockAssertFullIcuAvailable = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const mockRegisterSession = vi.hoisted(
@@ -84,6 +92,7 @@ const mockSelectTuiRenderer = vi.hoisted(() =>
   })),
 );
 const mockStartOpenTuiUI = vi.hoisted(() => vi.fn());
+const mockSetTuiRendererOfRecord = vi.hoisted(() => vi.fn());
 
 const sessionRegistryConfigStub = {
   getTargetDir: () => '/tmp/project',
@@ -167,6 +176,7 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
+    isProjectHooksPendingApproval: () => false,
     isLspEnabled: () => false,
     getLspClient: () => undefined,
     getWarnings: vi.fn(() => []),
@@ -221,8 +231,19 @@ vi.mock('./utils/stdioHelpers.js', () => ({
 }));
 
 vi.mock('./utils/relaunch.js', () => ({
+  exitWhenSupervisorExits: vi.fn(),
   relaunchAppInChildProcess: vi.fn(),
   relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
+}));
+
+vi.mock('./utils/processUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/processUtils.js')>()),
+  superviseInProcess: vi.fn(),
+}));
+
+vi.mock('./config/environment.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config/environment.js')>()),
+  hasLoadedEnvironmentValues: vi.fn(() => false),
 }));
 
 vi.mock('./config/sandboxConfig.js', () => ({
@@ -230,12 +251,12 @@ vi.mock('./config/sandboxConfig.js', () => ({
 }));
 
 vi.mock('./core/initializer.js', () => ({
-  initializeApp: vi.fn().mockResolvedValue({
+  initializeApp: vi.fn(async () => ({
     authError: null,
     themeError: null,
     shouldOpenAuthDialog: false,
     memoryFileCount: 0,
-  }),
+  })),
 }));
 
 vi.mock('./startup/startup-prefetch.js', () => ({
@@ -271,6 +292,10 @@ vi.mock('./services/housekeeping/scheduler.js', async (importOriginal) => {
       mockStopNonInteractiveOpenAILogHousekeeping(),
   };
 });
+
+vi.mock('./startup/icu-check.js', () => ({
+  assertFullIcuAvailable: mockAssertFullIcuAvailable,
+}));
 
 vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
@@ -312,6 +337,9 @@ vi.mock('./config/lsp-config-watcher.js', () => ({
 
 vi.mock('./config/extension-file-watcher.js', () => ({
   ExtensionFileWatcher: class {
+    constructor() {
+      mockConstructExtensionFileWatcher();
+    }
     startWatching() {}
     restartWatching() {}
     stopWatching() {}
@@ -335,6 +363,13 @@ vi.mock('./ui/opentui/renderer-selection.js', async (importOriginal) => {
     selectTuiRenderer: mockSelectTuiRenderer,
   };
 });
+
+// The dispatch records the renderer that actually mounted; spy on the writer
+// so deleting either record call (OpenTUI success / ink fallback) is caught.
+vi.mock('./ui/tui-renderer-of-record.js', () => ({
+  setTuiRendererOfRecord: mockSetTuiRendererOfRecord,
+  getTuiRendererOfRecord: vi.fn(() => undefined),
+}));
 
 function withLspDisabledConfig<T extends object>(
   config: T,
@@ -415,6 +450,104 @@ describe('llm.tsx main function', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    [false, undefined, undefined],
+    [true, undefined, undefined],
+    [false, 'private-parent', undefined],
+    [true, 'private-parent', undefined],
+    [false, '', undefined],
+    [true, '', undefined],
+    [false, undefined, false],
+    [false, undefined, true],
+  ] as const)(
+    'H01 opts into ancestor trust at sandbox=%s from provenance=%s with workspace override=%s',
+    async (sandbox, capability, workspaceTrustOverride) => {
+      const originalArgv = process.argv;
+      process.argv = ['node', 'script.js', '--acp'];
+      vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', capability);
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '1');
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      vi.mocked(parseArguments).mockResolvedValue({
+        acp: true,
+        extensions: [],
+      } as unknown as CliArgs);
+      vi.mocked(loadSandboxConfig).mockResolvedValue(
+        sandbox ? { command: 'sandbox-exec', image: 'fixture' } : undefined,
+      );
+      vi.mocked(loadSettings).mockImplementation(() => {
+        if (capability === undefined) {
+          process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'] =
+            'forged-by-settings';
+        } else {
+          delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+        }
+        return {
+          errors: [],
+          merged: {
+            advanced: {},
+            security: {
+              auth: {},
+              ...(workspaceTrustOverride !== undefined
+                ? { folderTrust: { enabled: workspaceTrustOverride } }
+                : {}),
+            },
+            ui: {},
+          },
+          setValue: vi.fn(),
+          forScope: (scope: string) => ({
+            settings:
+              workspaceTrustOverride !== undefined && scope === 'User'
+                ? {
+                    security: {
+                      folderTrust: { enabled: !workspaceTrustOverride },
+                    },
+                  }
+                : {},
+            originalSettings: {},
+            path: '',
+          }),
+          migrationWarnings: [],
+          getSystemHooks: () => undefined,
+          getUserHooks: () => undefined,
+          getProjectHooks: () => undefined,
+        } as never;
+      });
+      const reachedConfig = new Error('ancestor-config-construction');
+      vi.mocked(loadCliConfig).mockClear();
+      vi.mocked(loadCliConfig).mockRejectedValueOnce(reachedConfig);
+      try {
+        await expect(main()).rejects.toBe(reachedConfig);
+        const provider =
+          vi.mocked(loadCliConfig).mock.calls[0]?.[9]
+            ?.workflowAncestorTrustProvider;
+        if (sandbox) {
+          // The pre-sandbox partialConfig validates auth for a configuration
+          // that never uses LSP, so it must refuse the service outright: the
+          // setting alone would otherwise start host-side language servers
+          // outside the container.
+          expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.lspDisabled).toBe(
+            true,
+          );
+        }
+        if (capability === undefined) {
+          expect(provider).toBeTypeOf('function');
+          await expect(
+            provider?.([llmTestHome], join(llmTestHome, 'project')),
+          ).resolves.toEqual([workspaceTrustOverride !== false]);
+        } else {
+          expect(provider).toBeUndefined();
+        }
+      } finally {
+        process.argv = originalArgv;
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it('relaunches before config load and preserves only private managed ACP activation', async () => {
     const processExitSpy = vi
       .spyOn(process, 'exit')
@@ -452,6 +585,8 @@ describe('llm.tsx main function', () => {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
             EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -459,6 +594,7 @@ describe('llm.tsx main function', () => {
       callOrder.push('loadCliConfig');
       return {
         isInteractive: () => false,
+        isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -491,6 +627,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -521,6 +658,8 @@ describe('llm.tsx main function', () => {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
             EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         },
         onUpdateRelaunch: expect.any(Function),
       }),
@@ -554,6 +693,8 @@ describe('llm.tsx main function', () => {
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -566,6 +707,7 @@ describe('llm.tsx main function', () => {
       ).toBeUndefined();
       return {
         isInteractive: () => false,
+        isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -598,6 +740,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -619,6 +762,8 @@ describe('llm.tsx main function', () => {
         childEnv: {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         },
         onUpdateRelaunch: expect.any(Function),
       }),
@@ -654,6 +799,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -686,6 +832,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -702,6 +849,41 @@ describe('llm.tsx main function', () => {
     expect(relaunchAppInChildProcess).toHaveBeenCalled();
     processExitSpy.mockRestore();
   });
+
+  const managedHost = { acp: true, acpExecutionEngine: 'managed' };
+  const privateParent = {
+    QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+  };
+  it.each([
+    ['without the private capability', managedHost, {}],
+    ['outside ACP mode', { acpExecutionEngine: 'managed' }, privateParent],
+    [
+      'in the Conversations runtime',
+      managedHost,
+      { ...privateParent, QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1' },
+    ],
+    [
+      'given twice',
+      { acp: true, acpExecutionEngine: ['managed', 'managed'] },
+      privateParent,
+    ],
+  ])(
+    'refuses a Managed engine host %s',
+    async (_label, args, env: Record<string, string>) => {
+      const { loadSettings } = await import('./config/settings.js');
+      const { parseArguments } = await import('./config/config.js');
+      vi.mocked(parseArguments).mockResolvedValue(args as unknown as CliArgs);
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+      try {
+        await expect(main()).rejects.toThrow(
+          '--acp-execution-engine is reserved for hosts spawned by qwen serve.',
+        );
+        expect(loadSettings).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('rejects a Conversations marker whose value is not the exact enable value', async () => {
     const processExitSpy = vi
@@ -726,6 +908,8 @@ describe('llm.tsx main function', () => {
       async (_memoryArgs, _extraArgs, options) => {
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -733,6 +917,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -765,6 +950,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -817,6 +1003,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never;
@@ -835,6 +1022,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -901,6 +1089,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -977,6 +1166,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1015,6 +1205,111 @@ describe('llm.tsx main function', () => {
     });
   });
 
+  // The container mounts only the user settings dir and reads passthrough
+  // vars from `process.env`, so an operator opt-out that lives in a System
+  // settings file never reaches the sandboxed CLI through settings: the
+  // handoff itself has to carry it.
+  it.each([
+    ['model opt-out', { model: { catalogRefresh: false } }, 'off'],
+    [
+      'usage-statistics opt-out',
+      { privacy: { usageStatisticsEnabled: false } },
+      'off',
+    ],
+    ['no opt-out', {}, undefined],
+  ])(
+    'carries the operator catalog refresh opt-out into the sandbox handoff (%s)',
+    async (_label, extraSettings, expected) => {
+      const originalArgv = process.argv;
+      process.argv = ['node', 'script.js', '--acp'];
+      const processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((code) => {
+          throw new MockProcessExitError(code);
+        });
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { start_sandbox } = await import('./serve/sandbox.js');
+      vi.mocked(start_sandbox).mockClear();
+      vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+      delete process.env[MODEL_CATALOG_REFRESH_ENV];
+
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: {
+          advanced: {},
+          security: { auth: {} },
+          ui: {},
+          ...extraSettings,
+        },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      vi.mocked(loadSandboxConfig).mockResolvedValue({
+        command: 'docker',
+        image: 'ghcr.io/qwenlm/qwen-code:1.0.0',
+      });
+      vi.mocked(loadCliConfig).mockImplementation(
+        async () =>
+          ({
+            getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+            getSessionId: () => '123e4567-e89b-12d3-a456-426614174000',
+          }) as unknown as Config,
+      );
+
+      let refreshAtSpawn: string | undefined;
+      vi.mocked(start_sandbox).mockImplementation((async () => {
+        refreshAtSpawn = process.env[MODEL_CATALOG_REFRESH_ENV];
+        return 0;
+      }) as unknown as typeof start_sandbox);
+
+      try {
+        try {
+          await main();
+        } catch (e) {
+          if (!(e instanceof MockProcessExitError)) throw e;
+        }
+      } finally {
+        process.argv = originalArgv;
+        delete process.env[MODEL_CATALOG_REFRESH_ENV];
+        processExitSpy.mockRestore();
+      }
+
+      expect(start_sandbox).toHaveBeenCalledOnce();
+      expect(refreshAtSpawn).toBe(expected);
+    },
+  );
+
+  it('follows its relaunch supervisor before reading any arguments', async () => {
+    vi.clearAllMocks();
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new MockProcessExitError(code);
+    });
+    const { parseArguments } = await import('./config/config.js');
+    const { exitWhenSupervisorExits } = await import('./utils/relaunch.js');
+    vi.mocked(parseArguments).mockRejectedValueOnce(
+      new MockProcessExitError(1),
+    );
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    }
+
+    expect(exitWhenSupervisorExits).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(exitWhenSupervisorExits).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(parseArguments).mock.invocationCallOrder[0]!);
+  });
+
   it('handles --list-extensions before sandbox and app config startup', async () => {
     vi.clearAllMocks();
     const processExitSpy = vi
@@ -1042,6 +1337,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1174,6 +1470,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never);
@@ -1226,6 +1523,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1246,6 +1544,239 @@ describe('llm.tsx main function', () => {
       vi.unstubAllEnvs();
     }
   });
+
+  // Pins the process-replacement predicate in llm.tsx: a one-shot headless
+  // prompt replaces the already-loaded process, while supervisor-backed
+  // modes (ACP, -i, stream-json / file / json-fd input) keep the parent.
+  // The slash-command row pins the contract: a headless `/update` updates
+  // standalone installs in-process or prints manual instructions and never
+  // emits a relaunch exit code, so it keeps the execve optimization like any
+  // other one-shot prompt.
+  describe('relaunch routing', () => {
+    // 'in-process': no relaunch at all; otherwise the replaceProcess flag
+    // passed to the supervised relaunch.
+    const rows: Array<{
+      label: string;
+      argv: Partial<CliArgs>;
+      dualOutputInputFile?: string;
+      envFileValues?: boolean;
+      expected: 'in-process' | boolean;
+    }> = [
+      {
+        label: 'plain one-shot prompt',
+        argv: { prompt: 'summarize this repository' },
+        expected: 'in-process',
+      },
+      {
+        label: 'headless slash-command prompt',
+        argv: { prompt: '/update' },
+        expected: 'in-process',
+      },
+      {
+        label: 'acp mode',
+        argv: { acp: true, prompt: 'hi' },
+        expected: false,
+      },
+      {
+        label: 'interactive prompt (-i)',
+        argv: { prompt: 'hi', promptInteractive: 'follow-up' },
+        expected: 'in-process',
+      },
+      {
+        label: 'file input',
+        argv: { prompt: 'hi', inputFile: 'input.txt' },
+        expected: false,
+      },
+      {
+        label: 'json-fd input',
+        argv: { prompt: 'hi', jsonFd: 3 },
+        expected: false,
+      },
+      {
+        label: 'stream-json input',
+        argv: { prompt: 'hi', inputFormat: InputFormat.STREAM_JSON },
+        expected: false,
+      },
+      {
+        label: 'dual-output file input',
+        argv: { prompt: 'hi' },
+        dualOutputInputFile: 'session.jsonl',
+        expected: false,
+      },
+      {
+        // In-session restarts re-exec this process in place instead of
+        // going through a supervising parent.
+        label: 'plain interactive launch (no prompt)',
+        argv: {},
+        expected: 'in-process',
+      },
+      {
+        // Modules loaded before .env / settings.env were applied read the old
+        // environment; only a fresh image sees those values.
+        label: 'plain one-shot prompt with env-file values',
+        argv: { prompt: 'hi' },
+        envFileValues: true,
+        expected: true,
+      },
+      {
+        label: 'plain interactive launch with env-file values',
+        argv: {},
+        envFileValues: true,
+        expected: false,
+      },
+    ];
+
+    it.each(rows)(
+      'routes $label to $expected',
+      async ({ argv, dualOutputInputFile, envFileValues, expected }) => {
+        const originalIsTTY = Object.getOwnPropertyDescriptor(
+          process.stdin,
+          'isTTY',
+        );
+        Object.defineProperty(process.stdin, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+
+        const { parseArguments } = await import('./config/config.js');
+        const { loadSettings } = await import('./config/settings.js');
+        const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+        const { relaunchAppInChildProcess } = await import(
+          './utils/relaunch.js'
+        );
+        const { superviseInProcess } = await import('./utils/processUtils.js');
+        const { hasLoadedEnvironmentValues } = await import(
+          './config/environment.js'
+        );
+        vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(
+          envFileValues ?? false,
+        );
+        vi.mocked(parseArguments).mockResolvedValue(argv as CliArgs);
+        vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+        vi.mocked(loadSettings).mockReturnValue({
+          errors: [],
+          merged: {
+            advanced: {},
+            security: { auth: {} },
+            ui: {},
+            dualOutput: dualOutputInputFile
+              ? { inputFile: dualOutputInputFile }
+              : undefined,
+          },
+          setValue: vi.fn(),
+          forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+          migrationWarnings: [],
+          getSystemHooks: () => undefined,
+          getUserHooks: () => undefined,
+          getProjectHooks: () => undefined,
+        } as never);
+
+        let route: 'in-process' | boolean | undefined;
+        vi.mocked(relaunchAppInChildProcess).mockImplementation(
+          async (_memoryArgs, _extraArgs, options) => {
+            route = options?.replaceProcess;
+            throw new Error('stop after routing check');
+          },
+        );
+        vi.mocked(superviseInProcess).mockImplementation(() => {
+          route = 'in-process';
+          throw new Error('stop after routing check');
+        });
+
+        try {
+          await expect(main()).rejects.toThrow('stop after routing check');
+        } finally {
+          vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(false);
+          vi.unstubAllEnvs();
+          if (originalIsTTY) {
+            Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+          } else {
+            delete (process.stdin as { isTTY?: unknown }).isTTY;
+          }
+        }
+
+        expect(route).toBe(expected);
+      },
+    );
+  });
+
+  // The synchronous 'auto' baseline runs `defaults read` on macOS, which
+  // blocks the event loop; a run that renders no theme colors must not pay it.
+  it.each([
+    { stdoutIsTTY: false, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: 'true', expectAuto: true },
+  ])(
+    'resolves the auto theme baseline only when the run can render it (stdoutIsTTY=$stdoutIsTTY, promptInteractive=$promptInteractive)',
+    async ({ stdoutIsTTY, promptInteractive, expectAuto }) => {
+      const stubIsTTY = (
+        stream: { isTTY?: unknown },
+        value: boolean | undefined,
+      ): (() => void) => {
+        const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+        Object.defineProperty(stream, 'isTTY', { value, configurable: true });
+        return () => {
+          if (original) {
+            Object.defineProperty(stream, 'isTTY', original);
+          } else {
+            delete stream.isTTY;
+          }
+        };
+      };
+      const restoreStdoutIsTTY = stubIsTTY(process.stdout, stdoutIsTTY);
+      // `-i` exits early unless stdin is a terminal.
+      const restoreStdinIsTTY = stubIsTTY(process.stdin, true);
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+      const { themeManager, AUTO_THEME_NAME } = await import(
+        './ui/themes/theme-manager.js'
+      );
+      const setActiveTheme = vi
+        .spyOn(themeManager, 'setActiveTheme')
+        .mockReturnValue(true);
+      vi.mocked(parseArguments).mockResolvedValue({
+        prompt: 'hi',
+        outputFormat: 'json',
+        promptInteractive,
+      } as CliArgs);
+      vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: { advanced: {}, security: { auth: {} }, ui: {} },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
+        throw new Error('stop after theme baseline');
+      });
+      // A plain one-shot run supervises itself in-process instead.
+      const { superviseInProcess } = await import('./utils/processUtils.js');
+      vi.mocked(superviseInProcess).mockImplementation(() => {
+        throw new Error('stop after theme baseline');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow('stop after theme baseline');
+        expect(
+          setActiveTheme.mock.calls.some(([name]) => name === AUTO_THEME_NAME),
+        ).toBe(expectAuto);
+      } finally {
+        setActiveTheme.mockRestore();
+        vi.unstubAllEnvs();
+        restoreStdoutIsTTY();
+        restoreStdinIsTTY();
+      }
+    },
+  );
 
   // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
   // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
@@ -1272,6 +1803,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1339,11 +1871,13 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     };
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1402,7 +1936,9 @@ describe('llm.tsx main function', () => {
       // settingsWatcher: not started in bare mode
       undefined,
       undefined,
-      undefined,
+      { workflowAncestorTrustProvider: expect.any(Function) },
+      expect.any(Function),
+      // projectHooksApprovalProvider: live settings for the YOLO-exit re-gate
       expect.any(Function),
     );
   });
@@ -1641,6 +2177,7 @@ describe('llm.tsx main function', () => {
     let initialized = false;
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1682,6 +2219,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1714,7 +2252,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       configStub,
@@ -1759,6 +2301,148 @@ describe('llm.tsx main function', () => {
       2,
     );
   });
+
+  it.each([
+    ['pending', true, 'Run qwen interactively'],
+    ['rejected', true, 'not asked about again'],
+    ['approved', false, undefined],
+  ] as const)(
+    'warns on stderr only when project hooks were withheld (%s)',
+    async (state, pending, expected) => {
+      const dir = mkdtempSync(join(tmpdir(), 'llm-hooks-gate-'));
+      const root = join(dir, 'repo');
+      const hooks = {
+        SessionStart: [{ hooks: [{ type: 'command', command: './x.sh' }] }],
+      };
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      vi.stubEnv('QWEN_CODE_HOOK_APPROVALS_PATH', join(dir, 'approvals.json'));
+      const {
+        getProjectHooksForApproval,
+        loadHookApprovals,
+        resetHookApprovalsForTesting,
+      } = await import('./config/hook-approvals.js');
+      resetHookApprovalsForTesting();
+      const settings = {
+        errors: [],
+        merged: { advanced: {}, security: { auth: {} }, ui: {} },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => hooks,
+        user: { originalSettings: {} },
+        workspace: {
+          path: join(root, '.qwen', 'settings.json'),
+          originalSettings: { hooks },
+          settings: { hooks },
+        },
+      };
+      if (state !== 'pending') {
+        await loadHookApprovals().setState(
+          getProjectHooksForApproval(settings as never)!,
+          state,
+        );
+      }
+      const originalIsTTY = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        'isTTY',
+      );
+      Object.defineProperty(process.stdin, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      const processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((code) => {
+          throw new MockProcessExitError(code);
+        });
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      const validatorModule = await import('./validateNonInterActiveAuth.js');
+      const nonInteractiveModule = await import('./nonInteractiveCli.js');
+      const initializerModule = await import('./core/initializer.js');
+      mockWriteStderrLine.mockClear();
+      vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        memoryFileCount: 0,
+      });
+      const runNonInteractiveSpy = vi
+        .spyOn(nonInteractiveModule, 'runNonInteractive')
+        .mockResolvedValue(0);
+      const configStub = {
+        isInteractive: () => false,
+        isProjectHooksPendingApproval: () => pending,
+        // The execution accessor serves the block exactly when the gate
+        // is not pending; the trust warning must stay quiet for it.
+        getProjectHooks: () => (pending ? undefined : hooks),
+        getQuestion: () => 'hello',
+        getSandbox: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getDebugMode: () => false,
+        getListExtensions: () => false,
+        getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
+        getModelProvidersConfig: () => undefined,
+        initialize: vi.fn(),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getFailedMcpServerNames: () => [],
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getScreenReader: () => false,
+        getMemoryFileCount: () => 0,
+        getProjectRoot: () => '/',
+        getOutputFormat: () => OutputFormat.TEXT,
+        getWarnings: () => [],
+        isSafeMode: () => false,
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+        getContentGeneratorConfig: () => undefined,
+        getUsageStatisticsEnabled: () => true,
+        getSessionId: () => 'test-session-id',
+        getProxy: () => undefined,
+      } as unknown as Config;
+      vi.mocked(parseArguments).mockResolvedValue({
+        extensions: [],
+      } as unknown as CliArgs);
+      vi.mocked(loadSettings).mockReturnValue(settings as never);
+      vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+      vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
+        configStub,
+      );
+
+      try {
+        await main();
+      } catch (error) {
+        if (!(error instanceof MockProcessExitError)) throw error;
+      } finally {
+        processExitSpy.mockRestore();
+        if (originalIsTTY) {
+          Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+        } else {
+          delete (process.stdin as { isTTY?: unknown }).isTTY;
+        }
+        vi.unstubAllEnvs();
+        resetHookApprovalsForTesting();
+        rmSync(dir, { recursive: true, force: true });
+      }
+
+      if (expected) {
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(expected),
+        );
+      } else {
+        expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('.qwen/settings.json were not loaded'),
+        );
+      }
+      // Warn and continue: the prompt still runs, only the hooks are withheld.
+      expect(runNonInteractiveSpy).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('creates non-interactive prompt ids that preserve session correlation', () => {
     expect(createNonInteractivePromptId('test-session-id')).toBe(
@@ -1886,6 +2570,7 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1945,6 +2630,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2017,6 +2703,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2266,6 +2953,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2276,6 +2964,7 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2345,7 +3034,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       validatedConfig,
@@ -2403,6 +3096,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
   let initialSigtermListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
+    mockConstructExtensionFileWatcher.mockClear();
     originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
     initialSigintListeners = process.listeners(
@@ -2454,7 +3148,10 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
 
   // Drives main() to the renderer dispatch: interactive config, no
   // relaunch, TTY stdin — the same harness the kitty-protocol tests use.
-  const interactiveMainSetup = async () => {
+  const interactiveMainSetup = async (
+    screenReader = false,
+    acpFlag?: 'acp' | 'experimentalAcp',
+  ) => {
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -2481,8 +3178,8 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
+      getExperimentalZedIntegration: () => acpFlag !== undefined,
+      getScreenReader: () => screenReader,
       getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
@@ -2501,6 +3198,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2525,10 +3223,11 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
-      acp: undefined,
-      experimentalAcp: undefined,
+      acp: acpFlag === 'acp' || undefined,
+      experimentalAcp: acpFlag === 'experimentalAcp' || undefined,
       extensions: undefined,
       listExtensions: undefined,
       openaiLogging: undefined,
@@ -2569,6 +3268,23 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     });
   };
 
+  it.each(['acp', 'experimentalAcp'] as const)(
+    'does not construct the interactive extension watcher in %s mode',
+    async (acpFlag) => {
+      await interactiveMainSetup(false, acpFlag);
+      mockRunAcpAgent.mockClear();
+      mockRunAcpAgent.mockResolvedValue(undefined);
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+      await expect(main()).rejects.toBeInstanceOf(MockProcessExitError);
+
+      expect(mockRunAcpAgent).toHaveBeenCalledOnce();
+      expect(mockConstructExtensionFileWatcher).not.toHaveBeenCalled();
+    },
+  );
+
   it('strict mode fails loudly when the OpenTUI entry declines to start', async () => {
     await interactiveMainSetup();
     selectOpentui(true);
@@ -2577,6 +3293,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     await expect(main()).rejects.toThrow(
       /QWEN_TUI_RENDERER_STRICT forbids the ink fallback/,
     );
+    expect(mockConstructExtensionFileWatcher).toHaveBeenCalledOnce();
     // The dispatch rejected before the ink UI could mount.
     expect(mockStartPostRenderPrefetches).not.toHaveBeenCalled();
   });
@@ -2598,10 +3315,93 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     // only falls through to startInteractiveUI, proven by the post-render
     // prefetch hook inside it running.
     mockStartOpenTuiUI.mockResolvedValue(false);
+    mockSetTuiRendererOfRecord.mockClear();
 
     await main();
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalled();
+    // The fallback must record ink as the renderer of record, not leave the
+    // requested opentui on record (which would mislabel /about and /bug).
+    expect(mockSetTuiRendererOfRecord).toHaveBeenCalledWith('ink');
+    expect(mockSetTuiRendererOfRecord).not.toHaveBeenCalledWith('opentui');
+  });
+
+  it('records opentui as the renderer of record when the entry starts', async () => {
+    await interactiveMainSetup();
+    selectOpentui(false);
+    mockStartOpenTuiUI.mockResolvedValue(true);
+    mockSetTuiRendererOfRecord.mockClear();
+
+    await main();
+
+    expect(mockSetTuiRendererOfRecord).toHaveBeenCalledWith('opentui');
+    expect(mockSetTuiRendererOfRecord).not.toHaveBeenCalledWith('ink');
+  });
+
+  it('probes ICU on the interactive path before the UI renders', async () => {
+    await interactiveMainSetup();
+    mockAssertFullIcuAvailable.mockClear();
+    mockStartPostRenderPrefetches.mockClear();
+
+    await main();
+
+    expect(mockAssertFullIcuAvailable).toHaveBeenCalledTimes(1);
+    const probeOrder = mockAssertFullIcuAvailable.mock.invocationCallOrder[0]!;
+    const renderOrder =
+      mockStartPostRenderPrefetches.mock.invocationCallOrder[0]!;
+    expect(probeOrder).toBeLessThan(renderOrder);
+  });
+
+  it('never probes ICU on the headless path', async () => {
+    const { loadCliConfig } = await import('./config/config.js');
+    await interactiveMainSetup();
+    // Same fully-mocked setup as the interactive case, one bit flipped: the
+    // non-interactive branch must stay untouched by the ICU gate.
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
+      isInteractive: () => false,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
+    mockAssertFullIcuAvailable.mockClear();
+    try {
+      await main();
+    } catch {
+      // The headless tail (auth validation, session plumbing) is not the
+      // subject here; the gate sits at configConstructionEnd, before it.
+    }
+    expect(mockAssertFullIcuAvailable).not.toHaveBeenCalled();
+  });
+
+  it('passes the resolved screen-reader Config to the selected Native entry', async () => {
+    await interactiveMainSetup(/* screenReader */ true);
+    selectOpentui(false);
+    mockStartOpenTuiUI.mockResolvedValue(true);
+    await main();
+    expect(mockSelectTuiRenderer).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      expect.anything(),
+    );
+    const config = mockStartOpenTuiUI.mock.calls.at(-1)![0] as Config;
+    expect(config.getScreenReader()).toBe(true);
   });
 });
 
@@ -2712,6 +3512,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2736,6 +3537,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -2779,6 +3581,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: true,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -2841,6 +3645,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2865,6 +3670,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -2906,6 +3712,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -2969,6 +3777,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2993,6 +3802,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -3034,6 +3844,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3093,6 +3905,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3117,6 +3930,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -3170,6 +3984,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: false,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockRunAcpAgent).toHaveBeenCalledWith(
@@ -3252,6 +4068,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3566,6 +4383,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3741,6 +4559,7 @@ describe('startInteractiveUI', () => {
       // options; the messaging path is covered in startInteractiveUI.test.
       agents: { crossSessionMessaging: false },
     },
+    getSystemHooks: () => undefined,
     getUserHooks: () => undefined,
     getProjectHooks: () => undefined,
   } as LoadedSettings;

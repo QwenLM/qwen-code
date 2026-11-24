@@ -5,6 +5,29 @@
  */
 
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
+
+test('updates the current model badge when selecting from welcome settings', async ({
+  page,
+}, testInfo) => {
+  await openModelSettings(page, testInfo, true);
+  const select = page.getByRole('button', {
+    name: 'Set current Configured Test Model',
+    exact: true,
+  });
+  await select.click();
+  await expect(select).toHaveCount(0);
+  const row = page
+    .getByTestId('model-management')
+    .locator('[class*="modelRow"]')
+    .filter({
+      has: page.getByText('Configured Test Model', { exact: true }),
+    });
+  await expect(row.getByText('Current', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Set current Qwen Test', exact: true }),
+  ).toBeVisible();
+});
+
 import type {
   DaemonAuthProviderCatalog,
   DaemonAuthProviderInstallRequest,
@@ -16,7 +39,11 @@ import {
   replayCompleteEvent,
 } from './utils/mockDaemon';
 
-async function openModelSettings(page: Page, testInfo: TestInfo) {
+async function openModelSettings(
+  page: Page,
+  testInfo: TestInfo,
+  welcome = false,
+) {
   const scenario = createWebShellDaemonScenario({
     settings: {
       settings: (
@@ -179,16 +206,21 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
     if (changed)
       await daemon.sendEvent({ v: 1, type: 'settings_changed', data: changed });
   });
-  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
-  await daemon.sendEvent(
-    replayCompleteEvent({ sessionId: connection.sessionId }),
+  await page.goto(
+    welcome ? '/' : `/session/${encodeURIComponent(scenario.sessionId)}`,
   );
+  if (!welcome) {
+    const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+    await daemon.sendEvent(
+      replayCompleteEvent({ sessionId: connection.sessionId }),
+    );
+  }
   if ((page.viewportSize()?.width ?? 1440) < 768) {
     await page
       .getByRole('button', { name: 'Toggle menu', exact: true })
       .click();
   }
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Settings', exact: true })
     .first()
@@ -782,23 +814,14 @@ test('edits a persisted context window, retries a failure, and resets to automat
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const { configurations, daemon, scenario } = await openModelSettings(
-    page,
-    testInfo,
-  );
+  const { configurations } = await openModelSettings(page, testInfo);
   const reloadSettings = async () => {
     await page.reload();
-    await daemon.sse.waitForConnection(scenario.sessionId);
-    await daemon.sendEvent(
-      replayCompleteEvent({ sessionId: scenario.sessionId }),
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page.getByTestId('inline-panel')).toHaveAttribute(
+      'aria-label',
+      'Settings',
     );
-    await page
-      .getByRole('button', { name: 'Toggle menu', exact: true })
-      .click();
-    await page
-      .getByRole('button', { name: 'Settings', exact: true })
-      .first()
-      .click();
     await page
       .getByRole('navigation', { name: 'Settings' })
       .getByRole('button', { name: /^Model/ })

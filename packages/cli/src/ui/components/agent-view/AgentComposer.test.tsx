@@ -5,12 +5,24 @@
  */
 
 import { render } from 'ink-testing-library';
+import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentStatus, ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  AgentStatus,
+  ApprovalMode,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  tokenLimit,
+} from '@qwen-code/qwen-code-core';
 import {
   useAgentViewActions,
   useAgentViewState,
 } from '../../contexts/AgentViewContext.js';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+  type ContextMenuContextValue,
+} from '../../context-menu/ContextMenuContext.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
@@ -18,7 +30,7 @@ import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { StreamingState } from '../../types.js';
 import { useTextBuffer } from '../shared/text-buffer.js';
-import { AgentComposer } from './AgentComposer.js';
+import { AgentComposer, getAgentContextWindowSize } from './AgentComposer.js';
 
 vi.mock('../../contexts/AgentViewContext.js');
 vi.mock('../../contexts/ConfigContext.js');
@@ -27,24 +39,100 @@ vi.mock('../../hooks/useKeypress.js');
 vi.mock('../../hooks/usePreferredEditor.js');
 vi.mock('../../hooks/useTerminalSize.js');
 vi.mock('../shared/text-buffer.js');
-vi.mock('../BaseTextInput.js', () => ({ BaseTextInput: () => null }));
+// Capture the props instead of dropping them: `onKeypress` is the seam where
+// the composer decides whether BaseTextInput may act on a key.
+const { baseTextInputProps } = vi.hoisted(() => ({
+  baseTextInputProps: {} as {
+    onKeypress?: (key: Key) => boolean;
+    onSubmit?: (text: string) => void;
+  },
+}));
+vi.mock('../BaseTextInput.js', () => ({
+  BaseTextInput: (props: {
+    onKeypress?: (key: Key) => boolean;
+    onSubmit?: (text: string) => void;
+  }) => {
+    baseTextInputProps.onKeypress = props.onKeypress;
+    baseTextInputProps.onSubmit = props.onSubmit;
+    return null;
+  },
+}));
 vi.mock('../LoadingIndicator.js', () => ({ LoadingIndicator: () => null }));
 vi.mock('../QueuedMessageDisplay.js', () => ({
   QueuedMessageDisplay: () => null,
 }));
-vi.mock('./AgentFooter.js', () => ({ AgentFooter: () => null }));
+const { agentFooterProps } = vi.hoisted(() => ({
+  agentFooterProps: {} as { contextWindowSize?: number },
+}));
+vi.mock('./AgentFooter.js', () => ({
+  AgentFooter: (props: { contextWindowSize?: number }) => {
+    agentFooterProps.contextWindowSize = props.contextWindowSize;
+    return null;
+  },
+}));
 
 type KeypressHandler = (key: Key) => void;
 
+// `AgentComposer` calls useKeypress twice per render, in a fixed order:
+// [0] Escape-to-cancel, [1] Shift+Tab approval-mode cycler.
+const ESCAPE_CANCEL = 0;
+const SHIFT_TAB_CYCLE = 1;
+
+const MenuProbe = () => {
+  menuApi = useContextMenu();
+  return null;
+};
+let menuApi: ContextMenuContextValue | null = null;
+
+const renderWithMenu = () =>
+  render(
+    <ContextMenuProvider>
+      <AgentComposer agentId="agent-1" />
+      <MenuProbe />
+    </ContextMenuProvider>,
+  );
+
 describe('AgentComposer', () => {
   const setAgentInputBufferText = vi.fn();
+  const setAgentComposerLayoutKey = vi.fn();
   const setAgentTabBarFocused = vi.fn();
   const setAgentApprovalMode = vi.fn();
   let capturedKeypressHandlers: KeypressHandler[];
+  let capturedKeypressOptions: Array<{ isActive: boolean }>;
+  let agentModel: string | undefined;
+  let agentRuntimeView:
+    | {
+        contentGeneratorConfig: {
+          authType?: string;
+          baseUrl?: string;
+          contextWindowSize?: number;
+        };
+      }
+    | undefined;
+  // Keyed `authType|modelId|baseUrl`, like the registry itself. As in the
+  // registry, a `null` base URL matches only an entry declared without one,
+  // while an omitted base URL takes any entry for the model.
+  let registryWindows: Record<string, number>;
+  let sessionConfig: {
+    authType?: string;
+    baseUrl?: string;
+    contextWindowSize: number;
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    menuApi = null;
+    agentModel = undefined;
+    agentRuntimeView = undefined;
+    registryWindows = {};
+    sessionConfig = {
+      authType: 'openai',
+      baseUrl: 'https://session.example/v1',
+      contextWindowSize: 250_000,
+    };
+    agentFooterProps.contextWindowSize = undefined;
     capturedKeypressHandlers = [];
+    capturedKeypressOptions = [];
 
     vi.mocked(useAgentViewState).mockReturnValue({
       activeView: 'agent-1',
@@ -59,6 +147,10 @@ describe('AgentComposer', () => {
               enqueueMessage: vi.fn(),
               getError: vi.fn(),
               getLastRoundError: vi.fn(),
+              getCore: () => ({
+                modelConfig: { model: agentModel },
+                runtimeView: agentRuntimeView,
+              }),
             },
           },
         ],
@@ -71,18 +163,44 @@ describe('AgentComposer', () => {
     } as never);
     vi.mocked(useAgentViewActions).mockReturnValue({
       setAgentInputBufferText,
+      setAgentComposerLayoutKey,
       setAgentTabBarFocused,
       setAgentApprovalMode,
       setAgentMessageQueue: vi.fn(),
     } as never);
     vi.mocked(useConfig).mockReturnValue({
-      getContentGeneratorConfig: () => undefined,
+      // Like the real Config, these answer with the agent's own config from
+      // inside its runtime frame.
+      getContentGeneratorConfig: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig ?? sessionConfig,
+      getModel: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig.model ??
+        'qwen3-coder-plus',
+      getModelsConfig: () => ({
+        getResolvedModel: (
+          authType: string,
+          modelId: string,
+          baseUrl?: string | null,
+        ) => {
+          const prefix = `${authType}|${modelId}|`;
+          const window =
+            baseUrl === undefined
+              ? Object.entries(registryWindows).find(([key]) =>
+                  key.startsWith(prefix),
+                )?.[1]
+              : registryWindows[`${prefix}${baseUrl ?? ''}`];
+          return window === undefined
+            ? undefined
+            : { generationConfig: { contextWindowSize: window } };
+        },
+      }),
     } as never);
     vi.mocked(usePreferredEditor).mockReturnValue(undefined);
     vi.mocked(useTerminalSize).mockReturnValue({ columns: 80, rows: 24 });
     vi.mocked(useKeypress).mockImplementation(
-      (handler: KeypressHandler, _options) => {
+      (handler: KeypressHandler, options: { isActive: boolean }) => {
         capturedKeypressHandlers.push(handler);
+        capturedKeypressOptions.push(options);
       },
     );
     vi.mocked(useAgentStreamingState).mockReturnValue({
@@ -110,6 +228,262 @@ describe('AgentComposer', () => {
     expect(setAgentInputBufferText).not.toHaveBeenCalled();
   });
 
+  describe('footer context window', () => {
+    it("uses the window the registry declares for the agent's model", () => {
+      agentModel = 'gpt-4o';
+      registryWindows = { 'openai|gpt-4o|https://session.example/v1': 128_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(128_000);
+    });
+
+    it('finds a registry entry declared without a base URL', () => {
+      agentModel = 'gpt-4o';
+      registryWindows = { 'openai|gpt-4o|': 96_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(96_000);
+    });
+
+    it('does not take a registry entry declared for another endpoint', () => {
+      agentModel = 'gpt-4o';
+      registryWindows = { 'openai|gpt-4o|https://third.example/v1': 32_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it("looks the window up on the agent's own provider", () => {
+      agentModel = 'gpt-4o';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'anthropic',
+          baseUrl: 'https://other.example/v1',
+        },
+      };
+      registryWindows = {
+        'openai|gpt-4o|https://session.example/v1': 128_000,
+        'anthropic|gpt-4o|https://other.example/v1': 64_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(64_000);
+    });
+
+    it("uses the model's known limit when the agent inherited the session window", () => {
+      // A same-provider agent whose registry entry declares no window copies
+      // the session's window into its own config.
+      agentModel = 'gpt-4o';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'openai',
+          baseUrl: 'https://session.example/v1',
+          contextWindowSize: 250_000,
+        },
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it("uses the model's known limit when the agent has no runtime config", () => {
+      agentModel = 'gpt-4o';
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it("uses the model's known limit when the session names no provider", () => {
+      agentModel = 'gpt-4o';
+      sessionConfig = { contextWindowSize: 250_000 };
+      registryWindows = { 'openai|gpt-4o|': 96_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it("uses the session window for an agent on the session's model and route", () => {
+      // 250K is neither the registry's nor the model's known limit, so only
+      // the same-model shortcut can produce it.
+      agentModel = 'qwen3-coder-plus';
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(250_000);
+    });
+
+    it("uses the session window when the agent's own route matches the session's", () => {
+      agentModel = 'qwen3-coder-plus';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'openai',
+          baseUrl: 'https://session.example/v1',
+          contextWindowSize: 128_000,
+        },
+      };
+      registryWindows = {
+        'openai|qwen3-coder-plus|https://session.example/v1': 128_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(250_000);
+    });
+
+    it('does not borrow the session window for the same model id on another provider', () => {
+      agentModel = 'qwen3-coder-plus';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'anthropic',
+          baseUrl: 'https://session.example/v1',
+        },
+      };
+      registryWindows = {
+        'anthropic|qwen3-coder-plus|https://session.example/v1': 64_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(64_000);
+    });
+
+    it('does not borrow the session window for the same model id on another endpoint', () => {
+      agentModel = 'qwen3-coder-plus';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'openai',
+          baseUrl: 'https://other.example/v1',
+        },
+      };
+      registryWindows = {
+        'openai|qwen3-coder-plus|https://other.example/v1': 128_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(128_000);
+    });
+
+    it("reads the session's window from inside the agent's runtime frame", async () => {
+      const agentRoute = {
+        model: 'gpt-4o',
+        authType: 'openai',
+        baseUrl: 'https://session.example/v1',
+        contextWindowSize: 1_000_000,
+      };
+      const core = {
+        modelConfig: { model: 'gpt-4o' },
+        runtimeView: { contentGeneratorConfig: agentRoute },
+      };
+
+      const size = await runWithRuntimeContentGenerator(
+        { contentGeneratorConfig: agentRoute } as never,
+        async () =>
+          getAgentContextWindowSize(useConfig() as never, core as never),
+      );
+
+      expect(size).toBe(tokenLimit('gpt-4o', 'input'));
+    });
+
+    it("reads the session's route from inside the agent's runtime frame", async () => {
+      // Same model id as the session, but on another endpoint. Read inside the
+      // frame, the session config would be the agent's own route and the
+      // agent would borrow its inherited window.
+      const agentRoute = {
+        model: 'qwen3-coder-plus',
+        authType: 'openai',
+        baseUrl: 'https://other.example/v1',
+        contextWindowSize: 1_000_000,
+      };
+      registryWindows = {
+        'openai|qwen3-coder-plus|https://other.example/v1': 128_000,
+      };
+      const core = {
+        modelConfig: { model: 'qwen3-coder-plus' },
+        runtimeView: { contentGeneratorConfig: agentRoute },
+      };
+
+      const size = await runWithRuntimeContentGenerator(
+        { contentGeneratorConfig: agentRoute } as never,
+        async () =>
+          getAgentContextWindowSize(useConfig() as never, core as never),
+      );
+
+      expect(size).toBe(128_000);
+    });
+
+    it("does not take another endpoint's entry when the route names no base URL", () => {
+      agentModel = 'gpt-4o';
+      agentRuntimeView = { contentGeneratorConfig: { authType: 'openai' } };
+      registryWindows = { 'openai|gpt-4o|https://third.example/v1': 32_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it('ignores a declared window of 0', () => {
+      agentModel = 'gpt-4o';
+      registryWindows = { 'openai|gpt-4o|https://session.example/v1': 0 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it('uses the session window when the agent names no model', () => {
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(250_000);
+    });
+  });
+
+  it('syncs the footer layout key and updates it when the agent completes', () => {
+    // AppContainer's controls-height measure effect depends on this key; it
+    // is the only re-measure trigger for the agent footer (#9507).
+    const { rerender } = render(<AgentComposer agentId="agent-1" />);
+
+    expect(setAgentComposerLayoutKey).toHaveBeenCalled();
+    const initialKey = String(setAgentComposerLayoutKey.mock.calls.at(-1)?.[0]);
+    // The input text is part of the key (input wrapping shifts the height).
+    expect(initialKey).toContain('draft');
+
+    vi.mocked(useAgentStreamingState).mockReturnValue({
+      status: AgentStatus.COMPLETED,
+      streamingState: StreamingState.Idle,
+      isInputActive: false,
+      elapsedTime: 0,
+      lastPromptTokenCount: 0,
+    } as never);
+    rerender(<AgentComposer agentId="agent-1" />);
+
+    // The terminal-status row appeared, so the key must change to trigger a
+    // re-measure of the grown footer.
+    const completedKey = String(
+      setAgentComposerLayoutKey.mock.calls.at(-1)?.[0],
+    );
+    expect(completedKey).not.toBe(initialKey);
+  });
+
   // The second useKeypress call is the Shift+Tab approval-mode cycler.
   const getShiftTabHandler = (): KeypressHandler => {
     render(<AgentComposer agentId="agent-1" />);
@@ -133,5 +507,84 @@ describe('AgentComposer', () => {
     handler({ name: 'tab', shift: true, ctrl: true } as Key);
 
     expect(setAgentApprovalMode).not.toHaveBeenCalled();
+  });
+
+  // The real useKeypress hook only subscribes while `isActive` is true, so the
+  // registration from the most recent render is the gate in force right now.
+  const latestOptions = (callSite: number): { isActive: boolean } =>
+    capturedKeypressOptions[capturedKeypressOptions.length - 2 + callSite]!;
+
+  it('releases same-chunk keys only after input dismisses the menu', async () => {
+    renderWithMenu();
+    const items = [{ id: 'open-link', label: 'Open Link', onSelect: vi.fn() }];
+    const open = () =>
+      act(async () => {
+        menuApi?.openMenu(items, { x: 0, y: 0 });
+      });
+    await open();
+
+    await act(async () => {
+      // Hold the same callback: no render may occur between these keys.
+      const handleKey = baseTextInputProps.onKeypress!;
+      expect(handleKey({ name: 'a', sequence: 'a' } as Key)).toBe(false);
+      expect(handleKey({ name: 'return', sequence: '\r' } as Key)).toBe(false);
+    });
+
+    await open();
+    await act(async () => {
+      const handleKey = baseTextInputProps.onKeypress!;
+      // A fresh menu owns Enter even after the previous menu was dismissed.
+      expect(handleKey({ name: 'return', sequence: '\r' } as Key)).toBe(true);
+      menuApi?.executeIndex(0);
+      // Even if the overlay executes first, the same Enter cannot submit.
+      expect(handleKey({ name: 'return', sequence: '\r' } as Key)).toBe(true);
+    });
+    expect(items[0]!.onSelect).toHaveBeenCalledOnce();
+  });
+
+  it('goes quiet while the right-click context menu is open', async () => {
+    // AgentChatContent mounts ContentMouseController on the teammate tab, so
+    // this composer is now reachable with the menu open. KeypressContext
+    // broadcasts to every subscriber and discards return values (the overlay
+    // cannot consume a key for us), so each consumer has to gate itself or a
+    // key aimed at the menu also cancels the round and steals tab-bar focus.
+    vi.mocked(useAgentStreamingState).mockReturnValue({
+      status: AgentStatus.IDLE,
+      streamingState: StreamingState.Responding,
+      isInputActive: false,
+      elapsedTime: 0,
+      lastPromptTokenCount: 0,
+    } as never);
+
+    renderWithMenu();
+
+    // Control: with no menu open the composer still owns its keys.
+    expect(latestOptions(ESCAPE_CANCEL).isActive).toBe(true);
+    expect(latestOptions(SHIFT_TAB_CYCLE).isActive).toBe(true);
+    expect(baseTextInputProps.onKeypress?.({ name: 'down' } as Key)).toBe(true);
+    expect(setAgentTabBarFocused).toHaveBeenCalledWith(true);
+
+    setAgentTabBarFocused.mockClear();
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    // Escape no longer reaches the cancel-round handler at all...
+    expect(latestOptions(ESCAPE_CANCEL).isActive).toBe(false);
+    // ...and neither does Shift+Tab reach the approval-mode cycler, which
+    // writes straight through to the agent runtime's tool-scheduling policy:
+    // a key aimed at the menu must not silently change the approval mode of
+    // the teammate the user is deciding about.
+    expect(latestOptions(SHIFT_TAB_CYCLE).isActive).toBe(false);
+    // ...and BaseTextInput never sees the menu's navigation keys, so the draft
+    // survives and the tab bar keeps its focus.
+    for (const name of ['up', 'down', 'return', 'escape']) {
+      expect(baseTextInputProps.onKeypress?.({ name } as Key)).toBe(true);
+    }
+    expect(setAgentTabBarFocused).not.toHaveBeenCalled();
   });
 });

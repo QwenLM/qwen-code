@@ -54,6 +54,11 @@ function createPromptPipelineContent(text: string): PromptPipelineContent {
 const mockCheckCommandPermissions = vi.hoisted(() => vi.fn());
 const mockShellExecute = vi.hoisted(() => vi.fn());
 
+const runtimeShellMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core/sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: runtimeShellMock,
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original = await importOriginal<object>();
   return {
@@ -79,6 +84,9 @@ describe('ShellProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runtimeShellMock.mockImplementation((_runtime, ...args) =>
+      mockShellExecute(...args),
+    );
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
@@ -112,6 +120,30 @@ describe('ShellProcessor', () => {
       allAllowed: true,
       disallowedCommands: [],
     });
+  });
+
+  it('keeps YOLO prompt injections bound to the runtime sandbox', async () => {
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ filesystem: 'read-only', network: 'closed' });
+    mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+    mockCheckCommandPermissions.mockResolvedValue({
+      allAllowed: false,
+      disallowedCommands: ['touch forbidden'],
+    });
+    await new ShellProcessor('test-command').process(
+      createPromptPipelineContent('!{touch forbidden}'),
+      context,
+    );
+    expect(runtimeShellMock).toHaveBeenCalledWith(
+      context.services.config,
+      'touch forbidden',
+      expect.any(String),
+      expect.any(Function),
+      expect.any(AbortSignal),
+      false,
+      expect.any(Object),
+    );
   });
 
   it('should throw an error if config is missing', async () => {
@@ -597,6 +629,74 @@ describe('ShellProcessor', () => {
       // Update context for these tests to use specific arguments
       context.invocation!.args = rawArgs;
     });
+
+    it.each(['$$', '$&', '$`', "$'"])(
+      'preserves literal %s in plain prompt arguments',
+      async (token) => {
+        const args = `before ${token} after`;
+        context.invocation!.args = args;
+        const result = await new ShellProcessor('test-command').process(
+          createPromptPipelineContent('First {{args}}, then {{args}}.'),
+          context,
+        );
+        expect(result).toEqual([{ text: `First ${args}, then ${args}.` }]);
+        expect(mockShellExecute).not.toHaveBeenCalled();
+      },
+    );
+
+    it('preserves literal arguments on both sides of a shell injection', async () => {
+      const args = "costs $$5, $&, $`, $' and $ARGUMENTS";
+      context.invocation!.args = args;
+      const result = await new ShellProcessor('test-command').process(
+        createPromptPipelineContent(
+          'Before {{args}} !{echo TEMPLATE} after {{args}}',
+        ),
+        context,
+      );
+      expect(result).toEqual([
+        { text: `Before ${args} default shell output after ${args}` },
+      ]);
+      expect(mockShellExecute.mock.calls[0]?.[0]).toBe('echo TEMPLATE');
+    });
+
+    it.each(['{{args}}', '$ARGUMENTS'])(
+      'preserves replacement tokens in the checked and executed %s shell argument',
+      async (placeholder) => {
+        const args = "costs $$5, $&, $`, $' and $ARGUMENTS {{args}}";
+        context.invocation!.args = args;
+        await new ShellProcessor('test-command').process(
+          createPromptPipelineContent(`!{printf %s ${placeholder}}`),
+          context,
+        );
+        const expectedCommand = `printf %s ${getExpectedEscapedArgForPlatform(args)}`;
+        expect(mockCheckCommandPermissions.mock.calls[0]?.[0]).toBe(
+          expectedCommand,
+        );
+        expect(mockShellExecute.mock.calls[0]?.[0]).toBe(expectedCommand);
+      },
+    );
+
+    it.each([
+      { placeholder: '{{args}}', raw: false },
+      { placeholder: '$ARGUMENTS', raw: true },
+    ])(
+      'substitutes safe $placeholder arguments consistently for permissions and execution',
+      async ({ placeholder, raw }) => {
+        const args = 'foo bar';
+        context.invocation!.args = args;
+        await new ShellProcessor('test-command').process(
+          createPromptPipelineContent(`!{printf %s ${placeholder}}`),
+          context,
+        );
+        const expectedCommand = raw
+          ? `printf %s ${args}`
+          : `printf %s ${getExpectedEscapedArgForPlatform(args)}`;
+        expect(mockCheckCommandPermissions.mock.calls[0]?.[0]).toBe(
+          expectedCommand,
+        );
+        expect(mockShellExecute.mock.calls[0]?.[0]).toBe(expectedCommand);
+      },
+    );
 
     it('should perform raw replacement if no shell injections are present (optimization path)', async () => {
       const processor = new ShellProcessor('test-command');

@@ -150,7 +150,12 @@ type TestConfig = Config & {
   updateSessionRegistryIpcPath: ReturnType<typeof vi.fn>;
 };
 
-function makeConfig(): TestConfig {
+// The gate reads the two session-level suppressions off the Config, so the
+// double models them. Neither is in force unless a case says so: the
+// settings argument these suites pass is what the gate otherwise defers to.
+function makeConfig(
+  suppression: { isSafeMode?: boolean; getBareMode?: boolean } = {},
+): TestConfig {
   const trackSessionRegistration = vi.fn((registration: Promise<unknown>) => {
     void registration.catch(() => undefined);
   });
@@ -161,6 +166,8 @@ function makeConfig(): TestConfig {
     getChatRecordingService: () => undefined,
     isTelemetryInitializationDeferred: () => false,
     getApprovalMode: () => 'default',
+    isSafeMode: () => suppression.isSafeMode === true,
+    getBareMode: () => suppression.getBareMode === true,
     trackSessionRegistration,
     whenSessionRegistered: vi.fn().mockResolvedValue(true),
     updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
@@ -607,5 +614,52 @@ describe('startInteractiveUI cross-session messaging', () => {
     await cleanup;
 
     expect(peerMessagingStart).not.toHaveBeenCalled();
+  });
+
+  // Both suppressions rather than one: a gate answering only for safe mode
+  // would leave `--bare` binding an inbox and publishing its socket path, in
+  // the mode documented as skipping implicit startup work.
+  it.each([
+    ['safe mode', { isSafeMode: true }],
+    ['bare mode', { getBareMode: true }],
+  ])(
+    'does not bind when the session runs in %s whatever the setting says',
+    async (_label, suppression) => {
+      const config = makeConfig(suppression);
+
+      await start(config, enabledSettings);
+
+      expect(config.whenSessionRegistered).not.toHaveBeenCalled();
+      expect(peerMessagingStart).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not explain a bind failure for an inbox a suppressed session never asked for', async () => {
+    // The null a suppressed session publishes is deliberate, not a failure.
+    // Gating this branch on the setting alone would hand the user a cause
+    // that never happened — the same invented-cause defect `/peers` had,
+    // one file over. A leftover failure from an earlier bind is what makes
+    // that reachable rather than theoretical.
+    lastPeerInboxFailure.value = {
+      cause: 'permission',
+      socketPath: '/run/user/1000/qwen-socks/1.sock',
+      detail: 'EACCES',
+      hint: 'Choose a directory you own.',
+      attempts: 3,
+    };
+    const config = makeConfig({ isSafeMode: true });
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() =>
+      expect(config.trackSessionRegistration).toHaveBeenCalled(),
+    );
+    const appTree = inkRender.mock.calls[0]?.[0] as ReactElement;
+    const mounted = renderDom(appTree);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(observedPeerInboxFailure.value).toBeNull();
+    } finally {
+      mounted.unmount();
+    }
   });
 });

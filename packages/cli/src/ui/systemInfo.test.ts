@@ -88,6 +88,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+const { mockGetTuiRendererOfRecord } = vi.hoisted(() => ({
+  mockGetTuiRendererOfRecord: vi.fn(
+    (): 'ink' | 'opentui' | undefined => undefined,
+  ),
+}));
+vi.mock('./tui-renderer-of-record.js', () => ({
+  getTuiRendererOfRecord: mockGetTuiRendererOfRecord,
+}));
+
 describe('systemInfo', () => {
   let mockContext: CommandContext;
   const originalPlatform = process.platform;
@@ -221,6 +230,26 @@ describe('systemInfo', () => {
   });
 
   describe('getSystemInfo', () => {
+    it('reports the Config policy and skips host binary probes', async () => {
+      mockContext.services.config!.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({
+          requestedBackend: 'bwrap',
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+          filesystem: 'read-only',
+          network: 'closed',
+        });
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.sandboxEnv).toBe(
+        'tools / bwrap → bwrap (full) / read-only / command network: closed',
+      );
+      expect(info.npmVersion).toBe(
+        'not probed (tool execution sandbox active)',
+      );
+      expect(mockedExecFile).not.toHaveBeenCalled();
+    });
+
     it('should collect all system information', async () => {
       // Ensure SANDBOX is not set for this test
       delete process.env['SANDBOX'];
@@ -261,6 +290,43 @@ describe('systemInfo', () => {
   });
 
   describe('getExtendedSystemInfo', () => {
+    it('should redact userinfo from the persisted fast model selector', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 'openai:fast\0https://user:sk-secret@fast.example/v1';
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe(
+        'openai:fast (https://fast.example/v1)',
+      );
+      expect(JSON.stringify(extendedInfo)).not.toContain('sk-secret');
+    });
+
+    it('should resolve a non-string fast model setting instead of rejecting', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      // Settings get no type validation on load, so a workspace-scope
+      // settings.json can carry a number here. `getExtendedSystemInfo` has no
+      // enclosing try, so this used to reject the whole promise — taking out
+      // `/status`, `/about`, `/bug` and both `/settings` Status tabs.
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 42;
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe('42');
+    });
+
     it('should include memory usage and base URL', async () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),
@@ -280,6 +346,27 @@ describe('systemInfo', () => {
       expect(extendedInfo.memoryUsage).toBeDefined();
       expect(extendedInfo.memoryUsage).toMatch(/\d+\.\d+ (KB|MB|GB)/);
       expect(extendedInfo.baseUrl).toBe('https://api.openai.com');
+    });
+
+    it('renders a pinned fast model without the raw endpoint disambiguator (#12760)', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      // The picker persists `authType:id\0<baseUrl>`; every display surface
+      // (/about, /status, /bug, settings) consumes ExtendedSystemInfo, so the
+      // scrub-aware rendering happens here at the producer.
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 'openai:shared-fast\0https://free-quota.example.com/v1';
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe(
+        'openai:shared-fast (https://free-quota.example.com/v1)',
+      );
+      expect(extendedInfo.fastModel).not.toContain('\0');
     });
 
     it('should include provider diagnostics for OpenAI Responses auth', async () => {
@@ -480,5 +567,86 @@ describe('systemInfo', () => {
         expect(extendedInfo.lspStatus).toBe(expected);
       },
     );
+  });
+
+  describe('agentLoop line', () => {
+    beforeEach(() => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+      mockGetTuiRendererOfRecord.mockReturnValue(undefined);
+      mockContext.services.config = {
+        ...(mockContext.services.config ?? {}),
+        getScreenReader: vi.fn().mockReturnValue(false),
+        getAgentLoopPath: vi.fn().mockReturnValue('legacy'),
+      } as unknown as CommandContext['services']['config'];
+    });
+
+    it('reports headless for non_interactive mode', async () => {
+      mockContext.executionMode = 'non_interactive';
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('headless: legacy');
+    });
+
+    it('reports acp for acp mode', async () => {
+      mockContext.executionMode = 'acp';
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('acp: legacy');
+    });
+
+    it('reports the renderer of record for interactive mode', async () => {
+      mockContext.executionMode = 'interactive';
+      mockGetTuiRendererOfRecord.mockReturnValue('opentui');
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('opentui: legacy');
+    });
+
+    it('omits the line when no renderer has been recorded', async () => {
+      // The entry records the renderer on both the OpenTUI success path and
+      // the ink fallback; with nothing recorded the line is omitted rather
+      // than re-deriving the selection gate.
+      mockContext.executionMode = 'interactive';
+      mockGetTuiRendererOfRecord.mockReturnValue(undefined);
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBeUndefined();
+    });
+
+    it('reports the mounted renderer after an OpenTUI-to-ink boot fallback', async () => {
+      // A requested OpenTUI failed to boot and ink is serving; the per-surface
+      // switches differ, so re-deriving the gate would name the wrong renderer
+      // and the wrong loop. The recorded renderer (ink) must win.
+      mockContext.executionMode = 'interactive';
+      mockGetTuiRendererOfRecord.mockReturnValue('ink');
+      (mockContext.services.config as unknown as Record<string, unknown>)[
+        'getAgentLoopPath'
+      ] = vi.fn((surface: string) => (surface === 'ink' ? 'legacy' : 'kernel'));
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('ink: legacy');
+    });
+
+    it('reflects the resolved path', async () => {
+      mockContext.executionMode = 'non_interactive';
+      (mockContext.services.config as unknown as Record<string, unknown>)[
+        'getAgentLoopPath'
+      ] = vi.fn().mockReturnValue('kernel');
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('headless: kernel');
+    });
+
+    it('omits the line when there is no execution mode (Settings dialog)', async () => {
+      mockContext.executionMode = undefined;
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBeUndefined();
+    });
+
+    it('omits the line when config lacks getAgentLoopPath', async () => {
+      mockContext.executionMode = 'non_interactive';
+      delete (
+        mockContext.services.config as unknown as Record<string, unknown>
+      )['getAgentLoopPath'];
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBeUndefined();
+    });
   });
 });

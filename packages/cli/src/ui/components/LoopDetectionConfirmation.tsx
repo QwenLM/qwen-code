@@ -15,10 +15,12 @@ export type LoopDetectionConfirmationResult = {
 };
 
 interface LoopDetectionConfirmationProps {
+  cause?: string;
   onComplete: (result: LoopDetectionConfirmationResult) => void;
 }
 
 export function LoopDetectionConfirmation({
+  cause,
   onComplete,
 }: LoopDetectionConfirmationProps) {
   useKeypress(
@@ -31,6 +33,10 @@ export function LoopDetectionConfirmation({
     },
     { isActive: true },
   );
+
+  // The cause is shared with the headless text, which marks setting names as
+  // code; quote them like the note below.
+  const quotedCause = cause?.replace(/`([^`]+)`/g, '"$1"');
 
   const OPTIONS: Array<RadioSelectItem<LoopDetectionConfirmationResult>> = [
     {
@@ -74,6 +80,9 @@ export function LoopDetectionConfirmation({
         </Box>
         <Box width="100%" marginTop={1}>
           <Box flexDirection="column">
+            {quotedCause && (
+              <Text color={theme.text.primary}>Cause: {quotedCause}.</Text>
+            )}
             <Text color={theme.text.secondary}>
               This can happen due to repetitive tool calls or other model
               behavior. Do you want to keep loop detection enabled or disable it
@@ -84,13 +93,13 @@ export function LoopDetectionConfirmation({
             </Box>
             <Box marginTop={1}>
               <Text color={theme.text.secondary}>
-                Note: Setting &quot;model.skipLoopDetection&quot; to true in
-                your settings.json disables only the heuristic loop checks for
-                future sessions; the always-on guards (consecutive identical
-                tool calls, repeated shell inspection commands, and the per-turn
-                tool-call cap) are not affected by it. The cap is tunable via
-                &quot;model.maxToolCallsPerTurn&quot; (0 disables it). Disabling
-                for this session above suppresses everything.
+                Note: Setting &quot;model.loopProtection&quot; in your
+                settings.json to &quot;warn&quot; reminds the model instead of
+                stopping, and &quot;off&quot; turns loop protection off, for
+                future sessions. &quot;model.skipLoopDetection&quot; disables
+                only the heuristic loop checks. The tool-call budget is tunable
+                via &quot;model.maxToolCallsPerTurn&quot; (0 disables it).
+                Disabling for this session above suppresses everything.
               </Text>
             </Box>
           </Box>

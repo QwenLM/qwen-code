@@ -7,6 +7,57 @@
 // Portuguese translations for Qwen Code CLI (pt-BR)
 
 export default {
+  user: 'usuário',
+  assistant: 'assistente',
+  thinking: 'raciocínio',
+  task: 'tarefa',
+  compaction: 'compactação',
+  info: 'informação',
+  warning: 'aviso',
+  retry: 'nova tentativa',
+  'stop-hook': 'hook de parada',
+  'away-recap': 'resumo de ausência',
+  'user-shell': 'comando do usuário',
+  advisor: 'consultor',
+  'arena-agent': 'agente de arena',
+  'arena-session': 'sessão de arena',
+  goal: 'objetivo',
+  'Protected input': 'Entrada protegida',
+  'Focused input. Cursor: {{position}}':
+    'Entrada em foco. Cursor: {{position}}',
+  'Unfocused input.': 'Entrada sem foco.',
+  'Focused Prompt: {{value}}': 'Prompt em foco: {{value}}',
+  'Prompt: {{value}}': 'Prompt: {{value}}',
+  'Focused Input: {{value}}': 'Entrada em foco: {{value}}',
+  'Input: {{value}}': 'Entrada: {{value}}',
+  'Placeholder: {{value}}': 'Texto de exemplo: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Selecionado {{value}}',
+  'Disabled {{value}}': 'Desativado {{value}}',
+  'Focused Toggle on: {{value}}': 'Em foco, opção ativada: {{value}}',
+  'Focused Toggle off: {{value}}': 'Em foco, opção desativada: {{value}}',
+  'Toggle on: {{value}}': 'Opção ativada: {{value}}',
+  'Toggle off: {{value}}': 'Opção desativada: {{value}}',
+  'Conversation cleared.': 'Conversa limpa.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revisão {{value}}',
+  Dialog: 'Diálogo',
+  'Dialog closed. Focus: prompt.': 'Diálogo fechado. Foco: prompt.',
+  'Dialog closed.': 'Diálogo fechado.',
+  'Waiting for confirmation': 'Aguardando confirmação',
+  'Working. Escape to cancel.': 'Em execução. Escape para cancelar.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Histórico {{start}}-{{end}} de {{total}}.',
+  'Worktree: {{value}}': 'Árvore de trabalho: {{value}}',
+  'Workflow mode: on': 'Modo de fluxo de trabalho: ativado',
+  'Workflow mode: on (unavailable)':
+    'Modo de fluxo de trabalho: ativado (indisponível)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Cima/Baixo ou PageUp/PageDown para ler; Ctrl+Home/End para primeiro/mais recente.',
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Ativa o Generated UI integrado em sessões locais compatíveis. Reinicie a sessão correspondente para aplicar as alterações.',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -91,6 +142,7 @@ export default {
   Auth: 'Autenticação',
   Model: 'Modelo',
   'Fast Model': 'Modelo Rápido',
+  'Agent Loop': 'Loop do agente',
   Sandbox: 'Sandbox',
   'Session ID': 'ID da Sessão',
   'Base URL': 'Base URL',
@@ -186,6 +238,8 @@ export default {
     'O retrocesso não afeta arquivos editados manualmente ou por meio de comandos shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Não é possível retroceder para um turno que foi compactado. Tente um turno mais recente.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Não é possível retroceder a conversa para este turno: ele não corresponde mais ao histórico do modelo (por exemplo, após uma nova tentativa). Tente um turno mais recente.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'A restauração de arquivos não está disponível para este turno (sem alterações capturadas, ou o turno é anterior à sessão atual).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -984,6 +1038,26 @@ export default {
     'Uso: /forget <texto de memória a remover>',
   'No managed auto-memory entries matched: {{query}}':
     'Nenhuma entrada de memória automática gerenciada correspondeu: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Vincular um pull request do GitHub a esta sessão',
+  'Usage: /pr <number | url>': 'Uso: /pr <número | url>',
+  'No PRs bound to this session.': 'Nenhum PR vinculado a esta sessão.',
+  'Bound PRs: {{list}}': 'PRs vinculados: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Referência de PR inválida. Uso: /pr <número | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Não foi possível resolver o PR #{{number}} via gh. Informe a URL completa do PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} vinculado a esta sessão: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'O PR #{{number}} já está vinculado a esta sessão: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Falha ao vincular o PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Falha ao vincular o PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Não foi possível ler as vinculações de PR desta sessão.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'O GitHub CLI (gh) está indisponível ou excedeu o tempo limite. Informe a URL completa do PR para vincular sem ele.',
   'Consolidate managed auto-memory topic files.':
     'Consolidar arquivos de tópicos de memória automática gerenciada.',
   'Could not retrieve tool registry.':
@@ -1076,6 +1150,8 @@ export default {
     'Não foi possível comprimir o histórico do chat porque o resumo da compressão foi truncado.',
   'Could not compress chat history due to an API error.':
     'Não foi possível comprimir o histórico do chat devido a um erro da API.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Não foi possível comprimir o histórico do chat porque ele é grande demais para a janela de contexto.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1140,6 +1216,14 @@ export default {
   'Clear Authentication': 'Limpar autenticação',
   disabled: 'desativado',
   enabled: 'ativado',
+  'disabled (bare mode)': 'desativado (modo mínimo)',
+  'disabled (safe mode)': 'desativado (modo seguro)',
+  'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
+  'disabled (not approved)': 'desativado (não aprovado)',
+  'disabled (rejected)': 'desativado (rejeitado)',
+  'disabled (folder not trusted)': 'desativado (pasta não confiável)',
+  'disabled (turned off for this session)':
+    'desativado (desligado nesta sessão)',
   'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',
@@ -1512,6 +1596,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Tokens de Entrada',
   'Output Tokens': 'Tokens de Saída',
+  'Output (incl. Reasoning)': 'Saída (com raciocínio)',
   'Savings Highlight:': 'Destaque de Economia:',
   'of input tokens were served from the cache, reducing costs.':
     'de tokens de entrada foram servidos do cache, reduzindo custos.',
@@ -1845,19 +1930,28 @@ export default {
     'Contexto excede o limite! Use /compress ou /clear para reduzir.',
   'No API response yet. Send a message to see actual usage.':
     'Ainda não há resposta da API. Envie uma mensagem para ver o uso real.',
+  'Estimated usage, including the conversation':
+    'Uso estimado, incluindo a conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Ainda não há uso do provedor. Estas são estimativas locais, incluindo a conversa.',
   'Estimated pre-conversation overhead': 'Sobrecarga estimada pré-conversa',
   'Context window': 'Janela de Contexto',
   tokens: 'tokens',
   Used: 'Usado',
   Free: 'Livre',
-  'Autocompact buffer': 'Buffer de autocompactação',
+  'Autocompact buffer': 'Buffer de compactação',
   'Usage by category': 'Uso por categoria',
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Arquivos de instruções',
+  'Auto memory': 'Memória automática',
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
+  'Startup context': 'Contexto inicial',
+  Unattributed: 'Não atribuído',
+  'Cached prefix': 'Prefixo em cache',
   'Run /context detail for per-item breakdown.':
     'Execute /context detail para detalhamento por item.',
   active: 'ativo',
@@ -2009,6 +2103,8 @@ export default {
   'Advisor review failed: {{error}}': 'Falha na revisão do assessor: {{error}}',
   'No conversation context available for /advisor':
     'Nenhum contexto de conversa disponível para /advisor',
+  'No conversation context available for /btw':
+    'Nenhum contexto de conversa disponível para /btw',
   'Focus too long (max {{max}} chars)':
     'Foco muito longo (máx. {{max}} caracteres)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2109,6 +2205,10 @@ export default {
   'to retry last request': 'para repetir a última solicitação',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key inválida. As API Keys do Coding Plan começam com "sk-sp-". Verifique.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key inválida. As chaves pay-as-you-go começam com "sk-" ou "sk-ws-". As chaves Token Plan ("sk-sp-") precisam da entrada Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key inválida. As Token Plan API Keys começam com "sk-sp-". Gere uma no console Token Plan ou use a entrada Standard API Key para uma chave pay-as-you-go.',
   'Lock release warning': 'Aviso de liberação de bloqueio',
   'Metadata write warning': 'Aviso de gravação de metadados',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -2181,6 +2281,8 @@ export default {
   out: 'saída',
   'In/Out': 'Ent/Saída',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Atualizações para uma versão específica exigem uma instalação independente. Instale a versão {{version}} manualmente usando seu método de instalação.',
   'Check for Qwen Code updates and install if available':
     'Verificar atualizações do Qwen Code e instalar se disponível',
   'Qwen Code update available! {{current}} → {{latest}}':

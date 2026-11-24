@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatExecutionSandbox } from './utils/execution-sandbox-display.js';
 import process from 'node:process';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import type { CommandContext } from './commands/types.js';
 import { getCliVersion } from '../utils/version.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 import {
   IdeClient,
   AuthType,
@@ -16,7 +18,9 @@ import {
   formatMemoryUsage,
   type LspStatusSnapshot,
 } from '@qwen-code/qwen-code-core';
+import type { AgentLoopSurface } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
+import { getTuiRendererOfRecord } from './tui-renderer-of-record.js';
 
 const debugLogger = createDebugLogger('STATUS');
 
@@ -29,6 +33,12 @@ const debugLogger = createDebugLogger('STATUS');
  */
 type SystemInfoContext = {
   services: Partial<Pick<CommandContext['services'], 'config' | 'settings'>>;
+  /**
+   * Present for command invocations; absent for the Settings dialog, which
+   * has no execution mode and therefore omits the agent-loop line rather
+   * than guessing a surface.
+   */
+  executionMode?: CommandContext['executionMode'];
 };
 
 /**
@@ -61,6 +71,8 @@ export interface ExtendedSystemInfo extends SystemInfo {
   proxy?: string;
   fastModel?: string;
   lspStatus?: string;
+  /** The current surface and the loop path it resolves to, e.g. `ink: legacy`. */
+  agentLoop?: string;
 }
 
 // `execFile` (not the shell-spawning `exec`) so a hostile binary on PATH
@@ -171,8 +183,11 @@ export async function getSystemInfo(
   const osArch = process.arch;
   const osRelease = os.release();
   const nodeVersion = process.version;
-  const npmVersion = await getNpmVersion();
-  const sandboxEnv = getSandboxEnv();
+  const executionSandbox = formatExecutionSandbox(context.services.config);
+  const npmVersion = executionSandbox
+    ? 'not probed (tool execution sandbox active)'
+    : await getNpmVersion();
+  const sandboxEnv = executionSandbox ?? getSandboxEnv();
   const modelVersion = context.services.config?.getModel() || 'Unknown';
   const cliVersion = await getCliVersion();
   const selectedAuthType = context.services.config?.getAuthType() || '';
@@ -210,7 +225,8 @@ export async function getExtendedSystemInfo(
   const memoryUsage = formatMemoryUsage(process.memoryUsage().rss);
 
   // For bug reports, use sandbox name without prefix
-  const sandboxEnv = getSandboxEnv(true);
+  const sandboxEnv =
+    formatExecutionSandbox(context.services.config) ?? getSandboxEnv(true);
 
   // Get base URL and apiKeyEnvKey if using OpenAI or Anthropic auth
   const contentGeneratorConfig =
@@ -228,9 +244,15 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
-  // Get fast model from settings
-  const fastModel = context.services.settings?.merged?.fastModel || undefined;
+  // Get fast model from settings. The persisted selector can carry a
+  // userinfo-bearing baseUrl suffix — bug reports must not embed it.
+  const fastModelSetting =
+    context.services.settings?.merged?.fastModel || undefined;
+  const fastModel = fastModelSetting
+    ? formatAuxModelSelectorForDisplay(fastModelSetting)
+    : undefined;
   const lspStatus = getLspStatus(context);
+  const agentLoop = getAgentLoopInfo(context);
 
   return {
     ...baseInfo,
@@ -241,7 +263,48 @@ export async function getExtendedSystemInfo(
     gitCommit,
     fastModel,
     lspStatus,
+    agentLoop,
   };
+}
+
+/**
+ * The current surface and the loop path it resolves to, for /about and /bug.
+ * The surface comes from the execution mode; the interactive surface is the
+ * renderer that actually mounted (recorded by the entry after a successful
+ * boot, so an OpenTUI-to-ink fallback is reported as ink). Returns undefined
+ * when there is no execution mode (Settings dialog) or no config, so the line
+ * is omitted rather than guessed. Read-only: never throws.
+ */
+function getAgentLoopInfo(context: SystemInfoContext): string | undefined {
+  const config = context.services.config;
+  if (!config) return undefined;
+
+  let surface: AgentLoopSurface;
+  switch (context.executionMode) {
+    case 'non_interactive':
+      surface = 'headless';
+      break;
+    case 'acp':
+      surface = 'acp';
+      break;
+    case 'interactive': {
+      // Report the renderer that actually mounted: a requested OpenTUI can
+      // fail to boot and fall back to ink without the environment changing,
+      // and re-deriving the gate would then name the wrong renderer and loop.
+      // When nothing has been recorded, omit the line rather than re-deriving
+      // the gate (the entry records the renderer on both the OpenTUI success
+      // path and the ink fallback, so a serving session always has a record).
+      const mounted = getTuiRendererOfRecord();
+      if (!mounted) return undefined;
+      surface = mounted;
+      break;
+    }
+    default:
+      return undefined;
+  }
+
+  const path = config.getAgentLoopPath?.(surface);
+  return path === undefined ? undefined : `${surface}: ${path}`;
 }
 
 function getLspStatus(context: SystemInfoContext): string | undefined {

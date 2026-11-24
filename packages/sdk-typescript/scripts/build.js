@@ -39,7 +39,7 @@ const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
 
-execSync('tsc --project tsconfig.build.json', {
+execSync('tsc --build tsconfig.reference.json', {
   stdio: 'inherit',
   cwd: rootDir,
 });
@@ -147,6 +147,36 @@ await esbuild.build({
   keepNames: false,
   treeShaking: true,
 });
+
+// UI event normalizer subpath (`@qwen-code/sdk/daemon/ui`). Kept out of the
+// default daemon barrel so browser consumers that never render normalized UI
+// events do not pay for the normalizer.
+for (const [format, platform, target, outfile] of [
+  [
+    'esm',
+    'browser',
+    'es2022',
+    join(rootDir, 'dist', 'daemon', 'ui', 'index.js'),
+  ],
+  ['cjs', 'node', 'node22', join(rootDir, 'dist', 'daemon', 'ui', 'index.cjs')],
+]) {
+  await esbuild.build({
+    entryPoints: [join(rootDir, 'src', 'daemon', 'ui', 'index.ts')],
+    bundle: true,
+    format,
+    platform,
+    target,
+    outfile,
+    sourcemap: false,
+    minify: true,
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    legalComments: 'none',
+    keepNames: false,
+    treeShaking: true,
+  });
+}
 
 // Opt-in transports subpath (`@qwen-code/sdk/daemon/transports`): the concrete
 // ACP transports + negotiateTransport. Kept out of the default daemon barrel

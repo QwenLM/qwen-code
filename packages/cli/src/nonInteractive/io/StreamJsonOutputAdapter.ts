@@ -170,20 +170,6 @@ export class StreamJsonOutputAdapter
       return;
     }
 
-    // Active goal updates are session-level metadata, not message content.
-    // They intentionally bypass the base finalized guard so late goal state
-    // changes can still reach stream consumers.
-    if (event.type === LlmEventType.ActiveGoal) {
-      this.emitStreamEventIfEnabled(
-        {
-          type: 'active_goal',
-          active_goal: event.value,
-        },
-        null,
-      );
-      return;
-    }
-
     super.processEvent(event);
   }
 

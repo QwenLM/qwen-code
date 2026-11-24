@@ -40,14 +40,17 @@ export const repoRoot = path.resolve(__dirname, '..');
 // scripts/tests/vitest-global-setup.test.js asserts the builtin channels of
 // channel-registry.ts stay covered.
 export const DIST_PREREQUISITES = {
-  'packages/core': ['packages/core'],
+  'packages/core': ['packages/core', 'packages/network-policy'],
   'packages/cli': [
     'packages/acp-bridge',
     'packages/web-templates',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
+    'packages/channels/email',
     'packages/channels/feishu',
+    'packages/channels/generic-webhook',
+    'packages/network-policy',
     'packages/channels/github',
     'packages/channels/gitlab',
     'packages/channels/qqbot',

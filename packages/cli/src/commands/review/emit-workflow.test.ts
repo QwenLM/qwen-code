@@ -765,6 +765,34 @@ describe('emit-workflow — where it writes', () => {
     );
   });
 
+  it('emits a one-agent workflow for a fix-audit manifest, with no worktree pin', async () => {
+    // Step 6B dispatches the fix auditor through the same machinery as
+    // every other recorded wave: one manifest, one foreground workflow.
+    // Its plan is a local/file one, which carries no `worktreePath`, so
+    // the child must not be pinned to a review tree — the audit reads the
+    // working tree the fix was applied in.
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const key = 'fix-audit--9dace1f6b360';
+    const prompt = 'You are review agent `fix-audit`\nverbatim';
+    recordPrompt(plan, key, prompt);
+    const manifest = join(dir, 'fix-audit.json');
+    writeFileSync(manifest, JSON.stringify(createWorkflowBatch(plan, [key])));
+    mocks.buildLaunchOverride = () => {
+      throw new Error('a selected batch must never rebuild its prompts');
+    };
+    await yargs(['emit-workflow', '--plan', plan, '--batch', manifest])
+      .command(emitWorkflowCommand)
+      .exitProcess(false)
+      .parseAsync();
+    expect(readFileSync(emittedScriptPath(), 'utf8')).toBe(
+      buildReviewWorkflowScript([{ key, prompt }], undefined),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('1 agents required.'),
+    );
+  });
+
   it('rejects empty batch records before writing a workflow', () => {
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');

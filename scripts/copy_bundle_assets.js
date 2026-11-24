@@ -471,6 +471,37 @@ export function copyOpenTuiAssets({
   return copied;
 }
 
+export function copyGeneratedUiAssets({
+  root = defaultRoot,
+  distDir = join(root, 'dist'),
+} = {}) {
+  const sourceDir = join(root, 'integrations', 'generated-ui', 'dist');
+  if (!existsSync(join(sourceDir, '..', 'package.json'))) return;
+  const files = [
+    ['bundled-main.js', 'main.js'],
+    ['app.html', 'app.html'],
+    ['skills/generated-ui/SKILL.md', 'skills/generated-ui/SKILL.md'],
+    ['THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_NOTICES.txt'],
+  ];
+  for (const [source] of files) {
+    if (
+      !statSync(join(sourceDir, source), { throwIfNoEntry: false })?.isFile()
+    ) {
+      throw new Error(
+        `Generated UI asset not found: ${join(sourceDir, source)}. ` +
+          'Run npm run build --workspace=@qwen-code/generated-ui first.',
+      );
+    }
+  }
+  const targetDir = join(distDir, 'generated-ui');
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  for (const [source, target] of files) {
+    const destination = join(targetDir, target);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(join(sourceDir, source), destination);
+  }
+}
+
 export function copyBundleAssets({ root = defaultRoot } = {}) {
   const distDir = join(root, 'dist');
   const coreVendorDir = join(root, 'packages', 'core', 'vendor');
@@ -479,6 +510,8 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   if (!existsSync(distDir)) {
     mkdirSync(distDir);
   }
+
+  copyGeneratedUiAssets({ root, distDir });
 
   // Find and copy all .sb files from packages to the root of the dist directory
   const sbFiles = glob.sync('packages/**/*.sb', { cwd: root });
@@ -516,8 +549,11 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
       // DESIGN.md files are maintainer design narratives, not runtime inputs;
       // shipping one would hand a review a ~125 KB read_file target that
       // outweighs the context the slimmed skill saves.
-      skipEntry: (entry) =>
-        isBundledSkillTestFile(entry) || entry === 'DESIGN.md',
+      skipEntry: (entry, sourcePath) =>
+        isBundledSkillTestFile(entry) ||
+        entry === 'DESIGN.md' ||
+        sourcePath === join(bundledSkillsDir, 'browser-use') ||
+        sourcePath === join(bundledSkillsDir, 'computer-use'),
     });
     console.log('Copied bundled skills to dist/bundled/');
   } else {
@@ -592,6 +628,14 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     mkdirSync(destWebShellDir, { recursive: true });
     copyFileSync(webShellIndexHtml, join(destWebShellDir, 'index.html'));
     copyRecursiveSync(webShellAssetsDir, join(destWebShellDir, 'assets'));
+    for (const file of ['manifest.webmanifest', 'sw.js']) {
+      const source = join(webShellDistDir, file);
+      if (existsSync(source)) {
+        copyFileSync(source, join(destWebShellDir, file));
+      } else {
+        console.warn(`Warning: Web Shell PWA asset not found: ${source}`);
+      }
+    }
     console.log('Copied Web Shell UI to dist/web-shell/');
   } else {
     console.warn(
@@ -704,11 +748,11 @@ function copyRecursiveSync(src, dest, options = {}) {
 
     const entries = fs.readdirSync(src);
     for (const entry of entries) {
-      if (entry === '.DS_Store' || options.skipEntry?.(entry)) {
+      const srcPath = join(src, entry);
+      if (entry === '.DS_Store' || options.skipEntry?.(entry, srcPath)) {
         continue;
       }
 
-      const srcPath = join(src, entry);
       const destPath = join(dest, entry);
       copyRecursiveSync(srcPath, destPath, options);
     }

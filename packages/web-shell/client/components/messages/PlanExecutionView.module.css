@@ -381,9 +381,11 @@
   text-align: left;
 }
 
-.node:has(.nodeSummary:focus-visible) {
-  outline: 2px solid var(--node-ring);
-  outline-offset: 2px;
+@supports (selector(:has(*))) {
+  .node:has(.nodeSummary:focus-visible) {
+    outline: 2px solid var(--node-ring);
+    outline-offset: 2px;
+  }
 }
 
 .nodeSummary:focus-visible {
@@ -735,21 +737,23 @@ button.nestedExecution:not(:disabled):focus-visible {
   padding-top: 4px;
 }
 
-@container (max-width: 760px) {
-  .overview {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+@supports (container-type: inline-size) {
+  @container (max-width: 760px) {
+    .overview {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
 
-  .progressCard {
-    grid-column: 1 / -1;
-  }
+    .progressCard {
+      grid-column: 1 / -1;
+    }
 
-  .overviewStat {
-    border-top: 1px solid var(--border);
-  }
+    .overviewStat {
+      border-top: 1px solid var(--border);
+    }
 
-  .overviewStat:nth-child(2) {
-    border-left: 0;
+    .overviewStat:nth-child(2) {
+      border-left: 0;
+    }
   }
 }
 

@@ -122,7 +122,7 @@ describe('ContextUsagePanel', () => {
       )!;
       expect(button.disabled).toBe(true);
       expect(button.parentElement?.title).toContain(
-        'Requires an idle, connected, writable session',
+        'Requires an idle, connected session with permission to compress context.',
       );
       act(() => button.click());
     }
@@ -747,12 +747,29 @@ describe('ContextUsagePanel', () => {
   it('explains unavailable usage without assuming no API responses', async () => {
     const snapshot = fixture();
     snapshot.usage.totalTokens = 0;
+    snapshot.usage.breakdown.messages = 0;
     const { container } = renderPanel(vi.fn().mockResolvedValue(snapshot));
     await act(async () => {});
     expect(container.textContent).toContain(
       'Current context usage is unavailable.',
     );
     expect(container.textContent).toContain('Estimated base overhead');
+  });
+
+  it('captions an estimated history as including the conversation (#12235)', async () => {
+    // After /model, /restore or a resume the provider total is 0 while the
+    // history is intact, so the rows include the conversation.
+    const snapshot = fixture();
+    snapshot.usage.totalTokens = 0;
+    const { container } = renderPanel(vi.fn().mockResolvedValue(snapshot));
+    await act(async () => {});
+    expect(container.textContent).toContain(
+      'The estimates below include the conversation.',
+    );
+    expect(container.textContent).toContain(
+      'Estimated usage, including the conversation',
+    );
+    expect(container.textContent).not.toContain('Estimated base overhead');
   });
 
   it.each(['session', 'actions'])(
@@ -816,4 +833,111 @@ describe('ContextUsagePanel', () => {
       container.remove();
     },
   );
+
+  it('opens instruction files through the admission root, not a relocated live cwd', async () => {
+    const status = fixture();
+    // A worktree session: the live cwd moved under the registered root.
+    status.workspaceCwd = '/repo/.qwen/worktrees/task';
+    status.workspaceRoot = '/repo';
+    status.usage.breakdown.instructionFiles = 5;
+    status.usage.instructionFiles = [
+      {
+        path: 'AGENTS.md',
+        tokens: 5,
+        absolutePath: '/repo/.qwen/worktrees/task/AGENTS.md',
+      },
+    ];
+    const onOpenMemoryFile = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ContextUsagePanel
+            sessionActions={
+              {
+                getContextUsage: vi.fn().mockResolvedValue(status),
+              } as unknown as DaemonSessionActions
+            }
+            sessionId="s-1"
+            onOpenMemoryFile={onOpenMemoryFile}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await act(async () => {});
+
+    const summaries = Array.from(container.querySelectorAll('summary'));
+    const advanced = summaries.find((node) =>
+      node.textContent?.includes('Advanced'),
+    )!;
+    await act(async () => advanced.click());
+    const instruction = Array.from(container.querySelectorAll('summary')).find(
+      (node) => node.textContent?.includes('Instruction files'),
+    )!;
+    await act(async () => instruction.click());
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    )!;
+    await act(async () => button.click());
+
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    // The owner must be resolved from the admission root, not the worktree cwd.
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+      '/repo',
+    );
+  });
+
+  it('falls back to the live cwd when the daemon predates workspaceRoot', async () => {
+    // The fixture sets only workspaceCwd; older daemons send no workspaceRoot.
+    const status = fixture();
+    status.usage.breakdown.instructionFiles = 5;
+    status.usage.instructionFiles = [
+      { path: 'AGENTS.md', tokens: 5, absolutePath: '/workspace/AGENTS.md' },
+    ];
+    const onOpenMemoryFile = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ContextUsagePanel
+            sessionActions={
+              {
+                getContextUsage: vi.fn().mockResolvedValue(status),
+              } as unknown as DaemonSessionActions
+            }
+            sessionId="s-1"
+            onOpenMemoryFile={onOpenMemoryFile}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await act(async () => {});
+
+    const advanced = Array.from(container.querySelectorAll('summary')).find(
+      (node) => node.textContent?.includes('Advanced'),
+    )!;
+    await act(async () => advanced.click());
+    const instruction = Array.from(container.querySelectorAll('summary')).find(
+      (node) => node.textContent?.includes('Instruction files'),
+    )!;
+    await act(async () => instruction.click());
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    )!;
+    await act(async () => button.click());
+
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    expect(status.workspaceRoot).toBeUndefined();
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+      '/workspace',
+    );
+  });
 });

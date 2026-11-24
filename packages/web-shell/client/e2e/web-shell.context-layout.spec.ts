@@ -183,6 +183,20 @@ for (const theme of ['light', 'dark']) {
         )
         .toBe(true);
     }
+    await surface.evaluate((element) => {
+      (element as HTMLElement).style.width = '850px';
+    });
+    await expect(
+      page.getByRole('button', { name: 'Ultra wide', exact: true }),
+    ).toBeVisible();
+    const expandedToolbar = surface.locator('[class*="toolbarLeft"]');
+    await expect
+      .poll(() =>
+        expandedToolbar.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth + 1,
+        ),
+      )
+      .toBe(true);
     await surface.evaluate((element) =>
       (element as HTMLElement).style.removeProperty('width'),
     );
@@ -214,33 +228,36 @@ for (const theme of ['light', 'dark']) {
     for (const label of await tooltip.locator('dt').all()) {
       await expect(label).toHaveCSS('color', secondaryColor);
     }
-    await expect(tooltip).toContainText(
+    // The main composer has a details panel, so the popover points at that
+    // instead of advertising a transcript snapshot.
+    await expect(tooltip).not.toContainText(
       'Click to view the breakdown in the conversation.',
     );
     await expect(
-      tooltip.getByText('Click to view the breakdown in the conversation.', {
-        exact: true,
-      }),
-    ).toHaveCSS('color', secondaryColor);
+      tooltip.getByRole('button', { name: 'View details', exact: true }),
+    ).toBeVisible();
     expect(contextRequests).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath(`context-hover-${theme}.png`),
     });
-    await usage.click();
     const history = page.locator('[data-web-shell-message-list]');
     const cards = history.getByRole('group', {
       name: 'Context Usage',
       exact: true,
     });
+
+    // The transcript detail card is still reachable, through the command. It is
+    // produced before the panel is ever opened, so the overflow checks below
+    // measure a chat column that is not mid-transition.
+    await editor.fill('/context detail');
+    await page
+      .getByRole('button', { name: 'Send message', exact: true })
+      .click();
     await expect(cards).toHaveCount(1);
-    await expect(cards.first()).toContainText('60.0%');
-    expect(contextRequests).toEqual([false]);
-    await cards.first().getByRole('button', { name: 'View details' }).click();
-    await expect(cards).toHaveCount(2);
     await expect(
       history.getByRole('region', { name: 'Context Usage', exact: true }),
     ).toHaveCount(0);
-    expect(contextRequests).toEqual([false, true]);
+    expect(contextRequests).toEqual([true]);
     const detailCard = cards.last();
     await expect(detailCard.locator('[class*="total"]')).toHaveText(
       '60.0k / 100.0k tokens',
@@ -397,7 +414,12 @@ for (const theme of ['light', 'dark']) {
         'background-color',
         color,
       );
-      await usage.click();
+      // The ring opens the panel instead of posting a card, so the transcript
+      // reading under test comes from the slash command.
+      await editor.fill('/context');
+      await page
+        .getByRole('button', { name: 'Send message', exact: true })
+        .click();
       await expect(tooltip).toHaveCount(0);
       await expect(cards.last().locator('[class*="percentage"]')).toHaveText(
         `${tokens / 1000}.0%`,

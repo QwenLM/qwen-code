@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { WorkspaceDetailsTooltip } from './WorkspaceDetailsTooltip';
 import type { WorkspaceOverviewSnapshot } from './workspaceOverviewModel';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
 // The real picker reads the daemon workspace context and portals its own
 // layer; the branch row only needs to prove it wires the trigger and the
@@ -167,6 +168,30 @@ describe('WorkspaceDetailsTooltip', () => {
     expect(facetRow(details, 'extensions')?.textContent).toBe('Extensions0');
     expect(facetRow(details, 'channels')?.textContent).toBe('Channels0');
     expect(facetRow(details, 'context')?.textContent).toBe('Context0');
+  });
+
+  it('names trust-withheld hooks and the remedy in the hooks facet', async () => {
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={{
+          ...snapshot,
+          hooks: { initialized: true, count: 2, disabled: false, untrusted: 1 },
+        }}
+        items={['hooks']}
+      >
+        <button type="button">qwen-code</button>
+      </WorkspaceDetailsTooltip>,
+    );
+
+    expect(facetRow(details, 'hooks')?.textContent).toBe('Hooks2');
+    expect(facetRow(details, 'hooks')?.getAttribute('title')).toContain(
+      'not loaded (folder not trusted)',
+    );
+    expect(facetRow(details, 'hooks')?.getAttribute('title')).toContain(
+      'security.folderTrust.enabled',
+    );
   });
 
   it('marks a facet with an issue in the warning tone', async () => {
@@ -597,6 +622,75 @@ function gitDot(details: HTMLElement): HTMLElement | null {
 function picker(details: HTMLElement): HTMLElement | null {
   return details.querySelector<HTMLElement>('[data-testid="branch-picker"]');
 }
+
+describe('WorkspaceDetailsTooltip menu suppression', () => {
+  it('closes and cancels hover without stealing focus, then restores hover and focus opening', async () => {
+    let suppressed = true;
+    const content = (suppressed: boolean) => (
+      <SidebarHoverSuppressionContext.Provider value={suppressed}>
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="workspace"
+            cwd="/workspace"
+            overview={undefined}
+            items={[]}
+          >
+            <button type="button">Workspace</button>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>
+      </SidebarHoverSuppressionContext.Provider>
+    );
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(content(suppressed));
+    });
+    const trigger = () => container.querySelector<HTMLButtonElement>('button')!;
+    const hover = async () => {
+      await act(async () => {
+        trigger().dispatchEvent(new Event('pointerover', { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(300);
+        await Promise.resolve();
+      });
+    };
+    await hover();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    await act(async () => {
+      suppressed = false;
+      root.render(content(suppressed));
+      trigger().focus();
+    });
+    await hover();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.activeElement).toBe(trigger());
+
+    const menuLayer = document.createElement('div');
+    menuLayer.dataset.slot = 'popover-content';
+    document.body.appendChild(menuLayer);
+    const menuFocus = document.createElement('button');
+    menuLayer.appendChild(menuFocus);
+    await act(async () => {
+      menuFocus.focus();
+      suppressed = true;
+      root.render(content(suppressed));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(menuFocus);
+
+    await act(async () => {
+      suppressed = false;
+      root.render(content(suppressed));
+    });
+    await act(async () => {
+      expect(trigger().isConnected).toBe(true);
+      trigger().dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+});
 
 describe('WorkspaceDetailsTooltip git branch row', () => {
   it('stays a plain summary when no git actions are wired', async () => {

@@ -12,7 +12,7 @@ import {
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 export function runWithWorkspaceRuntimeStorage<T>(
-  runtime: WorkspaceRuntime,
+  runtime: Pick<WorkspaceRuntime, 'sessionRuntimeBaseDir'>,
   fn: () => T,
 ): T {
   return Storage.runWithResolvedRuntimeBaseDir(

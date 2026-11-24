@@ -20,7 +20,10 @@ import {
   SessionNotArchivedError,
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  LOG_LINE_UNSAFE_RE,
+  writeStderrLine,
+} from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
@@ -34,6 +37,7 @@ import {
   logWorktreeCleanupPreserve,
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
+  withWorktreeArchiveMove,
 } from './worktree-orphan-cleanup.js';
 
 export interface DaemonArchiveSessionsResult {
@@ -262,10 +266,9 @@ async function runWithDaemonWriterLease<T>(params: {
       ) {
         throw error;
       }
-      lease = await service.acquireSessionMaintenanceLease(
-        sessionId,
-        leaseOptions,
-      );
+      lease =
+        (await service.acquireSealedManagedMaintenanceLease(sessionId)) ??
+        (await service.acquireSessionMaintenanceLease(sessionId, leaseOptions));
     }
   } catch (error) {
     return { mutationApplied: false, error };
@@ -495,10 +498,47 @@ async function deletePersistedSessionWithLease(
   };
 }
 
+function sessionLiveOnBridge(
+  bridge: Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>,
+  candidate: string,
+): boolean {
+  if (!bridge.getSessionSummary) return true;
+  try {
+    bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
+    return true;
+  } catch (error) {
+    return !(
+      isSessionNotFoundError(error) &&
+      (error as SessionNotFoundError).code !== 'session_closing'
+    );
+  }
+}
+
+async function prepareWorktreeCleanup(
+  service: SessionService,
+  sessionId: string,
+  runtimeWorkspaceCwd?: string,
+) {
+  const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
+  const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    'archived',
+  );
+  if (
+    !fs.existsSync(activeSidecarPath) &&
+    (archivedSidecarPath === activeSidecarPath ||
+      !fs.existsSync(archivedSidecarPath))
+  ) {
+    return undefined;
+  }
+  return preclassifyWorktreeCleanup(service, sessionId, runtimeWorkspaceCwd);
+}
+
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession' | 'deleteSessionAttachments'>;
+  bridge: Pick<AcpSessionBridge, 'closeSession' | 'deleteSessionAttachments'> &
+    Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   assertCanMutate?: () => void;
@@ -527,6 +567,12 @@ export async function deleteDaemonSessions(params: {
       coordinator.assertNotTransitioning(sessionId);
     }
   }
+  // Whether a superseded session that still names a checkout is running
+  // on this runtime's bridge. Only a genuine not-found counts as gone; any
+  // other answer, a `session_closing` refusal included, or a bridge
+  // without the query counts as live, so the checkout is kept.
+  const isSessionLive = (candidate: string): boolean =>
+    sessionLiveOnBridge(bridge, candidate);
   // Ownership-verified worktree cleanup (#11024): classify before the
   // record deletion (the deletion destroys the sidecar), execute only
   // after a confirmed removal, all under the worktree ownership lock so
@@ -558,7 +604,7 @@ export async function deleteDaemonSessions(params: {
     ) {
       return coordinator.runExclusiveMany([sessionId], mutateSession);
     }
-    const cleanupPlan = await preclassifyWorktreeCleanup(
+    const cleanupPlan = await prepareWorktreeCleanup(
       service,
       sessionId,
       runtimeWorkspaceCwd,
@@ -568,7 +614,10 @@ export async function deleteDaemonSessions(params: {
     }
     const releaseCleanupLock = await acquireWorktreeCleanupLock(cleanupPlan);
     try {
-      const ownership = await verifyWorktreeCleanupOwnership(cleanupPlan);
+      const ownership = await verifyWorktreeCleanupOwnership(
+        cleanupPlan,
+        isSessionLive,
+      );
       if (!ownership.ok) {
         logWorktreeCleanupPreserve(sessionId, ownership.reason);
       }
@@ -635,7 +684,9 @@ export async function deleteDaemonSessions(params: {
             }
           };
           try {
-            await bridge.closeSession(sessionId);
+            await bridge.closeSession(sessionId, undefined, {
+              forDeletion: true,
+            });
           } catch (error) {
             // A 'session_closing' refusal means a bridge-internal
             // auto-close (last-detach, idle reaper) is in flight — the
@@ -902,12 +953,6 @@ export function logSessionArchiveWarning(message: string): void {
   writeStderrLine(`qwen serve: ${sanitizeLogLine(message)}`);
 }
 
-// Control characters are intentionally stripped from daemon log lines.
-/* eslint-disable no-control-regex */
-const LOG_LINE_UNSAFE_RE =
-  /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
-/* eslint-enable no-control-regex */
-
 function sanitizeLogLine(message: string): string {
   return message.replace(LOG_LINE_UNSAFE_RE, ' ').slice(0, 4096);
 }
@@ -919,6 +964,7 @@ export async function archiveDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
+  requireIdle?: boolean;
   assertCanMutate?: () => void;
 }): Promise<DaemonArchiveSessionsResult> {
   const {
@@ -928,6 +974,7 @@ export async function archiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
     resolveConflicts = false,
+    requireIdle = false,
     assertCanMutate,
   } = params;
   const uniqueSessionIds = [
@@ -946,9 +993,13 @@ export async function archiveDaemonSessions(params: {
           try {
             await bridge.closeSession(sessionId, undefined, {
               requireAgentClose: true,
+              requireIdle,
             });
           } catch (error) {
-            if (!isSessionNotFoundError(error)) {
+            if (
+              !isSessionNotFoundError(error) ||
+              (error as SessionNotFoundError).code === 'session_closing'
+            ) {
               return {
                 kind: 'error' as const,
                 error,
@@ -1062,7 +1113,9 @@ export async function archiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'active', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -1248,7 +1301,9 @@ export async function unarchiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'archived', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;

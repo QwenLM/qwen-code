@@ -15,6 +15,7 @@ import {
   getAllSettingKeys,
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
   // Business logic utilities
   TEST_ONLY,
@@ -29,7 +30,6 @@ import {
   setNestedPropertyForce,
   validateSettingValue,
 } from './settingsUtils.js';
-import { GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
@@ -261,9 +261,9 @@ describe('SettingsUtils', () => {
 
       it('refuses out-of-range model.goalCheckpointTimeoutSeconds values', async () => {
         // This file mocks getSettingsSchema, so read the production
-        // definition straight from the module: removing the declared bounds
-        // must turn this red, closing the /config write path that persists a
-        // value the next CLI start rejects.
+        // definition straight from the module. The setting is deprecated and
+        // ignored, but its declared bounds stay so the /config write path
+        // keeps refusing a value that was never valid.
         const { getSettingsSchema: getRealSettingsSchema } =
           await vi.importActual<typeof import('./settingsSchema.js')>(
             './settingsSchema.js',
@@ -272,16 +272,11 @@ describe('SettingsUtils', () => {
           getRealSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
 
         expect(validateSettingValue(definition, 0)).toBe('Value must be >= 1');
-        expect(
-          validateSettingValue(
-            definition,
-            GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-          ),
-        ).toBe(`Value must be <= ${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}`);
+        expect(validateSettingValue(definition, 901)).toBe(
+          'Value must be <= 900',
+        );
         expect(validateSettingValue(definition, 1)).toBeUndefined();
-        expect(
-          validateSettingValue(definition, GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP),
-        ).toBeUndefined();
+        expect(validateSettingValue(definition, 900)).toBeUndefined();
       });
 
       it('refuses zero for Goal cadence settings while accepting -1', async () => {
@@ -483,6 +478,41 @@ describe('SettingsUtils', () => {
           ).toEqual(allKeys);
           expect(allKeys).toContain(restrictedKey);
         });
+
+        it.each(WORKSPACE_RESTRICTED_ROOT_SETTINGS)(
+          'hides the root-level %s only in Workspace scope',
+          (key) => {
+            vi.mocked(getSettingsSchema).mockReturnValue({
+              [key]: {
+                type: 'number',
+                label: key,
+                category: 'General',
+                requiresRestart: false,
+                default: 5,
+                showInDialog: true,
+              },
+              visionModel: {
+                type: 'string',
+                label: 'Vision Model',
+                category: 'General',
+                requiresRestart: false,
+                default: '',
+                showInDialog: true,
+              },
+            } as unknown as ReturnType<typeof getSettingsSchema>);
+
+            expect(getDialogSettingKeys()).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: false }),
+            ).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).not.toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).toContain('visionModel');
+          },
+        );
       });
 
       it('should return only settings marked for dialog display', () => {
@@ -1121,6 +1151,44 @@ describe('SettingsUtils', () => {
         expect(nextBooleanSettingValue(false)).toBe(true);
         expect(nextBooleanSettingValue(true)).toBe(false);
       });
+
+      it('moves an unset boolean to the value its definition asks for', () => {
+        expect(nextBooleanSettingValue(undefined, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(false, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(true, undefined, true)).toBe(false);
+      });
+
+      it('turns the unified agent loop on from its unset state', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().experimental.properties.unifiedAgentLoop;
+        expect(
+          nextBooleanSettingValue(
+            undefined,
+            definition.default,
+            definition.unsetToggleValue,
+          ),
+        ).toBe(true);
+      });
+
+      it('turns the event-bus agent loop on from its unset state', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().experimental.properties.eventBusAgentLoop;
+        expect(
+          nextBooleanSettingValue(
+            undefined,
+            definition.default,
+            definition.unsetToggleValue,
+          ),
+        ).toBe(true);
+      });
     });
 
     describe('saveModifiedSettings', () => {
@@ -1237,11 +1305,12 @@ describe('setNestedProperty prototype-pollution guards', () => {
 });
 
 describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
-  it('lists the cross-session keys, and the restricted list no longer does', () => {
+  it('lists the name-only lock and the cross-session keys, and the restricted list does not', () => {
     const keys = WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
       ({ section, key }) => `${section}.${key}`,
     );
     expect(keys).toEqual([
+      'tools.workflowNameOnly',
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
     ]);
@@ -1276,6 +1345,17 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       messaging.strictness(false),
     );
     expect(messaging.strictness({})).toBe(messaging.strictness(false));
+  });
+
+  // A repository may turn the name-only lock on for itself, never off: only
+  // `true` locks, so anything else ranks with the unlocked default.
+  it('ranks the name-only lock on as stricter than off, unset or garbage', () => {
+    const lock = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'workflowNameOnly',
+    )!;
+    expect(lock.strictness(true)).toBeGreaterThan(lock.strictness(false));
+    expect(lock.strictness(undefined)).toBe(lock.strictness(false));
+    expect(lock.strictness('true')).toBe(lock.strictness(false));
   });
 
   it('ranks the switch off as stricter than on, and unset as on', () => {

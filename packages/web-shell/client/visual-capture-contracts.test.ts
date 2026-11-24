@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { FIXED_CAPTURE_TIME } from './e2e/visuals/constants';
+import smokeConfig from '../playwright.config';
 
 /*
  * Contracts the visuals pipeline depends on and that no runtime assertion
@@ -80,14 +81,18 @@ describe('visual capture contracts', () => {
     expect(sources.length).toBeGreaterThan(5);
   });
 
-  it('keeps both navigation helpers freezing the clock before they navigate', () => {
+  it('keeps every navigation helper freezing the clock before it navigates', () => {
     // `freezeWallClock` runs only implicitly, and nothing in the visuals suite
     // reads the page clock -- so dropping the call, or moving it after
     // `page.goto`, leaves every test green while timestamped captures silently
     // resume drifting between the base and head passes.
     const harness = readFileSync(join(VISUALS_DIR, 'harness.ts'), 'utf8');
 
-    for (const helper of ['gotoSession', 'gotoNewSession']) {
+    for (const helper of [
+      'gotoSession',
+      'gotoNewSession',
+      'gotoSettingsHarness',
+    ]) {
       const body = harness.slice(
         harness.indexOf(`export async function ${helper}(`),
       );
@@ -253,5 +258,93 @@ describe('visual capture contracts', () => {
     expect(css, 'the hide rule must live inside @media (hover: hover)').toMatch(
       /@media \(hover: hover\) \{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
     );
+  });
+
+  it('keeps the AskUser action row wrapping so the details button stays reachable', () => {
+    // The fifth action button ("Ask for details") can push the row past a
+    // 320px panel, and a flex-end row overflows to the LEFT, which scrollWidth
+    // does not report. `flex-wrap: wrap` is what keeps every button inside the
+    // panel and clickable. The only test that measures this is the visuals
+    // Playwright case, which no gating lane collects (vitest excludes e2e/**,
+    // playwright ignores **/visuals/**, and the visuals step is
+    // continue-on-error). Pin the rule here so a later refactor of `.actions`
+    // cannot drop it with every gate green.
+    const css = readFileSync(
+      join(HERE, 'components/messages/AskUserQuestion.module.css'),
+      'utf8',
+    ).replace(/\/\*[\s\S]*?\*\//g, '');
+    // The base rule must wrap, and no later override (e.g. a narrow-width
+    // @container form) may turn wrapping off for the same selector. Matching
+    // each `.actions { … }` block rather than only the first one keeps a later
+    // override from slipping through green.
+    const actionBlocks = [...css.matchAll(/\.actions\s*\{([^}]*)\}/g)].map(
+      (m) => m[1],
+    );
+    expect(
+      actionBlocks.length,
+      'AskUserQuestion.module.css must declare .actions',
+    ).toBeGreaterThan(0);
+    expect(actionBlocks[0], '.actions must wrap its buttons').toMatch(
+      /flex-wrap:\s*wrap;/,
+    );
+    for (const block of actionBlocks) {
+      expect(block, 'no .actions override may disable wrapping').not.toMatch(
+        /flex-wrap:\s*nowrap;/,
+      );
+    }
+    // Markup half: the wrap rule only protects the details button if that
+    // button is rendered inside the .actions row. Pin that it appears in the
+    // row region of the component, not orphaned by a markup-only refactor.
+    const tsx = readFileSync(
+      join(HERE, 'components/messages/AskUserQuestion.tsx'),
+      'utf8',
+    );
+    const rowAt = tsx.indexOf('className={styles.actions}');
+    expect(rowAt, 'the actions row must be rendered').toBeGreaterThan(-1);
+    const buttonAt = tsx.indexOf('className={styles.detailsButton}');
+    expect(
+      buttonAt,
+      'the details button must be rendered in the actions row',
+    ).toBeGreaterThan(rowAt);
+  });
+});
+
+describe('smoke lane browser projects', () => {
+  // `npm run test:e2e:smoke` selects `--grep @smoke` across every project in
+  // playwright.config.ts. Nothing reads that project list at test time, and
+  // Playwright does not fail when a project definition disappears — it just
+  // collects fewer tests — so deleting or re-scoping the WebKit project would
+  // silently drop the repo's only WebKit execution while the separately
+  // pinned WebKit install steps (scripts/tests/no-ak-integration-ci.test.js)
+  // keep every gate green.
+  it('keeps a WebKit and a Chromium mobile project intersecting --grep @smoke', () => {
+    const projects = smokeConfig.projects ?? [];
+    const coversMobileSpecs = (project: (typeof projects)[number]) =>
+      [project.testMatch ?? []]
+        .flat()
+        .some((pattern) =>
+          typeof pattern === 'string'
+            ? pattern.includes('*.mobile.spec.ts')
+            : pattern.test('fake.mobile.spec.ts'),
+        );
+    const intersectsSmokeGrep = (project: (typeof projects)[number]) => {
+      const greps = [project.grep ?? []].flat();
+      return (
+        greps.length === 0 ||
+        greps.some((grep) => new RegExp(grep).test('@smoke'))
+      );
+    };
+    for (const browserType of ['chromium', 'webkit'] as const) {
+      const matching = projects.filter(
+        (project) =>
+          project.use?.defaultBrowserType === browserType &&
+          coversMobileSpecs(project) &&
+          intersectsSmokeGrep(project),
+      );
+      expect(
+        matching.length,
+        `playwright.config.ts must keep a ${browserType} mobile project reachable from --grep @smoke`,
+      ).toBeGreaterThan(0);
+    }
   });
 });

@@ -1,3 +1,8 @@
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonHttpError,
@@ -155,6 +160,21 @@ export function projectStreamingTailMessages(
     return undefined;
   }
 
+  let blockIndex = blocks.length - 1;
+  let messageIndex = previous.messages.length - 1;
+  for (; blockIndex > 0 && messageIndex > 0; blockIndex--, messageIndex--) {
+    const block = blocks[blockIndex];
+    if (block.kind !== 'status' || block.source !== 'mod_log') break;
+    const message = previous.messages[messageIndex];
+    if (
+      previous.blocks[blockIndex] !== block ||
+      message.id !== block.id ||
+      message.role !== 'system' ||
+      message.source !== 'mod_log'
+    )
+      return undefined;
+  }
+
   const previousSummary = previous.blockChangeSummary;
   let summaryProvesTailAppend = false;
   if (previousSummary && blockChangeSummary) {
@@ -168,14 +188,14 @@ export function projectStreamingTailMessages(
     }
     summaryProvesTailAppend = true;
   } else {
-    for (let i = 0; i < blocks.length - 1; i += 1) {
+    for (let i = 0; i < blockIndex; i += 1) {
       if (previous.blocks[i] !== blocks[i]) return undefined;
     }
   }
 
-  const before = previous.blocks[blocks.length - 1];
-  const after = blocks[blocks.length - 1];
-  const previousTail = previous.messages[previous.messages.length - 1];
+  const before = previous.blocks[blockIndex];
+  const after = blocks[blockIndex];
+  const previousTail = previous.messages[messageIndex];
   if (
     (before.kind !== 'assistant' && before.kind !== 'thought') ||
     after.kind !== before.kind ||
@@ -223,14 +243,16 @@ export function projectStreamingTailMessages(
   if (
     (previousTail.role !== 'assistant' && previousTail.role !== 'thinking') ||
     previousTail.isStreaming !== true ||
-    (after.kind === 'assistant') !== (previousTail.role === 'assistant')
+    (after.kind === 'assistant') !== (previousTail.role === 'assistant') ||
+    (previousTail.role === 'assistant' &&
+      previousTail.parentToolCallId !== undefined)
   ) {
     return undefined;
   }
 
   const messages = previous.messages.slice();
   const appendedText = after.text.slice(before.text.length);
-  messages[messages.length - 1] = {
+  messages[messageIndex] = {
     ...previousTail,
     content: previousTail.content + appendedText,
     isStreaming: true,
@@ -373,6 +395,8 @@ export function useMessagesFromBlocks(
 ): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const [resolutionSnapshot, setResolutionSnapshot] = useState<{
     sessionId: string;
     resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
@@ -542,6 +566,13 @@ export function useMessagesFromBlocks(
     }
     const sessionId = connection.sessionId;
     if (
+      !available ||
+      (availability && availability.getSnapshot() !== 'available')
+    ) {
+      reconciliationRequestRef.current = undefined;
+      return;
+    }
+    if (
       !sessionId ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
@@ -652,6 +683,15 @@ export function useMessagesFromBlocks(
     request
       .then(({ resolutions, errors, notFounds, succeeded }) => {
         if (!active) return;
+        if (
+          (availability && availability.getSnapshot() !== 'available') ||
+          errors.some((entry) => isDaemonUnavailableError(entry.error))
+        ) {
+          if (reconciliationRequestRef.current?.request === request) {
+            reconciliationRequestRef.current = undefined;
+          }
+          return;
+        }
         round.processed = true;
         // Grace-miss accounting lives in the active handler, not the per-call
         // closure: a superseded round's late 404 must not consume grace that
@@ -783,6 +823,8 @@ export function useMessagesFromBlocks(
       clearTimeout(retryTimer);
     };
   }, [
+    availability,
+    available,
     backgroundAgentNotificationKey,
     connection.catchingUp,
     connection.loadingTranscript,

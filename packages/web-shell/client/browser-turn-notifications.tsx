@@ -14,7 +14,7 @@ import {
   type ReactNode,
 } from 'react';
 import { notificationExcerpt } from './notification-text';
-import { getTranslator, type WebShellLanguage } from './i18n';
+import { getTranslator, loadLanguage, type WebShellLanguage } from './i18n';
 import {
   createTurnNotificationObserver,
   TurnNotificationContext,
@@ -25,6 +25,8 @@ import {
 export const BROWSER_NOTIFICATIONS_STORAGE_KEY =
   'qwen-code-web-shell-browser-notifications';
 const CLAIMS_STORAGE_KEY = 'qwen-code-web-shell-notification-claims';
+const AUTH_ATTEMPT_STORAGE_KEY =
+  'qwen-code-web-shell-notification-authorization-attempted';
 const MAX_CLAIMS = 1024;
 const NOTIFICATION_ICON_URL = new URL(
   './assets/qwen-code-notification.png',
@@ -32,7 +34,7 @@ const NOTIFICATION_ICON_URL = new URL(
 ).href;
 
 export interface WebShellBrowserNotificationsOptions {
-  /** Initial preference when none is saved. Defaults to false; never requests permission automatically. */
+  /** Initial preference when none is saved. Defaults to false; mounting alone never requests permission. */
   defaultEnabled?: boolean;
   /** Application name prefixed to notification titles. Defaults to QwenCode. */
   appName?: string;
@@ -56,6 +58,7 @@ interface BrowserNotificationSettings {
   persistent: boolean;
   error: boolean;
   setEnabled(enabled: boolean): Promise<void>;
+  requestPermissionOnce(): void;
   refreshPermission(): void;
   syncLanguage(language: WebShellLanguage): void;
 }
@@ -129,6 +132,7 @@ function StandaloneNotifications({
   const enabledRef = useRef(preference.enabled);
   const version = useRef(0);
   const mounted = useRef(true);
+  const authorizationAttempted = useRef(false);
   const notifyRef = useRef<(turn: TurnNotification) => void>(() => {});
   const [observer] = useState(() =>
     createTurnNotificationObserver((turn) => notifyRef.current(turn)),
@@ -183,6 +187,12 @@ function StandaloneNotifications({
       const storedBeforeRequest = readStoredPreference();
       let nextPermission = permission();
       if (nextPermission === 'default') {
+        authorizationAttempted.current = true;
+        try {
+          window.localStorage.setItem(AUTH_ATTEMPT_STORAGE_KEY, 'true');
+        } catch {
+          // The mounted shell still remembers manual authorization attempts.
+        }
         setPending(true);
         try {
           nextPermission = await window.Notification.requestPermission();
@@ -204,6 +214,34 @@ function StandaloneNotifications({
     [savePreference, defaultEnabled],
   );
 
+  const requestPermissionOnce = useCallback(() => {
+    if (
+      !activeRef.current ||
+      authorizationAttempted.current ||
+      permission() !== 'default' ||
+      readStoredPreference() === 'false'
+    )
+      return;
+    authorizationAttempted.current = true;
+    try {
+      if (window.localStorage.getItem(AUTH_ATTEMPT_STORAGE_KEY) === 'true')
+        return;
+      window.localStorage.setItem(AUTH_ATTEMPT_STORAGE_KEY, 'true');
+    } catch {
+      // Storage restrictions limit one-shot authorization to this mounted shell.
+    }
+    // Wait for Strict Mode's initial effect cleanup/setup before requesting.
+    queueMicrotask(() => {
+      if (
+        mounted.current &&
+        activeRef.current &&
+        permission() === 'default' &&
+        readStoredPreference() !== 'false'
+      )
+        void setEnabled(true);
+    });
+  }, [setEnabled]);
+
   notifyRef.current = (turn) => {
     const request = version.current;
     const canShow = () =>
@@ -215,11 +253,15 @@ function StandaloneNotifications({
       (document.visibilityState !== 'visible' || !document.hasFocus());
     if (turn.outcome === 'cancelled' || !canShow()) return;
     const show = async () => {
+      const notificationLanguage = appLanguage ?? language;
+      const localeReady = loadLanguage(notificationLanguage);
       // Hash identities so notification tags and shared storage contain no paths.
       const digest = await crypto.subtle.digest(
         'SHA-256',
         new TextEncoder().encode(turn.key),
       );
+      if (localeReady) await localeReady;
+      if (!canShow()) return;
       const tag = `qwen-code-turn:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
       let attempted = false;
       const deliver = (shared: boolean) => {
@@ -244,7 +286,7 @@ function StandaloneNotifications({
             // Storage restrictions degrade to page-local deduplication and tag replacement.
           }
         }
-        const t = getTranslator(appLanguage ?? language);
+        const t = getTranslator(notificationLanguage);
         const appName = options?.appName?.trim() || 'QwenCode';
         const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
         const prompt = notificationExcerpt(turn.promptText ?? '', 80);
@@ -318,6 +360,7 @@ function StandaloneNotifications({
                   pending,
                   error,
                   setEnabled,
+                  requestPermissionOnce,
                   refreshPermission,
                   syncLanguage,
                 }

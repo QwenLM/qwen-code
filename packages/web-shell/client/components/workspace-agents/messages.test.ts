@@ -1,0 +1,134 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { getTranslator } from '../../i18n';
+import { formatElapsed } from './agents-view-logic';
+import {
+  COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_RU,
+  COLLAB_MESSAGES_ZH,
+} from './messages';
+import * as transcriptStub from './messages.transcript-stub';
+
+const CLIENT_DIR = join(dirname(fileURLToPath(import.meta.url)), '../..');
+
+describe('collaboration messages', () => {
+  it('still reach the app through the main dictionary, in both languages', () => {
+    expect(getTranslator('en')('collab.agent.new')).toBe('New agent');
+    expect(getTranslator('zh-CN')('collab.agent.new')).toBe('新建 Agent');
+    expect(
+      getTranslator('zh-CN')('collab.runtime.joinConnected', {
+        server: 'https://coordinator:4170',
+      }),
+    ).toBe('这台电脑已作为 Runtime 加入 https://coordinator:4170。');
+  });
+
+  it("format durations in the reader's language", () => {
+    expect(formatElapsed(405_000, getTranslator('zh-CN'))).toBe('6 分 45 秒');
+    expect(formatElapsed(45_000, getTranslator('en'))).toBe('45s');
+  });
+
+  it('hold only workspace-agent keys, translated one for one', () => {
+    const en = Object.keys(COLLAB_MESSAGES_EN);
+    expect(en.length).toBeGreaterThan(0);
+    expect(
+      en.every(
+        (key) => key.startsWith('collab.') || key === 'agents.description',
+      ),
+    ).toBe(true);
+    expect(Object.keys(COLLAB_MESSAGES_ZH).sort()).toEqual([...en].sort());
+    expect(Object.keys(COLLAB_MESSAGES_RU).sort()).toEqual([...en].sort());
+  });
+
+  it('are replaced by a stub of the same shape in the transcript build', () => {
+    expect(Object.keys(transcriptStub).sort()).toEqual([
+      'COLLAB_MESSAGES_EN',
+      'COLLAB_MESSAGES_RU',
+      'COLLAB_MESSAGES_ZH',
+    ]);
+    expect(transcriptStub.COLLAB_MESSAGES_EN).toEqual({});
+    expect(transcriptStub.COLLAB_MESSAGES_ZH).toEqual({});
+    expect(transcriptStub.COLLAB_MESSAGES_RU).toEqual({});
+  });
+
+  // A collaboration key in these catalogs would ship to every exported document.
+  it.each(['i18n.tsx', 'i18n-zh-cn.ts'])(
+    'are defined outside the embedded catalog in %s',
+    (filename) => {
+      const dictionary = readFileSync(join(CLIENT_DIR, filename), 'utf8');
+      expect(dictionary).not.toMatch(/^ {2}'collab\./m);
+      expect(dictionary).not.toMatch(/^ {2}'agents\.description'/m);
+    },
+  );
+});
+
+describe('the join notices', () => {
+  const en = COLLAB_MESSAGES_EN['collab.runtime.notSavedHere'];
+  const zh = COLLAB_MESSAGES_ZH['collab.runtime.notSavedHere'];
+  const tw = getTranslator('zh-TW');
+
+  it('advises a rerun only when the credential recorded the join', () => {
+    // An older daemon sends no `recorded`: absent means unknown, and the
+    // rerun it would be advised to make can be refused.
+    const cases = [
+      [undefined, '', '', ''],
+      ['false', '', '', ''],
+      [
+        'true',
+        ' Run the same join command again to save it.',
+        '再运行一次同样的加入命令即可保存。',
+        '再執行一次同樣的加入命令即可儲存。',
+      ],
+    ] as const;
+    for (const [recorded, remedyEn, remedyZh, remedyTw] of cases) {
+      expect(
+        typeof en === 'function' ? en({ error: 'disk full', recorded }) : en,
+      ).toBe(
+        `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full.${remedyEn}`,
+      );
+      expect(
+        typeof zh === 'function' ? zh({ error: 'disk full', recorded }) : zh,
+      ).toBe(
+        `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连：disk full。${remedyZh}`,
+      );
+      expect(
+        tw('collab.runtime.notSavedHere', { error: 'disk full', recorded }),
+      ).toBe(
+        `這臺電腦已加入，但沒能儲存這次連線，重啟或重新載入工作區後不會自動重連：disk full。${remedyTw}`,
+      );
+    }
+  });
+
+  it('renders the empty-error fallback without a dangling colon', () => {
+    expect(typeof en === 'function' ? en({}) : en).toBe(
+      'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload.',
+    );
+  });
+
+  it('the timed-out join hint names the branches instead of promising', () => {
+    const enTimeout = COLLAB_MESSAGES_EN['collab.runtime.joinTimedOut'];
+    const zhTimeout = COLLAB_MESSAGES_ZH['collab.runtime.joinTimedOut'];
+    const enText = typeof enTimeout === 'function' ? enTimeout({}) : enTimeout;
+    const zhText = typeof zhTimeout === 'function' ? zhTimeout({}) : zhTimeout;
+    // Whether the daemon recorded the token is unknowable after a timeout:
+    // the hint must not promise the rerun goes on (a released daemon would
+    // tear the live connection down and refuse).
+    expect(enText).toContain('if the daemon recorded this join’s token');
+    expect(enText).not.toContain('picks up what this attempt did');
+    expect(zhText).toContain('若守护进程记录了本次加入的令牌');
+    expect(zhText).not.toContain('会接着这次尝试已完成的部分继续');
+    const twText = tw('collab.runtime.joinTimedOut', {});
+    expect(twText).toContain('若守護程序已記錄本次加入的令牌');
+    expect(twText).toContain('沿用');
+    expect(tw('collab.runtime.joinTimedOut', { error: 'boom' })).toContain(
+      '（boom）',
+    );
+  });
+});

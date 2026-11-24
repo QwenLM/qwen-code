@@ -48,6 +48,7 @@ const KNOWN_AGENT_OPTS = [
   'stallMs',
   'workingDir',
   'disallowedTools',
+  'tools',
 ];
 
 async function runScript(

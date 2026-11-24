@@ -19,11 +19,18 @@ final class HttpSupport {
     }
 
     static HttpResponse.BodyHandler<Body> bodyHandler() {
+        return bodyHandler(MAXIMUM_JSON_BYTES);
+    }
+
+    static HttpResponse.BodyHandler<Body> bodyHandler(int maximumJsonBytes) {
+        if (maximumJsonBytes < 1 || maximumJsonBytes > 8 * 1024 * 1024) {
+            throw new IllegalArgumentException("Invalid JSON response limit");
+        }
         return responseInfo -> {
             boolean success = responseInfo.statusCode() >= 200
                     && responseInfo.statusCode() < 300;
             return new BoundedBodySubscriber(
-                    success ? MAXIMUM_JSON_BYTES : MAXIMUM_ERROR_BYTES);
+                    success ? maximumJsonBytes : MAXIMUM_ERROR_BYTES);
         };
     }
 

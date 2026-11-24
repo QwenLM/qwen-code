@@ -9,7 +9,13 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export interface BackgroundNotificationTurn {
   turnId: string;
   taskId: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /**
+   * What produced the turn. `peer` is a message another session sent to
+   * this one, which the cross-session gate accepted; it is not a task, so
+   * its `taskId` is the message id and nothing in the task registry
+   * answers to it.
+   */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   sourceTurnId?: string;
   label?: string;

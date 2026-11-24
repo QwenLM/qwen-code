@@ -687,6 +687,27 @@ describe('TextSelectionController', () => {
     expect(setSelection).toHaveBeenCalledWith(null);
   });
 
+  it('clears the painted highlight when the controller unmounts', () => {
+    const handler = mount();
+    selectHello(handler);
+    // The painted range lives on the per-stdout frame controller, which outlives
+    // this component. Without an unmount teardown, a view that replaces this one
+    // (switching away from a teammate tab, or between teammates) re-stamps the
+    // highlight over cells the user never selected there — and no successor can
+    // repair it, because `clearSelection()` early-returns on an empty own
+    // selection, which is what every fresh controller starts with.
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 0,
+    });
+
+    cleanup();
+
+    expect(setSelection).toHaveBeenLastCalledWith(null);
+  });
+
   it('keeps a selection across its own highlight repaint', () => {
     const handler = mount();
     selectHello(handler);

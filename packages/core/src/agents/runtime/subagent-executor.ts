@@ -31,7 +31,15 @@ export interface SubagentExecutor {
   execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options?: { resetStats?: boolean },
+    options?: {
+      resetStats?: boolean;
+      /**
+       * Internal: enforce the agent time limit during retry backoff sleeps
+       * (see `ReasoningLoopOptions.enforceTimeLimitDuringRetryWait`). Set by
+       * workflow dispatches only.
+       */
+      enforceTimeLimitDuringRetryWait?: boolean;
+    },
   ): Promise<void>;
 
   executeExternalInputs(
@@ -42,6 +50,13 @@ export interface SubagentExecutor {
 
   getFinalText(): string;
   getTerminateMode(): AgentTerminateMode;
+  /**
+   * Best-effort message of the failure that ended the run. May be `undefined`
+   * even when `getTerminateMode()` is ERROR — not every ERROR route records one
+   * — and is never present on external executors (ACP, Codex), which own their
+   * own failure reporting and do not implement this.
+   */
+  getLastError?(): string | undefined;
   getExecutionSummary(): AgentStatsSummary;
   getCore(): SubagentExecutorCore;
 

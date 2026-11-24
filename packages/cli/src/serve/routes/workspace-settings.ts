@@ -6,32 +6,50 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
+import { resolveModelId } from '@qwen-code/qwen-code-core/utils/modelId.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,
 } from '../../config/mcp-server-secrets.js';
-import type {
-  SettingEnumOption,
-  SettingsType,
-  SettingsValue,
+import {
+  getSettingsSchema,
+  type SettingEnumOption,
+  type SettingsType,
+  type SettingsValue,
 } from '../../config/settingsSchema.js';
 import {
   getDialogSettingKeys,
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
+import {
+  isAuxModelSelectorSettingKey,
+  publicAuxModelSelectorValue,
+} from '../../utils/aux-model-selector.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  WorkspaceSettingsPartialPersistError,
+  type WorkspaceSettingsWrite,
+} from '../workspace-service/types.js';
+import {
+  ACP_ROUTE_ID_PREFIX,
+  parseAcpModelOption,
+  resolveAcpFastModelSelector,
+} from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
@@ -45,20 +63,47 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
+  'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
   'ui.hideBanner',
-  'ui.accessibility.enableLoadingPhrases',
   'ui.enableWelcomeBack',
 ]);
 
-// `voiceModel` is `showInDialog: false` (so not in the dialog allowlist), but
-// the Web Shell `/model --voice` picker needs to read + persist it; the daemon
-// `/voice/stream` then reads it back via `loadSettings`.
+// Served to hosts so they can display the effective value, but never written
+// here: persisting this key alone would leave `output-language.md` and running
+// sessions stale. The language command (`/language output`) is the only
+// supported write path.
+const READ_ONLY_SETTINGS = new Set(['general.outputLanguage']);
+
+// Suggestions for the output-language row. Values are the full names
+// `normalizeOutputLanguage` persists; hosts still accept free-form input
+// because the setting supports any language name.
+const OUTPUT_LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map(
+  ({ fullName, nativeName }) => ({
+    value: fullName,
+    label:
+      nativeName && nativeName !== fullName
+        ? `${nativeName} (${fullName})`
+        : fullName,
+  }),
+);
+
+// `voiceModel`, `imageModel`, `advisorModel`, and `visionBridgeTimeoutMs` are
+// `showInDialog: false` (so not in the dialog allowlist), but the Web Shell
+// settings panel still renders their rows and needs to read + persist them
+// (`visionBridgeTimeoutMs` is also written by Web Shell's
+// `/model --vision --timeout`); for `voiceModel` the daemon `/voice/stream`
+// then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
+  'ui.allowedApprovalModes',
   'ui.compactMode',
+  'serve.maxSessions',
   'voiceModel',
   'imageModel',
+  'advisorModel',
+  'visionBridgeTimeoutMs',
   'mcpServers',
+  'worktree.defaultForNewSessions',
 ]);
 
 const LIVE_WEB_SHELL_SETTINGS = [
@@ -107,6 +152,12 @@ interface SettingsResponse {
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
 
+/** Both restriction lists, for the membership test the write guard needs. */
+const WORKSPACE_RESTRICTED_KEYS = new Set<string>([
+  ...WORKSPACE_RESTRICTED_SETTING_KEYS,
+  ...WORKSPACE_RESTRICTED_ROOT_SETTINGS,
+]);
+
 /**
  * Refuse a workspace-scope write of a setting the merge strips anyway.
  *
@@ -130,7 +181,7 @@ function rejectWorkspaceRestrictedWrite(
   key: string,
 ): boolean {
   if (scope !== 'workspace') return false;
-  if (WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key)) {
+  if (WORKSPACE_RESTRICTED_KEYS.has(key)) {
     res.status(400).json({
       error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
       code: 'workspace_restricted_setting',
@@ -140,7 +191,8 @@ function rejectWorkspaceRestrictedWrite(
   return false;
 }
 
-function getAllowedKeys(includeLiveVoice = false): Set<string> {
+/** Keys the daemon may serve to Web Shell clients; exported for tests. */
+export function getAllowedKeys(includeLiveVoice = false): Set<string> {
   const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
@@ -152,6 +204,20 @@ function getAllowedKeys(includeLiveVoice = false): Set<string> {
   if (includeLiveVoice) {
     for (const key of LIVE_WEB_SHELL_SETTINGS) keys.add(key);
   }
+  return keys;
+}
+
+/**
+ * Keys served by GET: the writable set plus read-only keys, in the settings
+ * dialog's order so a read-only row sits next to its siblings instead of at
+ * the end of the category.
+ */
+function getReadableKeys(allowedKeys: ReadonlySet<string>): Set<string> {
+  const keys = new Set<string>();
+  for (const key of getDialogSettingKeys()) {
+    if (allowedKeys.has(key) || READ_ONLY_SETTINGS.has(key)) keys.add(key);
+  }
+  for (const key of allowedKeys) keys.add(key);
   return keys;
 }
 
@@ -183,8 +249,14 @@ function buildSettingsResponse(
       key,
     );
 
+    // Aux-model selectors persist as `authType:id\0baseUrl`; the suffix can
+    // embed userinfo credentials, so the served value is the scrubbed one.
     const publicValue = (value: unknown) =>
-      key === 'mcpServers' ? redactMcpServersSetting(value) : value;
+      key === 'mcpServers'
+        ? redactMcpServersSetting(value)
+        : typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value;
     const effective = LIVE_MANAGED_SETTINGS.has(key)
       ? (userVal ?? def.default)
       : (mergedEffective ?? def.default);
@@ -196,6 +268,14 @@ function buildSettingsResponse(
       values.workspace = publicValue(wsVal);
     }
 
+    // `general.outputLanguage` declares no schema options, but hosts render a
+    // combobox, so it ships the supported language names as suggestions.
+    const options = def.options?.length
+      ? def.options
+      : key === 'general.outputLanguage'
+        ? OUTPUT_LANGUAGE_OPTIONS
+        : undefined;
+
     settings.push({
       key,
       type: def.type,
@@ -204,7 +284,7 @@ function buildSettingsResponse(
       ...(def.description ? { description: def.description } : {}),
       requiresRestart: def.requiresRestart,
       default: def.default,
-      ...(def.options?.length ? { options: def.options } : {}),
+      ...(options?.length ? { options } : {}),
       values,
     });
   }
@@ -238,7 +318,40 @@ export function prepareSettingWrite(
   workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
-    return { persistedValue: value, publicValue: value };
+    let persistedValue = value;
+    if (
+      key === 'fastModel' &&
+      typeof value === 'string' &&
+      (value.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(value).authType)
+    ) {
+      const { merged } = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      });
+      const models = new ModelsConfig({
+        modelProvidersConfig: merged.modelProviders,
+        providerProtocolConfig: merged.providerProtocol,
+      });
+      persistedValue = resolveAcpFastModelSelector(
+        value,
+        models.getAllConfiguredModels(),
+      );
+      if (persistedValue === null) {
+        throw new Error('Fast model ACP route is unavailable');
+      }
+    }
+    return {
+      persistedValue,
+      // Aux-model selectors persist with their endpoint suffix (runtime
+      // routing resolves against it), but the value answered to and
+      // broadcast to clients must not carry userinfo credentials.
+      publicValue:
+        typeof persistedValue === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(persistedValue)
+          : persistedValue,
+    };
   }
   const existing =
     loadSettings(workspace, {
@@ -452,6 +565,7 @@ export function registerWorkspaceSettingsRoutes(
   } = deps;
 
   const allowedKeys = getAllowedKeys(deps.includeLiveVoice === true);
+  const readableKeys = getReadableKeys(allowedKeys);
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
@@ -460,7 +574,7 @@ export function registerWorkspaceSettingsRoutes(
       assertGenerationOpen();
       const response = buildSettingsResponse(
         boundWorkspace,
-        allowedKeys,
+        readableKeys,
         deps.isWorkspaceTrusted?.() ?? true,
       );
       res.status(200).json(response);
@@ -728,6 +842,16 @@ export function registerWorkspaceSettingsRoutes(
   );
 }
 
+function isVisionModelSelector(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  try {
+    const modelId = resolveModelId(value)?.modelId;
+    return modelId !== undefined && !/(?:^|\s)--/.test(modelId);
+  } catch {
+    return false;
+  }
+}
+
 export function registerWorkspaceQualifiedSettingsRoutes(
   app: Application,
   deps: Pick<
@@ -736,9 +860,15 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   > & {
     workspaceRegistry: WorkspaceRegistry;
     invalidateServeFeaturesCache: () => void;
+    persistSettings?: (
+      workspace: string,
+      writes: WorkspaceSettingsWrite[],
+      assertGenerationOpen: () => void,
+    ) => Promise<void>;
   },
 ): void {
   const allowedKeys = getAllowedKeys(false);
+  const readableKeys = getReadableKeys(allowedKeys);
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
     const runtime = resolveWorkspaceRuntimeFromParam(
@@ -751,7 +881,10 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     // the Phase 3 core-route trust gate.
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
-      const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
+      const response = buildSettingsResponse(
+        runtime.workspaceCwd,
+        readableKeys,
+      );
       res.status(200).json(response);
     } catch (err) {
       writeStderrLine(
@@ -915,7 +1048,10 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             if (sendGenerationClosedError(res, err)) return 'unchanged_failure';
             throw err;
           }
-          if (key === 'experimental.sessionWorkflow') {
+          if (
+            key === 'experimental.sessionWorkflow' &&
+            !runtime.routeFileSystemFactory?.sshWorkspace
+          ) {
             if (
               !(await updateLiveSessionWorkflow(
                 (enabled) =>
@@ -993,6 +1129,91 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         scope,
         value: publicValue,
         requiresRestart: def.requiresRestart || imageSyncFailed,
+      });
+    },
+  );
+
+  const { persistSettings } = deps;
+  if (!persistSettings) return;
+
+  app.post(
+    '/workspaces/:workspace/settings/vision-bridge',
+    deps.mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const { model, timeoutMs } = deps.safeBody(req);
+      const schema = getSettingsSchema();
+      const modelError = isVisionModelSelector(model)
+        ? validateSettingValue(schema.visionModel, model)
+        : 'Expected a vision model selector';
+      const validationError =
+        modelError ??
+        validateSettingValue(schema.visionBridgeTimeoutMs, timeoutMs);
+      if (validationError) {
+        res.status(400).json({ error: validationError, code: 'invalid_value' });
+        return;
+      }
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+
+      const scope = SettingScope.Workspace;
+      const assertGenerationOpen = () => runtime.generationGuard?.assertOpen();
+      const writes = [
+        { scope, key: 'visionModel', value: model },
+        { scope, key: 'visionBridgeTimeoutMs', value: timeoutMs },
+      ];
+      try {
+        await persistSettings(
+          runtime.workspaceCwd,
+          writes,
+          assertGenerationOpen,
+        );
+        assertGenerationOpen();
+      } catch (err) {
+        const cause =
+          err instanceof WorkspaceSettingsPartialPersistError ? err.cause : err;
+        if (sendGenerationClosedError(res, cause)) return;
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/settings/vision-bridge persist error (workspace=${runtime.workspaceCwd}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to persist vision bridge settings',
+          code: 'persist_error',
+        });
+        return;
+      }
+
+      deps.invalidateServeFeaturesCache();
+      for (const { key, value } of writes) {
+        runtime.bridge.publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key,
+            value:
+              key === 'visionModel' && typeof value === 'string'
+                ? publicAuxModelSelectorValue(value)
+                : value,
+            scope: 'workspace',
+          },
+          ...(clientId ? { originatorClientId: clientId } : {}),
+        });
+      }
+      res.status(200).json({
+        key: 'visionBridgeTimeoutMs',
+        scope: 'workspace',
+        value: timeoutMs,
+        requiresRestart: schema.visionBridgeTimeoutMs.requiresRestart,
       });
     },
   );

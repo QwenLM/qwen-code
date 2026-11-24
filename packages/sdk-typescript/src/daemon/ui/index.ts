@@ -18,6 +18,8 @@ export {
   createDaemonTranscriptState,
   estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   isSubagentChildBlock,
   isTaskExecutionMode,
   isTrimmedPermissionBlockId,
@@ -61,6 +63,7 @@ export type {
 } from './conformance.js';
 export {
   extractContentPart,
+  extractTranscriptTiming,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,
   redactSensitiveFields as redactDaemonUiSensitiveFields,
@@ -76,13 +79,17 @@ export {
 } from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
+  DaemonTranscriptTimingMeta,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonInputSourceAnnotation,
+  DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
@@ -100,6 +107,7 @@ export type {
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonTranscriptTruncationDetail,
+  DaemonTurnUsage,
   DaemonUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events
@@ -117,11 +125,13 @@ export type {
   DaemonUiShellOutputEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUiUserResourceLinkEvent,
   DaemonUiToolUpdateEvent,
   DaemonUiToolProvenance,
   // Session-meta events
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiSessionSourceChangedEvent,
+  DaemonUiSessionSubSessionTaskChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,
@@ -151,3 +161,43 @@ export type {
   DaemonUiAuthDeviceFlowCancelledEvent,
   NormalizeDaemonEventOptions,
 } from './types.js';
+
+export {
+  parseHookLifecycle,
+  extractHookLifecycle,
+  createHookLifecycleState,
+  reduceHookLifecycle,
+  summarizeHookExecutions,
+} from './hook-lifecycle.js';
+export type {
+  HookLifecycleOutcome,
+  HookLifecycleSource,
+  HookLifecycleBase,
+  HookLifecycleEvent,
+  HookExecutionEntry,
+  HookLifecycleState,
+  HookLifecycleSummary,
+  HookTurnPage,
+} from './hook-lifecycle.js';
+
+export {
+  createExecutionLifecycleState,
+  extractExecutionLifecycle,
+  reduceExecutionLifecycle,
+} from './execution-lifecycle.js';
+export type {
+  DaemonExecutionLifecycle,
+  ExecutionLifecycleEntry,
+  ExecutionLifecycleState,
+} from './execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './tool-lifecycle.js';

@@ -27,6 +27,7 @@ import {
   isSDKSystemMessage,
   isSDKResultMessage,
 } from '@qwen-code/sdk';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 
 // ============================================================================
 // Core Test Helper Class
@@ -98,8 +99,17 @@ export class SDKTestHelper {
           ? (optionsSettings['general'] as Record<string, unknown>)
           : {};
 
+      const memorySettings =
+        typeof optionsSettings['memory'] === 'object' &&
+        optionsSettings['memory'] !== null
+          ? (optionsSettings['memory'] as Record<string, unknown>)
+          : {};
+
       const settings = {
         ...optionsSettings,
+        // Per-key merge: a suite opting back into one flag keeps the other
+        // off.
+        memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
         telemetry: {
           enabled: false, // SDK tests don't need telemetry
         },

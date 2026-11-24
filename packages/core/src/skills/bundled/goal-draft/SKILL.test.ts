@@ -14,6 +14,7 @@ import {
 } from '../../../core/permission-helpers.js';
 import { PermissionManager } from '../../../permissions/permission-manager.js';
 import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
+import { PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS } from '../../../goals/goal-tools.js';
 import { parseSkillContent } from '../../skill-load.js';
 
 function loadGoalDraftSkill() {
@@ -182,6 +183,22 @@ describe('bundled goal-draft skill', () => {
       'Do not call `propose_goal` or print a runnable `/goal set` or `/goal edit` line',
     );
     expect(body.slice(gate, readyHandoff)).toContain('Stop here');
+  });
+
+  it('names the propose_goal objective limit the tool enforces', () => {
+    const { body } = loadGoalDraftSkill();
+    const handoff = body.slice(
+      body.indexOf('**If the `propose_goal` tool is available'),
+      body.indexOf('**Otherwise**'),
+    );
+
+    // The number is prose in a markdown file, so pin it to the constant the
+    // tool validates against: raising one without the other sends the model
+    // a limit the tool does not have.
+    expect(handoff).toContain(
+      `refuses an objective over ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS.toLocaleString('en-US')} characters`,
+    );
+    expect(handoff).toContain('tighten a longer draft before calling it');
   });
 
   it('describes the prose budget as an agreement rather than a runtime limit', () => {

@@ -2,7 +2,9 @@
 
 [English](2026-09-15-acp-bridge-completion.md) | [简体中文](2026-09-15-acp-bridge-completion.zh-CN.md)
 
-状态：本地实现已完成；验证按集成批次记录。历史完整测试验收仍未关闭，2026-09-16。在[前四个切片](2026-09-14-acp-bridge-control-plane-harness-boundary.zh-CN.md)
+状态：已通过 [#11916](https://github.com/QwenLM/qwen-code/pull/11916) 合入；
+2026-09-16，合入提交通过了配置中的 Linux CI 完整测试。
+证据及限制见[合入后验收](#合入后验收)。在[前四个切片](2026-09-14-acp-bridge-control-plane-harness-boundary.zh-CN.md)
 之后实现 [#11866](https://github.com/QwenLM/qwen-code/issues/11866) 的剩余边界抽取。
 
 ## 问题与范围
@@ -177,7 +179,7 @@ bundle、serve bundle 边界及 core 导出检查，全部通过。新的 1,079 
 也满足原验收条件，完整产物清单在验证前后保持一致。两个正向 EOF 场景均输出
 1,062,289 字节 stdout，实际 ACP 退出 0；负例保留实际退出 1 及原始 timeout
 和 EPIPE。所拥有的进程和监听端口均已消失。规范化的正向输出与此前最终 bundle
-一致，历史失败另行保留。由于仓库级命令尚未全绿，完整测试验收仍未关闭。
+一致，历史失败另行保留。在该阶段，由于仓库级命令尚未全绿，完整测试验收仍未关闭。
 详细证据及独立后续事项保留在
 `.qwen/investigations/issue-11866-completion/` 和
 `.qwen/issues/issue-11866-unrelated-unit-followups.md`。
@@ -223,8 +225,8 @@ fixture 的模拟 home 目录。只移除该覆盖，并保留同一隔离 home�
 三项 core 失败继续记录在持久化 cron 监听中：600 毫秒后未观察到监听器读取、
 afterEach 清理 hook 超过 10 秒，以及 3 秒内未观察到外部任务。本次 hook
 超时不改称历史断言失败。先前基线对照仍是历史证据，不能为本次每项失败确定
-原因。没有通过修改产品代码、断言或期限来让结果变绿。因此完整测试验收仍未
-关闭。
+原因。没有通过修改产品代码、断言或期限来让结果变绿。因此在该阶段，完整测试
+验收仍未关闭。
 
 八项串行 E2E 在重新构建的候选上均满足各自正向或负向验收条件。公共生命周期、
 32 技能原生监听和活动 writer 关停均测得 daemon 退出 0，并独立检查清理。
@@ -390,7 +392,7 @@ SIGTERM，当时两条管道均未被 destroy。超时及退出 7 的查询都�
 完整 dist 树摘要为
 `317c38b5bda31f45b0a924952a78d3516778f4160d1fee64816726d533562ec5`。
 这是本次集成的证据，不是将更早的产物重新标记。普通提示 fixture 仍保留上文
-对后台/权限及延迟覆盖的限制；历史完整 workspace 验收仍未关闭。
+对后台/权限及延迟覆盖的限制；在该阶段，完整 workspace 验收仍未关闭。
 
 ## `3a00c42948` 的空闲子进程回收集成
 
@@ -460,3 +462,39 @@ skill-manager 失败。其基线对照被缺失构建产物的前置检查拦住
 证据，不是新的真实 daemon E2E 运行。上文历史进程结果仍绑定原提交。新的集成
 检查和最终审计记录在 PR 跟进中；原始复现与验证证据位于
 `.qwen/investigations/issue-11866-conflict3/`。
+
+## 合入后验收
+
+PR #11916 于 2026-09-16 合入，对应提交
+`fa336618c26f0655ab25f8c1e4bdab103154bcbd`。其 Git 树
+`8cf8a5feaff593f84b3f7538b6e2c937a992b64a` 与 PR 最终 head
+`803a0380a17c57cafb02782b9ef4a22046f9db18` 一致。下列两个 job 的 checkout
+日志均指向该合入提交，而非之后的 main 版本。这些是在合入后核实的已完成 CI
+结果，不是本次新执行的本地测试。
+
+[合入后单测 job](https://github.com/QwenLM/qwen-code/actions/runs/35068367808/job/104703832563)
+运行了全部 22 个配置了 `test:ci` 的 workspace，随后运行根目录脚本测试：
+
+| 测试范围           |   通过 | 失败 | 跳过 |
+| ------------------ | -----: | ---: | ---: |
+| Workspace 单元测试 | 77,222 |    0 |  104 |
+| 根目录脚本测试     |  2,493 |    0 |   12 |
+
+其中包含 ACP bridge 2,179 项、CLI 31,744 项、core 26,808 项、TypeScript SDK
+2,046 项及 Web Shell 8,386 项通过。
+[合入后静态检查 job](https://github.com/QwenLM/qwen-code/actions/runs/35068367808/job/104703832566)
+还通过了配置中的 Node helper 测试：580 项通过，零失败、零跳过。两个 job
+均成功完成。[PR 最终单测 job](https://github.com/QwenLM/qwen-code/actions/runs/35066664366/job/104698456229)
+在相同代码树上另行报告了相同的 workspace 和根目录脚本测试计数。
+
+这些结果满足 #11866 在配置中的 Linux 完整测试验收。本次运行使用 Node 22、
+隔离的 CI home、覆盖率采集及已有的 `--retry=2` 策略。共享 runner 启用了
+`QWEN_SKIP_LATENCY_BUDGETS=1`。结果不证明无需重试即可通过，也未验证跳过的
+延迟断言。macOS 和 Windows 单测 job 被跳过，因此不宣称全平台完整测试通过。
+Python、Java、mobile 及真实 daemon 的结果仍绑定各自另行记录的运行。
+
+上文此前的本地失败与未完成归因继续作为历史证据保留；本次 Linux 结果既不修复
+这些失败，也不为它们确定原因。没有为取得本验收记录而修改生产代码、测试、断言、
+期限或 CI 策略。边界抽取已完成；无状态 `wake(sessionId)` / `getEvents()`、
+worker 池和外部事件存储仍由 [#11868](https://github.com/QwenLM/qwen-code/issues/11868)
+跟进。

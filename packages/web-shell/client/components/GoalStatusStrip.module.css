@@ -36,6 +36,20 @@
   font-weight: 600;
 }
 
+/* Same lifecycle tones as the Goals page's status pill, from the shared
+   execution-status palette (App.module.css). */
+.status[data-status='running'] {
+  color: var(--status-running-fg);
+}
+
+.status[data-status='attention'] {
+  color: var(--status-attention-fg);
+}
+
+.status[data-status='done'] {
+  color: var(--status-done-fg);
+}
+
 .activity,
 .objective {
   color: var(--muted-foreground);
@@ -58,16 +72,6 @@
 .separator,
 .elapsed {
   color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
-}
-
-/* Gives way on a narrow pane rather than pushing into the action buttons. */
-.checkpoint {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--warning-color);
 }
 
 .actions {
@@ -108,6 +112,17 @@
   cursor: default;
 }
 
+/* Navigation, not a control: the Goals-page jump wears the same interactive
+   blue as the Goals page's session-jump affordances, so it reads apart from
+   the grey edit/pause/clear controls. The Target glyph is the app-wide Goals
+   icon (the sidebar's Goals entry uses it too). Declared after the
+   `.action:hover` rules so the blue survives hover at equal specificity. */
+.goalsAction,
+.goalsAction:hover:not(:disabled),
+.goalsAction:focus-visible:not(:disabled) {
+  color: var(--agent-blue-500);
+}
+
 /*
  * `.root` establishes the container, so it can only style its DESCENDANTS from
  * here — an element is never its own container query target. Compacting the
@@ -115,10 +130,12 @@
  * `container-type`; until then keep this block to what actually resolves,
  * rather than leaving half a responsive rule that silently does nothing.
  */
-@container (max-width: 620px) {
-  .activity,
-  .separator,
-  .elapsed {
-    display: none;
+@supports (container-type: inline-size) {
+  @container (max-width: 620px) {
+    .activity,
+    .separator,
+    .elapsed {
+      display: none;
+    }
   }
 }

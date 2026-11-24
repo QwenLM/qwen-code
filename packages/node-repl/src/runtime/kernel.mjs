@@ -392,7 +392,13 @@ function resolveImagePayload(payload) {
       );
     }
   }
-  return { data: buffer.toString('base64'), mimeType: sniffed };
+  return {
+    data: buffer.toString('base64'),
+    mimeType: sniffed,
+    ...(typeof payload.metadata === 'string'
+      ? { metadata: payload.metadata }
+      : {}),
+  };
 }
 
 function scheduleTimer(callback, delay, repeat) {
@@ -567,6 +573,7 @@ const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectDefineProperties = Object.defineProperties;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
 const intrinsicJSONParse = JSON.parse;
+const intrinsicJSONStringify = JSON.stringify;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicWeakSetHas = WeakSet.prototype.has;
 const intrinsicWeakSetAdd = WeakSet.prototype.add;
@@ -620,12 +627,20 @@ const runtime = {
       };
     } else if (image && typeof image === 'object' && 'bytes' in image) {
       const bytes = image.bytes;
+      let metadata = null;
+      if ('metadata' in image && image.metadata !== undefined) {
+        metadata = intrinsicJSONStringify(image.metadata);
+        if (typeof metadata !== 'string') {
+          throw new TypeError('emitImage metadata must be JSON-serializable');
+        }
+      }
       payload = {
         kind: 'bytes',
         bytes: intrinsicArrayBufferIsView(bytes)
           ? bytes
           : new intrinsicUint8Array(bytes),
         mimeType: typeof image.mimeType === 'string' ? image.mimeType : null,
+        metadata,
       };
     } else {
       throw new TypeError('unsupported emitImage input');
@@ -791,6 +806,7 @@ function initialize(message) {
     cwd: String(message.cwd),
     homeDir: String(message.homeDir),
     tmpDir: String(message.tmpDir),
+    preloadCua: message.preloadCua === true,
     moduleRoots: [...message.moduleRoots],
     readableRoots: [...message.readableRoots],
   };
@@ -958,7 +974,22 @@ async function handleExec(message) {
         pendingCancelExecId = null;
         activeExec.cancel();
       }
-      const evaluation = cell.evaluate({ timeout: message.timeoutMs });
+      const evaluation = (async () => {
+        if (config.preloadCua && !untrustedContext.cua) {
+          const { createCua } = await import('@qwen-code/cua-sdk/runtime');
+          if (exec.cancelRequested || activeExec !== exec)
+            throw new CellCancelledError();
+          const runtime = untrustedContext.nodeRepl;
+          Object.defineProperty(untrustedContext, 'cua', {
+            value: createCua(runtime),
+            enumerable: true,
+          });
+          untrustedContext.cua.rewriteDocumentation();
+        }
+        if (exec.cancelRequested || activeExec !== exec)
+          throw new CellCancelledError();
+        await cell.evaluate({ timeout: message.timeoutMs });
+      })();
       void evaluation.catch(() => undefined);
       await Promise.race([evaluation, cancellation]);
       if (activeExec.cancelRequested) throw new CellCancelledError();
@@ -1046,10 +1077,20 @@ function handleAddModuleRoot(message) {
   });
 }
 
-function shutdown(removeSessionTmpDir = false) {
+async function shutdown(removeSessionTmpDir = false) {
   if (shuttingDown) return;
   shuttingDown = true;
+  activeExec?.abortController.abort();
   clearAllTimers();
+  const forceExit = hostSetTimeout(() => process.exit(0), 2000);
+  forceExit.unref();
+  try {
+    await untrustedContext?.cua?.[Symbol.asyncDispose]?.();
+  } catch (error) {
+    process.stderr.write(
+      `Computer Use cleanup failed: ${error?.message ?? String(error)}\n`,
+    );
+  }
   if (removeSessionTmpDir) {
     try {
       if (config?.tmpDir) {

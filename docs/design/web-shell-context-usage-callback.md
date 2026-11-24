@@ -16,10 +16,12 @@ returns before creating or selecting a built-in panel tab. Without the callback,
 existing behavior is preserved. Both `WebShell` and `WebShellWithProviders`
 expose the prop through their existing public types.
 
-The callback applies to composer details and header detail entries, including
-split panes. It does not intercept the ring’s `/context` snapshot action,
-compression, or restoration of already persisted panel tabs. It is an override,
-not a notification; no return-value protocol or extra UI is needed.
+The callback applies to the composer ring click, composer details, transcript
+context cards, and header detail entries, including split panes. It does not
+intercept compression, restoration of already persisted panel tabs, or the
+`/context` snapshot fallback that a composer with no details surface still
+uses. It is an override, not a notification; no return-value protocol or extra
+UI is needed.
 
 ## Files and validation
 

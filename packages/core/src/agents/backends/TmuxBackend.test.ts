@@ -139,7 +139,43 @@ describe('TmuxBackend', () => {
     }
   });
 
-  // ─── Initialization ─────────────────────────────────────────
+  const pane = (paneId: string, dead = false, deadStatus = 0) => ({
+    paneId,
+    dead,
+    deadStatus,
+  });
+  const listPanes = (...panes: Array<ReturnType<typeof pane>>) =>
+    hoistedTmuxListPanes.mockResolvedValue(panes);
+  function onExit() {
+    const exitCallback = vi.fn();
+    backend.setOnAgentExit(exitCallback);
+    return exitCallback;
+  }
+
+  /**
+   * init(), spawn `first`, then spawn each of `more` by splitting: list-panes
+   * returns the first agent pane and split-window returns '%2'.
+   */
+  async function start(first: string, ...more: string[]) {
+    await backend.init();
+    await spawnWithTimers(backend, makeConfig(first));
+    for (const id of more) {
+      listPanes(pane('%0'));
+      hoistedTmuxSplitWindow.mockResolvedValue('%2');
+      await spawnWithTimers(backend, makeConfig(id));
+    }
+  }
+
+  /** Recreates the backend inside tmux, init()s it, optionally spawns `id`. */
+  async function startInsideTmux(id?: string) {
+    process.env['TMUX'] = '/tmp/tmux-1000/default,12345,0';
+    backend = new TmuxBackend();
+    await backend.init();
+    if (id === undefined) return;
+    listPanes(pane('%0'));
+    hoistedTmuxSplitWindow.mockResolvedValue('%1');
+    await spawnWithTimers(backend, makeConfig(id));
+  }
 
   it('throws if spawnAgent is called before init', async () => {
     await expect(backend.spawnAgent(makeConfig('a1'))).rejects.toThrow(
@@ -158,11 +194,8 @@ describe('TmuxBackend', () => {
     expect(hoistedVerifyTmux).toHaveBeenCalledTimes(1);
   });
 
-  // ─── Spawning (outside tmux) ──────────────────────────────
-
   it('spawns first agent outside tmux by respawning the initial pane', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('agent-1'));
+    await start('agent-1');
 
     expect(hoistedTmuxNewSession).toHaveBeenCalled();
     expect(hoistedTmuxRespawnPane).toHaveBeenCalledWith(
@@ -174,42 +207,21 @@ describe('TmuxBackend', () => {
   });
 
   it('spawns second agent outside tmux by splitting', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('agent-1'));
-
-    // For second agent, list-panes returns the first agent pane
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
-    hoistedTmuxSplitWindow.mockResolvedValue('%2');
-
-    await spawnWithTimers(backend, makeConfig('agent-2'));
+    await start('agent-1', 'agent-2');
 
     expect(hoistedTmuxSplitWindow).toHaveBeenCalled();
   });
 
   it('rejects duplicate agent IDs', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('dup'));
+    await start('dup');
 
     await expect(backend.spawnAgent(makeConfig('dup'))).rejects.toThrow(
       'already exists',
     );
   });
 
-  // ─── Spawning (inside tmux) ───────────────────────────────
-
   it('spawns first agent inside tmux by splitting from main pane', async () => {
-    process.env['TMUX'] = '/tmp/tmux-1000/default,12345,0';
-    backend = new TmuxBackend();
-    await backend.init();
-
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
-    hoistedTmuxSplitWindow.mockResolvedValue('%1');
-
-    await spawnWithTimers(backend, makeConfig('agent-1'));
+    await startInsideTmux('agent-1');
 
     // Should have split horizontally with firstSplitPercent
     expect(hoistedTmuxSplitWindow).toHaveBeenCalledWith(
@@ -220,17 +232,8 @@ describe('TmuxBackend', () => {
     expect(hoistedTmuxSelectPane).toHaveBeenCalledWith('%0');
   });
 
-  // ─── Navigation ───────────────────────────────────────────
-
   it('switchTo changes active agent', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
-    hoistedTmuxSplitWindow.mockResolvedValue('%2');
-    await spawnWithTimers(backend, makeConfig('b'));
+    await start('a', 'b');
 
     backend.switchTo('b');
     expect(backend.getActiveAgentId()).toBe('b');
@@ -242,14 +245,7 @@ describe('TmuxBackend', () => {
   });
 
   it('switchToNext and switchToPrevious cycle correctly', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
-    hoistedTmuxSplitWindow.mockResolvedValue('%2');
-    await spawnWithTimers(backend, makeConfig('b'));
+    await start('a', 'b');
 
     expect(backend.getActiveAgentId()).toBe('a');
     backend.switchToNext();
@@ -261,39 +257,26 @@ describe('TmuxBackend', () => {
   });
 
   it('switchToNext does nothing with a single agent', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('solo'));
+    await start('solo');
     backend.switchToNext();
     expect(backend.getActiveAgentId()).toBe('solo');
   });
 
-  // ─── Stop & Cleanup ──────────────────────────────────────
-
   it('stopAgent kills the pane', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
+    await start('a');
     backend.stopAgent('a');
     expect(hoistedTmuxKillPane).toHaveBeenCalledWith('%0', expect.any(String));
   });
 
   it('stopAll kills all running panes', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
-    hoistedTmuxSplitWindow.mockResolvedValue('%2');
-    await spawnWithTimers(backend, makeConfig('b'));
+    await start('a', 'b');
 
     backend.stopAll();
-    // Should have killed both panes
     expect(hoistedTmuxKillPane).toHaveBeenCalledTimes(2);
   });
 
   it('cleanup kills panes and the external session', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
+    await start('a');
     await backend.cleanup();
 
     expect(hoistedTmuxKillPane).toHaveBeenCalledWith('%0', expect.any(String));
@@ -302,15 +285,7 @@ describe('TmuxBackend', () => {
   });
 
   it('cleanup does not kill session when running inside tmux', async () => {
-    process.env['TMUX'] = '/tmp/tmux-1000/default,12345,0';
-    backend = new TmuxBackend();
-    await backend.init();
-
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
-    hoistedTmuxSplitWindow.mockResolvedValue('%1');
-    await spawnWithTimers(backend, makeConfig('a'));
+    await startInsideTmux('a');
 
     hoistedTmuxKillSession.mockClear();
     await backend.cleanup();
@@ -321,33 +296,22 @@ describe('TmuxBackend', () => {
   // ─── Exit Detection (Bug #1: missing pane → exited) ──────
 
   it('marks agent as exited when pane disappears from tmux', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
+    await start('a');
+    const exitCallback = onExit();
 
     // Polling returns no panes → agent's pane is gone
-    hoistedTmuxListPanes.mockResolvedValue([]);
-
-    // Advance timer to trigger poll
+    listPanes();
     await vi.advanceTimersByTimeAsync(600);
 
     expect(exitCallback).toHaveBeenCalledWith('a', 1, null);
   });
 
   it('marks agent as exited when pane reports dead', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
+    await start('a');
+    const exitCallback = onExit();
 
     // Polling returns the pane as dead with exit code 42
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: true, deadStatus: 42 },
-    ]);
-
+    listPanes(pane('%0', true, 42));
     await vi.advanceTimersByTimeAsync(600);
 
     expect(exitCallback).toHaveBeenCalledWith('a', 42, null);
@@ -356,72 +320,46 @@ describe('TmuxBackend', () => {
   // ─── waitForAll (Bug #3: cleanup resolves waiters) ────────
 
   it('waitForAll resolves when all agents exit', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: true, deadStatus: 0 },
-    ]);
+    await start('a');
+    listPanes(pane('%0', true, 0));
 
     const waitPromise = backend.waitForAll();
-
     await vi.advanceTimersByTimeAsync(600);
 
-    const result = await waitPromise;
-    expect(result).toBe(true);
+    expect(await waitPromise).toBe(true);
   });
 
   it('waitForAll resolves after cleanup is called', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
+    await start('a');
     // Pane stays alive — without cleanup, waitForAll would hang
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
+    listPanes(pane('%0'));
 
     const waitPromise = backend.waitForAll();
-
-    // Advance a bit (poll runs but agent still alive)
+    // Poll runs but agent still alive; then cleanup, then advance again so
+    // the waitForAll interval fires
     await vi.advanceTimersByTimeAsync(600);
-
-    // Now cleanup
     await backend.cleanup();
-
-    // Advance again so the waitForAll interval fires
     await vi.advanceTimersByTimeAsync(600);
 
-    const result = await waitPromise;
     // The key thing is the promise resolves instead of hanging forever.
     // allExited() returns true since panes were cleared in cleanup.
-    expect(result).toBe(true);
+    expect(await waitPromise).toBe(true);
   });
 
   it('waitForAll returns false on timeout', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
-
-    // Pane stays alive
-    hoistedTmuxListPanes.mockResolvedValue([
-      { paneId: '%0', dead: false, deadStatus: 0 },
-    ]);
+    await start('a');
+    listPanes(pane('%0')); // Pane stays alive
 
     const waitPromise = backend.waitForAll(1000);
-
     await vi.advanceTimersByTimeAsync(1100);
 
-    const result = await waitPromise;
-    expect(result).toBe(false);
+    expect(await waitPromise).toBe(false);
   });
 
-  // ─── Input ────────────────────────────────────────────────
-
   it('forwardInput sends literal keys to active agent pane', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
+    await start('a');
 
-    const result = backend.forwardInput('hello');
-    expect(result).toBe(true);
+    expect(backend.forwardInput('hello')).toBe(true);
     expect(hoistedTmuxSendKeys).toHaveBeenCalledWith(
       '%0',
       'hello',
@@ -435,45 +373,31 @@ describe('TmuxBackend', () => {
     expect(backend.forwardInput('hello')).toBe(false);
   });
 
-  // ─── Snapshots ────────────────────────────────────────────
-
   it('getActiveSnapshot returns null (tmux handles rendering)', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
+    await start('a');
     expect(backend.getActiveSnapshot()).toBeNull();
   });
 
   it('getAgentScrollbackLength returns 0', async () => {
-    await backend.init();
-    await spawnWithTimers(backend, makeConfig('a'));
+    await start('a');
     expect(backend.getAgentScrollbackLength('a')).toBe(0);
   });
 
-  // ─── getAttachHint ────────────────────────────────────────
-
   it('returns attach command when outside tmux', async () => {
     await backend.init();
-    const hint = backend.getAttachHint();
-    expect(hint).toMatch(/^tmux -L arena-server-\d+ a$/);
+    expect(backend.getAttachHint()).toMatch(/^tmux -L arena-server-\d+ a$/);
   });
 
   it('returns null when inside tmux', async () => {
-    process.env['TMUX'] = '/tmp/tmux-1000/default,12345,0';
-    backend = new TmuxBackend();
-    await backend.init();
+    await startInsideTmux();
     expect(backend.getAttachHint()).toBeNull();
   });
 
-  // ─── Spawn failure handling ───────────────────────────────
-
   it('registers failed agent and fires exit callback on spawn error', async () => {
     await backend.init();
-
     // Make the external session setup fail
     hoistedTmuxHasSession.mockRejectedValueOnce(new Error('tmux exploded'));
-
-    const exitCallback = vi.fn();
-    backend.setOnAgentExit(exitCallback);
+    const exitCallback = onExit();
 
     await spawnWithTimers(backend, makeConfig('fail'));
 

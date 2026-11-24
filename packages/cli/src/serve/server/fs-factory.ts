@@ -5,6 +5,8 @@
  */
 
 import * as path from 'node:path';
+import { readSshWorkspace } from '../ssh-workspace-store.js';
+import { createSshWorkspaceFileSystemFactory } from '../fs/ssh-workspace-file-system.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
@@ -109,6 +111,21 @@ export function resolveBridgeFsFactory(input: {
    */
   newFileMode?: NewFileModePolicy;
 }): WorkspaceFileSystemFactory {
+  const cwd = input.boundWorkspaces[0];
+  const connection = cwd ? readSshWorkspace(cwd) : undefined;
+  if (connection && cwd) {
+    if (input.boundWorkspaces.length !== 1 || input.injected) {
+      throw new Error('SSH workspaces require their own filesystem boundary.');
+    }
+    return createSshWorkspaceFileSystemFactory({
+      cwd,
+      connection,
+      trusted: input.trusted,
+      customIgnoreFiles: input.customIgnoreFiles,
+      generationGuard: input.generationGuard,
+      emit: input.emit ?? createDefaultFsAuditEmit(),
+    });
+  }
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
     boundWorkspaces: input.boundWorkspaces,

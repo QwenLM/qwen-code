@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { TurnCallsProvider } from '../turnCallsContext';
 import {
   WebShellCustomizationProvider,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -10,6 +11,7 @@ import {
 } from '../customization';
 import type { ACPToolCall, Message } from '../adapters/types';
 import { summaryRunId } from './summaryRunId';
+import messageStyles from './messages/AssistantMessage.module.css';
 import timestampStyles from './MessageTimestamp.module.css';
 import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
 
@@ -23,7 +25,21 @@ vi.mock('../WebShellContexts', async () => {
 // drive the message-level ErrorBoundary (the real one, imported below); the
 // rest are inert. MessageTimestamp remains real to verify row spacing.
 const captured = vi.hoisted(() => ({
+  userRenderCount: 0,
   userMessageProps: null as null | {
+    source?: string;
+    images?: Array<{
+      data: string;
+      mimeType: string;
+      attachmentId?: string;
+    }>;
+    files?: Array<{
+      name: string;
+      mimeType: string;
+      data?: Blob;
+      text?: string;
+      attachmentId?: string;
+    }>;
     editing?: boolean;
     submittingEdit?: boolean;
   },
@@ -34,11 +50,25 @@ vi.mock('./messages/UserMessage', async () => {
   return {
     UserMessage: (props: {
       content: string;
+      source?: string;
+      images?: Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>;
+      files?: Array<{
+        name: string;
+        mimeType: string;
+        data?: Blob;
+        text?: string;
+        attachmentId?: string;
+      }>;
       editing?: boolean;
       submittingEdit?: boolean;
       onEditSubmit?: (content: string) => void;
     }) => {
       if (props.content.includes('__BOOM__')) throw new Error('user boom');
+      captured.userRenderCount += 1;
       captured.userMessageProps = props;
       return React.createElement(
         'div',
@@ -67,10 +97,12 @@ vi.mock('./messages/AssistantMessage', async () => {
       content,
       customFooterInfo,
       onBranchSession,
+      footerAlwaysVisible,
     }: {
       content: string;
       customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       onBranchSession?: () => void | Promise<void>;
+      footerAlwaysVisible?: boolean;
     }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
       const { renderAssistantTurnFooter } = useWebShellCustomization();
@@ -82,6 +114,12 @@ vi.mock('./messages/AssistantMessage', async () => {
         { 'data-testid': 'assistant-ok' },
         content,
         customFooter,
+        React.createElement('div', {
+          'data-testid': 'assistant-footer-visibility',
+          className: footerAlwaysVisible
+            ? messageStyles.messageFooterVisible
+            : undefined,
+        }),
         onBranchSession
           ? React.createElement(
               'button',
@@ -481,6 +519,36 @@ describe('MessageItem assistant turn footer', () => {
     ).toBe('u2');
   });
 
+  it('updates assistant footer visibility when only that flag changes', () => {
+    const message = assistantMsg('1', 'hello');
+    const tree = (assistantFooterAlwaysVisible: boolean) => (
+      <I18nProvider language="en">
+        <MessageItem
+          message={message}
+          showAssistantActions
+          assistantFooterAlwaysVisible={assistantFooterAlwaysVisible}
+        />
+      </I18nProvider>
+    );
+    const { root, container } = renderWithRoot(tree(true));
+    const footer = container.querySelector(
+      '[data-testid="assistant-footer-visibility"]',
+    )!;
+    expect(footer.classList.contains(messageStyles.messageFooterVisible)).toBe(
+      true,
+    );
+
+    act(() => root.render(tree(false)));
+
+    const released = container.querySelector(
+      '[data-testid="assistant-footer-visibility"]',
+    )!;
+    expect(released).not.toBeNull();
+    expect(
+      released.classList.contains(messageStyles.messageFooterVisible),
+    ).toBe(false);
+  });
+
   it('degrades a crashing custom footer renderer to an inline notice', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const renderAssistantTurnFooter = vi.fn(() => {
@@ -541,6 +609,24 @@ describe('MessageItem background notification spacing', () => {
   );
 });
 
+function openMessageMenu(container: HTMLElement) {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="More message actions"]',
+  );
+  expect(trigger).not.toBeNull();
+  act(() => {
+    trigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+    );
+  });
+}
+
+function messageMenuItem(label: string) {
+  return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (element) => element.textContent === label,
+  );
+}
+
 describe('MessageItem inline message editing', () => {
   function renderEditableUserMessage(
     onSubmitUserMessageEdit: (content: string) => boolean | Promise<boolean>,
@@ -560,11 +646,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(true);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
     expect(captured.userMessageProps?.editing).toBe(true);
 
     await act(async () => {
@@ -582,11 +665,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(false);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
 
     await act(async () => {
       container
@@ -599,4 +679,197 @@ describe('MessageItem inline message editing', () => {
     expect(captured.userMessageProps?.editing).toBe(true);
     expect(captured.userMessageProps?.submittingEdit).toBe(false);
   });
+});
+
+it.each([
+  [undefined, 'ordinary prompt', true],
+  ['cron', 'scheduled prompt', true],
+  ['goal_runtime', 'continue goal', false],
+  ['goal_control', 'goal card', false],
+  ['cron', '', false],
+] as const)(
+  'exposes Tool calls only for a navigation prompt (%s)',
+  (source, content, visible) => {
+    const onOpen = vi.fn();
+    const view = render(
+      <I18nProvider language="en">
+        <TurnCallsProvider onOpen={onOpen}>
+          <MessageItem
+            message={{
+              id: 'prompt',
+              role: 'user',
+              content,
+              timestamp: 0,
+              ...(source ? { source } : {}),
+            }}
+          />
+        </TurnCallsProvider>
+      </I18nProvider>,
+    );
+    if (visible) openMessageMenu(view);
+    const entry = messageMenuItem('View tool calls');
+    expect(Boolean(entry)).toBe(visible);
+    if (entry) {
+      act(() => entry.click());
+      expect(onOpen).toHaveBeenCalledWith('prompt');
+    }
+  },
+);
+
+it('updates the Tool calls entry when the user message source is filled in', () => {
+  const onOpen = vi.fn();
+  const row = (source?: string) => (
+    <I18nProvider language="en">
+      <TurnCallsProvider onOpen={onOpen}>
+        <MessageItem
+          message={{
+            id: 'prompt',
+            role: 'user',
+            content: 'Same text',
+            timestamp: 0,
+            source,
+          }}
+        />
+      </TurnCallsProvider>
+    </I18nProvider>
+  );
+  const { root, container } = renderWithRoot(row());
+  openMessageMenu(container);
+  expect(messageMenuItem('View tool calls')).toBeDefined();
+  act(() => root.render(row('goal_runtime')));
+  expect(messageMenuItem('View tool calls')).toBeUndefined();
+});
+
+it('forwards automatic source updates to UserMessage', () => {
+  const row = (source?: string) => (
+    <MessageItem
+      message={{
+        id: 'automatic-prompt',
+        role: 'user',
+        content: 'Same automatic text',
+        timestamp: 0,
+        source,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row());
+  expect(captured.userMessageProps?.source).toBeUndefined();
+  act(() => root.render(row('cron')));
+  expect(captured.userMessageProps?.source).toBe('cron');
+  act(() => root.render(row('loop')));
+  expect(captured.userMessageProps?.source).toBe('loop');
+  act(() => root.render(row()));
+  expect(captured.userMessageProps?.source).toBeUndefined();
+});
+
+it('re-renders when only user-message files change', () => {
+  const files = [
+    { name: 'first.txt', mimeType: 'text/plain', text: 'first' },
+    { name: 'second.txt', mimeType: 'text/plain', text: 'second' },
+  ];
+  const row = (update: typeof files) => (
+    <MessageItem
+      message={{
+        id: 'file-update',
+        role: 'user',
+        content: 'Same prompt',
+        timestamp: 0,
+        source: 'cron',
+        files: update,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row(files.slice(0, 1)));
+  expect(captured.userMessageProps?.files).toEqual(files.slice(0, 1));
+  act(() => root.render(row(files)));
+  expect(captured.userMessageProps?.files).toEqual(files);
+});
+
+it('skips a structurally identical, newly allocated attachment array', () => {
+  const file = {
+    name: 'first.txt',
+    mimeType: 'text/plain',
+    text: 'same content',
+    attachmentId: 'same-attachment',
+    data: new Blob(['same bytes'], { type: 'text/plain' }),
+  };
+  const row = (files: Array<typeof file>) => (
+    <MessageItem
+      message={{
+        id: 'same-files',
+        role: 'user',
+        content: 'Same prompt',
+        timestamp: 0,
+        source: 'cron',
+        files,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row([file]));
+  const renderCount = captured.userRenderCount;
+  act(() => root.render(row([{ ...file }])));
+  expect(captured.userRenderCount).toBe(renderCount);
+});
+
+it.each(['name', 'mimeType', 'text', 'attachmentId', 'data'])(
+  'forwards a same-count file update to its %s field',
+  (field) => {
+    const originalBlob = new Blob(['same bytes'], { type: 'text/plain' });
+    const baseFile = {
+      name: 'first.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'attachment-one',
+      text: 'first version',
+      data: originalBlob,
+    };
+    const updatedFile = { ...baseFile };
+    if (field === 'name') updatedFile.name = 'renamed.txt';
+    if (field === 'mimeType') updatedFile.mimeType = 'text/markdown';
+    if (field === 'text') updatedFile.text = 'second version';
+    if (field === 'attachmentId') updatedFile.attachmentId = 'attachment-two';
+    const row = (files: Array<typeof baseFile>) => (
+      <MessageItem
+        message={{
+          id: 'same-file-update',
+          role: 'user',
+          content: 'Same prompt',
+          timestamp: 0,
+          source: 'cron',
+          files,
+        }}
+      />
+    );
+    if (field === 'data') {
+      updatedFile.data = new Blob(['same bytes'], { type: 'text/plain' });
+    }
+    const { root } = renderWithRoot(row([baseFile]));
+    expect(captured.userMessageProps?.files).toEqual([baseFile]);
+    act(() => root.render(row([updatedFile])));
+    expect(captured.userMessageProps?.files).toEqual([updatedFile]);
+    expect(captured.userMessageProps?.files?.[0]?.data).toBe(updatedFile.data);
+  },
+);
+
+it('forwards a same-data image attachment ID update', () => {
+  const image = { data: 'same-image-data', mimeType: 'image/png' };
+  const updatedImage = { ...image, attachmentId: 'image-reference-2' };
+  const row = (images: Array<typeof image & { attachmentId?: string }>) => (
+    <MessageItem
+      message={{
+        id: 'same-image-update',
+        role: 'user',
+        content: 'Same image prompt',
+        timestamp: 0,
+        images,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row([image]));
+  const renderCount = captured.userRenderCount;
+  expect(captured.userMessageProps?.images?.[0]?.attachmentId).toBeUndefined();
+  act(() => root.render(row([updatedImage])));
+  expect(captured.userRenderCount).toBe(renderCount + 1);
+  expect(captured.userMessageProps?.images?.[0]?.attachmentId).toBe(
+    'image-reference-2',
+  );
 });

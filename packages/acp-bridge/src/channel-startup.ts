@@ -16,6 +16,8 @@ import type { HarnessChannel, ChannelLifecycle } from './channel-lifecycle.js';
 import type {
   BridgeRuntimeEpochSource,
   BridgeTelemetry,
+  BridgeExecutionEngine,
+  BridgeOptions,
 } from './bridgeOptions.js';
 import type { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
@@ -30,18 +32,37 @@ import {
 } from './channel-handshake.js';
 import {
   terminateChannel,
-  channelUnavailableReject,
+  raceChannelUnavailable,
 } from './channel-transport.js';
 import {
   startChannelLivenessMonitor,
   type ChannelLivenessFailure,
 } from './channel-liveness.js';
+import {
+  sampleChannelProcess,
+  type ChannelProcessSample,
+} from './channel-process-sample.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import { withTimeout } from './with-timeout.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 
+// Single source for the sample-field guards shared by the kill line and the
+// grace line: an operator comparing both lines from one incident must see
+// one format for the same sample. Field order stays pinned by bridge tests.
+function wchanEvidence(sample: ChannelProcessSample | undefined): string {
+  return sample?.wchan || '?';
+}
+
+function rssMbEvidence(sample: ChannelProcessSample | undefined): string {
+  return sample ? String(Math.round(sample.rssBytes / 1048576)) : '?';
+}
+
 export interface ChannelStartupOptions {
   channelFactory: ChannelFactory;
+  executionEngines?: Pick<
+    NonNullable<BridgeOptions['executionEngines']>,
+    'legacy' | 'managed'
+  >;
   boundWorkspace: string;
   childEnvOverrides: Readonly<Record<string, string | undefined>>;
   initTimeoutMs: number;
@@ -52,7 +73,11 @@ export interface ChannelStartupOptions {
   delegateReadTextFileToClient: boolean;
   isExternalToolGuardRequired(): boolean;
   isShuttingDown(): boolean;
-  constructHarnessChannel(channel: AcpChannel, id: string): HarnessChannel;
+  constructHarnessChannel(
+    channel: AcpChannel,
+    id: string,
+    engine?: BridgeExecutionEngine,
+  ): HarnessChannel;
   handleChannelTransportUnavailable(info: HarnessChannel): void;
   handleChannelExit(
     info: HarnessChannel,
@@ -101,6 +126,7 @@ function safeTransportFailureDetail(error: unknown): string | undefined {
 
 export function createChannelStartup({
   channelFactory,
+  executionEngines,
   boundWorkspace,
   childEnvOverrides,
   initTimeoutMs,
@@ -119,7 +145,11 @@ export function createChannelStartup({
 }: ChannelStartupOptions) {
   let runtimeEpoch = initialRuntimeEpoch;
 
-  async function start(): Promise<HarnessChannel> {
+  async function start(
+    engine?: BridgeExecutionEngine,
+  ): Promise<HarnessChannel> {
+    const factory =
+      engine === undefined ? channelFactory : executionEngines![engine];
     const privateParentCapability = randomBytes(32).toString('base64url');
     const acpChannelId = randomUUID();
     const startupStartedAt = Date.now();
@@ -133,7 +163,7 @@ export function createChannelStartup({
         'qwen-code.daemon.acp_channel.id': acpChannelId,
       },
       async () =>
-        await channelFactory(
+        await factory(
           boundWorkspace,
           {
             ...childEnvOverrides,
@@ -173,7 +203,7 @@ export function createChannelStartup({
     }
     let info: HarnessChannel;
     try {
-      info = constructHarnessChannel(channel, acpChannelId);
+      info = constructHarnessChannel(channel, acpChannelId, engine);
     } catch (error) {
       try {
         channel.killSync();
@@ -219,18 +249,21 @@ export function createChannelStartup({
     channelLifecycle.track(info);
     // Belt-and-suspenders leak detection. The set is intentionally
     // multi-entry to cover the `killSession`-then-`spawnOrAttach`
-    // overlap window (size 2 is legitimate: one dying + one fresh
+    // overlap window (size 2 per engine is legitimate: one dying + one fresh
     // attach-target). Anything higher implies a `channel.exited`
     // handler never fired for some prior channel — a real leak we'd
     // otherwise notice only as gradually-growing RSS over hours.
     // The warning surfaces it the moment it happens. Threshold is
-    // 2 because that's the design ceiling; bumping it requires
+    // 2 per engine because that's the design ceiling; bumping it requires
     // updating both this guard and the comments around
     // `aliveChannels` declaration.
-    if (channelLifecycle.size > 2) {
+    const engineChannelCount = [...channelLifecycle.values()].filter(
+      (candidate) => candidate.executionEngine === engine,
+    ).length;
+    if (engineChannelCount > 2) {
       writeStderrLine(
-        `qwen serve: WARNING aliveChannels.size=${channelLifecycle.size} ` +
-          `(expected 1, max 2 during killSession-then-spawnOrAttach ` +
+        `qwen serve: WARNING engine=${engine ?? 'single'} channelCount=${engineChannelCount} ` +
+          `(expected 1, max 2 per engine during killSession-then-spawnOrAttach ` +
           `overlap) — possible channel leak; check that prior channels' ` +
           `channel.exited fired and the handler ran cleanup.`,
       );
@@ -277,15 +310,16 @@ export function createChannelStartup({
             initTimeoutMs - (Date.now() - startupStartedAt),
           );
           const response = await withTimeout(
-            Promise.race([
+            raceChannelUnavailable(
+              channel,
               connection.initialize(
                 createChannelInitializeRequest(
                   privateParentCapability,
                   delegateReadTextFileToClient,
                 ),
               ),
-              channelUnavailableReject(channel, 'during initialize'),
-            ]),
+              'during initialize',
+            ),
             remainingStartupMs,
             'initialize',
           );
@@ -391,6 +425,7 @@ export function createChannelStartup({
       throw epochError;
     }
     runtimeEpoch = nextRuntimeEpoch;
+    info.runtimeEpoch = nextRuntimeEpoch;
     info.lastUsedAt = Date.now();
     channelLifecycle.publish(info);
     info.handshakeComplete = true;
@@ -398,13 +433,55 @@ export function createChannelStartup({
       const failChannelLiveness = (error: ChannelLivenessFailure) => {
         if (info.isDying || !channelLifecycle.has(info)) return;
         markTransportFailed(error);
+        const evidence = error.evidence;
+        const sample = evidence?.lastSample;
         telemetry.event('channel.liveness_failed', {
           'qwen-code.daemon.acp_channel.id': info.id,
           'qwen-code.daemon.channel.session_count': sessionCount(info),
           'qwen-code.daemon.channel.transport_error_code': error.code,
+          // Per-field guards: the attribute contract admits no undefined
+          // values, and numeric zero (a zero-CPU stall's cpu_delta_ticks)
+          // is evidence, so guard numerics on !== undefined, not truthiness.
+          ...(evidence
+            ? {
+                ...(info.channel.pid !== undefined
+                  ? {
+                      'qwen-code.daemon.channel.liveness.pid': info.channel.pid,
+                    }
+                  : {}),
+                ...(sample
+                  ? {
+                      'qwen-code.daemon.channel.liveness.state': sample.state,
+                      ...(sample.wchan
+                        ? {
+                            'qwen-code.daemon.channel.liveness.wchan':
+                              sample.wchan,
+                          }
+                        : {}),
+                      'qwen-code.daemon.channel.liveness.rss_bytes':
+                        sample.rssBytes,
+                    }
+                  : {}),
+                ...(evidence.lastCpuDeltaTicks !== undefined
+                  ? {
+                      'qwen-code.daemon.channel.liveness.cpu_delta_ticks':
+                        evidence.lastCpuDeltaTicks,
+                    }
+                  : {}),
+                'qwen-code.daemon.channel.liveness.busy_extensions':
+                  evidence.busyExtensions,
+                'qwen-code.daemon.channel.liveness.consecutive_timeouts':
+                  evidence.consecutiveTimeouts,
+              }
+            : {}),
         });
+        // SIGKILL destroys the scene; the evidence must land in the log
+        // before the kill so the next incident is triageable.
+        const evidenceSuffix = evidence
+          ? ` pid=${info.channel.pid ?? '?'} state=${sample?.state ?? '?'} wchan=${wchanEvidence(sample)} cpuDelta=${evidence.lastCpuDeltaTicks ?? '?'} busy=${evidence.busyExtensions} timeouts=${evidence.consecutiveTimeouts} rssMB=${rssMbEvidence(sample)}`
+          : '';
         writeStderrLine(
-          `qwen serve: channel liveness failed (${error.code}); killing channel`,
+          `qwen serve: channel liveness failed (${error.code})${evidenceSuffix}; killing channel`,
         );
         if (info.channel.transportGuard) {
           info.channel.transportGuard.fail(error);
@@ -418,9 +495,18 @@ export function createChannelStartup({
             v: CHANNEL_LIVENESS_VERSION,
             nonce,
           }),
+        sampleProcess: () => sampleChannelProcess(info.channel.pid),
+        onBusyExtension: ({ extension, limit, cpuDeltaTicks, sample }) => {
+          const graceSuffix = sample
+            ? ` state=${sample.state} wchan=${wchanEvidence(sample)} rssMB=${rssMbEvidence(sample)}`
+            : '';
+          writeStderrLine(
+            `qwen serve: channel liveness probe timed out but agent pid=${info.channel.pid ?? '?'} consumed CPU (${cpuDeltaTicks} ticks)${graceSuffix}; extending grace ${extension}/${limit}`,
+          );
+        },
         onFailure: failChannelLiveness,
         isActive: () =>
-          channelLifecycle.current === info &&
+          channelLifecycle.currentFor(engine) === info &&
           channelLifecycle.has(info) &&
           !info.isDying &&
           !isShuttingDown(),

@@ -25,7 +25,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
+import { CHECKED_NODE_VERSION_ENV } from './utils/env-provenance.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
+import { commandMetadata } from './commands/command-metadata.js';
 import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
@@ -40,21 +42,48 @@ import {
 const mocks = vi.hoisted(() => ({
   main: vi.fn(),
   tryRunServeFastPath: vi.fn(),
+  installBundledChunkResolver: vi.fn(),
   initStartupProfiler: vi.fn(),
   initializeAcpStartupProfiler: vi.fn(),
   markAcpStartup: vi.fn(),
   initCpuProfiler: vi.fn(),
   mcpHandler: vi.fn(),
   mcpBuilder: vi.fn(),
+  memoryHandler: vi.fn(),
+  memoryImportHandler: vi.fn(),
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
   mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
+  runWorkspaceRecoveryWorker: vi.fn(),
+  runSessionSendMcp: vi.fn(),
+  runManagedRuntimeAttestationWorker: vi.fn(),
+  runManagedRuntimeBootstrap: vi.fn(),
+}));
+
+vi.mock('./serve/managed-runtime-bootstrap.js', () => ({
+  runManagedRuntimeBootstrap: mocks.runManagedRuntimeBootstrap,
+}));
+
+vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
+  runSessionSendMcp: mocks.runSessionSendMcp,
+}));
+
+vi.mock('./serve/workspace-recovery-worker.js', () => ({
+  runWorkspaceRecoveryWorker: mocks.runWorkspaceRecoveryWorker,
+}));
+
+vi.mock('./serve/managed-runtime-attestation-worker.js', () => ({
+  runManagedRuntimeAttestationWorker: mocks.runManagedRuntimeAttestationWorker,
 }));
 
 vi.mock('./llm.js', () => ({
   main: mocks.main,
+}));
+
+vi.mock('./utils/bundled-chunk-resolver.js', () => ({
+  installBundledChunkResolver: mocks.installBundledChunkResolver,
 }));
 
 vi.mock('./serve/fast-path.js', () => ({
@@ -118,13 +147,45 @@ vi.mock('./commands/mcp.js', () => ({
   },
 }));
 
+vi.mock('./commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory',
+    describe: 'Preview and import external memories',
+    builder: (yargs: Argv) =>
+      yargs
+        .command({
+          command: 'import codex',
+          describe:
+            'Preview Codex memory; explicitly confirm selected sections to consolidate',
+          handler: mocks.memoryImportHandler,
+        })
+        .demandCommand(1, 'You need at least one command before continuing.')
+        .version(false),
+    handler: mocks.memoryHandler,
+  },
+}));
+
 describe('resolveBootstrapRoute', () => {
-  it('routes top-level help, version, serve, and mcp correctly', async () => {
+  it('routes top-level help, version, serve, mcp, and the Runtime worker correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['managed-runtime-worker'])).toBe(
+      'managed-runtime-worker',
+    );
+    expect(
+      resolveBootstrapRoute([
+        'agents',
+        'session-send-mcp',
+        '--url',
+        'http://127.0.0.1:4170/x/send',
+      ]),
+    ).toBe('session-send-mcp');
+    expect(
+      resolveBootstrapRoute(['agents', 'join', 'https://hub/join/w']),
+    ).toBe('default');
   });
 
   it('keeps bundled entrypoint paths out of the route detection', async () => {
@@ -752,6 +813,87 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('runs private recovery before inherited updates or normal CLI startup', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    await runCliEntry(['--workspace-recovery-worker']);
+    expect(mocks.runWorkspaceRecoveryWorker).toHaveBeenCalledOnce();
+    expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { args: [], help: false, upload: false },
+    { args: ['--help'], help: true, upload: false },
+    { args: ['--workspace-file-upload'], help: false, upload: true },
+  ])(
+    'dispatches the private bootstrap entry $args before normal startup',
+    async ({ args, help, upload }) => {
+      process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+      await runCliEntry(['managed-runtime-bootstrap', ...args]);
+      expect(mocks.runManagedRuntimeBootstrap).toHaveBeenCalledWith(
+        help,
+        upload,
+      );
+      expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+      expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+    },
+  );
+
+  it('serves session_send without normal startup or any stdout output', async () => {
+    await runCliEntry([
+      'agents',
+      'session-send-mcp',
+      '--url',
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    ]);
+
+    expect(mocks.runSessionSendMcp).toHaveBeenCalledWith(
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(stdout.join('')).toBe('');
+  });
+
+  it('refuses session-send-mcp without a URL, on stderr only', async () => {
+    await runCliEntry(['agents', 'session-send-mcp']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('--url');
+    expect(stdout.join('')).toBe('');
+    expect(mocks.runSessionSendMcp).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['managed-runtime-worker', '--help'],
+    ['managed-runtime-worker', '--container-boot'],
+    ['managed-runtime-worker', '--container-boot', '/boot.json', 'extra'],
+    ['managed-runtime-worker', '/boot.json', '--container-boot'],
+  ])('rejects invalid hidden Runtime worker arguments: %j', async (...argv) => {
+    await runCliEntry(argv);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain(
+      'Managed Runtime worker arguments are invalid.',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.runManagedRuntimeAttestationWorker).not.toHaveBeenCalled();
+  });
+
+  it('passes the boot file to the container worker without starting the CLI', async () => {
+    await runCliEntry([
+      'managed-runtime-worker',
+      '--container-boot',
+      '/boot.json',
+    ]);
+    expect(mocks.runManagedRuntimeAttestationWorker).toHaveBeenCalledWith(
+      '/boot.json',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
   it('runs a managed update worker without starting the CLI', async () => {
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
     process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
@@ -841,7 +983,7 @@ describe('runCliEntry', () => {
       expect(helpText).toContain(`--${name}`);
     }
     expect(helpText).toContain(
-      '"openai", "openai-responses", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
+      '"openai", "openai-responses", "anthropic", "qwen-oauth", "qwen-subscription", "gemini", "vertex-ai"',
     );
     // The fast path mirrors config.ts and wraps help at the terminal width;
     // in a non-TTY (columns unset) that disables wrapping, so a description
@@ -916,6 +1058,16 @@ describe('runCliEntry', () => {
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
   });
 
+  it('lets the entrypoint report a fatal MCP configuration failure once', async () => {
+    const error = new FatalError('Repair operator settings and restart.', 52);
+    mocks.mcpListHandler.mockRejectedValueOnce(error);
+    const stdout = vi.spyOn(process.stdout, 'write');
+    const stderr = vi.spyOn(process.stderr, 'write');
+    await expect(runCliEntry(['mcp', 'list'])).rejects.toBe(error);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
   it('fails MCP fast-path validation without loading the full CLI', async () => {
     await runCliEntry(['mcp', 'doesnotexist']);
 
@@ -942,6 +1094,47 @@ describe('runCliEntry', () => {
     expect(process.exitCode).toBe(1);
     expect(stderr.join('')).toContain('Not enough non-option arguments');
     expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints memory help to stdout and exits 0 when no subcommand is given', async () => {
+    await runCliEntry(['memory']);
+
+    expect(stdout.join('')).toContain('Usage: qwen memory <command>');
+    expect(stdout.join('')).toContain('qwen memory import codex');
+    expect(stderr.join('')).toBe('');
+    expect(process.exitCode).toBeUndefined();
+    expect(mocks.memoryHandler).not.toHaveBeenCalled();
+    expect(mocks.memoryImportHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints memory help for the -h alias without loading the full CLI', async () => {
+    await runCliEntry(['memory', '-h']);
+
+    expect(stdout.join('')).toContain('Usage: qwen memory <command>');
+    expect(stderr.join('')).toBe('');
+    expect(process.exitCode).toBeUndefined();
+    expect(mocks.memoryHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('executes memory subcommands through the fast path', async () => {
+    await runCliEntry(['memory', 'import', 'codex']);
+
+    expect(mocks.memoryImportHandler).toHaveBeenCalledTimes(1);
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an option-shifted memory argv as a bare help request', async () => {
+    await runCliEntry(['memory', '--json', 'import', 'codex']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stdout.join('')).not.toContain('Usage: qwen memory <command>');
+    expect(stderr.join('')).toContain('Unknown command: codex');
+    expect(mocks.memoryImportHandler).not.toHaveBeenCalled();
     expect(mocks.main).not.toHaveBeenCalled();
   });
 
@@ -997,6 +1190,49 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
     expect(mocks.main).not.toHaveBeenCalled();
   });
+
+  it('installs the chunk resolver once before the serve fast path runs', async () => {
+    mocks.tryRunServeFastPath.mockImplementationOnce(async () => {
+      expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+      return true;
+    });
+
+    await runCliEntry(['serve']);
+
+    expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('does not install the chunk resolver twice when serve with ACP falls through', async () => {
+    await runCliEntry(['serve', '--acp']);
+
+    expect(mocks.tryRunServeFastPath).toHaveBeenCalledTimes(1);
+    expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+    expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['--acp', '--experimental-acp'])(
+    'installs the chunk resolver once before the full %s startup',
+    async (flag) => {
+      mocks.main.mockImplementationOnce(async () => {
+        expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+      });
+
+      await runCliEntry([flag]);
+
+      expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([[], ['--help'], ['--version'], ['--acp=false']])(
+    'does not install the chunk resolver for %j',
+    async (...argv) => {
+      await runCliEntry(argv);
+
+      expect(mocks.installBundledChunkResolver).not.toHaveBeenCalled();
+    },
+  );
 
   it('initializes profilers once when the serve fast path falls back', async () => {
     mocks.tryRunServeFastPath.mockResolvedValue(false);
@@ -1169,6 +1405,19 @@ describe('stampCliEntryEnv', () => {
 });
 
 describe('bootstrap import boundaries', () => {
+  it('installs the chunk resolver before importing the serve fast path', () => {
+    // Runtime mocks observe the call, not module evaluation; pin the import
+    // boundary too so moving installation after the import cannot pass.
+    const source = readFileSync('src/cli.ts', 'utf8');
+    const install = source.indexOf(
+      'installBundledChunkResolver(import.meta.url)',
+    );
+    const fastPathImport = source.indexOf("import('./serve/fast-path.js')");
+
+    expect(install).toBeGreaterThan(-1);
+    expect(fastPathImport).toBeGreaterThan(install);
+  });
+
   it('keeps fast-path-only dependencies out of static imports', () => {
     const source = readFileSync('src/cli.ts', 'utf8');
 
@@ -1211,7 +1460,10 @@ describe('bootstrap import boundaries', () => {
   it('uses the bootstrap file as the production bundle entry', () => {
     const source = readFileSync('../../esbuild.config.js', 'utf8');
 
-    expect(source).toContain("entryPoints: { cli: 'packages/cli/src/cli.ts' }");
+    expect(source).toContain("cli: 'packages/cli/src/cli.ts'");
+    expect(source).toContain(
+      "'execution-worker': 'packages/core/src/services/execution-worker-main.ts'",
+    );
   });
 
   it('keeps bootstrap fast paths in-process in the npm bin wrapper', () => {
@@ -1220,6 +1472,7 @@ describe('bootstrap import boundaries', () => {
     expect(source).toContain('function isInProcessFastPath()');
     expect(source).toContain("first === 'serve'");
     expect(source).toContain("first === 'mcp'");
+    expect(source).toContain("first === 'memory'");
     expect(source).toContain("hasFlag('--help', '-h')");
     expect(source).toContain("hasFlag('--version', '-v')");
     expect(source).toContain('UPDATE_COMPLETE_EXIT_CODE = 44');
@@ -1361,7 +1614,9 @@ describe('bootstrap import boundaries', () => {
         expect(JSON.parse(output)).toEqual({
           args: ['--prompt', 'a&b'],
           skip: 'true',
-          hasLauncherPid: true,
+          // Outside Windows the CLI runs inside the launcher process, so
+          // there is no separate launcher pid to wait for.
+          hasLauncherPid: false,
         });
       } finally {
         rmSync(tempDir, { recursive: true, force: true });
@@ -1733,17 +1988,8 @@ describe('bootstrap import boundaries', () => {
   it('keeps bootstrap top-level help commands aligned with config registrations', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
-      ['authCommand', 'auth'],
-      ['boardCommand', 'board'],
-      ['channelCommand', 'channel'],
-      ['extensionsCommand', 'extensions'],
-      ['hooksCommand', 'hooks'],
-      ['mcpCommand', 'mcp'],
+      ['autofixPrCommand', 'autofix-pr'],
       ['reviewCommand', 'review'],
-      ['sandboxCommand', 'sandbox'],
-      ['serveCommand', 'serve'],
-      ['sessionsCommand', 'sessions'],
-      ['updateCommand', 'update'],
     ]);
     const registeredIdentifiers = [
       ...configSource.matchAll(/\.command\((\w+Command)\)/g),
@@ -1753,11 +1999,15 @@ describe('bootstrap import boundaries', () => {
     );
 
     expect(registeredIdentifiers).toHaveLength(commandNameByIdentifier.size);
-    for (const identifier of registeredIdentifiers) {
-      const commandName = commandNameByIdentifier.get(identifier);
-      expect(commandName, `missing mapping for ${identifier}`).toBeDefined();
-      expect(bootstrapCommands).toContain(commandName);
-    }
+    const registeredCommands = new Set([
+      ...Object.values(commandMetadata).map(
+        ({ command }) => command.split(' ')[0],
+      ),
+      ...registeredIdentifiers.map((identifier) =>
+        commandNameByIdentifier.get(identifier),
+      ),
+    ]);
+    expect(bootstrapCommands).toEqual(registeredCommands);
   });
 
   it('keeps bootstrap MCP help commands aligned with MCP registrations', () => {
@@ -1787,6 +2037,11 @@ describe('bootstrap import boundaries', () => {
 });
 
 describe('bootstrap error handling', () => {
+  const nodeVersion = Object.getOwnPropertyDescriptor(
+    process.versions,
+    'node',
+  )!;
+  const bunVersion = Object.getOwnPropertyDescriptor(process.versions, 'bun');
   const savedEnv = {
     NO_COLOR: process.env['NO_COLOR'],
   };
@@ -1794,6 +2049,10 @@ describe('bootstrap error handling', () => {
   let stderr: string[];
 
   beforeEach(() => {
+    Object.defineProperty(process.versions, 'node', { value: '26.12.1' });
+    delete process.versions['bun'];
+    vi.stubEnv(CHECKED_NODE_VERSION_ENV, undefined);
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', undefined);
     stderr = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
       stderr.push(String(chunk));
@@ -1805,6 +2064,13 @@ describe('bootstrap error handling', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
+    Object.defineProperty(process.versions, 'node', nodeVersion);
+    if (bunVersion) {
+      Object.defineProperty(process.versions, 'bun', bunVersion);
+    } else {
+      delete process.versions['bun'];
+    }
     if (savedEnv.NO_COLOR === undefined) {
       delete process.env['NO_COLOR'];
     } else {
@@ -1812,6 +2078,142 @@ describe('bootstrap error handling', () => {
     }
     vi.restoreAllMocks();
   });
+
+  it.each([
+    '24.0.0',
+    '24.9.0',
+    '24.13.0',
+    '24.13.1',
+    '24.13.2',
+    '24.15.0',
+    '24.16.0',
+    '24.16.1',
+    '24.22.0',
+    '24.22.1',
+    '24.22.1+build.1',
+    '25.0.0',
+    '25.1.0',
+    '25.8.0',
+    '25.9.0',
+    '25.9.0+build.1',
+  ])(
+    'warns on Node %s before continuing startup without changing stdout',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const stdout = vi.spyOn(process.stdout, 'write');
+      const handleError = vi.fn();
+      const run = vi.fn(async () => {
+        expect(stderr).toHaveLength(1);
+        expect(stderr[0]).toContain(`Node.js ${node}`);
+        expect(stderr[0]).toContain('Upgrade to Node.js 26.12.1');
+        expect(stderr[0]).toContain('will continue normally');
+        expect(stderr[0]).toContain('issues/15165');
+      });
+
+      await runCliEntryPoint(run, handleError);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(handleError).not.toHaveBeenCalled();
+      expect(process.exit).not.toHaveBeenCalled();
+      expect(stdout).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    '22.22.1',
+    '22.23.4',
+    '23.0.0',
+    '23.11.1',
+    '23.99.0',
+    '24.22.2',
+    '24.23.0',
+    '24.99.0',
+    '25.9.1',
+    '25.10.0',
+    '26.0.0',
+    '26.12.1',
+    '27.0.0',
+    '24.0.0-rc.1',
+    '24.13.1-nightly',
+    '24.22.1-rc.1',
+    '25.0.0-rc.1',
+    '25.8.0-nightly',
+    '25.9.0-rc.1',
+    'invalid',
+  ])(
+    'does not warn on Node %s outside the reviewed stable ranges',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {});
+
+      await runCliEntryPoint(run);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toEqual([]);
+      expect(process.exit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['24.13.1', '25.9.0'])(
+    'does not apply the V8 warning to Bun reporting Node %s',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      Object.defineProperty(process.versions, 'bun', {
+        value: '1.3.0',
+        configurable: true,
+      });
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {});
+
+      await runCliEntryPoint(run);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toEqual([]);
+    },
+  );
+
+  it.each(['24.13.1', '25.9.0'])(
+    'consumes the Node %s relaunch marker without repeating the warning',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      vi.stubEnv(CHECKED_NODE_VERSION_ENV, node);
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {
+        expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
+      });
+
+      await runCliEntryPoint(run);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['24.13.1', undefined],
+    ['24.13.1', '24.22.1'],
+    ['25.9.0', undefined],
+    ['25.9.0', '24.22.1'],
+  ])(
+    'warns on Node %s when relaunch is disabled and the checked version is %s',
+    async (node, checkedVersion) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      vi.stubEnv(CHECKED_NODE_VERSION_ENV, checkedVersion);
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {});
+
+      await runCliEntryPoint(run);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toHaveLength(1);
+      expect(stderr[0]).toContain('Upgrade to Node.js 26.12.1');
+      expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
+      expect(process.exit).not.toHaveBeenCalled();
+    },
+  );
 
   it('prints FatalError messages and exits with their code', async () => {
     process.env['NO_COLOR'] = '1';

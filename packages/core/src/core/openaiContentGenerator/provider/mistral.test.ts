@@ -4,74 +4,64 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
-import type OpenAI from 'openai';
-import type { Config } from '../../../config/config.js';
+import { describe, it, vi } from 'vitest';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { determineProvider } from '../index.js';
+import {
+  createCliConfig,
+  createReasoningRequest,
+  expectOutboundRequest,
+} from './test-utils/reasoning-wire-contract.js';
 
-function createCliConfig(): Config {
-  return {
-    getCliVersion: vi.fn().mockReturnValue('1.0.0'),
-    getProxy: vi.fn().mockReturnValue(undefined),
-  } as unknown as Config;
-}
-
-function createProviderConfig(
-  overrides: Partial<ContentGeneratorConfig>,
-): ContentGeneratorConfig {
-  return {
-    apiKey: 'test-api-key',
-    baseUrl: 'https://api.mistral.ai/v1',
-    model: 'mistral-large-latest',
-    ...overrides,
-  } as ContentGeneratorConfig;
-}
-
-function createReasoningRequest(): OpenAI.Chat.ChatCompletionCreateParams {
-  return {
-    model: 'mistral-large-latest',
-    messages: [
-      { role: 'user', content: 'Say OK' },
-      {
-        role: 'assistant',
-        content: 'OK',
-        reasoning_content: 'User asked for a short response.',
-      } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
-        reasoning_content: string;
-      },
-      { role: 'user', content: 'Say OK again' },
-    ],
-    max_tokens: 1000,
-  };
-}
+const config = {
+  apiKey: 'test-api-key',
+  baseUrl: 'https://api.mistral.ai/v1',
+  model: 'mistral-large-latest',
+};
+const stripped = { role: 'assistant' as const, content: 'OK' };
+const preserved = {
+  ...stripped,
+  reasoning_content: 'User asked for a short response.',
+};
+const createRequest = () =>
+  createReasoningRequest(config.model, preserved, 'Say OK', 'Say OK again');
 
 describe('Mistral provider outbound compatibility filtering', () => {
-  it('strips reasoning_content from outgoing requests for api.mistral.ai without mutating the source history', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://api.mistral.ai/v1',
-        model: 'strict-chat-alias',
-      }),
-      createCliConfig(),
+  it.each([
+    [
+      'strips reasoning_content from outgoing requests for api.mistral.ai without mutating the source history',
+      'https://api.mistral.ai/v1',
+      'strict-chat-alias',
+      stripped,
+    ],
+    [
+      'also strips reasoning_content when a Mistral model is served behind a custom base URL',
+      'https://strict-proxy.example.com/v1',
+      'Mistral-Large-Latest',
+      stripped,
+    ],
+    [
+      'preserves reasoning_content for non-Mistral OpenAI-compatible providers',
+      'https://api.openai.com/v1',
+      'gpt-4o',
+      preserved,
+    ],
+    [
+      'does not treat hostile hostnames containing api.mistral.ai as Mistral',
+      'https://api.mistral.ai.evil.example/v1',
+      'gpt-4o',
+      preserved,
+    ],
+  ] as const)('%s', (_title, baseUrl, model, expectedAssistant) => {
+    expectOutboundRequest(
+      { ...config, baseUrl, model },
+      createRequest(),
+      expectedAssistant,
     );
-
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
-
-    expect(result.messages?.[1]).toEqual({
-      role: 'assistant',
-      content: 'OK',
-    });
-    expect(
-      (originalRequest.messages[1] as { reasoning_content?: string })
-        .reasoning_content,
-    ).toBe('User asked for a short response.');
   });
 
   it('preserves declared DeepSeek history on a Mistral-named gateway alias', () => {
-    const config = createCliConfig();
-    config.getResolvedModelConfig = vi.fn().mockReturnValue({
+    const cliConfig = createCliConfig();
+    cliConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
       capabilities: {
         reasoning: {
           profile: 'deepseek-openai',
@@ -80,71 +70,16 @@ describe('Mistral provider outbound compatibility filtering', () => {
         },
       },
     });
-    const provider = determineProvider(
-      createProviderConfig({
-        model: 'mistral-large-latest',
+    expectOutboundRequest(
+      {
+        ...config,
         baseUrl: 'https://gateway.example/v1',
         authType: 'openai' as ContentGeneratorConfig['authType'],
-      }),
-      config,
+      },
+      createRequest(),
+      preserved,
+      cliConfig,
+      'prompt',
     );
-    const original = createReasoningRequest();
-    expect(provider.buildRequest(original, 'prompt').messages[1]).toEqual(
-      original.messages[1],
-    );
-  });
-
-  it('also strips reasoning_content when a Mistral model is served behind a custom base URL', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://strict-proxy.example.com/v1',
-        model: 'Mistral-Large-Latest',
-      }),
-      createCliConfig(),
-    );
-
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
-
-    expect(result.messages?.[1]).toEqual({
-      role: 'assistant',
-      content: 'OK',
-    });
-  });
-
-  it('preserves reasoning_content for non-Mistral OpenAI-compatible providers', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://api.openai.com/v1',
-        model: 'gpt-4o',
-      }),
-      createCliConfig(),
-    );
-
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
-
-    expect(
-      (result.messages?.[1] as { reasoning_content?: string })
-        .reasoning_content,
-    ).toBe('User asked for a short response.');
-  });
-
-  it('does not treat hostile hostnames containing api.mistral.ai as Mistral', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://api.mistral.ai.evil.example/v1',
-        model: 'gpt-4o',
-      }),
-      createCliConfig(),
-    );
-
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
-
-    expect(
-      (result.messages?.[1] as { reasoning_content?: string })
-        .reasoning_content,
-    ).toBe('User asked for a short response.');
   });
 });

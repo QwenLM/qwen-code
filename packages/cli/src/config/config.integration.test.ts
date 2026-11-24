@@ -487,6 +487,20 @@ describe('skill settings providers', async () => {
     expect(provider()).toEqual(new Set(['hard']));
   });
 
+  it('reflects Browser Use disable and re-enable changes without restarting', () => {
+    const settings = {
+      merged: { skills: { enabled: [] as string[], disabled: [] as string[] } },
+      forScope: () => ({ settings: { skills: {} } }),
+    };
+    const provider = buildDisabledSkillNamesProvider(settings as never);
+    expect(provider().has('browser-use')).toBe(false);
+    settings.merged.skills.disabled = ['browser-use'];
+    expect(provider().has('browser-use')).toBe(true);
+    settings.merged.skills.disabled = [];
+    expect(provider().has('browser-use')).toBe(false);
+    expect(provider().has('computer-use')).toBe(false);
+  });
+
   it('reads explicit enables from the current merged settings', () => {
     const settings = {
       merged: { skills: { enabled: [' REVIEW '] } },

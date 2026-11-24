@@ -31,81 +31,91 @@ vi.mock('../telemetry/trace-context.js', () => ({
 }));
 
 describe('getShellContextEnvVars', () => {
-  let originalSessionId: string | undefined;
-  // Isolated for the same reason as the session id, and it matters more now: the
-  // CLI exports QWEN_CODE_CLI to every shell it spawns, so a `npm test` run started
-  // from inside a qwen session inherits it — and the exact-equality assertion below
-  // would fail on a variable the test never set.
-  let originalCli: string | undefined;
-  // And QWEN_CODE_PROJECT_DIR, for the same reason again — the CLI exports it
-  // too, and the `.toEqual()` exact matches below fail on the inherited key.
-  // Reproduced: with it set, exactly the two exact-match tests fail. Restoring it
-  // here also cleans up after the per-session tests below, which assign it and
-  // used to leak the assignment into every later test in the file.
-  let originalProjectDir: string | undefined;
-  // And QWEN_CODE_MODEL — Config claims it into process.env, so a test run
-  // started from inside a qwen session inherits it too.
-  let originalModel: string | undefined;
-  // And its provider-qualified twin, published from the same place.
-  let originalIdentity: string | undefined;
+  // Cleared before and restored after each test. A test run started from
+  // inside a qwen session inherits these: the CLI exports QWEN_CODE_CLI and
+  // QWEN_CODE_PROJECT_DIR to every shell it spawns, and Config claims
+  // QWEN_CODE_MODEL (and its provider-qualified twin, QWEN_CODE_MODEL_IDENTITY)
+  // into process.env. The exact-equality `.toEqual()` assertions below would
+  // then fail on a variable the test never set — reproduced for
+  // QWEN_CODE_PROJECT_DIR: exactly the two exact-match tests fail. Restoring
+  // also cleans up after the per-session tests, which assign
+  // QWEN_CODE_PROJECT_DIR and used to leak it into every later test.
+  const isolatedKeys = [
+    'QWEN_CODE_SESSION_ID',
+    'QWEN_CODE_CLI',
+    'QWEN_CODE_PROJECT_DIR',
+    'QWEN_CODE_MODEL',
+    'QWEN_CODE_MODEL_IDENTITY',
+  ];
+  const originals: Record<string, string | undefined> = {};
 
   beforeEach(() => {
-    originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
-    delete process.env['QWEN_CODE_SESSION_ID'];
-    originalCli = process.env['QWEN_CODE_CLI'];
-    delete process.env['QWEN_CODE_CLI'];
-    originalProjectDir = process.env['QWEN_CODE_PROJECT_DIR'];
-    delete process.env['QWEN_CODE_PROJECT_DIR'];
-    originalModel = process.env['QWEN_CODE_MODEL'];
-    delete process.env['QWEN_CODE_MODEL'];
-    originalIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
-    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+    for (const key of isolatedKeys) {
+      originals[key] = process.env[key];
+      delete process.env[key];
+    }
   });
 
   afterEach(() => {
-    if (originalSessionId !== undefined) {
-      process.env['QWEN_CODE_SESSION_ID'] = originalSessionId;
-    } else {
-      delete process.env['QWEN_CODE_SESSION_ID'];
-    }
-    if (originalCli !== undefined) {
-      process.env['QWEN_CODE_CLI'] = originalCli;
-    } else {
-      delete process.env['QWEN_CODE_CLI'];
-    }
-    if (originalProjectDir !== undefined) {
-      process.env['QWEN_CODE_PROJECT_DIR'] = originalProjectDir;
-    } else {
-      delete process.env['QWEN_CODE_PROJECT_DIR'];
-    }
-    if (originalModel !== undefined) {
-      process.env['QWEN_CODE_MODEL'] = originalModel;
-    } else {
-      delete process.env['QWEN_CODE_MODEL'];
-    }
-    if (originalIdentity !== undefined) {
-      process.env['QWEN_CODE_MODEL_IDENTITY'] = originalIdentity;
-    } else {
-      delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+    for (const key of isolatedKeys) {
+      if (originals[key] !== undefined) {
+        process.env[key] = originals[key];
+      } else {
+        delete process.env[key];
+      }
     }
   });
+
+  const SHEBANG_JS = '#!/usr/bin/env node\nconsole.log("hi");\n';
+  const BUNDLE_JS = '"use strict";\nconsole.log("bundle");\n';
+
+  /**
+   * Points QWEN_CODE_CLI at a fresh temp dir itself (no `file`) or at `file`
+   * written inside it, runs `check` with that path, then removes the dir.
+   */
+  function withCliEntry(
+    prefix: string,
+    file: { name: string; body: string; mode?: number } | undefined,
+    check: (entry: string) => void,
+  ): void {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    try {
+      let entry = dir;
+      if (file) {
+        entry = join(dir, file.name);
+        const { mode } = file;
+        writeFileSync(
+          entry,
+          file.body,
+          mode === undefined ? undefined : { mode },
+        );
+      }
+      process.env['QWEN_CODE_CLI'] = entry;
+      check(entry);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** QWEN_CODE_CLI as a child sees it, composed the way spawn sites do. */
+  const childCli = () =>
+    ({ ...process.env, ...getShellContextEnvVars() })['QWEN_CODE_CLI'];
+
+  const inSession = (sessionId: string) =>
+    sessionIdContext.run(sessionId, () => getShellContextEnvVars());
 
   it('passes the running CLI down, so a subprocess does not resolve `qwen` off PATH', () => {
     // A skill that shells out to `qwen …` would otherwise reach whatever the machine
     // has installed. Dogfooded: a dev-daemon session ran `qwen review agent-prompt
     // --role 0`, PATH found a v0.19.10 whose agent-prompt predates --role, and the
     // review died on "Missing required argument: chunk".
-    const dir = mkdtempSync(join(tmpdir(), 'cli-entry-'));
-    try {
-      const entry = join(dir, 'cli-entry.js');
-      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
-        mode: 0o755,
-      });
-      process.env['QWEN_CODE_CLI'] = entry;
-      expect(getShellContextEnvVars()['QWEN_CODE_CLI']).toBe(entry);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    withCliEntry(
+      'cli-entry-',
+      { name: 'cli-entry.js', body: SHEBANG_JS, mode: 0o755 },
+      (entry) => {
+        expect(getShellContextEnvVars()['QWEN_CODE_CLI']).toBe(entry);
+      },
+    );
   });
 
   it('overwrites a shebang-less .js with an EMPTY string — omission would leak it through the spread', () => {
@@ -117,20 +127,12 @@ describe('getShellContextEnvVars', () => {
     // so a key merely omitted from the returned record arrives anyway, inherited
     // through the spread — reproduced: exit 126 on exactly the hosts the filter
     // was written for. The `:-` expansion falls back to `qwen` on empty.
-    const dir = mkdtempSync(join(tmpdir(), 'cli-nosb-'));
-    try {
-      const bundle = join(dir, 'cli.js');
-      writeFileSync(bundle, '"use strict";\nconsole.log("bundle");\n');
-      process.env['QWEN_CODE_CLI'] = bundle;
-
+    withCliEntry('cli-nosb-', { name: 'cli.js', body: BUNDLE_JS }, () => {
       const vars = getShellContextEnvVars();
       expect(vars['QWEN_CODE_CLI']).toBe('');
       // The contract, one spread up — the channel the omission bug lived in:
-      const childEnv = { ...process.env, ...vars };
-      expect(childEnv['QWEN_CODE_CLI']).toBe('');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+      expect({ ...process.env, ...vars }['QWEN_CODE_CLI']).toBe('');
+    });
   });
 
   it('an unreadable entry is filtered through the same spread-safe channel', () => {
@@ -138,8 +140,7 @@ describe('getShellContextEnvVars', () => {
     // inherited value either — a deleted or permission-blocked path is exactly
     // as unusable as a shebang-less one.
     process.env['QWEN_CODE_CLI'] = '/no/such/dir/cli.js';
-    const childEnv = { ...process.env, ...getShellContextEnvVars() };
-    expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    expect(childCli()).toBe('');
   });
 
   it('an EXECUTABLE shebang-less .js is filtered by the header check itself', () => {
@@ -149,18 +150,11 @@ describe('getShellContextEnvVars', () => {
     // dist/cli.js that IS executable and still has no shebang. A regression in
     // the header read (wrong byte count, offset, or comparison) would have
     // passed every test.
-    const dir = mkdtempSync(join(tmpdir(), 'cli-exec-nosb-'));
-    try {
-      const bundle = join(dir, 'cli.js');
-      writeFileSync(bundle, '"use strict";\nconsole.log("bundle");\n', {
-        mode: 0o755,
-      });
-      process.env['QWEN_CODE_CLI'] = bundle;
-      const childEnv = { ...process.env, ...getShellContextEnvVars() };
-      expect(childEnv['QWEN_CODE_CLI']).toBe('');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    withCliEntry(
+      'cli-exec-nosb-',
+      { name: 'cli.js', body: BUNDLE_JS, mode: 0o755 },
+      () => expect(childCli()).toBe(''),
+    );
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -169,34 +163,20 @@ describe('getShellContextEnvVars', () => {
       // The header check alone passes a 0644 script, and the shell then dies on
       // EACCES instead of falling back. Execute permission is part of "the shell
       // can exec this".
-      const dir = mkdtempSync(join(tmpdir(), 'cli-noexec-'));
-      try {
-        const entry = join(dir, 'entry.js');
-        writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
-          mode: 0o644,
-        });
-        process.env['QWEN_CODE_CLI'] = entry;
-        const childEnv = { ...process.env, ...getShellContextEnvVars() };
-        expect(childEnv['QWEN_CODE_CLI']).toBe('');
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+      withCliEntry(
+        'cli-noexec-',
+        { name: 'entry.js', body: SHEBANG_JS, mode: 0o644 },
+        () => expect(childCli()).toBe(''),
+      );
     },
   );
 
   it('a shebang-bearing entry still passes through the spread intact', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cli-sb-'));
-    try {
-      const entry = join(dir, 'entry.js');
-      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
-        mode: 0o755,
-      });
-      process.env['QWEN_CODE_CLI'] = entry;
-      const childEnv = { ...process.env, ...getShellContextEnvVars() };
-      expect(childEnv['QWEN_CODE_CLI']).toBe(entry);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    withCliEntry(
+      'cli-sb-',
+      { name: 'entry.js', body: SHEBANG_JS, mode: 0o755 },
+      (entry) => expect(childCli()).toBe(entry),
+    );
   });
 
   it('a DIRECTORY entry is filtered — search permission is not executability', () => {
@@ -204,14 +184,7 @@ describe('getShellContextEnvVars', () => {
     // passes an X_OK probe. An extension allowlist answered "usable" for it
     // and every `"${QWEN_CODE_CLI:-qwen}"` died on exit 126; only the
     // regular-file check can refuse this shape.
-    const dir = mkdtempSync(join(tmpdir(), 'cli-dir-'));
-    try {
-      process.env['QWEN_CODE_CLI'] = dir;
-      const childEnv = { ...process.env, ...getShellContextEnvVars() };
-      expect(childEnv['QWEN_CODE_CLI']).toBe('');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    withCliEntry('cli-dir-', undefined, () => expect(childCli()).toBe(''));
   });
 
   it('an executable script extension without a shebang is filtered beyond the .js family', () => {
@@ -219,32 +192,22 @@ describe('getShellContextEnvVars', () => {
     // a shebang-less script is exec'd by the kernel as a SHELL script — the
     // same reason the vendored `.js` bundle is filtered. The gate reads the
     // header for every known script extension, not an enumerated subset.
-    const dir = mkdtempSync(join(tmpdir(), 'cli-ts-'));
-    try {
-      const entry = join(dir, 'index.ts');
-      writeFileSync(entry, 'export {};\n', { mode: 0o755 });
-      process.env['QWEN_CODE_CLI'] = entry;
-      const childEnv = { ...process.env, ...getShellContextEnvVars() };
-      expect(childEnv['QWEN_CODE_CLI']).toBe('');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    withCliEntry(
+      'cli-ts-',
+      { name: 'index.ts', body: 'export {};\n', mode: 0o755 },
+      () => expect(childCli()).toBe(''),
+    );
   });
 
   it('a native-binary shape — executable, no extension, no shebang — passes', () => {
     // The gate demands positive evidence, not a shebang universally: a native
     // binary has none and must not be filtered. Extensionless-and-executable
     // is that shape's stand-in here.
-    const dir = mkdtempSync(join(tmpdir(), 'cli-bin-'));
-    try {
-      const entry = join(dir, 'qwen');
-      writeFileSync(entry, '\x7fELF-not-really\n', { mode: 0o755 });
-      process.env['QWEN_CODE_CLI'] = entry;
-      const childEnv = { ...process.env, ...getShellContextEnvVars() };
-      expect(childEnv['QWEN_CODE_CLI']).toBe(entry);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    withCliEntry(
+      'cli-bin-',
+      { name: 'qwen', body: '\x7fELF-not-really\n', mode: 0o755 },
+      (entry) => expect(childCli()).toBe(entry),
+    );
   });
 
   it('omits QWEN_CODE_CLI when the host does not export one', () => {
@@ -257,8 +220,7 @@ describe('getShellContextEnvVars', () => {
   });
 
   it('returns empty strings for agent/prompt when no context is available', () => {
-    const env = getShellContextEnvVars();
-    expect(env).toEqual({
+    expect(getShellContextEnvVars()).toEqual({
       QWEN_CODE_AGENT_ID: '',
       QWEN_CODE_PROMPT_ID: '',
       // Blanked, not omitted — see the identity describe block below.
@@ -268,8 +230,9 @@ describe('getShellContextEnvVars', () => {
 
   it('returns QWEN_CODE_SESSION_ID when set in process.env', () => {
     process.env['QWEN_CODE_SESSION_ID'] = 'test-session-123';
-    const env = getShellContextEnvVars();
-    expect(env['QWEN_CODE_SESSION_ID']).toBe('test-session-123');
+    expect(getShellContextEnvVars()['QWEN_CODE_SESSION_ID']).toBe(
+      'test-session-123',
+    );
   });
 
   it('returns QWEN_CODE_AGENT_ID when called within agent context', async () => {
@@ -309,8 +272,8 @@ describe('getShellContextEnvVars', () => {
       registerSessionProjectDir('sess-B', '/proj/B');
       process.env['QWEN_CODE_PROJECT_DIR'] = '/proj/A'; // the first to boot
 
-      const a = sessionIdContext.run('sess-A', () => getShellContextEnvVars());
-      const b = sessionIdContext.run('sess-B', () => getShellContextEnvVars());
+      const a = inSession('sess-A');
+      const b = inSession('sess-B');
 
       expect(a['QWEN_CODE_PROJECT_DIR']).toBe('/proj/A');
       expect(b['QWEN_CODE_PROJECT_DIR']).toBe('/proj/B'); // NOT A's
@@ -318,18 +281,10 @@ describe('getShellContextEnvVars', () => {
 
     it('drops a session entry on unregister — no daemon leak', () => {
       registerSessionProjectDir('sess-X', '/proj/X');
-      expect(
-        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
-          'QWEN_CODE_PROJECT_DIR'
-        ],
-      ).toBe('/proj/X');
+      expect(inSession('sess-X')['QWEN_CODE_PROJECT_DIR']).toBe('/proj/X');
       unregisterSessionProjectDir('sess-X');
       delete process.env['QWEN_CODE_PROJECT_DIR'];
-      expect(
-        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
-          'QWEN_CODE_PROJECT_DIR'
-        ],
-      ).toBeUndefined();
+      expect(inSession('sess-X')['QWEN_CODE_PROJECT_DIR']).toBeUndefined();
     });
 
     it('falls back to the env var for the single-session CLI', () => {
@@ -346,9 +301,7 @@ describe('getShellContextEnvVars', () => {
       // (constructor guard `sessionEnvClaimed` in config.ts), so a later
       // session must win via its own async context.
       process.env['QWEN_CODE_SESSION_ID'] = 'stale-first-session';
-      const env = sessionIdContext.run('current-session', () =>
-        getShellContextEnvVars(),
-      );
+      const env = inSession('current-session');
       expect(env['QWEN_CODE_SESSION_ID']).toBe('current-session');
     });
 
@@ -362,18 +315,15 @@ describe('getShellContextEnvVars', () => {
       // Regression: two daemon sessions interleaving must each see their
       // own ID at spawn time, even though process.env is a single slot.
       process.env['QWEN_CODE_SESSION_ID'] = 'stale-first-session';
-      let envSeenByA: Record<string, string> = {};
-      let envSeenByB: Record<string, string> = {};
+      const envAfterDelay = (sessionId: string) =>
+        sessionIdContext.run(sessionId, async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return getShellContextEnvVars();
+        });
 
-      await Promise.all([
-        sessionIdContext.run('session-A', async () => {
-          await new Promise((resolve) => setTimeout(resolve, 5));
-          envSeenByA = getShellContextEnvVars();
-        }),
-        sessionIdContext.run('session-B', async () => {
-          await new Promise((resolve) => setTimeout(resolve, 5));
-          envSeenByB = getShellContextEnvVars();
-        }),
+      const [envSeenByA, envSeenByB] = await Promise.all([
+        envAfterDelay('session-A'),
+        envAfterDelay('session-B'),
       ]);
 
       expect(envSeenByA['QWEN_CODE_SESSION_ID']).toBe('session-A');
@@ -432,10 +382,7 @@ describe('getShellContextEnvVars', () => {
       process.env['QWEN_CODE_MODEL'] = 'model-A'; // the first to boot
       process.env['QWEN_CODE_MODEL_IDENTITY'] = 'model-A@aaaaaaaa';
 
-      const child = (sid: string) => ({
-        ...process.env,
-        ...sessionIdContext.run(sid, () => getShellContextEnvVars()),
-      });
+      const child = (sid: string) => ({ ...process.env, ...inSession(sid) });
       expect(child('sess-B')['QWEN_CODE_MODEL_IDENTITY']).toBe(
         'model-B@bbbbbbbb',
       );
@@ -457,17 +404,11 @@ describe('getShellContextEnvVars', () => {
 
     it('drops the identity with the session on unregister', () => {
       registerSessionModel('sess-X', 'model-X', 'model-X@abcdabcd');
-      expect(
-        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
-          'QWEN_CODE_MODEL_IDENTITY'
-        ],
-      ).toBe('model-X@abcdabcd');
+      expect(inSession('sess-X')['QWEN_CODE_MODEL_IDENTITY']).toBe(
+        'model-X@abcdabcd',
+      );
       unregisterSessionModel('sess-X');
-      expect(
-        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
-          'QWEN_CODE_MODEL_IDENTITY'
-        ],
-      ).toBe('');
+      expect(inSession('sess-X')['QWEN_CODE_MODEL_IDENTITY']).toBe('');
     });
 
     it('matches on the whole model id, `@` in the name included', () => {
@@ -513,8 +454,8 @@ describe('getShellContextEnvVars', () => {
       registerSessionModel('sess-B', 'model-B');
       process.env['QWEN_CODE_MODEL'] = 'model-A'; // the first to boot
 
-      const a = sessionIdContext.run('sess-A', () => getShellContextEnvVars());
-      const b = sessionIdContext.run('sess-B', () => getShellContextEnvVars());
+      const a = inSession('sess-A');
+      const b = inSession('sess-B');
 
       expect(a['QWEN_CODE_MODEL']).toBe('model-A');
       expect(b['QWEN_CODE_MODEL']).toBe('model-B'); // NOT A's
@@ -522,18 +463,10 @@ describe('getShellContextEnvVars', () => {
 
     it('drops a session entry on unregister — no daemon leak', () => {
       registerSessionModel('sess-X', 'model-X');
-      expect(
-        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
-          'QWEN_CODE_MODEL'
-        ],
-      ).toBe('model-X');
+      expect(inSession('sess-X')['QWEN_CODE_MODEL']).toBe('model-X');
       unregisterSessionModel('sess-X');
       delete process.env['QWEN_CODE_MODEL'];
-      expect(
-        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
-          'QWEN_CODE_MODEL'
-        ],
-      ).toBeUndefined();
+      expect(inSession('sess-X')['QWEN_CODE_MODEL']).toBeUndefined();
     });
 
     it('falls back to the global slot for the single-session CLI', () => {

@@ -193,4 +193,53 @@ describe('createExtensionGitClient', () => {
       'http.https://git.example.com/owner/repo.git.extraHeader',
     );
   });
+
+  // Regression for #13447: loading an extension whose Git source needs
+  // authentication hung every startup. Git reads its credential prompt from
+  // /dev/tty, which the Ink TUI already holds in raw mode, so the prompt can
+  // be neither answered nor dismissed and nothing upstream cancels it.
+  // GIT_CONFIG_GLOBAL=/dev/null also drops the user's credential helper, so
+  // there is no non-interactive fallback left. Pin the same guard the rest of
+  // the repo pins (review/lib/git.ts, review-worktree-lease.ts,
+  // team-memory-sync.ts, ssh-workspace-script.ts) so it fails fast instead.
+  it('disables terminal credential prompts in restricted environments', () => {
+    vi.stubEnv('PATH', '/stubbed/bin');
+    vi.stubEnv('TMPDIR', '/stubbed/tmp');
+    const environments: Array<Record<string, string>> = [];
+    const fakeGit = {
+      env: (environment: Record<string, string>) => {
+        environments.push(environment);
+        return fakeGit;
+      },
+    } as unknown as SimpleGit;
+    const factory = (() => fakeGit) as unknown as SimpleGitFactory;
+
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+    });
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+      authentication: {
+        source: 'https://git.example.com/owner/repo.git',
+        credential: { username: 'user', password: 'token' },
+      },
+    });
+
+    expect(environments).toHaveLength(2);
+    for (const environment of environments) {
+      expect(environment).toHaveProperty('GIT_TERMINAL_PROMPT', '0');
+      // The rest of the allowlist must be unchanged by adding the guard.
+      expect(environment).toHaveProperty('GIT_CONFIG_NOSYSTEM', '1');
+      expect(environment).toHaveProperty('GIT_CONFIG_GLOBAL', '/dev/null');
+      expect(environment).toHaveProperty('PATH', '/stubbed/bin');
+      expect(environment).toHaveProperty('TMPDIR', '/stubbed/tmp');
+    }
+    expect(environments[1]).toHaveProperty('GIT_CONFIG_COUNT', '1');
+    expect(environments[1]).toHaveProperty(
+      'GIT_CONFIG_VALUE_0',
+      `Authorization: Basic ${Buffer.from('user:token', 'utf8').toString('base64')}`,
+    );
+  });
 });

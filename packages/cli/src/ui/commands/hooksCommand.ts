@@ -16,14 +16,19 @@ import type {
   Config,
   HookRegistryEntry,
   SessionHookEntry,
-  HookEventName,
 } from '@qwen-code/qwen-code-core';
+import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { supportsMatchers } from '../components/hooks/constants.js';
 import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { MessageType } from '../types.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
+import {
+  applyProjectHooksApproval,
+  getProjectHooksForApproval,
+} from '../../config/hook-approvals.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 
 const debugLogger = createDebugLogger('HOOKS_COMMAND');
 
@@ -54,17 +59,42 @@ async function reloadHooksFromSettings(
       'Settings could not be read; the previous hooks are still active.',
     );
   }
+  // The system files are reloaded on their own: a user usually cannot repair
+  // an administrator's file, so a broken one must not block the user's own
+  // edits. On failure their previous snapshot stays in effect.
+  const systemScopes = [SettingScope.System, SettingScope.SystemDefaults];
+  const systemReloaded = settings.reloadScopesFromDiskAtomically(systemScopes);
   config.setHooksFromSettings(
     resolveHookSettingsForConfig(
       settings.merged.hooks,
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
       config.getBareMode() || config.isSafeMode(),
+      // Keep the confirmation hook while an MCP allow-list hides the server.
+      config.getTopTierMcpServers()?.['external-context'],
     ),
   );
+  // An edited project hooks block has a new hash and so no approval: keep it
+  // out of the registry and let the approval dialog ask again. Keyed like
+  // startup, by the project the settings came from, not the live cwd.
+  const state = config.isProjectHooksApprovalGated()
+    ? applyProjectHooksApproval(config, getProjectHooksForApproval(settings))
+    : undefined;
   await hookSystem.reload();
+  if (state === 'pending') {
+    appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
+  }
+  if (!systemReloaded) {
+    const paths = systemScopes
+      .map((scope) => settings.forScope(scope).path)
+      .join(', ');
+    throw new Error(
+      `System settings could not be read (${paths}); hooks from them are unchanged, and other hook edits were applied.`,
+    );
+  }
 }
 
 /**
@@ -127,7 +157,33 @@ const listCommand: SlashCommand = {
       ? sessionHooksManager.getAllSessionHooks(sessionId)
       : [];
 
-    const totalHooks = configHooks.length + sessionHooks.length;
+    // The registry omits blocks the approval/trust gates withhold; the
+    // listing accessor still has them, so a non-interactive `/hooks` shows
+    // what is configured but not loaded instead of claiming none exist.
+    const withheldApproval = config.getWithheldProjectHooks?.();
+    const withheldTrust = config.getTrustWithheldProjectHooks?.();
+    const withheld = withheldApproval ?? withheldTrust;
+    const withheldReason = withheldApproval
+      ? config.isProjectHooksRejected?.()
+        ? 'rejected'
+        : 'not approved'
+      : 'folder not trusted';
+    const withheldCount = withheld
+      ? Object.values(withheld).reduce(
+          (count, defs) =>
+            count +
+            (Array.isArray(defs)
+              ? defs.reduce(
+                  (n, def) =>
+                    n + (Array.isArray(def?.hooks) ? def.hooks.length : 0),
+                  0,
+                )
+              : 0),
+          0,
+        )
+      : 0;
+
+    const totalHooks = configHooks.length + sessionHooks.length + withheldCount;
 
     if (totalHooks === 0) {
       return {
@@ -204,6 +260,32 @@ const listCommand: SlashCommand = {
         name: extractName(config),
         source: formatHookSource('session'),
       });
+    }
+
+    if (withheld) {
+      const eventNames = new Set<string>(Object.values(HookEventName));
+      for (const [eventName, defs] of Object.entries(withheld)) {
+        // Same filter as the registry path: non-event keys (e.g.
+        // notifications) are configuration, not hooks to render.
+        if (!eventNames.has(eventName) || !Array.isArray(defs)) continue;
+        for (const def of defs) {
+          if (!Array.isArray(def?.hooks)) continue;
+          for (const hookConfig of def.hooks) {
+            if (!hookConfig || typeof hookConfig !== 'object') continue;
+            addHook(eventName, normalizeMatcher(def.matcher), {
+              name: extractName(
+                hookConfig as {
+                  type: string;
+                  command?: string;
+                  url?: string;
+                  name?: string;
+                },
+              ),
+              source: `${formatHookSource('project')}; disabled (${withheldReason})`,
+            });
+          }
+        }
+      }
     }
 
     let output = `**Configured Hooks (${totalHooks} total)**\n\n`;

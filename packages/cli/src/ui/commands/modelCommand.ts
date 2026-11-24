@@ -13,6 +13,13 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import { MessageType } from '../types.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   AuthType,
@@ -20,15 +27,22 @@ import {
   type Config,
   isImageCapable,
   isImageGenerationCapable,
-  parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
+  resolveAcpFastModelSelector,
 } from '../../utils/acpModelUtils.js';
+import { VISION_BRIDGE_TIMEOUT_MS } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
+import {
+  modelAuthPolicyError,
+  switchPrimaryModel,
+} from '../models/primary-model-switch.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -65,6 +79,42 @@ const MODEL_PICKER_ONLY_PATTERN = new RegExp(
 
 export function isPickerOnlyModelInvocation(args: string): boolean {
   return MODEL_PICKER_ONLY_PATTERN.test(args);
+}
+
+const VISION_TIMEOUT_FLAG_PATTERN =
+  /(?:^|\s)--timeout(?=\s|$)(?:\s+(?!--)(\S+))?/;
+
+function isVisionArgs(args: string): boolean {
+  return args === '--vision' || args.startsWith('--vision ');
+}
+
+/**
+ * Splits `--timeout <value>` out of a `/model --vision` invocation, in any
+ * position. Other invocations are returned untouched so an inline
+ * `<model-id> <prompt>` keeps a literal `--timeout` in its prompt.
+ */
+function extractVisionTimeoutFlag(args: string): {
+  args: string;
+  timeoutFlag: RegExpExecArray | null;
+} {
+  const timeoutFlag = VISION_TIMEOUT_FLAG_PATTERN.exec(args);
+  const remaining = timeoutFlag
+    ? args.replace(timeoutFlag[0], ' ').trim()
+    : args;
+  return timeoutFlag && isVisionArgs(remaining)
+    ? { args: remaining, timeoutFlag }
+    : { args, timeoutFlag: null };
+}
+
+function parseVisionTimeoutMs(value: string | undefined): number | undefined {
+  const match = value ? /^(\d+)(s|ms)?$/.exec(value) : null;
+  if (!match) return undefined;
+  const timeoutMs = Number(match[1]) * (match[2] === 'ms' ? 1 : 1000);
+  return timeoutMs > 0 && timeoutMs <= 2_147_483_647 ? timeoutMs : undefined;
+}
+
+function formatVisionTimeout(timeoutMs: number): string {
+  return timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}s` : `${timeoutMs}ms`;
 }
 
 /**
@@ -111,12 +161,40 @@ function persistScopeSpread(
   return {};
 }
 
-function formatVisionModelSettingForDisplay(setting: string): string {
-  const parsed = parseVisionModelSetting(setting);
-  if (!parsed) return setting.replace(/\0/g, '\\0');
-  return parsed.baseUrl
-    ? `${parsed.selector} (${parsed.baseUrl})`
-    : parsed.selector;
+/**
+ * `/model --fast <id>` prints and accepts the selector half of a persisted
+ * `authType:id\0<baseUrl>` pin; re-entering that printed value must not
+ * silently drop the live endpoint pin and rebind the first same-id registry
+ * entry (#12760). Keep the pinned setting when it names the same model; an
+ * argument carrying its own `\0` endpoint, or naming a different model, is
+ * persisted as given.
+ */
+function preservedAuxModelSetting(
+  persisted: unknown,
+  modelName: string,
+  selector: { authType?: AuthType; modelId: string },
+): string {
+  if (
+    typeof persisted !== 'string' ||
+    !persisted.includes('\0') ||
+    modelName.includes('\0')
+  ) {
+    return modelName;
+  }
+  try {
+    const pinned = resolveModelId(persisted.trim().split('\0', 1)[0]);
+    if (
+      pinned?.modelId === selector.modelId &&
+      (!selector.authType ||
+        !pinned?.authType ||
+        pinned.authType === selector.authType)
+    ) {
+      return persisted;
+    }
+  } catch {
+    // An unparseable pin is not preserved.
+  }
+  return modelName;
 }
 
 function persistSetting(
@@ -132,18 +210,19 @@ async function switchMainModel(
   config: Config,
   settings: LoadedSettings,
   currentAuthType: AuthType,
-  modelArg: string,
+  parsed: ReturnType<typeof parseAcpModelOption>,
   scopeOverride?: SettingScope,
   persistSelection = true,
 ): Promise<string> {
-  const parsed = parseAcpModelOption(modelArg);
-
   if (parsed.authType) {
-    await config.switchModel(
+    await switchPrimaryModel(
+      config,
+      settings,
       parsed.authType,
       parsed.modelId,
-      parsed.authType !== currentAuthType &&
-        parsed.authType === AuthType.QWEN_OAUTH
+      parsed.authType === AuthType.QWEN_OAUTH &&
+        (parsed.authType !== currentAuthType ||
+          !config.getContentGeneratorConfig()?.authType)
         ? { requireCachedCredentials: true }
         : undefined,
     );
@@ -165,12 +244,12 @@ async function switchMainModel(
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, modelArg, undefined);
+  await switchPrimaryModel(config, settings, currentAuthType, parsed.modelId);
   if (persistSelection) {
-    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   }
-  return modelArg;
+  return parsed.modelId;
 }
 
 function formatUnavailableModelMessage(
@@ -390,7 +469,7 @@ export const modelCommand: SlashCommand = {
     );
   },
   argumentHint:
-    '[--fast|--voice|--vision|--compaction|--image] [--project|--global] [<model-id>] | <model-id> <prompt>',
+    '[--fast|--voice|--vision [--timeout <seconds>]|--compaction|--image] [--project|--global] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -410,6 +489,12 @@ export const modelCommand: SlashCommand = {
           value: '--vision',
           description: t(
             'Set the image-capable model used to transcribe images for a text-only main model',
+          ),
+        },
+        {
+          value: '--timeout',
+          description: t(
+            'Set the vision bridge timeout in seconds (use with --vision)',
           ),
         },
         {
@@ -456,6 +541,7 @@ export const modelCommand: SlashCommand = {
           .replace(/(?:^|\s)--image(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+          .replace(VISION_TIMEOUT_FLAG_PATTERN, ' ')
           .trim();
         if (/(?:^|\s)--fast(?:\s|$)/.test(trimmed)) mode = 'fast';
         else if (/(?:^|\s)--voice(?:\s|$)/.test(trimmed)) mode = 'voice';
@@ -493,10 +579,11 @@ export const modelCommand: SlashCommand = {
     const rawArgs = context.invocation?.args?.trim() || actionArgs.trim();
     const {
       scopeOverride,
-      remaining: args,
+      remaining: scopedArgs,
       hasProject,
       hasGlobal,
     } = parseScopeFlags(rawArgs);
+    const { args, timeoutFlag } = extractVisionTimeoutFlag(scopedArgs);
     // Reject mutually exclusive scope flags
     if (hasProject && hasGlobal) {
       return {
@@ -540,6 +627,15 @@ export const modelCommand: SlashCommand = {
         : scopeOverride === SettingScope.User
           ? t(' (global)')
           : '';
+    // Selector flags never take an inline prompt, so a leftover --timeout is a
+    // misplaced flag rather than prompt text.
+    if (args.startsWith('--') && VISION_TIMEOUT_FLAG_PATTERN.test(args)) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('--timeout can only be used with --vision.'),
+      };
+    }
     const isVoiceModelCommand =
       args === '--voice' || args.startsWith('--voice ');
     if (isVoiceModelCommand) {
@@ -619,8 +715,15 @@ export const modelCommand: SlashCommand = {
       if (!modelName) {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
         if (context.executionMode !== 'interactive') {
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value (the
+          // workspace-models routes test that shape) — report "not set"
+          // instead of throwing on `.split`.
+          const rawFastModel = context.services.settings?.merged?.fastModel;
           const fastModel =
-            context.services.settings?.merged?.fastModel ?? 'not set';
+            (typeof rawFastModel === 'string'
+              ? rawFastModel.trim().split('\0', 1)[0]
+              : '') || 'not set';
           return {
             type: 'message',
             messageType: 'info',
@@ -652,14 +755,24 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const fastModelSelector =
+        modelName.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(modelName).authType
+          ? resolveAcpFastModelSelector(
+              modelName,
+              config.getAllConfiguredModels(),
+            )
+          : modelName;
       const selector = (() => {
         try {
-          return resolveModelId(modelName);
+          return fastModelSelector
+            ? resolveModelId(fastModelSelector)
+            : undefined;
         } catch {
           return undefined;
         }
       })();
-      if (!selector) {
+      if (!selector || !fastModelSelector) {
         return {
           type: 'message',
           messageType: 'error',
@@ -687,10 +800,15 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'fastModel', modelName, scopeOverride);
+      const fastModelToPersist = preservedAuxModelSetting(
+        settings.merged?.fastModel,
+        fastModelSelector,
+        selector,
+      );
+      persistSetting(settings, 'fastModel', fastModelToPersist, scopeOverride);
       // Sync the runtime Config so forked agents pick up the change immediately
       // without requiring a restart.
-      config.setFastModel(modelName);
+      config.setFastModel(fastModelToPersist);
       return {
         type: 'message',
         messageType: 'info',
@@ -698,27 +816,96 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const isVisionModelCommand =
-      args === '--vision' || args.startsWith('--vision ');
-    if (isVisionModelCommand) {
+    if (isVisionArgs(args)) {
       const modelName = args.replace('--vision', '').trim();
+      const timeoutMs = timeoutFlag
+        ? parseVisionTimeoutMs(timeoutFlag[1])
+        : undefined;
+      if (timeoutFlag && timeoutMs === undefined) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.',
+            { value: timeoutFlag[1] ?? '' },
+          ),
+        };
+      }
+      const persistTimeout = (
+        settings: LoadedSettings,
+        timeoutMs: number,
+        visionModel?: string,
+      ): string => {
+        settings.setTopLevelValues(resolveScope(settings, scopeOverride), {
+          ...(visionModel === undefined ? {} : { visionModel }),
+          visionBridgeTimeoutMs: timeoutMs,
+        });
+        const effectiveTimeoutMs = settings.merged.visionBridgeTimeoutMs;
+        config.setVisionBridgeTimeoutMs(effectiveTimeoutMs);
+        const timeout = formatVisionTimeout(timeoutMs);
+        if (effectiveTimeoutMs === timeoutMs) {
+          return (
+            t('Vision bridge timeout: {{timeout}}', { timeout }) + scopeSuffix
+          );
+        }
+        return t(
+          'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
+          {
+            timeout,
+            scope: scopeSuffix,
+            effectiveTimeout: formatVisionTimeout(
+              config.getVisionBridgeTimeoutMs() ?? VISION_BRIDGE_TIMEOUT_MS,
+            ),
+          },
+        );
+      };
+      if (!modelName && timeoutMs !== undefined) {
+        if (!settings) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Settings service not available.'),
+          };
+        }
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: persistTimeout(settings, timeoutMs),
+        };
+      }
       if (!modelName) {
         // Open the model picker in vision mode (interactive) or print the
         // current vision model (non-interactive).
         if (context.executionMode !== 'interactive') {
           const visionModel =
             context.services.settings?.merged?.visionModel?.trim();
+          const currentTimeoutMs = config.getVisionBridgeTimeoutMs();
           return {
             type: 'message',
             messageType: 'info',
-            content: t(
-              'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
-              {
-                visionModel: visionModel
-                  ? formatVisionModelSettingForDisplay(visionModel)
-                  : t('not set'),
-              },
-            ),
+            content:
+              t(
+                'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+                {
+                  visionModel: visionModel
+                    ? formatAuxModelSelectorForDisplay(visionModel)
+                    : t('not set'),
+                },
+              ) +
+              '\n' +
+              t(
+                'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.',
+                {
+                  timeout:
+                    currentTimeoutMs === undefined
+                      ? t('{{timeout}} (default)', {
+                          timeout: formatVisionTimeout(
+                            VISION_BRIDGE_TIMEOUT_MS,
+                          ),
+                        })
+                      : formatVisionTimeout(currentTimeoutMs),
+                },
+              ),
           };
         }
         return {
@@ -801,7 +988,12 @@ export const modelCommand: SlashCommand = {
       const visionModel = matched.baseUrl
         ? `${qualifiedModelName}\0${matched.baseUrl}`
         : qualifiedModelName;
-      persistSetting(settings, 'visionModel', visionModel, scopeOverride);
+      let timeoutLine: string | undefined;
+      if (timeoutMs === undefined) {
+        persistSetting(settings, 'visionModel', visionModel, scopeOverride);
+      } else {
+        timeoutLine = persistTimeout(settings, timeoutMs, visionModel);
+      }
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(visionModel);
       // The pin is honored even if the model isn't image-capable (the user may
@@ -813,7 +1005,11 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content:
-          t('Vision Model') + ': ' + modelName + scopeSuffix + visionWarning,
+          t('Vision Model') +
+          ': ' +
+          modelName +
+          (timeoutLine === undefined ? scopeSuffix : `\n${timeoutLine}`) +
+          visionWarning,
       };
     }
 
@@ -839,9 +1035,15 @@ export const modelCommand: SlashCommand = {
           };
         }
         if (context.executionMode !== 'interactive') {
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value — report
+          // "not set" instead of throwing on `.trim`.
+          const rawCompactionModel =
+            context.services.settings?.merged?.compactionModel;
           const compactionModel =
-            context.services.settings?.merged?.compactionModel?.trim() ||
-            t('not set (falls back to the main model)');
+            (typeof rawCompactionModel === 'string'
+              ? rawCompactionModel.trim().split('\0', 1)[0]
+              : '') || t('not set (falls back to the main model)');
           return {
             type: 'message',
             messageType: 'info',
@@ -905,9 +1107,19 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'compactionModel', modelName, scopeOverride);
+      const compactionModelToPersist = preservedAuxModelSetting(
+        settings.merged?.compactionModel,
+        modelName,
+        selector,
+      );
+      persistSetting(
+        settings,
+        'compactionModel',
+        compactionModelToPersist,
+        scopeOverride,
+      );
       // Sync runtime Config so the compression service picks it up immediately.
-      config.setCompactionModel(modelName);
+      config.setCompactionModel(compactionModelToPersist);
       return {
         type: 'message',
         messageType: 'info',
@@ -930,7 +1142,7 @@ export const modelCommand: SlashCommand = {
               'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
               {
                 imageModel: imageModel
-                  ? formatVisionModelSettingForDisplay(imageModel)
+                  ? formatAuxModelSelectorForDisplay(imageModel)
                   : t('not set'),
               },
             ),
@@ -1030,24 +1242,6 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const contentGeneratorConfig = config.getContentGeneratorConfig();
-    if (!contentGeneratorConfig) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Content generator configuration not available.'),
-      };
-    }
-
-    const authType = contentGeneratorConfig.authType;
-    if (!authType) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Authentication type not available.'),
-      };
-    }
-
     // `/model <id>` switches the session model; `/model <id> <prompt>` runs the
     // prompt on <id> for this turn only (inline one-shot override) without
     // changing or persisting the session model.
@@ -1057,8 +1251,73 @@ export const modelCommand: SlashCommand = {
       firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
     const inlinePrompt =
       firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
+    const parsed = parseAcpModelOption(modelName);
+    const contentGeneratorConfig = config.getContentGeneratorConfig();
+    const authType =
+      contentGeneratorConfig?.authType ??
+      (settings.merged.security?.auth?.selectedType ===
+      AuthType.QWEN_SUBSCRIPTION
+        ? AuthType.QWEN_SUBSCRIPTION
+        : parsed.authType);
+    if (!authType && !trimmedArgs && context.executionMode === 'interactive') {
+      return {
+        type: 'dialog',
+        dialog: 'model',
+        ...persistScopeSpread(scopeOverride),
+      };
+    }
+    const requestedAuthType = parsed.authType ?? authType;
+    const policyError =
+      modelName && modelAuthPolicyError(settings, requestedAuthType);
+    if (policyError) {
+      return { type: 'message', messageType: 'error', content: policyError };
+    }
+    if (modelName && requestedAuthType === AuthType.QWEN_SUBSCRIPTION) {
+      context.ui.addItem(
+        { type: MessageType.INFO, text: t('Loading models from provider…') },
+        Date.now(),
+      );
+      try {
+        const result = await config.refreshSubscriptionModels(
+          context.abortSignal,
+        );
+        if (result.cached)
+          context.ui.addItem(
+            { type: MessageType.WARNING, text: SUBSCRIPTION_MODELS_CACHED },
+            Date.now(),
+          );
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            error instanceof SubscriptionOAuthError
+              ? subscriptionErrorMessage(error)
+              : SUBSCRIPTION_MODELS_UNAVAILABLE,
+        };
+      }
+    }
+    if (
+      !contentGeneratorConfig &&
+      authType !== AuthType.QWEN_SUBSCRIPTION &&
+      !parsed.authType
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Content generator configuration not available.'),
+      };
+    }
+
+    if (!authType) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Authentication type not available.'),
+      };
+    }
+
     if (modelName) {
-      const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
         .getAvailableModelsForAuthType(targetAuthType)
@@ -1153,7 +1412,7 @@ export const modelCommand: SlashCommand = {
         config,
         settings,
         authType,
-        modelName,
+        parsed,
         scopeOverride,
         context.executionPolicy?.persistModelSelection !== false,
       );

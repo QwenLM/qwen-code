@@ -9,7 +9,7 @@ import {
   recordAutoSkillCommandUsage,
   SkillCommandLoader,
 } from './SkillCommandLoader.js';
-import { skillArgsPath } from './skill-args-file.js';
+import { skillArgsPath, writeSkillArgs } from './skill-args-file.js';
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,7 +70,7 @@ describe('SkillCommandLoader', () => {
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
-      isTrustedFolder: vi.fn().mockReturnValue(true),
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(true),
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
@@ -87,6 +87,47 @@ describe('SkillCommandLoader', () => {
   });
 
   const signal = new AbortController().signal;
+
+  it('rejects sandbox skill invocation before side effects or argument writes and removal', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sandbox-skill-command-'));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue({
+        filesystem: 'read-only',
+      });
+      const skill = makeSkill({ level: 'project', allowedTools: ['Edit'] });
+      mockSkillManager.listSkills.mockImplementation(({ level }) =>
+        Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+      const invoke = (args: string) =>
+        command.action!(
+          { invocation: { raw: `/my-skill ${args}`, args } } as never,
+          args,
+        );
+      expect(await invoke('payload')).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('not yet supported'),
+      });
+      expect(existsSync(join(dir, '.qwen'))).toBe(false);
+      writeSkillArgs('my-skill', 'prior authority');
+      await invoke('');
+      expect(readFileSync(skillArgsPath('my-skill'), 'utf8')).toBe(
+        'prior authority',
+      );
+      await recordAutoSkillCommandUsage(mockConfig, command);
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('should return empty array when config is null', async () => {
     const loader = new SkillCommandLoader(null);
@@ -305,13 +346,13 @@ describe('SkillCommandLoader', () => {
     }
 
     it('grants no session allow rules in an untrusted folder', async () => {
-      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(false);
       await runProjectSkill();
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
 
     it('grants them in a trusted folder — marked trust-gated for the live revocation check', async () => {
-      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(true);
+      vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(true);
       await runProjectSkill();
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
       // Exactly `{ trustGated: true }`: suspension keys solely off the
@@ -668,9 +709,7 @@ describe('SkillCommandLoader', () => {
     });
 
     it('registers no hooks for a project skill in an untrusted folder', async () => {
-      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
-        false,
-      );
+      vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(false);
 
       await runSkillCommand(
         makeSkill({

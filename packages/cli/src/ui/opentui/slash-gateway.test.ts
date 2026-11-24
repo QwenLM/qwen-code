@@ -29,6 +29,7 @@ function fakeDispatcher(
   return {
     handle: vi.fn(handle),
     cancel: vi.fn(),
+    isCommitInProgress: vi.fn(() => false),
     commands: [],
     setCommands: vi.fn(),
     loadCommands: vi.fn(async () => {}),
@@ -54,7 +55,7 @@ describe('OpenTuiSlashGateway', () => {
       kind: 'dispatched',
       outcome: { kind: 'handled' },
     });
-    expect(dispatcher.handle).toHaveBeenCalledWith('/help');
+    expect(dispatcher.handle).toHaveBeenCalledWith('/help', undefined);
   });
 
   it('rejects dispatches after the queue drains post-attach', async () => {
@@ -142,12 +143,32 @@ describe('OpenTuiSlashGateway', () => {
     expect(dispatcher.cancel).toHaveBeenCalledTimes(1);
   });
 
-  it('replaces the dispatcher on re-attach after a reload', async () => {
+  it('keeps cancellation and commit ownership with the in-flight dispatcher across re-attach', async () => {
     const gateway = new OpenTuiSlashGateway();
-    const first = fakeDispatcher(async () => ({ kind: 'quit', messages: [] }));
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = fakeDispatcher(async () => {
+      await held;
+      return { kind: 'handled' };
+    });
+    vi.mocked(first.isCommitInProgress).mockReturnValue(true);
     const second = fakeDispatcher(async () => ({ kind: 'handled' }));
     gateway.attach(first);
-    gateway.attach(second);
+    const pending = gateway.dispatch('/branch');
+    await flush();
+    try {
+      gateway.attach(second);
+      expect(gateway.isCommitInProgress()).toBe(true);
+      gateway.cancel();
+      expect(first.cancel).toHaveBeenCalledOnce();
+      expect(second.cancel).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await pending;
+    }
+    expect(gateway.isCommitInProgress()).toBe(false);
     const settlement = await gateway.dispatch('/help');
     expect(settlement).toEqual({
       kind: 'dispatched',

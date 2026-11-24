@@ -115,6 +115,38 @@ export class HistoricalTranscriptWindowFullError extends Error {
   }
 }
 
+/**
+ * Blank the retained HTML of a tool block's MCP App display. `html: ''` is
+ * the documented degrade path — replay mounts the iframe only for non-empty
+ * `html` and never re-fetches the `ui://` resource, so the document must be
+ * dropped whole (never truncated); the block then renders its
+ * `fallbackText`, or an explanation when that text is empty. Returns the block
+ * unchanged when nothing was dropped.
+ */
+function dropMcpAppHtml(block: DaemonTranscriptBlock): DaemonTranscriptBlock {
+  if (block.kind !== 'tool') return block;
+  const rawOutput = block.rawOutput;
+  if (
+    typeof rawOutput !== 'object' ||
+    rawOutput === null ||
+    (rawOutput as Record<string, unknown>)['type'] !== 'mcp_app' ||
+    (rawOutput as Record<string, unknown>)['html'] === '' ||
+    typeof (rawOutput as Record<string, unknown>)['html'] !== 'string'
+  ) {
+    return block;
+  }
+  return {
+    ...block,
+    rawOutput: {
+      ...(rawOutput as Record<string, unknown>),
+      html: '',
+      fallbackText:
+        (rawOutput as Record<string, unknown>)['fallbackText'] ||
+        'MCP App HTML omitted because the historical page exceeds its size limit.',
+    },
+  };
+}
+
 type BoundaryDirection = 'older' | 'newer';
 
 const EMPTY_SNAPSHOT: HistoricalTranscriptPageTableSnapshot = Object.freeze({
@@ -262,13 +294,14 @@ export class HistoricalTranscriptPageTable {
     if (!filteredPage.firstRecordId || !filteredPage.lastRecordId) {
       throw new Error('Historical page has no persisted boundary');
     }
-    const page = this.withNewerRequest(filteredPage, {
-      kind: 'gap',
-      anchorRecordId: beforeRecordId,
-      afterRecordId: filteredPage.lastRecordId,
-      snapshot,
-    });
-    this.assertPageFits(page);
+    const page = this.fitPageWithinBudget(
+      this.withNewerRequest(filteredPage, {
+        kind: 'gap',
+        anchorRecordId: beforeRecordId,
+        afterRecordId: filteredPage.lastRecordId,
+        snapshot,
+      }),
+    );
     const rangeId = `history-range-${this.nextRangeId++}`;
     const range: SequentialHistoricalTranscriptRange = Object.freeze({
       id: rangeId,
@@ -339,6 +372,7 @@ export class HistoricalTranscriptPageTable {
     turnId: string,
     snapshot: string,
     response: DaemonSessionTranscriptPage,
+    targetRecordId?: string,
   ): AdmittedHistoricalTarget {
     const previous = this.snapshot;
     const requests = new Map(this.cachedBoundaryRequests);
@@ -346,7 +380,13 @@ export class HistoricalTranscriptPageTable {
     const selectedRange = this.selectedRangeId;
     const selectedPage = this.selectedPageId;
     try {
-      return this.admitAnchorPage(ordinal, turnId, snapshot, response);
+      return this.admitAnchorPage(
+        ordinal,
+        turnId,
+        snapshot,
+        response,
+        targetRecordId,
+      );
     } catch (error) {
       this.snapshot = previous;
       this.cachedBoundaryRequests.clear();
@@ -365,6 +405,7 @@ export class HistoricalTranscriptPageTable {
     turnId: string,
     snapshot: string,
     response: DaemonSessionTranscriptPage,
+    targetRecordId?: string,
   ): AdmittedHistoricalTarget {
     assertContinuationCursor(response);
     if (response.targetRecordId !== turnId) {
@@ -373,9 +414,18 @@ export class HistoricalTranscriptPageTable {
       );
     }
     const cached = this.findTurn(turnId);
-    if (cached) return cached;
+    if (
+      cached &&
+      (!targetRecordId ||
+        this.snapshot.pages.get(cached.pageId)?.recordIds.has(targetRecordId))
+    )
+      return cached;
 
-    const knownRecordIds = this.liveRecordIds;
+    // Exact-message navigation may need pages after a live user turn. Keep
+    // that turn as the historical anchor while searching for its record.
+    const knownRecordIds = targetRecordId
+      ? new Set([...this.liveRecordIds].filter((id) => id !== turnId))
+      : this.liveRecordIds;
     const materialized = this.materializePage(
       snapshot,
       response.events,
@@ -392,12 +442,19 @@ export class HistoricalTranscriptPageTable {
       filteredBlocks.length === materialized.page.blocks.length
         ? materialized.page
         : this.pageFromBlocks(materialized.page.id, snapshot, filteredBlocks);
-    const page = this.withNewerRequest(filteredPage, forwardRequest(response));
-    const blockId = page.turnBlockById.get(turnId);
+    const page = this.fitPageWithinBudget(
+      this.withNewerRequest(filteredPage, forwardRequest(response)),
+    );
+    const blockId =
+      page.turnBlockById.get(turnId) ??
+      (targetRecordId
+        ? page.blocks.find((block) =>
+            block.sourceRecordIds?.includes(targetRecordId),
+          )?.id
+        : undefined);
     if (!blockId) {
       throw new Error('Anchored transcript target could not be materialized');
     }
-    this.assertPageFits(page);
 
     const rangeId = `history-range-${this.nextRangeId++}`;
     const older: TranscriptBoundary =
@@ -411,14 +468,15 @@ export class HistoricalTranscriptPageTable {
             },
           }
         : { kind: 'end' };
-    const newer: TranscriptBoundary = reachedLive
-      ? { kind: 'live' }
-      : response.hasMore && response.nextCursor
-        ? {
-            kind: 'loadable',
-            request: { kind: 'cursor', cursor: response.nextCursor },
-          }
-        : { kind: 'end' };
+    const newer: TranscriptBoundary =
+      reachedLive && (!targetRecordId || !response.hasMore)
+        ? { kind: 'live' }
+        : response.hasMore && response.nextCursor
+          ? {
+              kind: 'loadable',
+              request: { kind: 'cursor', cursor: response.nextCursor },
+            }
+          : { kind: 'end' };
     const range: HistoricalTranscriptRange = Object.freeze({
       id: rangeId,
       anchorOrdinal: ordinal,
@@ -675,8 +733,8 @@ export class HistoricalTranscriptPageTable {
         : sequentialTerminal
           ? undefined
           : forwardRequest(response);
-    const admittedPage = this.withNewerRequest(filteredPage, newerRequest);
-    if (admittedPage.blocks.length === 0) {
+    const pageWithRequest = this.withNewerRequest(filteredPage, newerRequest);
+    if (pageWithRequest.blocks.length === 0) {
       if (recovery && !recovery.fromAnchor && !reachedLive && !cachedRangeId) {
         throw new Error('Gap recovery did not materialize newer records');
       }
@@ -705,8 +763,8 @@ export class HistoricalTranscriptPageTable {
       );
       return;
     }
-    this.assertPageFits(admittedPage);
 
+    const admittedPage = this.fitPageWithinBudget(pageWithRequest);
     const pages = new Map(this.snapshot.pages);
     pages.set(admittedPage.id, admittedPage);
     const pageIds =
@@ -827,10 +885,31 @@ export class HistoricalTranscriptPageTable {
     });
   }
 
-  private assertPageFits(page: HistoricalTranscriptPage): void {
-    if (page.retainedBytes > this.options.maxRetainedBytes) {
+  /**
+   * Return the page when it fits the budget. When it does not, degrade
+   * per document before failing per page: retained MCP App HTML is the one
+   * payload whose loss renderers absorb via `fallbackText`, and a single
+   * 4 MiB App document is estimated at twice its size (UTF-16 code units
+   * times two), so two of them would otherwise push a whole page — up to
+   * `WEB_SHELL_HISTORY_PAGE_SIZE` records — into a permanent, non-retryable
+   * `unavailable`. Only a page with nothing left to degrade fails closed.
+   */
+  private fitPageWithinBudget(
+    page: HistoricalTranscriptPage,
+  ): HistoricalTranscriptPage {
+    if (page.retainedBytes <= this.options.maxRetainedBytes) return page;
+    const blocks = page.blocks.map(dropMcpAppHtml);
+    if (blocks.every((block, index) => block === page.blocks[index])) {
       throw new HistoricalTranscriptPageTooLargeError();
     }
+    const degraded = this.withNewerRequest(
+      this.pageFromBlocks(page.id, page.snapshot, blocks),
+      page.newerRequest,
+    );
+    if (degraded.retainedBytes > this.options.maxRetainedBytes) {
+      throw new HistoricalTranscriptPageTooLargeError();
+    }
+    return degraded;
   }
 
   private withNewerRequest(

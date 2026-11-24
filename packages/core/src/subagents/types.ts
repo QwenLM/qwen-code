@@ -197,6 +197,9 @@ export interface SubagentConfig {
    */
   executor?: SubagentExecutorSpec;
 
+  /** Requires container execution; cannot lower the operator's backend policy. */
+  executionBackend?: 'container';
+
   /**
    * Indicates whether this is a built-in agent.
    * Built-in agents cannot be modified or deleted.

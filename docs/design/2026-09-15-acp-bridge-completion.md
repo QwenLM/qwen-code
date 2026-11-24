@@ -2,8 +2,9 @@
 
 [English](2026-09-15-acp-bridge-completion.md) | [简体中文](2026-09-15-acp-bridge-completion.zh-CN.md)
 
-Status: local implementation complete; verification is recorded per integration.
-Historical full-suite acceptance remains open, 2026-09-16.
+Status: merged in [#11916](https://github.com/QwenLM/qwen-code/pull/11916);
+the configured Linux CI suite passed on the merged commit, 2026-09-16.
+See [post-merge acceptance](#post-merge-acceptance) for evidence and limits.
 Implements the remaining boundary extraction for
 [#11866](https://github.com/QwenLM/qwen-code/issues/11866) after the four
 [earlier slices](2026-09-14-acp-bridge-control-plane-harness-boundary.md).
@@ -219,8 +220,8 @@ positive EOF cases delivered 1,062,289 stdout bytes and actual ACP exit 0;
 the negative cases retained actual exit 1 with the original timeout and EPIPE.
 All owned processes and listeners were gone. The normalized positive output
 matches the earlier final bundle; prior failures are preserved separately.
-Full-suite acceptance remains open because the repository-wide command is not
-green. Detailed evidence and separate
+Full-suite acceptance remained open at this stage because the repository-wide
+command was not green. Detailed evidence and separate
 follow-ups are retained in `.qwen/investigations/issue-11866-completion/` and
 `.qwen/issues/issue-11866-unrelated-unit-followups.md`.
 
@@ -277,7 +278,7 @@ an external task not observed within 3 seconds. The current hook timeout is
 not relabeled as the historical assertion failure. Prior baseline comparisons
 remain historical evidence; they do not establish the cause of every current
 failure. No product code, assertion or deadline was changed to make these
-results green. Full-suite acceptance therefore remains open.
+results green. Full-suite acceptance therefore remained open at this stage.
 
 All eight serial E2E scenarios met their positive or negative acceptance
 conditions on the rebuilt candidate. Public lifecycle, native watching with
@@ -483,7 +484,7 @@ the full dist tree digest is
 `317c38b5bda31f45b0a924952a78d3516778f4160d1fee64816726d533562ec5`.
 This is evidence for this integration, not a relabeling of earlier artifacts.
 The ordinary-prompt fixtures retain the background/permission and latency
-coverage limits above; historical full-workspace acceptance remains open.
+coverage limits above; full-workspace acceptance remained open at this stage.
 
 ## Idle-child reclamation integration at `3a00c42948`
 
@@ -570,3 +571,44 @@ and build evidence, not a new real-daemon E2E run. Historical process results
 above remain tied to their original commits. Fresh integration checks and
 final audits are recorded in the PR follow-up; raw reproduction and verification
 are under `.qwen/investigations/issue-11866-conflict3/`.
+
+## Post-merge acceptance
+
+PR #11916 merged as `fa336618c26f0655ab25f8c1e4bdab103154bcbd` on
+2026-09-16. Its Git tree, `8cf8a5feaff593f84b3f7538b6e2c937a992b64a`,
+matches the final PR head `803a0380a17c57cafb02782b9ef4a22046f9db18`.
+The checkout logs for both jobs below identify the merged commit, not a later
+main revision. These are completed CI results inspected after merge, not new
+local test runs.
+
+The [post-merge unit job](https://github.com/QwenLM/qwen-code/actions/runs/35068367808/job/104703832563)
+ran all 22 configured `test:ci` workspaces and then the root script suite:
+
+| Suite                | Passed | Failed | Skipped |
+| -------------------- | -----: | -----: | ------: |
+| Workspace unit tests | 77,222 |      0 |     104 |
+| Root script tests    |  2,493 |      0 |      12 |
+
+This includes 2,179 ACP bridge, 31,744 CLI, 26,808 core, 2,046 TypeScript SDK
+and 8,386 Web Shell passes. The
+[post-merge static job](https://github.com/QwenLM/qwen-code/actions/runs/35068367808/job/104703832566)
+also passed its configured Node helper suite: 580 passed, zero failed or
+skipped. Both jobs completed successfully. The
+[final PR unit job](https://github.com/QwenLM/qwen-code/actions/runs/35066664366/job/104698456229)
+separately reports the same workspace and root-script totals on the identical
+tree.
+
+These results satisfy the configured Linux full-suite acceptance for #11866.
+The run used Node 22, an isolated CI home, coverage collection and the existing
+`--retry=2` policy. `QWEN_SKIP_LATENCY_BUDGETS=1` was enabled on the shared runner.
+It does not establish a retry-free pass or validate the skipped latency
+assertions. The macOS and Windows unit jobs were skipped; no all-platform
+full-suite pass is claimed. Python, Java, mobile and real-daemon results remain
+bound to their separately recorded runs.
+
+Earlier local failures and incomplete diagnoses above remain historical
+evidence; this Linux result neither fixes nor assigns a cause to them. No
+production code, tests, assertions, deadlines or CI policy changed to obtain
+this acceptance record. The boundary extraction is complete; stateless
+`wake(sessionId)` / `getEvents()`, worker pooling and external event storage
+remain follow-up work under [#11868](https://github.com/QwenLM/qwen-code/issues/11868).

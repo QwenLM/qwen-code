@@ -1,6 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { rmSync } from 'node:fs';
-import { dirname } from 'node:path';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { TelegramChannel } from './TelegramAdapter.js';
 import type {
   ChannelAgentBridge,
@@ -145,7 +155,7 @@ function createChannel(
     { ...config, ...configOverrides },
     {} as ChannelAgentBridge,
     {
-      router: router as never,
+      router: { setChannelRotation: vi.fn(), ...(router as object) } as never,
     },
   );
 }
@@ -195,6 +205,17 @@ function installFakeBot(channel: TelegramChannel): {
 }
 
 describe('TelegramChannel', () => {
+  const qwenHome = mkdtempSync(join(tmpdir(), 'telegram-channel-home-'));
+
+  beforeAll(() => {
+    vi.stubEnv('QWEN_HOME', qwenHome);
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    rmSync(qwenHome, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -375,6 +396,54 @@ describe('TelegramChannel', () => {
     );
     expect(processOnceSpy).toHaveBeenCalled();
   });
+
+  it.each([
+    ['document', true],
+    ['document', false],
+    ['voice', true],
+    ['voice', false],
+  ] as const)(
+    'preserves the routed %s caption when download succeeds=%s',
+    async (kind, succeeds) => {
+      const channel = createChannel();
+      const bot = installFakeBot(channel);
+      bot.api.getFile.mockResolvedValue({ file_path: 'input.bin' });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: succeeds,
+        status: 500,
+        arrayBuffer: async () => new Uint8Array([1]).buffer,
+      } as Response);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([event]) => event === `message:${kind}`,
+      )?.[1] as (ctx: unknown) => Promise<void>;
+      await handler({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          caption: '/review inspect this',
+          [kind]: { file_id: 'file-1', file_name: 'input.bin' },
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+      const preparation = channel.inboundPreparations[0]!;
+      preparation.envelope.text = 'inspect this';
+      await preparation.prepare();
+      expect(preparation.envelope.text).toMatch(/^inspect this/);
+      expect(preparation.envelope.text).not.toContain('/review');
+      if (succeeds) {
+        expect(preparation.envelope.text).toBe('inspect this');
+        rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+          recursive: true,
+        });
+      } else {
+        expect(preparation.envelope.text).toContain('download failed');
+      }
+    },
+  );
 
   it('preserves the document caption when the download fails', async () => {
     const channel = createChannel();
@@ -1147,6 +1216,7 @@ describe('TelegramChannel', () => {
       'telegram',
       '1',
       '2',
+      undefined,
       undefined,
     );
     expect(bot.api.sendMessage).toHaveBeenCalledWith(

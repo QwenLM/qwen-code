@@ -133,6 +133,13 @@ async function setIdeModeAndSyncConnection(
   }
 }
 
+/**
+ * `/ide` and every subcommand below declare
+ * `supportedModes: ['interactive']`. `BuiltinCommandLoader` relies on that: it
+ * only constructs this command when `config.isInteractive() !== false`, so
+ * widening these modes requires widening that gate too, otherwise the command
+ * would be admitted by `filterCommandsForMode` but never built.
+ */
 export const ideCommand = async (): Promise<SlashCommand> => {
   const ideClient = await IdeClient.getInstance();
   const currentIDE = ideClient.getCurrentIde();

@@ -48,7 +48,8 @@ describe('ReadMcpResourceTool', () => {
     const tool = new ReadMcpResourceTool(configWith(readMcpResource));
 
     expect(tool.name).toBe(ToolNames.READ_MCP_RESOURCE);
-    // Deferred (discovered via tool_search) like web_fetch — infrequent.
+    // Deferred (reviewed via tool_search and invoked via tool_call) like
+    // web_fetch — infrequent.
     expect(tool.shouldDefer).toBe(true);
     expect(tool.schema.name).toBe(ToolNames.READ_MCP_RESOURCE);
     expect(tool.schema.parametersJsonSchema).toMatchObject({
@@ -204,6 +205,37 @@ describe('ReadMcpResourceTool', () => {
   it('overrides maxOutputChars so the scheduler does not slice the frame', () => {
     const tool = new ReadMcpResourceTool(configWith(vi.fn()));
     expect(tool.maxOutputChars).toBeGreaterThan(MAX_MCP_RESOURCE_TEXT_CHARS);
+  });
+
+  it('declares the raw size unknown only when it capped the body', async () => {
+    const readMcpResource = vi
+      .fn()
+      .mockResolvedValueOnce({
+        contents: [
+          { uri: 'x://big', text: 'a'.repeat(MAX_MCP_RESOURCE_TEXT_CHARS + 1) },
+        ],
+      })
+      .mockResolvedValueOnce({
+        contents: [{ uri: 'x://small', text: 'resource body' }],
+      });
+    const tool = new ReadMcpResourceTool(configWith(readMcpResource));
+    const signal = new AbortController().signal;
+
+    // The formatter dropped the tail, so this body is not the raw one; an
+    // undeclared size would let the scheduler measure the capped frame and
+    // report raw == injected with truncated: false.
+    const capped = await tool
+      .build({ server_name: 'srv', uri: 'x://big' })
+      .execute(signal);
+    expect(capped.rawOutputSize).toBeNull();
+    expect(capped.truncatedByProducer).toBe(true);
+
+    // Nothing was dropped, so the scheduler's own measurement is the truth.
+    const intact = await tool
+      .build({ server_name: 'srv', uri: 'x://small' })
+      .execute(signal);
+    expect(intact.rawOutputSize).toBeUndefined();
+    expect(intact.truncatedByProducer).toBeUndefined();
   });
 
   it('shares a per-turn blob budget across calls on the same signal', async () => {

@@ -30,6 +30,7 @@ export class ProcessTransport implements Transport {
   private abortController: AbortController;
   private abortHandler: (() => void) | null = null;
   private killEscalationTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly sentSignals = new Set<NodeJS.Signals>();
 
   constructor(options: TransportOptions) {
     this.options = options;
@@ -221,7 +222,9 @@ export class ProcessTransport implements Transport {
     }
 
     if (!this.childProcess.killed) {
-      this.childProcess.kill('SIGTERM');
+      if (this.childProcess.kill('SIGTERM')) {
+        this.sentSignals.add('SIGTERM');
+      }
     }
 
     this.scheduleChildProcessKillEscalation(this.childProcess);
@@ -235,7 +238,9 @@ export class ProcessTransport implements Transport {
         this.childProcess === childProcess &&
         childProcess.exitCode === null
       ) {
-        childProcess.kill('SIGKILL');
+        if (childProcess.kill('SIGKILL')) {
+          this.sentSignals.add('SIGKILL');
+        }
       }
       this.killEscalationTimer = null;
     }, 5000);
@@ -304,6 +309,19 @@ export class ProcessTransport implements Transport {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Error | undefined {
+    // The CLI can handle SIGTERM by exiting with a cancellation code, and
+    // Windows TerminateProcess reports code 1 instead of a signal.
+    const requestedShutdown =
+      this.closed &&
+      (signal
+        ? this.sentSignals.has(signal)
+        : (this.sentSignals.has('SIGTERM') && (code === 130 || code === 143)) ||
+          (process.platform === 'win32' &&
+            code === 1 &&
+            (this.sentSignals.has('SIGTERM') ||
+              this.sentSignals.has('SIGKILL'))));
+    if (requestedShutdown) return undefined;
+
     if (code !== 0 && code !== null) {
       return new Error(`CLI process exited with code ${code}`);
     } else if (signal) {
@@ -415,7 +433,7 @@ export class ProcessTransport implements Transport {
     }
 
     if (this.options.sandbox) {
-      args.push('--sandbox');
+      args.push('--sandbox=true');
     }
 
     if (this.options.safeMode) {
@@ -448,6 +466,17 @@ export class ProcessTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    // Closing must not hide a failure already visible before our shutdown.
+    if (!this.closed && this.childProcess) {
+      const { exitCode, signalCode } = this.childProcess;
+      if (exitCode !== null || signalCode !== null) {
+        this._exitError ??= this.abortController.signal.aborted
+          ? new AbortError('Operation aborted')
+          : (this.getProcessExitError(exitCode, signalCode) ?? null);
+      }
+    }
+    this.closed = true;
+
     if (this.childStdin) {
       this.childStdin.end();
       this.childStdin = null;
@@ -466,7 +495,6 @@ export class ProcessTransport implements Transport {
     this.requestChildProcessExit();
 
     this.ready = false;
-    this.closed = true;
     this.inputClosed = true;
   }
 
@@ -478,9 +506,21 @@ export class ProcessTransport implements Transport {
       return;
     }
 
-    if (this.childProcess.exitCode !== null || this.childProcess.killed) {
-      if (this._exitError) {
-        throw this._exitError;
+    if (
+      this.childProcess.exitCode !== null ||
+      this.childProcess.signalCode !== null
+    ) {
+      const error =
+        this._exitError ??
+        (this.abortController.signal.aborted
+          ? new AbortError('Operation aborted')
+          : this.getProcessExitError(
+              this.childProcess.exitCode,
+              this.childProcess.signalCode,
+            ));
+      if (error) {
+        this._exitError ??= error;
+        throw error;
       }
       return;
     }
@@ -495,7 +535,7 @@ export class ProcessTransport implements Transport {
           return;
         }
 
-        const error = this.getProcessExitError(code, signal);
+        const error = this._exitError ?? this.getProcessExitError(code, signal);
         if (error) {
           reject(error);
         } else {

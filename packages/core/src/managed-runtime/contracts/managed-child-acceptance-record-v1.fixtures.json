@@ -1,0 +1,480 @@
+{
+  "contract": "managed-child-acceptance-record/1",
+  "keys": [
+    "childRunId",
+    "contentDigest",
+    "contentRef",
+    "parentExecutionCallId",
+    "parentScopeId",
+    "resultVersion",
+    "run",
+    "terminalReceiptRef"
+  ],
+  "fixedKeys": [
+    "childRunId",
+    "contentDigest",
+    "contentRef",
+    "parentExecutionCallId",
+    "parentScopeId",
+    "resultVersion",
+    "terminalReceiptRef"
+  ],
+  "templates": {
+    "child_acceptance": {
+      "childRunId": "run-1",
+      "contentDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "contentRef": {
+        "resourceId": "result-1",
+        "kind": "managed-child-result",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "parentExecutionCallId": "call-1",
+      "parentScopeId": "scope-1",
+      "resultVersion": 1,
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "accepted"
+        }
+      },
+      "terminalReceiptRef": {
+        "resourceId": "receipt-1",
+        "kind": "managed-runtime-receipt",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    }
+  },
+  "cases": [
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-start",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-sent-completion",
+      "patch": {
+        "parentExecutionCallId": null
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-consumed-at-open",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-extra-key",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-with-call",
+      "patch": {
+        "run": {
+          "executionCallId": "call-9"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be purely logical"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-with-execution",
+      "patch": {
+        "run": {
+          "execution": "settled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "execution needs an executionCallId or an effectId"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-with-runtime",
+      "patch": {
+        "run": {
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "runtime needs an execution"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-with-definition",
+      "patch": {
+        "run": {
+          "definition": {
+            "definitionId": "agent-1",
+            "definitionRevision": 1,
+            "definitionDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be purely logical"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-with-dispatch",
+      "patch": {
+        "run": {
+          "dispatchId": "dispatch-9"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be purely logical"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-not-settled",
+      "patch": {
+        "run": {
+          "state": "admitted",
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be settled"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-delivery-before-end",
+      "patch": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "cannot hand over a result before the run ends"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-delivery-planned",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be accepted or consumed"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-delivery-channel",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "channel",
+            "state": "delivered"
+          },
+          "deliveryId": "delivery-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be purely logical"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-digest-mismatch",
+      "patch": {
+        "contentDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must name the content's digest"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-digest-uppercase",
+      "patch": {
+        "contentDigest": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-digest-short",
+      "patch": {
+        "contentDigest": "abcd"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-content-ref-digest-bad",
+      "patch": {
+        "contentRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "xyz"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "contentRef.digest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-receipt-digest-bad",
+      "patch": {
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "xyz"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "terminalReceiptRef.digest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-result-version-two",
+      "patch": {
+        "resultVersion": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "resultVersion must be 1 in schema version 1"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-result-version-overflow",
+      "patch": {
+        "resultVersion": 1e400
+      },
+      "valid": false,
+      "start": false,
+      "error": "resultVersion must be 1 in schema version 1"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-with-effect",
+      "patch": {
+        "run": {
+          "effectId": "effect-9"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be purely logical"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-run-without-delivery",
+      "patch": {
+        "run": {
+          "delivery": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be accepted or consumed"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-child-run-id-empty",
+      "patch": {
+        "childRunId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "childRunId must be a non-empty string"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-scope-empty",
+      "patch": {
+        "parentScopeId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "parentScopeId must be a non-empty string"
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-call-id-not-text",
+      "patch": {
+        "parentExecutionCallId": 7
+      },
+      "valid": false,
+      "start": false,
+      "error": "parentExecutionCallId must be a non-empty string"
+    }
+  ],
+  "successors": [
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-consume",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-restated",
+      "before": {},
+      "after": {},
+      "valid": true
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-consume-twice",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-regress",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "after": {},
+      "valid": false
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-content-changed",
+      "before": {},
+      "after": {
+        "contentRef": {
+          "resourceId": "result-2",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "contentDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "valid": false
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-call-changed",
+      "before": {},
+      "after": {
+        "parentExecutionCallId": "call-2"
+      },
+      "valid": false
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-child-run-retargeted",
+      "before": {},
+      "after": {
+        "childRunId": "run-2"
+      },
+      "valid": false
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-parent-scope-changed",
+      "before": {},
+      "after": {
+        "parentScopeId": "scope-2"
+      },
+      "valid": false
+    },
+    {
+      "domain": "child_acceptance",
+      "id": "acceptance-receipt-changed",
+      "before": {},
+      "after": {
+        "terminalReceiptRef": {
+          "resourceId": "receipt-2",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": false
+    }
+  ]
+}

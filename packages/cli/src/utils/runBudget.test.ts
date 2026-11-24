@@ -6,14 +6,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
 } from '@qwen-code/qwen-code-core';
 import {
   RunBudgetEnforcer,
   parseDurationSeconds,
-  validateGoalCheckpointTimeoutSeconds,
   validateGoalMaxActiveMinutes,
   validateGoalMaxTurns,
   validateGoalTokenBudget,
@@ -165,30 +163,6 @@ describe('validateGoalMaxActiveMinutes', () => {
 
   it('rejects non-number settings values', () => {
     expect(() => validateGoalMaxActiveMinutes('30')).toThrow();
-  });
-});
-
-describe('validateGoalCheckpointTimeoutSeconds', () => {
-  it.each([1, 180, GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP])(
-    'accepts supported value %s',
-    (value) => {
-      expect(validateGoalCheckpointTimeoutSeconds(value)).toBe(value);
-    },
-  );
-
-  it.each([
-    0,
-    -1,
-    1.5,
-    GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-    Number.NaN,
-    Number.POSITIVE_INFINITY,
-  ])('rejects invalid value %s', (value) => {
-    expect(() => validateGoalCheckpointTimeoutSeconds(value)).toThrow();
-  });
-
-  it('rejects non-number settings values', () => {
-    expect(() => validateGoalCheckpointTimeoutSeconds('30')).toThrow();
   });
 });
 

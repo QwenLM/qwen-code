@@ -6,7 +6,10 @@
 
 import type { Content, Part } from '@google/genai';
 import type { ConversationRecord } from '../services/sessionService.js';
-import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import {
+  buildSessionHistoryFromConversation,
+  cloneApiHistory,
+} from '../services/session-api-history.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
   detectTurnInterruption,
@@ -61,6 +64,21 @@ export interface BuildSessionRecoveryPlanFromApiHistoryInput {
   sessionId: string;
   apiHistory: Content[];
   completedToolCallIds?: readonly string[];
+  /**
+   * Authoritative count of trailing `apiHistory` entries whose source record
+   * the recorder stamped as a system-injected notification AND that is a cold
+   * copy persisted before any turn ran (`deliveredTurn !== true`), as reported
+   * by `buildSessionHistoryFromConversation`. A stamped-but-unanswered entry is
+   * treated as an `interrupted_prompt` rather than a cold notification nobody
+   * owes a response, so it is excluded from the count and survives the trim.
+   * Forwarded to
+   * `detectTurnInterruption` so the notification trim narrows to entries that
+   * really are notifications instead of trusting the `<task-notification>`
+   * shape — without it, a real user prompt whose whole text is a bare envelope
+   * is trimmed, the session is certified `clean`, and the unanswered prompt
+   * gets no banner and no Retry.
+   */
+  trailingSystemNotifications?: number;
   historyGaps?: HistoryGap[];
   options?: {
     allowAutoContinue?: boolean;
@@ -123,6 +141,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   sessionId,
   apiHistory: inputApiHistory,
   completedToolCallIds,
+  trailingSystemNotifications,
   historyGaps,
   options,
 }: BuildSessionRecoveryPlanFromApiHistoryInput): SessionRecoveryPlan {
@@ -132,7 +151,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   const gaps = historyGaps ?? [];
   const planId = createPlanId(sessionId, originalApiHistory.length);
 
-  const apiHistory = structuredClone(originalApiHistory);
+  const apiHistory = cloneApiHistory(originalApiHistory);
   const repairResult = repairOrphanedToolUseTurns(apiHistory);
   const repairs: RecoveryRepair[] = [
     ...repairResult.injected.map((repair) => ({
@@ -170,6 +189,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   const interruption = detectTurnInterruption(
     originalApiHistory,
     completedToolCallIds,
+    trailingSystemNotifications,
   );
   if (interruption.kind === 'none') {
     return {

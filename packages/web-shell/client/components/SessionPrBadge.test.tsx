@@ -11,19 +11,20 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { SessionPrBadge } from './SessionPrBadge';
+import { SessionPrBadge, openableSessionPrs } from './SessionPrBadge';
+import badgeStyles from './SessionPrBadge.module.css';
 import styles from './SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-function renderBadge(prs: DaemonSessionPrInfo[]): HTMLElement {
+function renderBadge(prs: DaemonSessionPrInfo[], compact = false): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <SessionPrBadge prs={prs} />
+        <SessionPrBadge prs={prs} compact={compact} />
       </I18nProvider>,
     );
   });
@@ -77,5 +78,72 @@ describe('SessionPrBadge', () => {
     expect(labelOf('closed')).toContain('Closed');
     expect(labelOf('open')).not.toContain('Open');
     expect(labelOf()).not.toContain('Open');
+  });
+
+  it('renders the last openable binding, not the last binding', () => {
+    const badge = renderBadge([
+      pr(9500),
+      { number: 1, url: 'javascript:alert(1)' },
+    ]);
+    const anchor = badge.querySelector('a');
+    expect(anchor?.getAttribute('href')).toBe(
+      'https://github.com/o/r/pull/9500',
+    );
+    expect(anchor?.textContent).toBe('#9500');
+    expect(anchor?.getAttribute('aria-label')).toBe('Pull Request #9500');
+  });
+
+  it('renders the latest-bound openable PR even when it is numbered lower', () => {
+    // Recency is array position, not number, and the overflow counts only
+    // the openable bindings.
+    const badge = renderBadge([
+      pr(9517, 'merged'),
+      { number: 1, url: 'javascript:alert(1)' },
+      pr(9500),
+    ]);
+    const anchor = badge.querySelector('a');
+    expect(anchor?.getAttribute('href')).toBe(
+      'https://github.com/o/r/pull/9500',
+    );
+    expect(anchor?.textContent).toBe('#9500 +1');
+    expect(anchor?.getAttribute('aria-label')).toBe(
+      'Pull Request #9500 (2 total)',
+    );
+  });
+
+  it('keeps the state icon and link on a compact merged-PR badge', () => {
+    const anchor = renderBadge([pr(9517, 'merged')], true).querySelector('a');
+    expect(anchor?.className).toContain(badgeStyles.sessionPrBadgeCompact);
+    expect(
+      anchor?.querySelector('svg')?.classList.contains('lucide-git-merge'),
+    ).toBe(true);
+    expect(anchor?.getAttribute('href')).toBe(
+      'https://github.com/o/r/pull/9517',
+    );
+    expect(anchor?.getAttribute('aria-label')).toContain('Merged');
+  });
+
+  it('renders nothing when no binding is openable', () => {
+    expect(
+      renderBadge([{ number: 1, url: 'javascript:alert(1)' }]).querySelector(
+        'a',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('openableSessionPrs', () => {
+  it('keeps only openable bindings, in binding order', () => {
+    // Bound later but numbered lower, so a sort by number cannot pass.
+    const first = pr(9517, 'merged');
+    const latest = pr(9500);
+    expect(
+      openableSessionPrs([
+        { number: 1, url: 'javascript:alert(1)' },
+        first,
+        { number: 2, url: '   ' },
+        latest,
+      ]),
+    ).toEqual([first, latest]);
   });
 });

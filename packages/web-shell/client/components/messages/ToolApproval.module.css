@@ -35,9 +35,33 @@
    buttons out of it. */
 .floating > .header,
 .floating > .desc,
-.floating > .explainRow,
-.floating > .options {
+.floating > .footer {
   flex-shrink: 0;
+}
+
+/* The command/content region absorbs the sheet's overflow and scrolls itself,
+   so the 300px caps on .content/.codeBlock apply to the inline variant only and
+   the decision buttons stay pinned at the bottom of the sheet. Each region keeps
+   the 3.5em floor of the inline variant: a warning block rendered next to the
+   diff, or a short command next to its warnings, must stay readable instead of
+   being squeezed to a sliver. The sheet's own overflow-y: auto above is only a
+   fallback for the degenerate case where the unshrinkable chrome plus these
+   floors exceed the sheet cap (short viewports): the decision buttons then stay
+   reachable by scrolling instead of being clipped. */
+.floating > .content:not(.planContent),
+.floating > .code {
+  flex: 1 1 auto;
+  min-height: 3.5em;
+  overflow-y: auto;
+}
+
+/* The base .codeBlock keeps min-height: 0 and overflow-y: auto: lifting only
+   the cap would leave the <pre> as its own scroller — squeezed, it shrinks to
+   the region's content box and scrolls inside the padding while the region's
+   own overflow-y: auto never engages. */
+.floating .codeBlock {
+  max-height: none;
+  overflow-y: visible;
 }
 
 .floatingWorkflow {
@@ -58,10 +82,22 @@
   overflow-y: auto;
 }
 
-.explainRow {
+.footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.footerWithExplanation {
   margin: 16px 0 0 24px;
   padding-top: 12px;
   border-top: 1px dashed var(--border);
+}
+
+.explainRow {
+  flex: 0 0 auto;
 }
 
 .explainButton {
@@ -114,7 +150,7 @@
 
 .name {
   color: var(--foreground);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 22px;
   min-width: 0;
@@ -125,7 +161,6 @@
 
 .desc {
   margin-top: 4px;
-  padding-left: 24px;
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 400;
@@ -141,7 +176,6 @@
 
 .content {
   margin: 10px 0 0;
-  margin-left: 24px;
   padding: 6px 10px;
   background: var(--secondary);
   border-radius: 7px;
@@ -166,7 +200,6 @@
   display: flex;
   flex-direction: column;
   margin: 10px 0 0;
-  margin-left: 24px;
   padding: 8px 12px;
   background: var(--secondary);
   border-radius: 7px;
@@ -205,12 +238,14 @@
 
 .options {
   display: flex;
+  flex: 0 1 auto;
   flex-direction: row;
   justify-content: flex-end;
-  gap: 16px;
-  margin-top: 24px;
-  padding-left: 0;
   flex-wrap: wrap;
+  gap: 16px;
+  min-width: 0;
+  margin: 0 0 0 auto;
+  padding-left: 0;
 }
 
 .option {
@@ -238,16 +273,6 @@
   outline-offset: 2px;
 }
 
-.optionPlain {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--secondary-foreground);
-  font-size: 12px;
-  font-weight: 500;
-  box-shadow: none;
-}
-
 .optionSecondary {
   border-color: var(--border);
   background: var(--background);
@@ -262,20 +287,53 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
+.splitAction {
+  display: inline-flex;
+  max-width: 100%;
+}
+
+.splitAction > .option:first-child {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+  white-space: normal;
+}
+
+.menuTrigger {
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.splitAction > .menuTrigger {
+  padding-inline: 8px;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  border-inline-start-color: color-mix(
+    in srgb,
+    var(--primary-foreground) 30%,
+    transparent
+  );
+}
+
+.splitAction > .option:focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
+.approvalMenu {
+  /* The floating approval sits 10 layers above the dialog backdrop. */
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 11);
+  width: max-content;
+  max-width: min(22rem, var(--radix-dropdown-menu-content-available-width));
+  overflow-wrap: anywhere;
+}
+
 .option:hover {
   opacity: 0.85;
 }
 
-.optionActive {
-  border-color: transparent;
-}
-
-.pointer {
-  display: none;
-}
-
-.num {
-  display: none;
+.option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .label {
@@ -284,7 +342,8 @@
 
 @media (max-width: 760px) {
   .options {
-    justify-content: flex-start;
+    flex: 1 0 100%;
+    margin-left: 0;
   }
 }
 
@@ -296,7 +355,7 @@
 }
 
 .goalApproval > .header,
-.goalApproval > .options,
+.goalApproval > .footer,
 .goalHint,
 .goalFeedback {
   flex-shrink: 0;
@@ -360,8 +419,11 @@
   line-height: 18px;
 }
 
-.goalApproval > .options {
+.goalApproval > .footer {
   margin-top: 8px;
+}
+
+.goalApproval .options {
   gap: 12px;
 }
 

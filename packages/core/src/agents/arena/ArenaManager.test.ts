@@ -10,10 +10,12 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { ArenaManager } from './ArenaManager.js';
 import { ArenaEventType } from './arena-events.js';
+import type { ArenaSessionUpdateEvent } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { ApprovalMode } from '../../config/config.js';
 import { getBuiltInOutputStyle } from '../../core/output-styles.js';
+import { modelText, userText } from '../../test-utils/model-fixtures.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
 const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
@@ -29,16 +31,11 @@ vi.mock('../index.js', async (importOriginal) => {
   };
 });
 
-// Mock GitWorktreeService to avoid real git operations.
-// The class mock includes static methods used by ArenaManager.
-//
-// Preserve every other export via `importActual` so unrelated
-// consumers of the module (e.g. `worktreeCleanup.ts` →
-// `AGENT_WORKTREE_SLUG_PATTERN`, `worktreeBranchForSlug`,
-// `generateAgentWorktreeSlug`, `WORKTREE_BRANCH_PREFIX`,
-// session-marker helpers) keep working. Without this, vitest replaces
-// the entire module surface and any static import of those constants
-// elsewhere in the dependency graph blows up at load time.
+// Mock GitWorktreeService (including the static methods ArenaManager calls)
+// to avoid real git operations. Other exports are preserved via
+// `importOriginal`: consumers such as `worktreeCleanup.ts` statically import
+// constants and helpers (slug pattern, branch prefix, session markers) and
+// would blow up at load time if vitest replaced the whole module surface.
 vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -94,10 +91,37 @@ const createMockConfig = (
   getTelemetryLogPromptsEnabled: () => false,
 });
 
+type InProcessSpawn = {
+  approvalMode?: unknown;
+  chatHistory?: unknown;
+  runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+};
+
 describe('ArenaManager', () => {
   let tempDir: string;
   let mockConfig: ReturnType<typeof createMockConfig>;
   let mockBackend: ReturnType<typeof createMockBackend>;
+
+  const newManager = (overrides: object = {}) =>
+    new ArenaManager({ ...mockConfig, ...overrides } as never);
+  /** Starts a manager (config overrides, extra start options) to completion. */
+  const startWith = async (overrides: object = {}, opts: object = {}) => {
+    const manager = newManager(overrides);
+    const result = await manager.start({
+      ...createValidStartOptions(),
+      ...opts,
+    });
+    return { manager, result };
+  };
+  /** Asserts both agents were spawned; returns each spawn's inProcess config. */
+  const spawnedInProcess = () => {
+    expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+    return mockBackend.spawnAgent.mock.calls.map(
+      (call) => (call[0] as { inProcess?: InProcessSpawn }).inProcess,
+    );
+  };
+  const spawnedSystemPrompts = () =>
+    spawnedInProcess().map((p) => p?.runtimeConfig?.promptConfig?.systemPrompt);
 
   beforeEach(async () => {
     // Create a temp directory - no need for git repo since we mock GitWorktreeService
@@ -158,81 +182,75 @@ describe('ArenaManager', () => {
 
   describe('constructor', () => {
     it('should create an ArenaManager instance', () => {
-      const manager = new ArenaManager(mockConfig as never);
+      const manager = newManager();
       expect(manager).toBeDefined();
       expect(manager.getSessionId()).toBeUndefined();
       expect(manager.getSessionStatus()).toBe(ArenaSessionStatus.INITIALIZING);
     });
 
     it('should not have a backend before start', () => {
-      const manager = new ArenaManager(mockConfig as never);
-      expect(manager.getBackend()).toBeNull();
+      expect(newManager().getBackend()).toBeNull();
     });
   });
 
   describe('start validation', () => {
-    it('should reject start with less than 2 models', async () => {
-      const manager = new ArenaManager(mockConfig as never);
+    it('refuses required-container sessions before initializing state or worktrees', async () => {
+      const manager = newManager({
+        getAgentExecutionBackend: () => 'container',
+      });
+      const onStart = vi.fn();
+      manager.getEventEmitter().on(ArenaEventType.SESSION_START, onStart);
 
-      await expect(
-        manager.start({
-          models: [{ modelId: 'model-1', authType: 'openai' }],
-          task: 'Test task',
-        }),
-      ).rejects.toThrow('Arena requires at least 2 models');
-    });
-
-    it('should reject start with more than max models', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-
-      const models = Array.from({ length: ARENA_MAX_AGENTS + 1 }, (_, i) => ({
-        modelId: `model-${i}`,
-        authType: 'openai',
-      }));
-
-      await expect(
-        manager.start({
-          models,
-          task: 'Test task',
-        }),
-      ).rejects.toThrow(
-        `Arena supports a maximum of ${ARENA_MAX_AGENTS} models`,
+      await expect(manager.start(createValidStartOptions())).rejects.toThrow(
+        'Container execution is required',
       );
+
+      expect(manager.getSessionId()).toBeUndefined();
+      expect(manager.getBackend()).toBeNull();
+      expect(manager.getAgentStates()).toEqual([]);
+      expect(onStart).not.toHaveBeenCalled();
+      expect(hoistedMockDetectBackend).not.toHaveBeenCalled();
+      expect(hoistedMockSetupWorktrees).not.toHaveBeenCalled();
+      expect(await fs.readdir(tempDir)).toEqual([]);
     });
 
-    it('should reject start with empty task', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-
-      await expect(
-        manager.start({
-          models: [
-            { modelId: 'model-1', authType: 'openai' },
-            { modelId: 'model-2', authType: 'openai' },
-          ],
-          task: '',
-        }),
-      ).rejects.toThrow('Arena requires a task/prompt');
-    });
-
-    it('should reject start with duplicate model IDs', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-
-      await expect(
-        manager.start({
-          models: [
-            { modelId: 'model-1', authType: 'openai' },
-            { modelId: 'model-1', authType: 'openai' },
-          ],
-          task: 'Test task',
-        }),
-      ).rejects.toThrow('Arena models must have unique identifiers');
+    it.each([
+      [
+        'should reject start with less than 2 models',
+        [model('model-1')],
+        'Test task',
+        'Arena requires at least 2 models',
+      ],
+      [
+        'should reject start with more than max models',
+        Array.from({ length: ARENA_MAX_AGENTS + 1 }, (_, i) =>
+          model(`model-${i}`),
+        ),
+        'Test task',
+        `Arena supports a maximum of ${ARENA_MAX_AGENTS} models`,
+      ],
+      [
+        'should reject start with empty task',
+        [model('model-1'), model('model-2')],
+        '',
+        'Arena requires a task/prompt',
+      ],
+      [
+        'should reject start with duplicate model IDs',
+        [model('model-1'), model('model-1')],
+        'Test task',
+        'Arena models must have unique identifiers',
+      ],
+    ])('%s', async (_title, models, task, message) => {
+      await expect(newManager().start({ models, task })).rejects.toThrow(
+        message,
+      );
     });
   });
 
   describe('event emitter', () => {
     it('should return the event emitter', () => {
-      const manager = new ArenaManager(mockConfig as never);
-      const emitter = manager.getEventEmitter();
+      const emitter = newManager().getEventEmitter();
       expect(emitter).toBeDefined();
       expect(typeof emitter.on).toBe('function');
       expect(typeof emitter.off).toBe('function');
@@ -242,7 +260,7 @@ describe('ArenaManager', () => {
 
   describe('PTY interaction methods', () => {
     it('should expose PTY interaction methods', () => {
-      const manager = new ArenaManager(mockConfig as never);
+      const manager = newManager();
       expect(typeof manager.switchToAgent).toBe('function');
       expect(typeof manager.switchToNextAgent).toBe('function');
       expect(typeof manager.switchToPreviousAgent).toBe('function');
@@ -254,48 +272,41 @@ describe('ArenaManager', () => {
     });
 
     it('should return null for active agent ID when no session', () => {
-      const manager = new ArenaManager(mockConfig as never);
-      expect(manager.getActiveAgentId()).toBeNull();
+      expect(newManager().getActiveAgentId()).toBeNull();
     });
 
     it('should return null for active snapshot when no session', () => {
-      const manager = new ArenaManager(mockConfig as never);
-      expect(manager.getActiveSnapshot()).toBeNull();
+      expect(newManager().getActiveSnapshot()).toBeNull();
     });
   });
 
   describe('cancel', () => {
     it('should handle cancel when no session is active', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-      await expect(manager.cancel()).resolves.not.toThrow();
+      await expect(newManager().cancel()).resolves.not.toThrow();
     });
   });
 
   describe('cleanup', () => {
     it('should handle cleanup when no session is active', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-      await expect(manager.cleanup()).resolves.not.toThrow();
+      await expect(newManager().cleanup()).resolves.not.toThrow();
     });
   });
 
   describe('getAgentStates', () => {
     it('should return empty array when no agents', () => {
-      const manager = new ArenaManager(mockConfig as never);
-      expect(manager.getAgentStates()).toEqual([]);
+      expect(newManager().getAgentStates()).toEqual([]);
     });
   });
 
   describe('getAgentState', () => {
     it('should return undefined for non-existent agent', () => {
-      const manager = new ArenaManager(mockConfig as never);
-      expect(manager.getAgentState('non-existent')).toBeUndefined();
+      expect(newManager().getAgentState('non-existent')).toBeUndefined();
     });
   });
 
   describe('applyAgentResult', () => {
     it('should return error for non-existent agent', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-      const result = await manager.applyAgentResult('non-existent');
+      const result = await newManager().applyAgentResult('non-existent');
       expect(result.success).toBe(false);
       expect(result.error).toContain('not found');
     });
@@ -303,26 +314,17 @@ describe('ArenaManager', () => {
 
   describe('getAgentDiff', () => {
     it('should return error message for non-existent agent', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-      const diff = await manager.getAgentDiff('non-existent');
+      const diff = await newManager().getAgentDiff('non-existent');
       expect(diff).toContain('not found');
     });
   });
 
   describe('backend initialization', () => {
     it('should emit SESSION_UPDATE with type warning when backend detection returns warning', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-      const updates: Array<{
-        type: string;
-        message: string;
-        sessionId: string;
-      }> = [];
+      const manager = newManager();
+      const updates: ArenaSessionUpdateEvent[] = [];
       manager.getEventEmitter().on(ArenaEventType.SESSION_UPDATE, (event) => {
-        updates.push({
-          type: event.type,
-          message: event.message,
-          sessionId: event.sessionId,
-        });
+        updates.push(event);
       });
 
       hoistedMockDetectBackend.mockResolvedValueOnce({
@@ -343,7 +345,7 @@ describe('ArenaManager', () => {
     });
 
     it('should emit SESSION_ERROR and mark FAILED when backend init fails', async () => {
-      const manager = new ArenaManager(mockConfig as never);
+      const manager = newManager();
       const sessionErrors: string[] = [];
       manager.getEventEmitter().on(ArenaEventType.SESSION_ERROR, (event) => {
         sessionErrors.push(event.error);
@@ -362,85 +364,48 @@ describe('ArenaManager', () => {
   describe('chat history forwarding', () => {
     it('passes approvalMode to in-process backend spawn configs', async () => {
       mockBackend.type = 'in-process';
-      const manager = new ArenaManager(mockConfig as never);
+      await startWith({}, { approvalMode: ApprovalMode.PLAN });
 
-      await manager.start({
-        ...createValidStartOptions(),
-        approvalMode: ApprovalMode.PLAN,
-      });
-
-      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
-      for (const call of mockBackend.spawnAgent.mock.calls) {
-        const spawnConfig = call[0] as {
-          inProcess?: { approvalMode?: unknown };
-        };
-        expect(spawnConfig.inProcess?.approvalMode).toBe(ApprovalMode.PLAN);
+      for (const inProcess of spawnedInProcess()) {
+        expect(inProcess?.approvalMode).toBe(ApprovalMode.PLAN);
       }
     });
 
     it('should pass chatHistory to backend spawnAgent calls', async () => {
-      const manager = new ArenaManager(mockConfig as never);
       const chatHistory = [
-        { role: 'user' as const, parts: [{ text: 'prior question' }] },
-        { role: 'model' as const, parts: [{ text: 'prior answer' }] },
+        userText('prior question'),
+        modelText('prior answer'),
       ];
-
-      await manager.start({
-        ...createValidStartOptions(),
-        chatHistory,
-      });
+      await startWith({}, { chatHistory });
 
       // Both agents should have been spawned with chatHistory in
       // the inProcess config.
-      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
-      for (const call of mockBackend.spawnAgent.mock.calls) {
-        const spawnConfig = call[0] as {
-          inProcess?: { chatHistory?: unknown };
-        };
-        expect(spawnConfig.inProcess?.chatHistory).toEqual(chatHistory);
+      for (const inProcess of spawnedInProcess()) {
+        expect(inProcess?.chatHistory).toEqual(chatHistory);
       }
     });
 
     it('should pass undefined chatHistory when not provided', async () => {
-      const manager = new ArenaManager(mockConfig as never);
+      await startWith();
 
-      await manager.start(createValidStartOptions());
-
-      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
-      for (const call of mockBackend.spawnAgent.mock.calls) {
-        const spawnConfig = call[0] as {
-          inProcess?: { chatHistory?: unknown };
-        };
-        expect(spawnConfig.inProcess?.chatHistory).toBeUndefined();
+      for (const inProcess of spawnedInProcess()) {
+        expect(inProcess?.chatHistory).toBeUndefined();
       }
     });
 
     it('builds the in-process worker prompt with headless mode and the active style', async () => {
       // Arena workers run non-interactively, so ArenaManager passes 'headless'
-      // as the interaction mode (4th arg) to getCoreSystemPrompt. A regression
-      // that drops that argument would fall back to the interactive prompt,
-      // telling arena workers to ask the user questions no one can answer.
-      // Assert on the produced prompt: the headless variant carries a
-      // single-turn marker that is absent from every other interaction mode.
+      // (4th arg) to getCoreSystemPrompt. Dropping it would fall back to the
+      // interactive prompt, telling workers to ask questions no one can
+      // answer. The headless variant's single-turn marker is absent from
+      // every other interaction mode.
       mockBackend.type = 'in-process';
-      mockConfig = {
-        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+      await startWith({
         getOutputStyle: () => getBuiltInOutputStyle('Concise'),
         isTodoWriteEnabled: () => true,
-      };
-      const manager = new ArenaManager(mockConfig as never);
+      });
 
-      await manager.start(createValidStartOptions());
-
-      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
-      for (const call of mockBackend.spawnAgent.mock.calls) {
-        const spawnConfig = call[0] as {
-          inProcess?: {
-            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
-          };
-        };
-        const systemPrompt =
-          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+      for (const systemPrompt of spawnedSystemPrompts()) {
         expect(systemPrompt).toContain(
           'This is a non-interactive, single-turn run',
         );
@@ -450,9 +415,9 @@ describe('ArenaManager', () => {
     });
 
     // The peer's whole job is to produce a diff it is judged on, so it must
-    // keep the software-engineering guidance — Verify (Tests), Verify
-    // (Standards), Report outcomes faithfully — that a
-    // `keepCodingInstructions: false` style deletes from the base prompt.
+    // keep the software-engineering guidance — Verify, Report outcomes
+    // faithfully — that a `keepCodingInstructions: false` style deletes from
+    // the base prompt.
     it('does not let a style strip the coding instructions from a peer', async () => {
       mockBackend.type = 'in-process';
       const haiku = {
@@ -462,23 +427,9 @@ describe('ArenaManager', () => {
         keepCodingInstructions: false,
         prompt: 'Answer in haiku.',
       };
-      mockConfig = {
-        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
-        getOutputStyle: () => haiku,
-      };
-      const manager = new ArenaManager(mockConfig as never);
+      await startWith({ getOutputStyle: () => haiku });
 
-      await manager.start(createValidStartOptions());
-
-      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
-      for (const call of mockBackend.spawnAgent.mock.calls) {
-        const spawnConfig = call[0] as {
-          inProcess?: {
-            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
-          };
-        };
-        const systemPrompt =
-          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+      for (const systemPrompt of spawnedSystemPrompts()) {
         expect(systemPrompt).toContain('## Software Engineering Tasks');
         expect(systemPrompt).not.toContain('# Output Style: Haiku');
       }
@@ -488,25 +439,13 @@ describe('ArenaManager', () => {
     // not reintroduce one the main session deliberately dropped.
     it('gives a peer no style when a custom system prompt replaces the main one', async () => {
       mockBackend.type = 'in-process';
-      mockConfig = {
-        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+      await startWith({
         getSystemPrompt: () => 'You are terse.',
         getOutputStyle: () => getBuiltInOutputStyle('Concise'),
-      };
-      const manager = new ArenaManager(mockConfig as never);
+      });
 
-      await manager.start(createValidStartOptions());
-
-      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
-      for (const call of mockBackend.spawnAgent.mock.calls) {
-        const spawnConfig = call[0] as {
-          inProcess?: {
-            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
-          };
-        };
-        expect(
-          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt,
-        ).not.toContain('# Output Style: Concise');
+      for (const systemPrompt of spawnedSystemPrompts()) {
+        expect(systemPrompt).not.toContain('# Output Style: Concise');
       }
     });
 
@@ -514,27 +453,12 @@ describe('ArenaManager', () => {
       // The in-process worker's AgentCore appends the volatile auto-memory
       // section itself (buildChatSystemPrompt), and the per-agent Config
       // inherits a non-empty getAutoMemoryPrompt() from this base. If
-      // ArenaManager also appended it, the section would appear twice in the
-      // worker's system prompt. Assert ArenaManager leaves it out.
+      // ArenaManager also appended it, the section would appear twice.
       const marker = '__ARENA_AUTO_MEMORY_MARKER__';
-      mockConfig = {
-        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
-        getAutoMemoryPrompt: () => marker,
-      };
       mockBackend.type = 'in-process';
-      const manager = new ArenaManager(mockConfig as never);
+      await startWith({ getAutoMemoryPrompt: () => marker });
 
-      await manager.start(createValidStartOptions());
-
-      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
-      for (const call of mockBackend.spawnAgent.mock.calls) {
-        const spawnConfig = call[0] as {
-          inProcess?: {
-            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
-          };
-        };
-        const systemPrompt =
-          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+      for (const systemPrompt of spawnedSystemPrompts()) {
         expect(systemPrompt).not.toContain(marker);
       }
     });
@@ -542,7 +466,7 @@ describe('ArenaManager', () => {
 
   describe('active session lifecycle', () => {
     it('collects diff summaries and fallback approach summaries', async () => {
-      const manager = new ArenaManager(mockConfig as never);
+      const manager = newManager();
       mockBackend.setAutoExit(false);
       hoistedMockGetWorktreeDiff.mockResolvedValue(`diff --git a/src/auth.ts b/src/auth.ts
 index 111..222 100644
@@ -605,26 +529,14 @@ index 111..222 100644
     });
 
     it('routes all approach summaries through the chokepoint, not per-agent generators', async () => {
+      const summaryReply = (summary: string) => ({
+        text: JSON.stringify({ summary }),
+        usage: undefined,
+      });
       const summaryGenerateText = vi
         .fn()
-        .mockResolvedValueOnce({
-          text: JSON.stringify({
-            summary: 'Model 1 used a strategy pattern.',
-          }),
-          usage: undefined,
-        })
-        .mockResolvedValueOnce({
-          text: JSON.stringify({
-            summary: 'Model 2 made inline edits.',
-          }),
-          usage: undefined,
-        });
-      const config = {
-        ...mockConfig,
-        getBaseLlmClient: () => ({
-          generateText: summaryGenerateText,
-        }),
-      };
+        .mockResolvedValueOnce(summaryReply('Model 1 used a strategy pattern.'))
+        .mockResolvedValueOnce(summaryReply('Model 2 made inline edits.'));
       mockBackend.type = 'in-process';
       mockBackend.setAutoExit(false);
       const agentInteractives = new Map<
@@ -642,22 +554,22 @@ index 111..222 100644
           );
         },
       );
-      const manager = new ArenaManager(config as never);
 
-      const result = await manager.start(createValidStartOptions());
+      const { result } = await startWith({
+        getBaseLlmClient: () => ({ generateText: summaryGenerateText }),
+      });
 
       // Both summaries should hit the single chokepoint generator.
       expect(summaryGenerateText).toHaveBeenCalledTimes(2);
 
-      const callPrompts = summaryGenerateText.mock.calls.map(
-        (call: unknown[]) => {
+      const allPrompts = summaryGenerateText.mock.calls
+        .map((call: unknown[]) => {
           const options = call[0] as {
             contents: Array<{ parts: Array<{ text: string }> }>;
           };
           return options.contents[0]?.parts[0]?.text ?? '';
-        },
-      );
-      const allPrompts = callPrompts.join('\n');
+        })
+        .join('\n');
       expect(allPrompts).toContain('"agentId": "model-1"');
       expect(allPrompts).toContain('"agentId": "model-2"');
 
@@ -670,7 +582,7 @@ index 111..222 100644
     });
 
     it('cancel should stop backend and move session to CANCELLED', async () => {
-      const manager = new ArenaManager(mockConfig as never);
+      const manager = newManager();
 
       // Disable auto-exit so agents stay running until we cancel.
       mockBackend.setAutoExit(false);
@@ -680,9 +592,9 @@ index 111..222 100644
         timeoutSeconds: 30,
       });
 
-      // Wait until the backend has spawned all agents.
-      // (Agents are spawned sequentially; cancelling between spawns would
-      // cause spawnAgentPty to overwrite the CANCELLED status back to RUNNING.)
+      // Wait until all agents are spawned: they spawn sequentially, and
+      // cancelling between spawns would let spawnAgentPty overwrite the
+      // CANCELLED status back to RUNNING.
       await waitForCondition(
         () => mockBackend.spawnAgent.mock.calls.length >= 2,
       );
@@ -696,16 +608,14 @@ index 111..222 100644
     });
 
     it('cleanup should release backend and worktree resources after start', async () => {
-      const manager = new ArenaManager(mockConfig as never);
-
       // auto-exit is on by default, so agents terminate quickly.
-      await manager.start(createValidStartOptions());
+      const { manager } = await startWith();
 
       await manager.cleanup();
 
       expect(mockBackend.cleanup).toHaveBeenCalledTimes(1);
-      // cleanupSession is called with worktreeDirName (short ID), not the full sessionId.
-      // For 'test-session', the short ID is 'testsess' (first 8 chars with dashes removed).
+      // cleanupSession gets worktreeDirName (short ID), not the full
+      // sessionId: 'test-session' -> 'testsess' (first 8 chars, no dashes).
       expect(hoistedMockCleanupSession).toHaveBeenCalledWith('testsess');
       expect(manager.getBackend()).toBeNull();
       expect(manager.getSessionId()).toBeUndefined();
@@ -795,28 +705,18 @@ function createMockInteractive(agentId: string) {
   };
 }
 
+function model(modelId: string) {
+  return { modelId, authType: 'openai' };
+}
+
 function createValidStartOptions() {
   return {
-    models: [
-      { modelId: 'model-1', authType: 'openai' },
-      { modelId: 'model-2', authType: 'openai' },
-    ],
+    models: [model('model-1'), model('model-2')],
     task: 'Implement feature X',
   };
 }
 
-async function waitForMicrotask(): Promise<void> {
-  // Use setImmediate (or setTimeout fallback) to yield to the event loop
-  // and allow other async operations (like the start() method) to progress.
-  await new Promise<void>((resolve) => {
-    if (typeof setImmediate === 'function') {
-      setImmediate(resolve);
-    } else {
-      setTimeout(resolve, 0);
-    }
-  });
-}
-
+/** Polls `predicate`, yielding to the event loop so start() can progress. */
 async function waitForCondition(
   predicate: () => boolean,
   timeoutMs = 1000,
@@ -826,6 +726,6 @@ async function waitForCondition(
     if (Date.now() - startedAt > timeoutMs) {
       throw new Error('Timed out while waiting for condition');
     }
-    await waitForMicrotask();
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }

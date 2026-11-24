@@ -119,6 +119,17 @@ export interface ChannelWorkerManager {
     owner: ChannelWorkerRequiredOwner,
     enabled: boolean,
   ): Promise<ChannelWorkerSetResult | ChannelWorkerStopResult>;
+  /**
+   * Adds names to the committed selection, reading that selection inside the
+   * control lane so the result builds on every change queued before it. Names
+   * already committed are left alone, and a committed `all` selection is never
+   * rewritten. `precondition` is evaluated in the lane too, immediately before
+   * anything is committed; when it returns false nothing changes.
+   */
+  addChannels(
+    names: readonly string[],
+    options?: { precondition?: () => boolean },
+  ): Promise<ChannelWorkerSetResult | ChannelWorkerStopResult>;
   stopSelection(): Promise<ChannelWorkerStopResult>;
   reload(): Promise<ChannelWorkerSnapshot>;
   reloadWorkspace(
@@ -554,6 +565,25 @@ export function createChannelWorkerManager(
         assertRequiredOwner(targetGroups, requiredOwner);
         if (hardKilled) throw drainingError();
         return applySelection(selection, false, targetGroups);
+      });
+    },
+    addChannels(names, options = {}) {
+      if (draining) {
+        return Promise.reject(drainingError());
+      }
+      return enqueue(async () => {
+        const unchanged = () => ({ changed: false, state: snapshot() });
+        if (options.precondition && !options.precondition()) {
+          return unchanged();
+        }
+        if (committedSelection?.mode === 'all') return unchanged();
+        const committedNames = committedChannelNames();
+        const pending = names.filter((name) => !committedNames.includes(name));
+        if (pending.length === 0) return unchanged();
+        return applySelection(
+          { mode: 'names', names: [...committedNames, ...pending] },
+          false,
+        );
       });
     },
     setChannelEnabled(owner, enabled) {

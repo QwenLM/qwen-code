@@ -37,7 +37,12 @@ export async function recordAutoSkillCommandUsage(
   command: SlashCommand,
 ): Promise<void> {
   const detail = command.skillDetail;
-  if (!config || detail?.level !== 'project' || !detail.filePath) {
+  if (
+    !config ||
+    config.getShellExecutionSandbox?.() ||
+    detail?.level !== 'project' ||
+    !detail.filePath
+  ) {
     return;
   }
   try {
@@ -153,6 +158,14 @@ export class SkillCommandLoader implements ICommandLoader {
               : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
+            if (this.config?.getShellExecutionSandbox?.()) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content:
+                  'Skill commands are not yet supported with tools.executionSandbox.',
+              };
+            }
             if (this.config && !this.config.isSkillEnabled(skill)) {
               return {
                 type: 'message',

@@ -23,7 +23,6 @@
  */
 
 import {
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   GOAL_TOKEN_BUDGET_CAP,
@@ -263,30 +262,6 @@ export function validateGoalMaxActiveMinutes(value: unknown): number {
     GOAL_MAX_ACTIVE_MINUTES_CAP,
     value,
   );
-}
-
-export function validateGoalCheckpointTimeoutSeconds(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error(
-      `model.goalCheckpointTimeoutSeconds must be a finite number; got ${String(value)}.`,
-    );
-  }
-  if (!Number.isInteger(value)) {
-    throw new Error(
-      `model.goalCheckpointTimeoutSeconds must be an integer number of seconds; got ${value}.`,
-    );
-  }
-  if (value < 1) {
-    throw new Error(
-      `model.goalCheckpointTimeoutSeconds must be at least 1; got ${value}. Unset it to use the default.`,
-    );
-  }
-  if (value > GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP) {
-    throw new Error(
-      `model.goalCheckpointTimeoutSeconds ${value} exceeds the supported ceiling (${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}s, the default stream lifetime cap, past which the stream guard rather than this setting ends the call). This ceiling is fixed; raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.`,
-    );
-  }
-  return value;
 }
 
 /**

@@ -7,6 +7,57 @@
 // Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
+  user: 'usuari',
+  assistant: 'assistent',
+  thinking: 'raonament',
+  task: 'tasca',
+  compaction: 'compressió',
+  info: 'informació',
+  warning: 'avís',
+  retry: 'reintent',
+  'stop-hook': 'ganxo d’aturada',
+  'away-recap': 'resum d’absència',
+  'user-shell': 'ordre de l’usuari',
+  advisor: 'assessor',
+  'arena-agent': 'agent d’arena',
+  'arena-session': 'sessió d’arena',
+  goal: 'objectiu',
+  'Protected input': 'Entrada protegida',
+  'Focused input. Cursor: {{position}}':
+    'Entrada amb focus. Cursor: {{position}}',
+  'Unfocused input.': 'Entrada sense focus.',
+  'Focused Prompt: {{value}}': 'Indicació amb focus: {{value}}',
+  'Prompt: {{value}}': 'Indicació: {{value}}',
+  'Focused Input: {{value}}': 'Entrada amb focus: {{value}}',
+  'Input: {{value}}': 'Entrada: {{value}}',
+  'Placeholder: {{value}}': 'Text de mostra: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Seleccionat {{value}}',
+  'Disabled {{value}}': 'Desactivat {{value}}',
+  'Focused Toggle on: {{value}}': 'Amb focus, opció activada: {{value}}',
+  'Focused Toggle off: {{value}}': 'Amb focus, opció desactivada: {{value}}',
+  'Toggle on: {{value}}': 'Opció activada: {{value}}',
+  'Toggle off: {{value}}': 'Opció desactivada: {{value}}',
+  'Conversation cleared.': 'Conversa esborrada.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revisió {{value}}',
+  Dialog: 'Diàleg',
+  'Dialog closed. Focus: prompt.': 'Diàleg tancat. Focus: indicació.',
+  'Dialog closed.': 'Diàleg tancat.',
+  'Waiting for confirmation': 'Esperant confirmació',
+  'Working. Escape to cancel.': 'En curs. Escape per cancel·lar.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Historial {{start}}-{{end}} de {{total}}.',
+  'Worktree: {{value}}': 'Arbre de treball: {{value}}',
+  'Workflow mode: on': 'Mode de flux de treball: activat',
+  'Workflow mode: on (unavailable)':
+    'Mode de flux de treball: activat (no disponible)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Maj+Amunt/Avall o PageUp/PageDown per llegir; Ctrl+Home/End per al primer/més recent.',
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Activa el Generated UI integrat a les sessions locals compatibles. Reinicieu la sessió corresponent per aplicar els canvis.',
+
   // ============================================================================
   // Ajuda / Components de la interfície
   // ============================================================================
@@ -98,6 +149,7 @@ export default {
   Auth: 'Autenticació',
   Model: 'Model',
   'Fast Model': 'Model ràpid',
+  'Agent Loop': 'Bucle agent',
   Sandbox: 'Entorn aïllat',
   'Session ID': 'ID de sessió',
   'Base URL': 'Base URL',
@@ -192,6 +244,8 @@ export default {
     'El retrocés no afecta els fitxers editats manualment o mitjançant ordres de shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'No es pot retrocedir a un torn que ha estat comprimit. Prova amb un torn més recent.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    "No es pot retrocedir la conversa a aquest torn: ja no correspon a l'historial del model (per exemple, després d'un reintent). Prova amb un torn més recent.",
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'La restauració de fitxers no està disponible per a aquest torn (no s’han capturat canvis, o aquest torn és anterior a la sessió actual).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -432,6 +486,14 @@ export default {
   active: 'activa',
   disabled: 'desactivada',
   enabled: 'activada',
+  'disabled (bare mode)': 'desactivada (mode mínim)',
+  'disabled (safe mode)': 'desactivada (mode segur)',
+  'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
+  'disabled (not approved)': 'desactivada (no aprovada)',
+  'disabled (rejected)': 'desactivada (rebutjada)',
+  'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
+  'disabled (turned off for this session)':
+    'desactivada (apagada en aquesta sessió)',
   'View Details': 'Visualitza els detalls',
   'Update failed:': "Error en l'actualització:",
   'Updating {{name}}...': 'Actualitzant {{name}}...',
@@ -1021,6 +1083,26 @@ export default {
     'Ús: /forget <text de memòria a eliminar>',
   'No managed auto-memory entries matched: {{query}}':
     'Cap entrada de memòria automàtica gestionada coincideix: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Vincula una pull request de GitHub a aquesta sessió',
+  'Usage: /pr <number | url>': 'Ús: /pr <número | url>',
+  'No PRs bound to this session.': 'Cap PR vinculat a aquesta sessió.',
+  'Bound PRs: {{list}}': 'PR vinculats: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Referència de PR no vàlida. Ús: /pr <número | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'No s’ha pogut resoldre el PR #{{number}} mitjançant gh. Indiqueu l’URL complet del PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} vinculat a aquesta sessió: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'El PR #{{number}} ja està vinculat a aquesta sessió: {{url}}',
+  'Failed to bind PR #{{number}}.': 'No s’ha pogut vincular el PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'No s’ha pogut vincular el PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'No s’han pogut llegir els vincles de PR d’aquesta sessió.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) no està disponible o ha excedit el temps d’espera. Indiqueu l’URL complet del PR per vincular sense ell.',
   'Consolidate managed auto-memory topic files.':
     'Consolida els fitxers de temes de memòria automàtica gestionada.',
   'Open MCP management dialog': 'Obre el diàleg de gestió MCP',
@@ -1196,6 +1278,8 @@ export default {
     "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
   'Could not compress chat history due to an API error.':
     "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
+  'Could not compress chat history because it is too large for the context window.':
+    "No s'ha pogut comprimir l'historial del xat perquè és massa gran per a la finestra de context.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================
@@ -1543,6 +1627,7 @@ export default {
   Reqs: 'Sol·licituds',
   'Input Tokens': "Tokens d'entrada",
   'Output Tokens': 'Tokens de sortida',
+  'Output (incl. Reasoning)': 'Sortida (amb raonament)',
   'Savings Highlight:': 'Estalvis destacats:',
   'of input tokens were served from the cache, reducing costs.':
     "dels tokens d'entrada s'han servit des de la memòria cau, reduint els costos.",
@@ -1847,6 +1932,10 @@ export default {
   'API key cannot be empty.': 'La API Key no pot estar buida.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key no vàlida. Les API Keys de Coding Plan comencen per "sk-sp-". Comproveu-la.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key no vàlida. Les claus pay-as-you-go comencen per "sk-" o "sk-ws-". Les claus Token Plan ("sk-sp-") necessiten l\'entrada Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key no vàlida. Les Token Plan API Keys comencen per "sk-sp-". Genereu-ne una des de la consola Token Plan o useu l\'entrada Standard API Key per a una clau pay-as-you-go.',
   'You can get your Coding Plan API key here':
     'Podeu obtenir la vostra API Key de Coding Plan aquí',
   'Failed to update Coding Plan configuration: {{message}}':
@@ -1887,20 +1976,29 @@ export default {
     'El context supera el límit! Useu /compress o /clear per reduir-lo.',
   'No API response yet. Send a message to see actual usage.':
     "Encara no hi ha cap resposta de l'API. Envieu un missatge per veure l'ús real.",
+  'Estimated usage, including the conversation':
+    'Ús estimat, inclosa la conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Encara no hi ha dades d'ús del proveïdor. Són estimacions locals, inclosa la conversa.",
   'Estimated pre-conversation overhead':
     'Càrrega estimada prèvia a la conversa',
   'Context window': 'Finestra de context',
   tokens: 'tokens',
   Used: 'Usat',
   Free: 'Lliure',
-  'Autocompact buffer': 'Memòria intermèdia de compactació automàtica',
+  'Autocompact buffer': 'Reserva de compactació',
   'Usage by category': 'Ús per categoria',
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fitxers d’instruccions',
+  'Auto memory': 'Memòria automàtica',
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
+  'Startup context': "Context d'inici",
+  Unattributed: 'No atribuït',
+  'Cached prefix': 'Prefix en memòria cau',
   'Run /context detail for per-item breakdown.':
     'Executeu /context detail per a un desglossament per element.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2019,6 +2117,8 @@ export default {
     "La revisió de l'assessor ha fallat: {{error}}",
   'No conversation context available for /advisor':
     'No hi ha context de conversa disponible per a /advisor',
+  'No conversation context available for /btw':
+    'No hi ha context de conversa disponible per a /btw',
   'Focus too long (max {{max}} chars)':
     'El focus és massa llarg (màx. {{max}} caràcters)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2147,6 +2247,8 @@ export default {
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
     'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Les actualitzacions a una versió concreta requereixen una instal·lació independent. Instal·leu manualment la versió {{version}} amb el vostre mètode d’instal·lació.',
   'Check for Qwen Code updates and install if available':
     'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2440,6 +2542,7 @@ export default {
   'toolDisplayName.CronCreate': 'Crea tasca programada',
   'toolDisplayName.CronList': 'Llista tasques programades',
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
+  'toolDisplayName.AutofixPr': 'Autocorrecció de PR',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
   'toolDisplayName.ListAgents': "Llista d'agents",
@@ -2456,6 +2559,7 @@ export default {
   'toolDisplayName.Monitor': 'Monitor',
   'toolDisplayName.NotebookEdit': 'Edita notebook',
   'toolDisplayName.ToolSearch': "Cerca d'eines",
+  'toolDisplayName.ToolCall': "Crida d'eina",
   'toolDisplayName.EnterWorktree': "Entra a l'arbre de treball",
   'toolDisplayName.ExitWorktree': "Surt de l'arbre de treball",
   'toolDisplayName.Workflow': 'Flux de treball',

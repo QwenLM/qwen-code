@@ -3,7 +3,11 @@ import type {
   DaemonTranscriptBlock,
   DaemonTranscriptState,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { extractPendingPermission } from './transcriptAdapter';
+import {
+  extractPendingPermission,
+  isAskUserPermissionBlock,
+} from './transcriptAdapter';
+import { isAskUserPermission } from '../utils/askUserPermission';
 
 function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
   return {
@@ -62,12 +66,24 @@ describe('extractPendingPermission', () => {
     },
   );
 
+  it('does not surface an empty parameter object as the approval body', () => {
+    const permission = extractPendingPermission([
+      genericPermission({ rawInput: {} }),
+    ]);
+    expect(permission?.content).toEqual([{ type: 'text', text: '{}' }]);
+    expect(permission?.contentIsInput).toBeUndefined();
+  });
+
   it('does not hide a parameter preview identical to the title', () => {
+    const input = { key: 'value' };
+    const text = JSON.stringify(input, null, 2);
     expect(
-      extractPendingPermission([genericPermission({ rawInput: {} })]),
+      extractPendingPermission([
+        { ...genericPermission({ rawInput: input }), title: text },
+      ]),
     ).toMatchObject({
-      title: '{}',
-      content: [{ type: 'text', text: '{}' }],
+      title: text,
+      content: [{ type: 'text', text }],
       contentIsInput: true,
     });
   });
@@ -89,10 +105,39 @@ describe('extractPendingPermission', () => {
         }),
       ]);
       expect(permission?.contentIsInput).toBeUndefined();
+      expect(permission?.content).toEqual(
+        content[0].type === 'diff'
+          ? content
+          : [{ type: 'text', text: 'Explicit explanation' }],
+      );
       expect(JSON.stringify(permission?.content)).not.toContain(
         'privateParameter',
       );
     }
+  });
+
+  it('escapes control characters in diff previews', () => {
+    const permission = extractPendingPermission([
+      genericPermission({
+        content: [
+          {
+            type: 'diff',
+            path: 'safe\u202e.txt',
+            oldText: 'old\u202e',
+            newText: 'new\u202e',
+          },
+        ],
+      }),
+    ]);
+
+    expect(permission?.content).toEqual([
+      {
+        type: 'diff',
+        path: 'safe\\u202e.txt',
+        oldText: 'old\\u202e',
+        newText: 'new\\u202e',
+      },
+    ]);
   });
 
   it('does not turn toolCall metadata into a parameter preview', () => {
@@ -304,5 +349,72 @@ describe('extractPendingPermission', () => {
 
     const result = extractPendingPermission(state([permission]).blocks);
     expect(result?.toolCallId).toBeUndefined();
+  });
+});
+
+describe('isAskUserPermissionBlock', () => {
+  const permissionBlock = (
+    toolCall: Record<string, unknown>,
+    resolved?: unknown,
+  ): DaemonTranscriptBlock =>
+    ({
+      id: 'perm-classify',
+      kind: 'permission',
+      requestId: 'req-classify',
+      sessionId: 'session-classify',
+      title: 'permission',
+      resolved,
+      options: [],
+      toolCall,
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+    }) as DaemonTranscriptBlock;
+
+  it.each([
+    [{ rawInput: { questions: [{ question: 'Q?' }] } }, true],
+    [{ input: { questions: [{ question: 'Q?' }] } }, true],
+    [{ args: { questions: [{ question: 'Q?' }] } }, true],
+    [
+      {
+        rawInput: { questions: [{ question: 'Q?' }] },
+        _meta: { toolName: 'ask_user_question' },
+      },
+      true,
+    ],
+    [{ rawInput: {} }, false],
+    [
+      {
+        rawInput: { questions: [{ question: 'Q?' }] },
+        _meta: { toolName: 'some_other_tool' },
+      },
+      false,
+    ],
+    [
+      {
+        kind: 'switch_mode',
+        _meta: { toolName: 'exit_plan_mode' },
+        rawInput: {},
+      },
+      false,
+    ],
+  ] as Array<[Record<string, unknown>, boolean]>)(
+    'classifies %j as question=%s and matches the canonical extraction',
+    (toolCall, expected) => {
+      const block = permissionBlock(toolCall);
+      expect(isAskUserPermissionBlock(block)).toBe(expected);
+      expect(isAskUserPermissionBlock(block)).toBe(
+        isAskUserPermission(extractPendingPermission([block])),
+      );
+    },
+  );
+
+  it('returns false for a resolved permission, like the canonical extraction', () => {
+    const block = permissionBlock(
+      { rawInput: { questions: [{ question: 'Q?' }] } },
+      { outcome: 'selected' },
+    );
+    expect(isAskUserPermissionBlock(block)).toBe(false);
+    expect(isAskUserPermission(extractPendingPermission([block]))).toBe(false);
   });
 });

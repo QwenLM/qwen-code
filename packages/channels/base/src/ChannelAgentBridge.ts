@@ -2,6 +2,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import type { SessionTarget } from './types.js';
 
 export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
@@ -11,11 +12,18 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // strips it from untrusted callers and honors it only when an authenticated
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_WORKFLOW_ORIGIN_META_KEY = 'qwen.channel.workflowOrigin';
 export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+// Marks a slash-command notice that must ride the turn's reply: a response
+// boundary clears the chunk collection, so the notice needs its own slot and
+// the producer and both bridges have to agree on the key.
+export const CHANNEL_TURN_NOTICE_META_KEY = 'turnNotice';
 export const CHANNEL_TASK_RESULT_META_KEY = 'qwen.channel.taskResult';
 export const CHANNEL_TASK_RESULT_PARTIAL_META_KEY =
   'qwen.channel.taskResultPartial';
 export const CHANNEL_TASK_OUTPUT_META_KEY = 'qwen.channel.taskOutput';
+export const BACKGROUND_WORKFLOW_APPROVAL_META_KEY =
+  'backgroundWorkflowApproval';
 
 export class ChannelPromptCancelledError extends Error {
   constructor() {
@@ -76,6 +84,33 @@ export interface ChannelLoopToolHandler {
   ): Promise<string | ChannelLoopToolResult>;
 }
 
+/**
+ * A platform action an adapter exposes to the agent as a client MCP tool.
+ * The handler runs in the adapter, so it owns the platform credentials and
+ * the platform-specific error mapping; the bridge only routes the call and
+ * tells the adapter which agent session invoked it.
+ */
+export interface ChannelToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  /**
+   * Channel instance that owns the tool. One bridge can serve several
+   * channels, and two instances of the same channel type register the same
+   * tool names, so the bridge only offers a tool to sessions whose channel
+   * matches this owner. Leave it unset for a tool every session may call.
+   */
+  owner?: string;
+  handler(
+    args: Record<string, unknown>,
+    context: ChannelToolContext,
+  ): Promise<string | ChannelLoopToolResult>;
+}
+
+export interface ChannelToolContext {
+  sessionId: string;
+}
+
 export interface SessionDiedEvent {
   sessionId: string;
   reason?: string;
@@ -92,15 +127,68 @@ export interface PermissionResolvedEvent {
   outcome?: RequestPermissionResponse['outcome'];
 }
 
+export type ChannelWorkflowOrigin = Readonly<
+  SessionTarget & { userInitiated?: true; backgroundWorkflowBlocked?: true }
+>;
+
+export function parseChannelWorkflowOrigin(
+  value: unknown,
+): ChannelWorkflowOrigin | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const {
+    channelName,
+    chatId,
+    senderId,
+    threadId,
+    isGroup,
+    messageRoute,
+    userInitiated,
+    backgroundWorkflowBlocked,
+  } = value as Record<string, unknown>;
+  if (
+    typeof channelName !== 'string' ||
+    !channelName ||
+    typeof chatId !== 'string' ||
+    !chatId ||
+    typeof senderId !== 'string' ||
+    !senderId ||
+    (threadId !== undefined && (typeof threadId !== 'string' || !threadId)) ||
+    (isGroup !== undefined && typeof isGroup !== 'boolean') ||
+    (messageRoute !== undefined &&
+      (typeof messageRoute !== 'string' || !messageRoute)) ||
+    (userInitiated !== undefined && userInitiated !== true) ||
+    (backgroundWorkflowBlocked !== undefined &&
+      backgroundWorkflowBlocked !== true)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    channelName,
+    chatId,
+    senderId,
+    ...(threadId !== undefined ? { threadId } : {}),
+    ...(isGroup !== undefined ? { isGroup } : {}),
+    ...(messageRoute !== undefined ? { messageRoute } : {}),
+    ...(userInitiated === true ? { userInitiated } : {}),
+    ...(backgroundWorkflowBlocked === true
+      ? { backgroundWorkflowBlocked }
+      : {}),
+  });
+}
+
 export interface BackgroundResponseContext {
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /** `peer`: a message from another session; `taskId` is the message id. */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   label?: string;
   turnId?: string;
   turnComplete?: boolean;
   partial?: boolean;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
 }
 
 export function parseBackgroundResponseContext(
@@ -121,7 +209,8 @@ export function parseBackgroundResponseContext(
     (kind !== 'agent' &&
       kind !== 'monitor' &&
       kind !== 'shell' &&
-      kind !== 'workflow')
+      kind !== 'workflow' &&
+      kind !== 'peer')
   ) {
     return undefined;
   }
@@ -139,6 +228,12 @@ export function parseBackgroundResponseContext(
   if (typeof record['partial'] === 'boolean') {
     context.partial = record['partial'];
   }
+  if (kind === 'workflow') {
+    const origin = parseChannelWorkflowOrigin(
+      record[CHANNEL_WORKFLOW_ORIGIN_META_KEY],
+    );
+    if (origin) context.channelWorkflowOrigin = origin;
+  }
   return context;
 }
 
@@ -152,6 +247,8 @@ interface ChannelAgentBridgeEventMap {
    */
   disconnected: [code: number | null, signal: NodeJS.Signals | null];
   textChunk: [sessionId: string, chunk: string];
+  /** Also prefixes prompt()'s result, with a blank line before a non-empty body. */
+  turnNotice: [sessionId: string, notice: string];
   backgroundResponse: [
     sessionId: string,
     text: string,
@@ -178,7 +275,9 @@ export interface ChannelAgentBridgeSessionOptions {
   /**
    * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
    * for new sessions and restore-time attribution for legacy sessions resumed
-   * through a channel.
+   * through a channel. Adapter tools registered with an `owner` are only
+   * offered to sessions whose sourceId matches, so a session created without it
+   * sees only ownerless tools.
    */
   sourceId?: string;
   /** Request daemon-managed git worktree isolation for a fresh session. */
@@ -192,6 +291,7 @@ export interface ChannelPromptImage {
 
 export interface ChannelAgentBridgePromptOptions {
   outputMode?: 'per_task';
+  workflowOrigin?: ChannelWorkflowOrigin;
   onTaskResult?: (result: { partial: boolean }) => void;
   images?: ChannelPromptImage[];
   imageBase64?: string;
@@ -244,6 +344,33 @@ export function resolvePromptImages(
     });
 }
 
+/**
+ * Per-session bounds on undrained mid-turn input: a turn with no drain point
+ * (a long tool-free generation) must not let a sender pin unbounded text in
+ * memory for the rest of the session. Shared by the bridge queue and the
+ * channel's inject→collect fallback so the two layers cannot drift apart.
+ */
+export const MID_TURN_QUEUE_MAX_MESSAGES = 20;
+export const MID_TURN_QUEUE_MAX_CHARS = 20_000;
+/**
+ * Most messages a single drain response may carry. The ACP child that consumes
+ * `craft/drainMidTurnQueue` caps one response at this many items and DROPS the
+ * rest, so the bridge must batch the queue rather than hand over everything.
+ */
+export const MID_TURN_DRAIN_BATCH = 10;
+
+/**
+ * Outcome of handing a message to the bridge's mid-turn queue. When
+ * `accepted` is false the bridge did NOT queue the text, so the caller owns
+ * fallback delivery (or an explicit refusal); it must not report delivery.
+ */
+export type MidTurnQueueReceipt =
+  | { accepted: true }
+  | {
+      accepted: false;
+      reason: 'blank' | 'unknown-session' | 'capacity';
+    };
+
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
   getAvailableCommands?(sessionId: string): AvailableCommand[];
@@ -287,6 +414,29 @@ export interface ChannelAgentBridge {
     question: string,
     signal?: AbortSignal,
   ): Promise<ChannelBtwResult>;
+  /**
+   * Hand a user message to the session's RUNNING turn: the agent sees it at its
+   * next drain boundary (between tool batches), not pre-emptively, and the text
+   * is not carried as an attachment. The receipt says whether the text was
+   * actually queued; a rejection is final for this call, so callers must fall
+   * back to buffering (`collect`) or refuse visibly instead of reporting
+   * delivery. Bridges that omit it make channels fall back to `collect`
+   * directly.
+   */
+  queueMidTurnMessage?(sessionId: string, text: string): MidTurnQueueReceipt;
+  /**
+   * Take back accepted mid-turn messages the owning turn never drained, at its
+   * turn boundary, so the channel can replay them as a new turn instead of
+   * leaking them into whatever turn runs next. Called after the turn's prompt
+   * has settled; bridges that settle the queue themselves omit it.
+   */
+  takeUndrainedMidTurnMessages?(sessionId: string): string[];
+  /**
+   * Drop the session's not-yet-drained mid-turn messages when the owning turn
+   * is cancelled. Callers surface the drop through the same buffer-drop
+   * notification `collect` uses.
+   */
+  dropMidTurnMessages?(sessionId: string): void;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(
@@ -319,4 +469,10 @@ export interface ChannelAgentBridge {
   ): Promise<{ sessionId: string; answer: string | null }>;
   listSessions?(): BridgeSessionInfo[];
   registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
+  /**
+   * Register an adapter-owned platform action for the agent session's client
+   * MCP server. Bridges without client MCP tool support omit it; adapters
+   * must then skip registration.
+   */
+  registerChannelTool?(tool: ChannelToolDefinition): void;
 }

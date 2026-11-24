@@ -1,0 +1,193 @@
+.toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 46px;
+  box-sizing: border-box;
+  padding: 0 12px;
+}
+
+.search {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  padding: 0 4px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--traj-text-secondary);
+}
+
+.search:focus-within {
+  border-color: var(--ring);
+}
+
+.icon {
+  flex: none;
+}
+
+.input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.count {
+  flex: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.coverage {
+  flex: none;
+  display: inline-flex;
+}
+
+.iconButton,
+.chipButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--traj-text-secondary);
+  cursor: pointer;
+}
+
+.chipButton {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+}
+
+.iconButton:hover:not(:disabled),
+.iconButton:focus-visible,
+.chipButton:hover,
+.chipButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.iconButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.rangeChip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 0 4px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.filterButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.filterButton:hover,
+.filterButton:focus-visible,
+.filterButton[data-state='open'] {
+  background: var(--muted);
+}
+
+.badge {
+  min-width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--foreground);
+  color: var(--background);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+.popover {
+  width: 240px;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.group legend {
+  margin-bottom: 6px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.clear {
+  align-self: flex-end;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.clear:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@container trajectory (max-width: 419px) {
+  .filterLabel {
+    display: none;
+  }
+}

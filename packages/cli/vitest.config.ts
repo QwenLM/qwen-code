@@ -19,6 +19,10 @@ const toAliases = (map: Record<string, string>) =>
 export default defineConfig({
   resolve: {
     alias: [
+      {
+        find: /^@qwen-code\/qwen-code-core\/omni$/,
+        replacement: path.resolve(__dirname, '../core/src/omni/index.ts'),
+      },
       // Named core subpaths. None of these targets can be derived from the
       // specifier (noFollowOpen lives at utils/no-follow-open.ts), so they
       // have to be matched ahead of the wildcard below. A new named subpath
@@ -26,6 +30,14 @@ export default defineConfig({
       // the wildcard, or the wildcard will claim it and point at a file
       // that does not exist.
       ...toAliases({
+        '@qwen-code/qwen-code-core/shellResult': path.resolve(
+          __dirname,
+          '../core/src/utils/shell-result.ts',
+        ),
+        '@qwen-code/qwen-code-core/omniPolicyCollection': path.resolve(
+          __dirname,
+          '../core/src/omni/policy/model-call-collection.ts',
+        ),
         '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
           __dirname,
           '../core/src/utils/no-follow-open.ts',
@@ -41,6 +53,10 @@ export default defineConfig({
         '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
           __dirname,
           '../core/src/utils/transcript-records.ts',
+        ),
+        '@qwen-code/qwen-code-core/telemetryConstants': path.resolve(
+          __dirname,
+          '../core/src/telemetry/constants.ts',
         ),
         '@qwen-code/qwen-code-core/userPromptSubmitContext': path.resolve(
           __dirname,
@@ -198,6 +214,10 @@ export default defineConfig({
           __dirname,
           '../sdk-typescript/src/daemon/ui/transcript.ts',
         ),
+        '@qwen-code/sdk/daemon/ui': path.resolve(
+          __dirname,
+          '../sdk-typescript/src/daemon/ui/index.ts',
+        ),
         '@qwen-code/sdk/daemon/types': path.resolve(
           __dirname,
           '../sdk-typescript/src/daemon/types.ts',
@@ -213,12 +233,27 @@ export default defineConfig({
     // See packages/core/vitest.config.ts: raise the per-test ceiling above
     // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
     // store's tempdir round-trip) don't blow it purely under CI contention.
-    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
-      ? 60_000
-      : 15_000,
-    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
-      ? 60_000
-      : undefined,
+    // The macOS nightly hosts are as contended as the ECS pool, so they get
+    // the same ceiling (keyed on the runner, like hookTimeout below). Owning
+    // it here lets the SubscriptionDialog suite drop its runtime vi.setConfig,
+    // which would otherwise outrank the autofix gate's --testTimeout (R4-1).
+    testTimeout:
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ||
+      process.env['RUNNER_OS'] === 'macOS'
+        ? 60_000
+        : 15_000,
+    // The macOS nightly hosts are as contended as the ECS pool (3 cores,
+    // parallel shards): Session.test.ts's afterEach dispose exceeded the
+    // 10s default hook budget there (run 43562547824, "Hook timed out in
+    // 10000ms"). Give those hosts the same ceiling the pool already gets —
+    // keyed on the runner, not on process.platform, so a developer's Mac
+    // keeps vitest's 10s default. RUNNER_OS is the signal
+    // integration-tests/ready-prompt-budget.ts already reads.
+    hookTimeout:
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ||
+      process.env['RUNNER_OS'] === 'macOS'
+        ? 60_000
+        : undefined,
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? '25%'

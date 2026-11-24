@@ -1,3 +1,5 @@
+import type { WebShellApprovalMode } from './utils/planMode';
+import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
   useContext,
@@ -18,15 +20,31 @@ import type {
   SessionSource,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
+import type {
+  DaemonSessionActions,
+  DaemonStreamingState,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
+import type { ComposerPlaceholderState } from './utils/composerInputState';
+import type { WebShellModelPickerOptions } from './model-picker';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
+/** Select an existing directory on the connected daemon, or cancel with undefined. */
+export type WebShellWorkspaceDirectoryPicker = (opts?: {
+  signal?: AbortSignal;
+}) => Promise<string | undefined>;
+
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
+  /**
+   * 当前消息的生成态；历史或静态内容为 false。所属 MessageList 空闲
+   * （isResponding=false）时，恢复 replay 中残留的 streaming 标记也会被
+   * 收口为 false，且已收口的行在会话重新响应时、内容不变的前提下保持收口。
+   */
+  isStreaming: boolean;
 }
 
 export interface WebShellCodeBlockRenderInfo {
@@ -183,19 +201,25 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
+  | 'artifacts'
   | 'tokenUsage'
   | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
+  /** Show the mobile-access QR entry in chat headers. Defaults to false. */
+  showMobileAccess?: boolean;
   /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
 export type WebShellRightPanelItem =
+  | 'files'
   | 'review'
   | 'sideTask'
   | 'terminal'
-  | 'webPreview';
+  | 'webPreview'
+  | 'trajectory'
+  | 'changeOverview';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -242,6 +266,25 @@ export interface ChatHeaderRenderInfo {
   onOpenTokenUsage?: () => void;
   /** Opens context usage for the current session, when available. */
   onOpenContextUsage?: () => void;
+  /**
+   * Number of session artifacts. Published together with `onOpenArtifacts`
+   * only when the artifacts list tab can actually be opened or closed, so a
+   * count never appears without a way to act on it: either there are artifacts
+   * to reveal, or the artifacts list tab is the active right-panel tab and the
+   * entry serves as its close affordance.
+   */
+  artifactCount?: number;
+  /**
+   * Toggles the right panel's artifacts list tab, when available. Opening
+   * reveals the session's artifacts; clicking again closes the right panel.
+   */
+  onOpenArtifacts?: () => void;
+  /**
+   * Whether the artifacts list tab is the active right-panel tab. With zero
+   * artifacts the entry renders only in that case (as the close affordance),
+   * not while unrelated right-panel tabs are open.
+   */
+  artifactsTabActive?: boolean;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
@@ -274,6 +317,7 @@ export interface WebShellSubmitSnapshot {
   sessionId?: string;
   prompt: string;
   inputAnnotations: readonly DaemonInputAnnotation[];
+  source?: 'mcp-app';
 }
 
 export type UserMessageContentRenderer = (
@@ -297,6 +341,23 @@ export interface WebShellAssistantMessageInfo {
   timestamp?: number;
 }
 
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Final visible assistant message when retained in the mounted transcript. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
 export interface WebShellAssistantTurnFooterRenderInfo {
   /** User-message id for the head of the completed turn. */
   turnId: string;
@@ -316,6 +377,51 @@ export interface WebShellSessionArtifactsChange {
 export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
+
+export type WebShellAssistantFeedbackRating = 'up' | 'down';
+
+/** The prompt that started a marked turn. */
+export interface WebShellAssistantFeedbackUserMessage {
+  /**
+   * The prompt's most recent characters, or a placeholder naming what the
+   * prompt carried when it had no text at all.
+   */
+  text: string;
+  /** Wall-clock epoch ms of the prompt, when the transcript knows it. */
+  timestamp?: number;
+}
+
+export interface WebShellAssistantFeedbackInfo {
+  /** The new mark; `null` when the user cleared it by clicking the lit icon. */
+  rating: WebShellAssistantFeedbackRating | null;
+  /** The mark the turn carried before this change, when there was one. */
+  previousRating?: WebShellAssistantFeedbackRating;
+  /** The session the marked turn belongs to. */
+  sessionId?: string;
+  /**
+   * Admitted prompt id of the marked turn. This is the daemon's own per-turn
+   * identity: unlike a transcript block id it survives a reload, and it is
+   * what the daemon addresses a turn by (`/session/:id/turns/:promptId`).
+   */
+  promptId: string;
+  /** The prompt that started the marked turn. */
+  userMessage: WebShellAssistantFeedbackUserMessage;
+}
+
+export type AssistantFeedbackHandler = (
+  info: WebShellAssistantFeedbackInfo,
+) => void;
+
+export interface WebShellAssistantFeedbackOptions {
+  /** Passing the object shows the icons; `false` hides them again. */
+  enabled?: boolean;
+  /**
+   * Notified after every change, including clearing a mark. This is a
+   * notification, not a gate: the icon is already lit (or dark) when it runs,
+   * and neither a throw nor a later rejection changes that.
+   */
+  onRate?: AssistantFeedbackHandler;
+}
 
 /** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
 export type ArtifactImageRenderer = (
@@ -420,6 +526,11 @@ export interface WebShellAtItem {
   iconTooltip?: string;
   insertText?: string;
   composerTag?: WebShellComposerTag;
+  /**
+   * Makes the item an action instead of a reference: choosing it removes the
+   * typed `@query` and calls this, inserting nothing.
+   */
+  onSelect?: () => void;
 }
 
 export type WebShellBuiltinAtProviderId =
@@ -461,6 +572,11 @@ export interface WebShellAtProvider {
   order?: number;
   tabs?: readonly WebShellAtProviderTab[];
   renderItem?: WebShellAtItemRenderer;
+  /**
+   * Claims a typed `@query` that names no category, so it searches this
+   * provider instead of falling back to files.
+   */
+  claimsTypedQuery?(query: string): boolean;
   search(params: {
     query: string;
     signal: AbortSignal;
@@ -615,21 +731,52 @@ export type FooterRenderer = ComponentType<WebShellFooterRenderInfo>;
  * resolved UI language. Return phrases to override the built-in defaults, an
  * empty array to hide the phrase entirely, or `undefined`/`null` to fall back
  * to the built-in defaults for that language.
+ * `ui.accessibility.enableLoadingPhrases: false` hides even custom phrases.
  */
 export type LoadingPhrasesResolver = (
   language: string,
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  modelPicker?: WebShellModelPickerOptions;
+  onRefreshModels?: Parameters<DaemonSessionActions['refreshModels']>[0];
+  allowedApprovalModes?: readonly WebShellApprovalMode[];
+  filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径。默认 false 保持独立版行为。
+   *
+   * 宿主已有自己的外壳与能力表达：控件不可用即灰掉，不额外解释。
+   * 置 true 后 Managed 会：
+   * - placeholder 改用与普通会话相同的解析口径
+   *   （`composerPlaceholders?.[state] ?? t(getComposerPlaceholderKey(state))`，
+   *   进行中的会话同样按 processing 态对齐，而不是停在 managed 队列提示）
+   * - 不再渲染「模型已固定 / 审批模式已固定 / 请新建任务后发送」这类解释文案
+   *   （能力仍由后端 capabilities 决定并静默禁用，不放宽任何限制）
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * Show the managed session header (title / workspace / phase badge). Defaults to true.
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，避免对话区重复一遍。
+   */
+  showManagedSessionHeader?: boolean;
+  /**
+   * Host welcome slots. Managed surfaces (the managed session empty state and
+   * the workspace-binding creation screen) invoke the same renderers but can
+   * only supply a workspace-relative `cwd`, no daemon `version`, and no
+   * `hideTips` flag — renderers that branch on those fields must tolerate the
+   * managed shape (see `WelcomeHeaderProps`).
+   */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  composerVariant?: 'default' | 'simple';
+  composerGlowEnabled?: boolean;
   /**
    * Built-in / host @ mention providers. Split-view panes share this context
    * so they match the main composer without ChatPane prop drilling.
@@ -640,16 +787,62 @@ export interface WebShellCustomization {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  /**
+   * Main-composer copy by semantic state, mirrored for the managed composer
+   * when `alignManagedChatWithHost` is on. Omitted or blank entries retain the
+   * localized default for that state.
+   */
+  composerPlaceholders?: Readonly<
+    Partial<Record<ComposerPlaceholderState, string>>
+  >;
+  /**
+   * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
+   * object to leave Web Shell's answer footer unchanged.
+   */
+  assistantFeedback?: WebShellAssistantFeedbackOptions;
   getAssistantSourcesIcon?: WebShellSourceIconResolver;
   sourceReferences?: readonly WebShellSourceReference[];
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
+  /**
+   * The host already renders its own add ("+") entry in
+   * `renderComposerToolbarStart`. Hides the built-in composer AddMenu in the
+   * main, split-pane, and managed composers, and the touch composer's
+   * commands trigger (slash icon, "All commands" label), so the two entries
+   * do not sit side by side.
+   *
+   * Workflow loses its menu entry with the menu, so the default-variant
+   * toolbar carries a switch for it instead. That switch drives both
+   * directions and is disabled only while the host reports no usable state
+   * (unbound, syncing, unknown, a pending write, no change handler, or
+   * unavailable with nothing requested); when Workflow is requested but
+   * currently unavailable, the switch stays enabled so the preference can
+   * still be turned off.
+   *
+   * `composerVariant: 'simple'` does not render the composer toolbar leading
+   * area where this switch lives — the host's own
+   * `renderComposerToolbarStart` is skipped there as well — so that variant
+   * has no Workflow fallback, and setting this flag only takes its built-in
+   * menu away. The flag is meant for the default variant.
+   *
+   * Unlike leaving `addMenu` out of `composerToolbarActions`, which only
+   * reaches the main composer, this flag applies to every composer's
+   * built-in menu.
+   */
+  hostOwnsAddMenu?: boolean;
   renderComposerHeader?: ComposerHeaderRenderer;
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   hostOwnsEditDiffPreview?: boolean;
+  /**
+   * The embedding host claims right-panel open requests and may render artifact
+   * previews itself. Managed-storage artifacts have no content in the default
+   * panel (metadata only), so the card only promises Preview for them when this
+   * is set; otherwise it keeps the generic Open.
+   */
+  hostOwnsArtifactPreview?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving
@@ -657,12 +850,13 @@ export interface WebShellCustomization {
    * expanded. Defaults to enabled when unset.
    */
   collapseCompletedTurns?: boolean;
+  overscan?: number;
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
   /**
-   * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Controls composer uploads (drag-and-drop and the @ panel upload item)
+   * and Files tree drag-and-drop uploads. Does not disable attachments.
    * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: setting `false`
    * force-disables upload even when the daemon advertises the capability,
@@ -675,13 +869,14 @@ export interface WebShellCustomization {
    */
   fileDropAction?: 'upload' | 'attach';
   /**
-   * Directory that drag-and-dropped files upload into, **relative to the
+   * Directory that composer-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
    * `'uploads'`, `'uploads/images'`, or omit it to upload into the
    * workspace root (the default). A leading-slash path like `'/uploads'`
    * is rejected by the daemon as outside the workspace. The directory
    * (including intermediate components) is created automatically on upload
-   * when it does not exist.
+   * when it does not exist. Files tree drops use the explicit tree destination
+   * instead of this setting.
    */
   fileUploadDirectory?: string;
 }

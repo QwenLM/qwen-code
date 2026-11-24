@@ -16,10 +16,17 @@ import {
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  resolveContainedCwd,
+  resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
+
+const MAX_SEARCH_CHARS = 200;
+// Bound the exclusion list at the transport: an unbounded ref count would
+// spawn git with an unbounded `--not` argv (a client could exhaust argv space
+// or fan out probes). The hook sends bound PR heads plus two base-branch refs,
+// far below this ceiling.
+const MAX_EXCLUDE_REFS = 256;
 
 function buildLogList(
   workspaceCwd: string,
@@ -114,7 +121,56 @@ async function handleLogList(
       typeof rawRange === 'string' && rawRange.trim()
         ? rawRange.trim()
         : undefined;
-    const result = await fetchGitLog(workspaceCwd, { limit, skip, range });
+    const rawSearch = req.query['search'];
+    const search =
+      typeof rawSearch === 'string' && rawSearch.trim()
+        ? rawSearch.trim().slice(0, MAX_SEARCH_CHARS)
+        : undefined;
+    const rawExclude = req.query['exclude'];
+    let excludeRefs: string[] | undefined;
+    if (rawExclude !== undefined) {
+      // Fail closed: a repeated key (an array) or an empty value must not
+      // silently drop the exclusion and run the walk unfiltered, re-listing
+      // the very commits the exclusion exists to remove. Absent stays unset.
+      if (typeof rawExclude !== 'string' || !rawExclude.trim()) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: 'exclude must be a non-empty comma-separated ref list',
+          status: 400,
+        });
+        return;
+      }
+      excludeRefs = rawExclude
+        .split(',')
+        .map((ref) => ref.trim())
+        .filter((ref) => ref.length > 0);
+      // A separator-only value (`,,,`) filters to nothing; treating that as
+      // "no exclusion" would run the walk unfiltered, so refuse it too.
+      if (excludeRefs.length === 0) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: 'exclude must be a non-empty comma-separated ref list',
+          status: 400,
+        });
+        return;
+      }
+      if (excludeRefs.length > MAX_EXCLUDE_REFS) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: `exclude accepts at most ${MAX_EXCLUDE_REFS} refs`,
+          status: 400,
+        });
+        return;
+      }
+    }
+    const result = await fetchGitLog(workspaceCwd, {
+      limit,
+      skip,
+      range,
+      all: req.query['all'] === '1',
+      search,
+      excludeRefs,
+    });
     res.status(200).json(buildLogList(workspaceCwd, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
@@ -182,26 +238,32 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     sendBridgeError: SendBridgeError;
   },
 ): void {
-  app.get('/workspaces/:workspace/git/log', (req, res) => {
+  app.get('/workspaces/:workspace/git/log', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/log';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    void handleLogList(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      runtime,
+      route,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/log',
     );
+    if (cwd === undefined) return;
+    void handleLogList(req, res, cwd, deps.sendBridgeError, route);
   });
-  app.get('/workspaces/:workspace/git/log/commit', (req, res) => {
+  app.get('/workspaces/:workspace/git/log/commit', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/log/commit';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    void handleCommitDetail(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      runtime,
+      route,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/log/commit',
     );
+    if (cwd === undefined) return;
+    void handleCommitDetail(req, res, cwd, deps.sendBridgeError, route);
   });
 }

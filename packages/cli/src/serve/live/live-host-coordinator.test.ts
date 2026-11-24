@@ -642,7 +642,10 @@ describe('LiveHostCoordinator', () => {
       },
     ]);
 
-    expect(value.getStatus()).not.toHaveProperty('coordinator');
+    expect(value.getStatus().coordinator).toEqual({
+      workspaceCwd: '/private/conversations/coordinator',
+      sessionId: 'coordinator-session',
+    });
     expect(value.getStatus()).not.toHaveProperty('workers');
     expect(value.isActiveSession('coordinator-session')).toBe(true);
     expect(value.isActiveSession('worker-session')).toBe(true);

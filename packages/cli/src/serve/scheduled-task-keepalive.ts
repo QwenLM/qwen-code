@@ -107,6 +107,29 @@ export interface KeepaliveBridge {
   ): unknown;
 }
 
+export interface KeepaliveSessionResumeRequest {
+  sessionId: string;
+  workspaceCwd: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
+export function beginKeepaliveSessionResume(
+  bridge: Pick<KeepaliveBridge, 'resumeSession'>,
+  request: KeepaliveSessionResumeRequest,
+  timeoutMs: number,
+): { completion: Promise<unknown>; deadline: Promise<unknown> } {
+  const completion = bridge.resumeSession(request);
+  return {
+    completion,
+    deadline: withTimeout(
+      completion,
+      timeoutMs,
+      `resumeSession(${request.sessionId})`,
+    ),
+  };
+}
+
 /** Default caller headroom above the bridge's 60-second restore deadline. */
 const KEEPALIVE_REVIVE_TIMEOUT_MS = 70_000;
 /** Per-task spawn timeout: a hung spawnOrAttach must not stall the sweep. */
@@ -257,6 +280,7 @@ async function bindAndNameSessions(
 }
 
 export interface ScheduledTaskKeepalive {
+  readonly activeWork: boolean;
   /** Stops the periodic heartbeat. Idempotent. */
   stop(): void;
   /** Runs one heartbeat pass immediately. Exposed for tests / eager warm-up. */
@@ -265,6 +289,7 @@ export interface ScheduledTaskKeepalive {
 
 export interface StartScheduledTaskKeepaliveOptions {
   bridge: KeepaliveBridge;
+  restoreSession?: (request: KeepaliveSessionResumeRequest) => Promise<unknown>;
   boundWorkspace: string;
   runtimeBaseDir?: string;
   cleanupSession?: (sessionId: string) => Promise<unknown>;
@@ -281,6 +306,8 @@ export function startScheduledTaskKeepalive(
   opts: StartScheduledTaskKeepaliveOptions,
 ): ScheduledTaskKeepalive {
   const { bridge, boundWorkspace, intervalMs } = opts;
+  const restoreSession: KeepaliveBridge['resumeSession'] =
+    opts.restoreSession ?? ((request) => bridge.resumeSession(request));
   const reviveTimeoutMs = opts.reviveTimeoutMs ?? KEEPALIVE_REVIVE_TIMEOUT_MS;
   const spawnTimeoutMs = opts.spawnTimeoutMs ?? KEEPALIVE_SPAWN_TIMEOUT_MS;
   const cleanupSession =
@@ -352,11 +379,15 @@ export function startScheduledTaskKeepalive(
         const metadata = await new SessionService(
           boundWorkspace,
         ).readCreationMetadata(sessionId);
-        const resume = bridge.resumeSession({
-          sessionId,
-          workspaceCwd: boundWorkspace,
-          ...metadata,
-        });
+        const { completion: resume, deadline } = beginKeepaliveSessionResume(
+          { resumeSession: restoreSession },
+          {
+            sessionId,
+            workspaceCwd: boundWorkspace,
+            ...metadata,
+          },
+          reviveTimeoutMs,
+        );
         // Clear the in-flight guard on the resume's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
         void resume
@@ -365,11 +396,7 @@ export function startScheduledTaskKeepalive(
             reviving.delete(sessionId);
           });
         try {
-          await withTimeout(
-            resume,
-            reviveTimeoutMs,
-            `resumeSession(${sessionId})`,
-          );
+          await deadline;
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {
@@ -414,13 +441,20 @@ export function startScheduledTaskKeepalive(
       cleanupSession,
     );
   };
-  const tick = (): Promise<void> =>
-    opts.runtimeBaseDir === undefined
-      ? tickInRuntime()
-      : Storage.runWithResolvedRuntimeBaseDir(
-          opts.runtimeBaseDir,
-          tickInRuntime,
-        );
+  let activeTicks = 0;
+  const tick = async (): Promise<void> => {
+    activeTicks++;
+    try {
+      await (opts.runtimeBaseDir === undefined
+        ? tickInRuntime()
+        : Storage.runWithResolvedRuntimeBaseDir(
+            opts.runtimeBaseDir,
+            tickInRuntime,
+          ));
+    } finally {
+      activeTicks--;
+    }
+  };
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
   // the revive timeout), so skip a tick while the previous is still running —
@@ -479,6 +513,9 @@ export function startScheduledTaskKeepalive(
 
   let stopped = false;
   return {
+    get activeWork() {
+      return activeTicks > 0 || reviving.size > 0 || binding.size > 0;
+    },
     stop: () => {
       if (stopped) return;
       stopped = true;
@@ -525,6 +562,7 @@ const REHYDRATE_MAX_CONCURRENCY = 4;
 
 export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
+  restoreSession?: (request: KeepaliveSessionResumeRequest) => Promise<unknown>;
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
   /** Values above the JS timer limit disable the caller-side watchdog. */
@@ -532,6 +570,8 @@ export async function rehydrateScheduledTaskSessions(deps: {
   onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
+  const restoreSession: RehydrateBridge['resumeSession'] =
+    deps.restoreSession ?? ((request) => bridge.resumeSession(request));
   const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_RESUME_TIMEOUT_MS;
   let tasks;
   try {
@@ -555,7 +595,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
     const metadata = await new SessionService(
       boundWorkspace,
     ).readCreationMetadata(sessionId);
-    const resume = bridge.resumeSession({
+    const resume = restoreSession({
       sessionId,
       workspaceCwd: boundWorkspace,
       ...metadata,

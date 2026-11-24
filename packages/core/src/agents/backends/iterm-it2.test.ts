@@ -34,12 +34,23 @@ import {
   itermCloseSession,
 } from './iterm-it2.js';
 
+const execReturns = (code: number, stdout = '', stderr = '') =>
+  hoistedExecCommand.mockResolvedValue({ code, stdout, stderr });
+const availableOnce = (...flags: boolean[]) =>
+  flags.forEach((available) =>
+    hoistedIsCommandAvailable.mockReturnValueOnce({ available }),
+  );
+const expectExec = (command: string, args: string[]) =>
+  expect(hoistedExecCommand).toHaveBeenCalledWith(
+    command,
+    args,
+    expect.any(Object),
+  );
+
 describe('iterm-it2', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
-
-  // ─── isIt2Available ─────────────────────────────────────────
 
   describe('isIt2Available', () => {
     it('returns true when it2 is on PATH', () => {
@@ -54,8 +65,6 @@ describe('iterm-it2', () => {
     });
   });
 
-  // ─── ensureIt2Installed ──────────────────────────────────────
-
   describe('ensureIt2Installed', () => {
     it('does nothing if it2 is already available', async () => {
       hoistedIsCommandAvailable.mockReturnValue({ available: true });
@@ -63,69 +72,35 @@ describe('iterm-it2', () => {
       expect(hoistedExecCommand).not.toHaveBeenCalled();
     });
 
-    it('installs via uv when uv is available', async () => {
-      // isIt2Available() → false; uv available; install succeeds; recheck → true
-      hoistedIsCommandAvailable
-        .mockReturnValueOnce({ available: false }) // isIt2Available() initial
-        .mockReturnValueOnce({ available: true }); // uv available
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: '',
-        stderr: '',
-      });
-      // After install, it2 is available
-      hoistedIsCommandAvailable.mockReturnValueOnce({ available: true });
-
-      await ensureIt2Installed();
-
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
+    it.each([
+      [
+        'installs via uv when uv is available',
+        0,
         'uv',
         ['tool', 'install', 'it2'],
-        expect.any(Object),
-      );
-    });
-
-    it('falls back to pipx when uv is unavailable', async () => {
-      hoistedIsCommandAvailable
-        .mockReturnValueOnce({ available: false }) // isIt2Available()
-        .mockReturnValueOnce({ available: false }) // uv not available
-        .mockReturnValueOnce({ available: true }); // pipx available
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: '',
-        stderr: '',
-      });
-      hoistedIsCommandAvailable.mockReturnValueOnce({ available: true }); // recheck
-
-      await ensureIt2Installed();
-
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
+      ],
+      [
+        'falls back to pipx when uv is unavailable',
+        1,
         'pipx',
         ['install', 'it2'],
-        expect.any(Object),
-      );
-    });
-
-    it('falls back to pip when uv and pipx are unavailable', async () => {
-      hoistedIsCommandAvailable
-        .mockReturnValueOnce({ available: false }) // isIt2Available()
-        .mockReturnValueOnce({ available: false }) // uv
-        .mockReturnValueOnce({ available: false }) // pipx
-        .mockReturnValueOnce({ available: true }); // pip available
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: '',
-        stderr: '',
-      });
-      hoistedIsCommandAvailable.mockReturnValueOnce({ available: true }); // recheck
+      ],
+      [
+        'falls back to pip when uv and pipx are unavailable',
+        2,
+        'pip',
+        ['install', '--user', 'it2'],
+      ],
+    ])('%s', async (_title, skipped, command, args) => {
+      // isIt2Available() → false; `skipped` earlier installers (uv, pipx)
+      // unavailable; this installer available; install succeeds; recheck → true
+      availableOnce(false, ...Array<boolean>(skipped).fill(false), true);
+      execReturns(0);
+      availableOnce(true);
 
       await ensureIt2Installed();
 
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
-        'pip',
-        ['install', '--user', 'it2'],
-        expect.any(Object),
-      );
+      expectExec(command, args);
     });
 
     it('throws if no installer succeeds', async () => {
@@ -137,182 +112,96 @@ describe('iterm-it2', () => {
     });
   });
 
-  // ─── verifyITerm ──────────────────────────────────────────────
-
   describe('verifyITerm', () => {
     it('succeeds when session list returns code 0', async () => {
       hoistedIsCommandAvailable.mockReturnValue({ available: true });
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: 'session1\n',
-        stderr: '',
-      });
+      execReturns(0, 'session1\n');
 
       await expect(verifyITerm()).resolves.toBeUndefined();
     });
 
-    it('throws Python API error when stderr mentions "api"', async () => {
+    it.each([
+      [
+        'throws Python API error when stderr mentions "api"',
+        'Python API not enabled',
+        'Python API not enabled',
+      ],
+      [
+        'throws Python API error when stderr mentions "connection refused"',
+        'Connection refused to iTerm2',
+        'Python API not enabled',
+      ],
+      [
+        'throws generic error for unrecognized failures',
+        'some unknown error',
+        'it2 session list failed',
+      ],
+    ])('%s', async (_title, stderr, message) => {
       hoistedIsCommandAvailable.mockReturnValue({ available: true });
-      hoistedExecCommand.mockResolvedValue({
-        code: 1,
-        stdout: '',
-        stderr: 'Python API not enabled',
-      });
+      execReturns(1, '', stderr);
 
-      await expect(verifyITerm()).rejects.toThrow('Python API not enabled');
-    });
-
-    it('throws Python API error when stderr mentions "connection refused"', async () => {
-      hoistedIsCommandAvailable.mockReturnValue({ available: true });
-      hoistedExecCommand.mockResolvedValue({
-        code: 1,
-        stdout: '',
-        stderr: 'Connection refused to iTerm2',
-      });
-
-      await expect(verifyITerm()).rejects.toThrow('Python API not enabled');
-    });
-
-    it('throws generic error for unrecognized failures', async () => {
-      hoistedIsCommandAvailable.mockReturnValue({ available: true });
-      hoistedExecCommand.mockResolvedValue({
-        code: 1,
-        stdout: '',
-        stderr: 'some unknown error',
-      });
-
-      await expect(verifyITerm()).rejects.toThrow('it2 session list failed');
+      await expect(verifyITerm()).rejects.toThrow(message);
     });
   });
 
-  // ─── itermSplitPane ──────────────────────────────────────────
-
   describe('itermSplitPane', () => {
     it('splits vertically without session ID', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: 'Created new pane: w0t1p2\n',
-        stderr: '',
-      });
+      execReturns(0, 'Created new pane: w0t1p2\n');
 
       const paneId = await itermSplitPane();
       expect(paneId).toBe('w0t1p2');
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
-        'it2',
-        ['session', 'split', '-v'],
-        expect.any(Object),
-      );
+      expectExec('it2', ['session', 'split', '-v']);
     });
 
     it('passes -s flag when session ID is provided', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: 'Created new pane: w0t1p3\n',
-        stderr: '',
-      });
+      execReturns(0, 'Created new pane: w0t1p3\n');
 
       await itermSplitPane('sess-123');
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
-        'it2',
-        ['session', 'split', '-v', '-s', 'sess-123'],
-        expect.any(Object),
-      );
+      expectExec('it2', ['session', 'split', '-v', '-s', 'sess-123']);
     });
 
     it('throws if pane ID cannot be parsed from output', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: 'Unexpected output\n',
-        stderr: '',
-      });
+      execReturns(0, 'Unexpected output\n');
 
       await expect(itermSplitPane()).rejects.toThrow('Unable to parse');
     });
 
     it('throws on non-zero exit code', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 1,
-        stdout: '',
-        stderr: 'split failed',
-      });
+      execReturns(1, '', 'split failed');
 
       await expect(itermSplitPane()).rejects.toThrow('split failed');
     });
   });
 
-  // ─── itermRunCommand ──────────────────────────────────────────
-
   describe('itermRunCommand', () => {
     it('calls it2 session run with correct args', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: '',
-        stderr: '',
-      });
-
+      execReturns(0);
       await itermRunCommand('sess-1', 'ls -la');
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
-        'it2',
-        ['session', 'run', '-s', 'sess-1', 'ls -la'],
-        expect.any(Object),
-      );
+      expectExec('it2', ['session', 'run', '-s', 'sess-1', 'ls -la']);
     });
   });
-
-  // ─── itermFocusSession ────────────────────────────────────────
 
   describe('itermFocusSession', () => {
     it('calls it2 session focus with correct args', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: '',
-        stderr: '',
-      });
-
+      execReturns(0);
       await itermFocusSession('sess-1');
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
-        'it2',
-        ['session', 'focus', 'sess-1'],
-        expect.any(Object),
-      );
+      expectExec('it2', ['session', 'focus', 'sess-1']);
     });
   });
-
-  // ─── itermSendText ─────────────────────────────────────────────
 
   describe('itermSendText', () => {
     it('calls it2 session send with correct args', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: '',
-        stderr: '',
-      });
-
+      execReturns(0);
       await itermSendText('sess-1', 'hello world');
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
-        'it2',
-        ['session', 'send', '-s', 'sess-1', 'hello world'],
-        expect.any(Object),
-      );
+      expectExec('it2', ['session', 'send', '-s', 'sess-1', 'hello world']);
     });
   });
 
-  // ─── itermCloseSession ────────────────────────────────────────
-
   describe('itermCloseSession', () => {
     it('calls it2 session close with correct args', async () => {
-      hoistedExecCommand.mockResolvedValue({
-        code: 0,
-        stdout: '',
-        stderr: '',
-      });
-
+      execReturns(0);
       await itermCloseSession('sess-1');
-      expect(hoistedExecCommand).toHaveBeenCalledWith(
-        'it2',
-        ['session', 'close', '-s', 'sess-1'],
-        expect.any(Object),
-      );
+      expectExec('it2', ['session', 'close', '-s', 'sess-1']);
     });
   });
 });

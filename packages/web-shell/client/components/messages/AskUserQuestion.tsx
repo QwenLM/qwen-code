@@ -8,17 +8,24 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
+import type { QuestionAnswer } from '../../chat-core/contract';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
 import { Spinner } from '../ui/spinner';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface Question {
+  id?: string;
   question: string;
   header: string;
-  options: { label: string; description: string }[];
+  options: { id?: string; label: string; description: string }[];
   multiSelect?: boolean;
+}
+
+function optionValue(index: number): string {
+  return String(index);
 }
 
 interface AskUserQuestionProps {
@@ -27,10 +34,17 @@ interface AskUserQuestionProps {
     id: string,
     selectedOption: string,
     answers?: Record<string, string>,
+    structuredAnswers?: readonly QuestionAnswer[],
   ) => Promise<boolean>;
   onError: (error: unknown, fallback: string) => void;
   variant?: 'inline' | 'floating';
   customInputLabel?: string;
+  /**
+   * Opens a side task that explains the pending question before the user
+   * answers. Omitted when the host has no side-task surface, which hides the
+   * action entirely.
+   */
+  onAskDetails?: () => void;
   /**
    * Whether this question should pull keyboard focus to its first option when it
    * becomes the topmost one. Defaults to true. Split-view panes pass false so an
@@ -52,6 +66,7 @@ export function AskUserQuestion({
   variant = 'inline',
   keyboardActive = true,
   customInputLabel,
+  onAskDetails,
 }: AskUserQuestionProps) {
   const submitShortcutLabel =
     typeof navigator !== 'undefined' &&
@@ -106,7 +121,7 @@ export function AskUserQuestion({
     setSelectedIdx(firstSelectedIdx);
     setAnswers(
       firstQuestion && !firstQuestion.multiSelect && firstQuestion.options[0]
-        ? { 0: firstQuestion.options[0].label }
+        ? { 0: optionValue(0) }
         : {},
     );
     setCustomInputs({});
@@ -137,13 +152,21 @@ export function AskUserQuestion({
         if (!q) continue;
         if (q.multiSelect) {
           const multi = multiSelections[i] || [];
+          const labels = multi.map(
+            (selected) =>
+              q.options.find((_, index) => optionValue(index) === selected)
+                ?.label ?? selected,
+          );
           const custom = customInputs[i];
-          const all = hasCustomAnswer(custom) ? [...multi, custom] : multi;
+          const all = hasCustomAnswer(custom) ? [...labels, custom] : labels;
           result[String(i)] = all.join(', ');
         } else {
           const custom = customInputs[i];
+          const selected = q.options.find(
+            (_, index) => optionValue(index) === answers[i],
+          );
           result[String(i)] =
-            answers[i] || (hasCustomAnswer(custom) ? custom : '');
+            selected?.label || (hasCustomAnswer(custom) ? custom : '');
         }
       }
       return result;
@@ -151,21 +174,56 @@ export function AskUserQuestion({
     [questions, selectedMulti, customInputs, answers],
   );
 
+  const buildStructuredAnswers = useCallback(
+    (
+      multiSelections: Record<number, string[]> = selectedMulti,
+    ): readonly QuestionAnswer[] => {
+      const rendered = buildResult(multiSelections);
+      return questions.map((question, i) => {
+        const custom = customInputs[i];
+        const selected = question.multiSelect
+          ? (multiSelections[i] || []).map(
+              (selection) => question.options[Number(selection)],
+            )
+          : question.options.filter(
+              (_, index) => optionValue(index) === answers[i],
+            );
+        const optionIds = question.options.every(
+          (option) => option.id !== undefined,
+        )
+          ? selected.map((option) => option?.id ?? '')
+          : undefined;
+        return {
+          questionId: question.id ?? String(i),
+          value: rendered[String(i)] ?? '',
+          ...(optionIds === undefined ? {} : { optionIds }),
+          ...(hasCustomAnswer(custom) ? { text: custom } : {}),
+        };
+      });
+    },
+    [answers, buildResult, customInputs, questions, selectedMulti],
+  );
+
   const submitDecision = useCallback(
     async (
       optionId: string,
       submittedAnswers?: Record<string, string>,
+      structuredAnswers?: readonly QuestionAnswer[],
     ): Promise<void> => {
       if (submittedRef.current) return;
       submittedRef.current = true;
       const attempt = ++submissionAttemptRef.current;
       setSubmitting(true);
       try {
-        const accepted = await onConfirm(
-          request.id,
-          optionId,
-          submittedAnswers,
-        );
+        const accepted =
+          structuredAnswers === undefined
+            ? await onConfirm(request.id, optionId, submittedAnswers)
+            : await onConfirm(
+                request.id,
+                optionId,
+                submittedAnswers,
+                structuredAnswers,
+              );
         if (!accepted) throw new Error(t('askUser.submitFailed'));
       } catch (error) {
         if (submissionAttemptRef.current !== attempt) return;
@@ -178,7 +236,10 @@ export function AskUserQuestion({
   );
 
   const handleSubmit = useCallback(
-    (submittedAnswers?: Record<string, string>) => {
+    (
+      submittedAnswers?: Record<string, string>,
+      multiSelections?: Record<number, string[]>,
+    ) => {
       if (submittedRef.current) return;
       const result = submittedAnswers ?? buildResult();
       if (!questions.every((_, idx) => hasCustomAnswer(result[String(idx)]))) {
@@ -190,9 +251,28 @@ export function AskUserQuestion({
         onError(new Error(message), message);
         return;
       }
-      void submitDecision(submitOption.id, result);
+      const carriesStructuredAnswers = questions.every(
+        (question) =>
+          question.id !== undefined &&
+          question.options.every((option) => option.id !== undefined),
+      );
+      void submitDecision(
+        submitOption.id,
+        result,
+        carriesStructuredAnswers
+          ? buildStructuredAnswers(multiSelections)
+          : undefined,
+      );
     },
-    [buildResult, onError, questions, request.options, submitDecision, t],
+    [
+      buildResult,
+      buildStructuredAnswers,
+      onError,
+      questions,
+      request.options,
+      submitDecision,
+      t,
+    ],
   );
 
   const currentAnswers = buildResult();
@@ -235,17 +315,17 @@ export function AskUserQuestion({
         focusCustomInput();
         return;
       }
-      const label = current.options[idx].label;
+      const value = optionValue(idx);
       if (isMulti) {
         setSelectedMulti((prev) => {
           const selected = prev[currentIdx] || [];
-          const next = selected.includes(label)
-            ? selected.filter((l) => l !== label)
-            : [...selected, label];
+          const next = selected.includes(value)
+            ? selected.filter((selectedValue) => selectedValue !== value)
+            : [...selected, value];
           return { ...prev, [currentIdx]: next };
         });
       } else {
-        const nextAnswers = { ...answers, [currentIdx]: label };
+        const nextAnswers = { ...answers, [currentIdx]: value };
         setAnswers(nextAnswers);
         setCustomInputs((prev) => {
           if (!(currentIdx in prev)) return prev;
@@ -265,12 +345,12 @@ export function AskUserQuestion({
         focusCustomInput();
         return;
       }
-      const label = current.options[idx].label;
+      const value = optionValue(idx);
       setSelectedMulti((prev) => {
         const selected = prev[currentIdx] || [];
-        const next = selected.includes(label)
-          ? selected.filter((l) => l !== label)
-          : [...selected, label];
+        const next = selected.includes(value)
+          ? selected.filter((selectedValue) => selectedValue !== value)
+          : [...selected, value];
         return { ...prev, [currentIdx]: next };
       });
     },
@@ -354,7 +434,7 @@ export function AskUserQuestion({
       if (!question.multiSelect) {
         const answer = answers[questionIdx];
         const answerIdx = question.options.findIndex(
-          (option) => option.label === answer,
+          (_, index) => optionValue(index) === answer,
         );
         if (answerIdx >= 0) return answerIdx;
       }
@@ -382,7 +462,7 @@ export function AskUserQuestion({
         nextSelectedIdx === question.options.length ||
         !question.options[0]
           ? prev
-          : { ...prev, [nextIdx]: question.options[0].label },
+          : { ...prev, [nextIdx]: optionValue(0) },
       );
     },
     [customInputs, getSelectedIndexForQuestion, questions],
@@ -399,7 +479,10 @@ export function AskUserQuestion({
   }, [currentIdx, questions.length, selectQuestion]);
 
   const advanceQuestion = useCallback(
-    (submittedAnswers?: Record<string, string>) => {
+    (
+      submittedAnswers?: Record<string, string>,
+      multiSelections?: Record<number, string[]>,
+    ) => {
       setCustomFocused(false);
       if (currentIdx < questions.length - 1) {
         selectQuestion(currentIdx + 1);
@@ -408,7 +491,7 @@ export function AskUserQuestion({
       if (customFocused) {
         focusCustomTriggerAfterSubmitFailureRef.current = true;
       }
-      if (!submitting) handleSubmit(submittedAnswers);
+      if (!submitting) handleSubmit(submittedAnswers, multiSelections);
     },
     [
       currentIdx,
@@ -476,6 +559,20 @@ export function AskUserQuestion({
   // option navigation remains scoped to the roving-tabindex option group.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        ((e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ||
+          (!isEditableTarget(e.target) &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-ask-option]') &&
+            ((e.key >= '1' && e.key <= '9') ||
+              e.key === 'Enter' ||
+              e.key === ' ')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (collapsed) {
         if (
@@ -544,15 +641,18 @@ export function AskUserQuestion({
           chooseOption(idx);
         } else {
           if (isMulti && idx < current.options.length) {
-            const label = current.options[idx].label;
+            const value = optionValue(idx);
             const selected = selectedMulti[currentIdx] || [];
-            if (!selected.includes(label)) {
+            if (!selected.includes(value)) {
               const nextSelectedMulti = {
                 ...selectedMulti,
-                [currentIdx]: [...selected, label],
+                [currentIdx]: [...selected, value],
               };
               setSelectedMulti(nextSelectedMulti);
-              advanceQuestion(buildResult(nextSelectedMulti));
+              advanceQuestion(
+                buildResult(nextSelectedMulti),
+                nextSelectedMulti,
+              );
               return;
             }
           }
@@ -730,6 +830,7 @@ export function AskUserQuestion({
               />
             </svg>
           </button>
+          <BrowserNotificationControl />
         </div>
       </div>
 
@@ -764,12 +865,12 @@ export function AskUserQuestion({
                 {current.options.map((opt, i) => {
                   const isActive = i === selectedIdx;
                   const isSelected = isMulti
-                    ? (selectedMulti[currentIdx] || []).includes(opt.label)
-                    : answers[currentIdx] === opt.label;
+                    ? (selectedMulti[currentIdx] || []).includes(optionValue(i))
+                    : answers[currentIdx] === optionValue(i);
 
                   return (
                     <button
-                      key={opt.label}
+                      key={optionValue(i)}
                       type="button"
                       ref={(el) => {
                         optionRefs.current[i] = el;
@@ -913,6 +1014,17 @@ export function AskUserQuestion({
             <p className={styles.shortcuts} title={shortcutHint}>
               {shortcutHint}
             </p>
+            {onAskDetails && (
+              <button
+                type="button"
+                className={styles.detailsButton}
+                disabled={submitting}
+                title={t('askUser.askDetailsHint')}
+                onClick={onAskDetails}
+              >
+                {t('askUser.askDetails')}
+              </button>
+            )}
             <button
               type="button"
               className={styles.ignoreButton}

@@ -8,7 +8,7 @@
 /**
  * Development entry point for Qwen Code CLI.
  *
- * Runs the CLI directly from TypeScript source files without requiring a build step.
+ * Runs the CLI from TypeScript source with prebuilt workspace dependencies.
  * Changes to packages/core or packages/cli are reflected immediately.
  *
  * Usage: npm run dev -- [args]
@@ -26,6 +26,7 @@ import {
   symlinkSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 
@@ -90,6 +91,47 @@ for (const [subpath, conditions] of Object.entries(coreExports ?? {})) {
       pathToFileURL(sourcePath).href;
   }
 }
+
+// Shared node_modules may resolve the bridge from another checkout. Keep the
+// daemon and its ACP children on this checkout's protocol without a build.
+const bridgeDir = join(root, 'packages', 'acp-bridge');
+// `?? {}` rather than a bare read: a manifest without an `exports` map means
+// there is nothing to remap, and `Object.entries(undefined)` would throw at
+// module load — taking the launcher down for every caller, not just this
+// remapping.
+const bridgeExports =
+  JSON.parse(readFileSync(join(bridgeDir, 'package.json'), 'utf-8')).exports ??
+  {};
+for (const [subpath, conditions] of Object.entries(bridgeExports)) {
+  const entry = conditions?.import;
+  if (typeof entry !== 'string' || !entry.startsWith('./dist/')) continue;
+  const sourcePath = join(
+    bridgeDir,
+    'src',
+    entry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+  );
+  if (!existsSync(sourcePath)) continue;
+  const specifier =
+    subpath === '.'
+      ? '@qwen-code/acp-bridge'
+      : `@qwen-code/acp-bridge/${subpath.slice(2)}`;
+  coreSubpathSourceUrls[specifier] = pathToFileURL(sourcePath).href;
+}
+
+// Keep shared worktree installs from mixing another checkout's channel build.
+for (const name of readdirSync(join(root, 'packages', 'channels'))) {
+  const directory = join(root, 'packages', 'channels', name);
+  const manifest = join(directory, 'package.json');
+  const entry = join(directory, 'src', 'index.ts');
+  if (!existsSync(manifest) || !existsSync(entry)) continue;
+  const channel = JSON.parse(readFileSync(manifest, 'utf8'));
+  coreSubpathSourceUrls[channel.name] = pathToFileURL(entry).href;
+}
+
+coreSubpathSourceUrls['@qwen-code/channel-base/markdown-chunks'] =
+  pathToFileURL(
+    join(root, 'packages/channels/base/src/markdown-chunks.ts'),
+  ).href;
 
 const loaderCode = `
 import { existsSync } from 'node:fs';

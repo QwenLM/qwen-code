@@ -6,6 +6,9 @@ import type { DaemonMetricsSeriesBucket } from '@qwen-code/web-shell/daemon-reac
 import { I18nProvider } from '../../i18n';
 import { getDaemonToken, persistDaemonToken } from '../../config/daemon';
 
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const summaryReport = {
@@ -40,6 +43,7 @@ const summaryReport = {
     maxPendingPromptsPerSession: 5,
     listenerMaxConnections: null,
     eventRingSize: 1024,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     promptDeadlineMs: 120_000,
     writerIdleTimeoutMs: null,
     channelIdleTimeoutMs: 60_000,
@@ -109,6 +113,11 @@ const fullReport = {
         pendingPermissionCount: 2,
         hasActivePrompt: true,
         lastEventId: 42,
+        eventRingCount: 0,
+        eventRingBytes: 0,
+        eventRingEvictedEvents: 0,
+        eventRingEvictedBytes: 0,
+        availableCommandsSnapshotBytes: 0,
       },
     ],
     acpConnections: [{ connectionId: 'conn-1' }],
@@ -196,6 +205,11 @@ let fullState: HookState = {
   error: undefined,
 };
 const seenDetails: Array<string | undefined> = [];
+const seenAutoLoads: Array<boolean | undefined> = [];
+const usagePrefetch = vi.fn(async () => undefined);
+const workspaceActionsState = {
+  loadUsageDashboard: usagePrefetch,
+};
 const workspaceState = {
   baseUrl: 'http://localhost:4170',
   status: 'connected' as const,
@@ -203,8 +217,18 @@ const workspaceState = {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
-  useStatusReport: (options: { detail?: string } = {}) => {
+  useWorkspaceActions: () => workspaceActionsState,
+  // The Usage tab mounts UsageDashboardTab, which calls useUsageDashboard; a
+  // missing mock would throw into the tab's ErrorBoundary on tab-switch.
+  useUsageDashboard: () => ({
+    dashboard: undefined,
+    loading: false,
+    error: undefined,
+    reload: vi.fn(async () => undefined),
+  }),
+  useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
     seenDetails.push(options.detail);
+    seenAutoLoads.push(options.autoLoad);
     if (options.detail === 'full') {
       return { ...fullState, data: fullState.report, reload: fullReload };
     }
@@ -216,7 +240,13 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   },
 }));
 
-const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
+vi.mock('../RemoteAccessSettingsCard', () => ({
+  RemoteAccessSettingsCard: () => null,
+}));
+
+const { DaemonConnectionsSettings, DaemonStatusDialog } = await import(
+  './DaemonStatusDialog'
+);
 const { StandaloneContext } = await import('../../config/standalone');
 
 let container: HTMLDivElement | null = null;
@@ -226,15 +256,35 @@ function mount(
   language: 'en' | 'zh-CN' = 'en',
   onChangeTarget?: (daemonOrigin: string, token?: string) => void,
   standalone = true,
+  availability?: ReturnType<typeof offlineDaemon>['availability'],
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <StandaloneContext.Provider value={standalone}>
-        <I18nProvider language={language}>
-          <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+      <DaemonAvailabilityContext.Provider value={availability}>
+        <StandaloneContext.Provider value={standalone}>
+          <I18nProvider language={language}>
+            <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+          </I18nProvider>
+        </StandaloneContext.Provider>
+      </DaemonAvailabilityContext.Provider>,
+    );
+  });
+}
+
+function mountConnections(
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void,
+): void {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root!.render(
+      <StandaloneContext.Provider value>
+        <I18nProvider language="en">
+          <DaemonConnectionsSettings onAddConnection={onAddConnection} />
         </I18nProvider>
       </StandaloneContext.Provider>,
     );
@@ -265,13 +315,18 @@ function openDiagnostics(): void {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   summaryState = { report: summaryReport, loading: false, error: undefined };
   fullState = { report: fullReport, loading: false, error: undefined };
   seenDetails.length = 0;
+  seenAutoLoads.length = 0;
   summaryReload.mockReset();
   summaryReload.mockImplementation(async () => undefined);
   fullReload.mockReset();
   fullReload.mockImplementation(async () => undefined);
+  usagePrefetch.mockReset();
+  usagePrefetch.mockImplementation(async () => undefined);
 });
 
 afterEach(() => {
@@ -283,6 +338,187 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it.each([false, true])(
+    'shows outage and connection repair (cached=%s)',
+    async (cached) => {
+      const report = cached ? summaryReport : undefined;
+      const { availability } = offlineDaemon();
+      try {
+        await availability.check(true);
+        summaryState.report = report;
+        fullState.report = undefined;
+        mount('zh-CN', undefined, true, availability);
+        expect(container!.textContent).toContain('无法连接服务。');
+        expect(container!.querySelector('form')).not.toBeNull();
+      } finally {
+        availability.dispose();
+      }
+    },
+  );
+
+  it('does not load status reports for the Connections settings page', () => {
+    vi.useFakeTimers();
+    mountConnections();
+
+    expect(seenAutoLoads).toEqual([false, false]);
+    act(() => vi.advanceTimersByTime(15_000));
+    expect(summaryReload).not.toHaveBeenCalled();
+    expect(fullReload).not.toHaveBeenCalled();
+    expect(usagePrefetch).not.toHaveBeenCalled();
+  });
+
+  it('prefetches the usage aggregate once on open so the Usage tab is warm', () => {
+    mount();
+
+    // Fired in the background on open (range-independent server-side), before
+    // the operator ever clicks the Usage tab.
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    expect(usagePrefetch).toHaveBeenCalledWith({ range: 'today' });
+
+    // A real re-render (switching tabs) must not re-fire it: the effect deps
+    // are stable for the life of the connection target.
+    const tabs = container!.querySelectorAll('[role="tab"]');
+    act(() => {
+      tabs[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not prefetch usage while the daemon is unavailable', async () => {
+    const { availability } = offlineDaemon();
+    try {
+      await availability.check(true);
+      mount('en', undefined, true, availability);
+      expect(usagePrefetch).not.toHaveBeenCalled();
+    } finally {
+      availability.dispose();
+    }
+  });
+
+  it('swallows a prefetch rejection so it never becomes an unhandled error', async () => {
+    usagePrefetch.mockRejectedValueOnce(new Error('usage load failed'));
+    mount();
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    // Let the rejected prefetch settle; the effect's .catch must absorb it.
+    // Without the .catch this is an unhandled rejection, which fails the run
+    // on Linux (dangerouslyIgnoreUnhandledErrors is false there).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container!.querySelectorAll('[role="tab"]').length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('rejects a mixed-content target before passing its token to navigation', () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(
+      window,
+      'location',
+    )!;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: new URL('https://shell.example/'),
+    });
+    const onAddConnection = vi.fn();
+    try {
+      mountConnections(onAddConnection);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'http://remote.example:4173');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const token = typeToken('secret');
+      act(() => {
+        token
+          .closest('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      expect(onAddConnection).not.toHaveBeenCalled();
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'HTTPS page cannot connect',
+      );
+      expect(container!.textContent).toContain('Allow remote connections');
+      expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
+  });
+
+  it('adds a new remote origin without replacing the current target', () => {
+    const onAddConnection = vi.fn(() => true);
+    mountConnections(onAddConnection);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, 'secret');
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+      container!
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+
+    expect(onAddConnection).toHaveBeenCalledWith(
+      'https://remote.example',
+      'secret',
+    );
+    expect(container!.textContent).toContain('Add connection');
+  });
+
+  it('lists, switches, and forgets connected computers', () => {
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify(['https://remote.example:4170']),
+    );
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+
+    const connection = container!.querySelector<HTMLButtonElement>(
+      'button[title="https://remote.example:4170"]',
+    )!;
+    expect(connection.textContent).toContain('remote.example:4170');
+    act(() => connection.click());
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      undefined,
+    );
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Forget https://remote.example:4170"]',
+        )!
+        .click();
+    });
+    expect(container!.textContent).not.toContain('remote.example:4170');
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-remote-connections') || 'null',
+      ),
+    ).toEqual([]);
+  });
+
   it('shows and switches the daemon connection target', () => {
     const onChangeTarget = vi.fn();
     mount('en', onChangeTarget);
@@ -325,6 +561,38 @@ describe('DaemonStatusDialog', () => {
       address.dispatchEvent(new Event('input', { bubbles: true }));
     });
     expect(token.value).toBe('');
+  });
+
+  // A switch whose credential cannot ride along is refused, and the operator
+  // has to be told: the shell would otherwise stay put while the form read as
+  // if the target had changed.
+  it('reports a refused target switch', () => {
+    const onChangeTarget = vi.fn(() => false);
+    mount('en', onChangeTarget);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      undefined,
+    );
+    expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+      'could not be carried',
+    );
   });
 
   it('shows the target but no switch form outside the standalone shell', () => {
@@ -423,6 +691,7 @@ describe('DaemonStatusDialog', () => {
   // a failed probe keeps the old token instead of navigating.
   it.each([
     [401, 'rejected'],
+    [403, 'HTTP 403'],
     [503, 'did not accept'],
   ])(
     'keeps the stored credential when a same-target probe returns %i',
@@ -437,10 +706,11 @@ describe('DaemonStatusDialog', () => {
         await submitConnect(token);
         expect(fetchMock).toHaveBeenCalledWith(
           'http://localhost:4170/capabilities',
-          expect.objectContaining({
-            headers: { Authorization: 'Bearer bad-token' },
-          }),
+          expect.anything(),
         );
+        expect(
+          new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers),
+        ).toEqual(new Headers({ Authorization: 'Bearer bad-token' }));
         expect(onChangeTarget).not.toHaveBeenCalled();
         expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
         expect(
@@ -469,7 +739,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');
@@ -506,7 +776,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');
@@ -1121,6 +1391,100 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('Failed to load diagnostics');
   });
 
+  it('shows the SSE admission cap paired with the aggregate stream occupancy', () => {
+    const withOccupancy = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: 204 },
+      runtime: {
+        ...summaryReport.runtime,
+        transport: {
+          ...summaryReport.runtime.transport,
+          restSseActive: 3,
+          streamOccupancy: {
+            total: 6,
+            bySurface: {
+              restEvents: 3,
+              agentEvents: 0,
+              generation: 0,
+              artifactLibrary: 0,
+              hostedEvents: 0,
+              acpSse: 2,
+              acpWs: 1,
+            },
+            // A non-primary distribution the daemon really produces (streams
+            // parked on the pairing listeners): total 6 ≠ primary 3, so the
+            // paired assertion below reds if the row reads byListener.primary
+            // instead of total (review R1-2).
+            byListener: { primary: 3, 'local-control': 2, 'remote-access': 1 },
+          },
+        },
+      },
+    };
+    summaryState = { report: withOccupancy, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('SSE admission (used / cap)');
+    // The aggregate occupancy pairs with the cap — not the REST-only 3 and
+    // not the primary listener's share (3).
+    expect(text).toContain('6 / 204');
+  });
+
+  it('shows the cap alone when the daemon predates the occupancy breakdown', () => {
+    const capOnly = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: 204 },
+    };
+    summaryState = { report: capOnly, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    // Row renders the label and value as adjacent spans with no separator.
+    // The cap-only branch must show the bare cap: pairing restSseActive (1
+    // in this fixture) into the fallback would render '1 / 204' — the exact
+    // misreading the row comment warns about — and both asserts below red
+    // (review R1-1).
+    expect(text).toContain('SSE admission (used / cap)204');
+    expect(text).not.toContain('/ 204');
+  });
+
+  it('shows unlimited when the SSE admission cap is disabled', () => {
+    const unlimited = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: null },
+      runtime: {
+        ...summaryReport.runtime,
+        transport: {
+          ...summaryReport.runtime.transport,
+          streamOccupancy: {
+            total: 0,
+            bySurface: {
+              restEvents: 0,
+              agentEvents: 0,
+              generation: 0,
+              artifactLibrary: 0,
+              hostedEvents: 0,
+              acpSse: 0,
+              acpWs: 0,
+            },
+            byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+          },
+        },
+      },
+    };
+    summaryState = { report: unlimited, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').toContain('0 / unlimited');
+  });
+
+  it('omits the SSE admission row for daemons that predate the cap', () => {
+    summaryState = { report: summaryReport, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').not.toContain('SSE admission');
+  });
+
   it('renders the ACP-disabled branch when the transport is off', () => {
     const acpOff = {
       ...summaryReport,
@@ -1420,6 +1784,11 @@ describe('DaemonStatusDialog', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 1,
+              eventRingCount: 0,
+              eventRingBytes: 0,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
             },
           ],
         },
