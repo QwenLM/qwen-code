@@ -49,14 +49,27 @@ test('downloads silently, shows an update action in More and restarts in place @
   status = { ...status, state: 'ready' };
   await page.getByRole('button', { name: '更多', exact: true }).click();
   await expect(entry).toHaveAccessibleName('更新');
+  const sidebar = page.getByRole('complementary', {
+    name: '工作区侧边栏',
+  });
+  const resizeHandle = sidebar.getByRole('separator');
+  // Desktop adds a 56px rail to the 220px minimum.
   for (const width of [220, 343, 360, 260]) {
-    await page.evaluate((sidebarWidth) => {
-      localStorage.setItem(
-        'qwen-code-web-shell-sidebar-width',
-        String(sidebarWidth),
-      );
-    }, width);
-    await page.reload();
+    await page.keyboard.press('Escape');
+    await expect(entry).toHaveCount(0);
+    await expect(resizeHandle).toBeVisible();
+    const sidebarBox = (await sidebar.boundingBox())!;
+    const handleBox = (await resizeHandle.boundingBox())!;
+    // The handle extends beyond the sidebar's clipped edge.
+    const x = handleBox.x + 1;
+    const y = handleBox.y + handleBox.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + width - sidebarBox.width, y, { steps: 4 });
+    await page.mouse.up();
+    await expect
+      .poll(async () => (await sidebar.boundingBox())!.width)
+      .toBeCloseTo(Math.max(width, 276), 0);
     await page.getByRole('button', { name: '更多', exact: true }).click();
     await expect(entry).toBeVisible();
     const buttonBox = (await entry.boundingBox())!;
