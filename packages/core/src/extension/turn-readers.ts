@@ -5,7 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { statfsSync } from 'node:fs';
+import { statfsSync, type Dirent } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -114,9 +114,11 @@ export async function assertNoExtensionTurnReaders(
   storeDir: string,
 ): Promise<void> {
   const directory = path.join(storeDir, '.turn-readers');
-  let entries: string[];
+  let entries: Dirent[];
   try {
-    entries = await fs.readdir(directory);
+    entries = (await fs.readdir(directory, { withFileTypes: true })).filter(
+      (entry) => !(entry.isFile() && entry.name.startsWith('.')),
+    );
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') return;
     throw error;
@@ -125,7 +127,7 @@ export async function assertNoExtensionTurnReaders(
   if (!localTypes.has((await fs.statfs(storeDir)).type >>> 0))
     throw new ExtensionStoreInUseError();
   await withSocketDirectory(directory, async (alias) => {
-    for (const name of entries) {
+    for (const { name } of entries) {
       if (!/^[0-9a-f-]{36}$/.test(name)) throw new ExtensionStoreInUseError();
       const held = await new Promise<boolean>((resolve) => {
         const socket = net.createConnection(path.join(alias, name));

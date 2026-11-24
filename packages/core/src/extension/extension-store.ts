@@ -114,12 +114,12 @@ export type ExtensionStoreEmptiness =
 
 const STORE_TRANSACTION_DIRS = ['staging', 'rollback', 'transactions'];
 const STORE_FILES = new Set(['state.json', 'state.previous.json', 'lock']);
-// What a write of a state file leaves when it stops before its rename; the
-// store never reads it.
+// Temporary files left by atomicWriteJSON before publishing its target.
+const JOURNAL_WRITE_LEFTOVER = /^[0-9a-f-]{36}\.json\.[0-9a-f]{12}\.tmp$/;
 const STATE_WRITE_LEFTOVER = /^state(?:\.previous)?\.json\.[0-9a-f]{12}\.tmp$/;
 
-// The store names nothing with a leading dot; such entries belong to the file
-// system or its browsers, such as `.DS_Store`.
+// Hidden entries do not denote installed artifacts; they include read leases
+// and filesystem metadata such as `.DS_Store`.
 function isStoreName(name: string): boolean {
   return !name.startsWith('.');
 }
@@ -1019,9 +1019,22 @@ export class ExtensionStore {
   ): Promise<() => Promise<void>> {
     return this.withLock(async () => {
       const snapshot = await this.readSnapshotUnlocked();
+      const entries = await fsp.readdir(
+        path.join(this.storeDir, 'transactions'),
+        {
+          withFileTypes: true,
+        },
+      );
+      // Unpublished temp files and Finder metadata cannot affect the installed
+      // artifact. A remaining journal (including a quarantined one) can.
       if (
         (snapshot?.generation ?? 0) !== expectedGeneration ||
-        (await fsp.readdir(path.join(this.storeDir, 'transactions'))).length > 0
+        entries.some(
+          (entry) =>
+            !entry.isFile() ||
+            (entry.name !== '.DS_Store' &&
+              !JOURNAL_WRITE_LEFTOVER.test(entry.name)),
+        )
       ) {
         throw new Error('Extension store generation unavailable');
       }
@@ -1039,14 +1052,16 @@ export class ExtensionStore {
         return await this.withLock(async () => {
           wait?.signal.throwIfAborted();
           wait?.checkOwnership?.();
-          if (waiting && wait && performance.now() >= wait.deadline)
-            throw new ExtensionStoreInUseError();
           try {
             await assertNoExtensionTurnReaders(this.storeDir);
           } catch (error) {
             if (error instanceof ExtensionStoreInUseError) busy = error;
             throw error;
           }
+          wait?.signal.throwIfAborted();
+          wait?.checkOwnership?.();
+          if (waiting && wait && performance.now() >= wait.deadline)
+            throw new ExtensionStoreInUseError();
           // Only a pre-transaction refusal may be retried. Never replay a
           // callback after an artifact swap, journal write or acknowledgement.
           return write();

@@ -115,6 +115,63 @@ describe('ExtensionStore', () => {
   };
 
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'ignores uncommitted journal temp files but still rejects an unrecoverable transaction',
+    async () => {
+      const { store, initial } = await initStore('4'.repeat(64));
+      const transactions = path.join(storeDir, 'transactions');
+      const journal = '00000000-0000-4000-8000-000000000001.json';
+      await fsp.writeFile(
+        path.join(transactions, journal + '.001122334455.tmp'),
+        'partial',
+      );
+      await fsp.writeFile(path.join(transactions, '.DS_Store'), 'metadata');
+      const release = await store.acquireTurnReader(initial.generation);
+      await release();
+      await fsp.writeFile(path.join(transactions, journal), 'broken');
+      await expect(store.acquireTurnReader(initial.generation)).rejects.toThrow(
+        'Extension store generation unavailable',
+      );
+      expect(await fsp.readdir(transactions)).toContainEqual(
+        expect.stringContaining(journal + '.corrupt-'),
+      );
+    },
+  );
+
+  it('cancels before writing if ownership expires while it checks native readers', async () => {
+    const { store, identity, initial } = await initStore('6'.repeat(64));
+    const controller = new AbortController();
+    const expired = new Error('operation owner expired');
+    await expect(
+      withExtensionTurnDrainWait(
+        1000,
+        controller.signal,
+        () => queueMicrotask(() => controller.abort(expired)),
+        () => store.setDefaultActivation(identity, 'disabled'),
+      ),
+    ).rejects.toBe(expired);
+    expect((await store.readSnapshot()).generation).toBe(initial.generation);
+  });
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'ignores directory metadata without dropping an active socket reader',
+    async () => {
+      const { store, identity, initial } = await initStore('5'.repeat(64));
+      const release = await store.acquireTurnReader(initial.generation);
+      const metadata = path.join(storeDir, '.turn-readers', '.DS_Store');
+      await fsp.writeFile(metadata, 'metadata');
+      const change = () => store.setDefaultActivation(identity, 'disabled');
+      await expect(change()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      await release();
+      await expect(change()).resolves.toMatchObject({
+        generation: initial.generation + 1,
+      });
+      expect(await fsp.readFile(metadata, 'utf-8')).toBe('metadata');
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
     'holds the verified generation across store clients until the last turn drains',
     async () => {
       const { store, identity, initial } = await initStore('a'.repeat(64));
