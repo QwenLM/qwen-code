@@ -7239,6 +7239,11 @@ describe('qwen-triage verify hardening round 2', () => {
       'A non-comment container restart needs no marked approval',
     );
     expect(flat).toContain('Do not release it merely to change modes');
+    expect(flat).toContain("this recipe's step 6–7 no longer apply");
+    expect(flat).toContain('`<trusted-dir>` is `<clone>`');
+    expect(flat).toContain(
+      "the trusted checkout whose main worktree is also the helper's default root",
+    );
     expect(flat).not.toContain('release any in-flight registration');
     expect(
       flat.match(/release followed by `--start` creates a new/gi),
@@ -7549,6 +7554,10 @@ describe('qwen-triage verify hardening round 2', () => {
     // own and same-repository local trust deliberately needs no public URL.
     expect(flat).toContain('**they**, never the round, post the PR comment');
     expect(flat).toContain('verify-pr-boundary-approval:');
+    expect(flat).toContain('"round":<r from this --start>');
+    expect(flat).toContain(
+      'Replace `<r from this --start>` with the exact `--round` value used for this registration',
+    );
     expect(flat).toContain(
       'node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"',
     );

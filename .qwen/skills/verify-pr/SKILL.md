@@ -279,9 +279,13 @@ requirement. The shapes:
   human-readable approval plus exactly one marker:
 
   ```text
-  <!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":2,"registrationNonce":"<nonce from this --start>"} -->
+  <!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":<r from this --start>,"registrationNonce":"<nonce from this --start>"} -->
   Approved host execution for this verify round.
   ```
+
+  Replace `<r from this --start>` with the exact `--round` value used for this
+  registration; a first registration may use round 1, so copying `2` literally
+  would be rejected.
 
   That comment authorizes only this verify round's execution; it is not a PR
   review, merge approval, or resolution of a review thread.
@@ -692,7 +696,11 @@ authority to certify the round.
    NOT declare `mode:"container"`, and do not hand-write a waiver. Keep the
    current head/round in-flight registration while changing modes, then re-run
    prepare with `--execution host|vm` and its applicable approval arguments
-   **before** the battery. Do not release it merely to change modes.
+   **before** the battery. Do not release it merely to change modes. After the
+   switch, this recipe's step 6–7 no longer apply: the battery runs on the
+   host/VM, so finish with the local checker command at the top of this section
+   and do not run step 7's cleanup/write, which would replace prepare's approval
+   with a container declaration.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and
@@ -875,10 +883,11 @@ Build the task in this order and stop at the first failure:
    (a residual tracked in #17371). Do not delete another session's live watch to
    make room; the claim guard forbids it.
 
-`<trusted-dir>` is one fixed absolute directory outside the PR clone, chosen
-when the watch is installed and reused by every start, completion, release and
-restart. The helper's default is the trusted clone's main worktree; an older
-default-root invocation keeps omitting `--state-root`.
+`<trusted-dir>` is `<clone>` — the trusted checkout whose main worktree is
+also the helper's default root — chosen when the watch is installed and reused
+by every start, completion, release and restart. An older default-root
+invocation keeps omitting `--state-root`; a newer explicit-root invocation
+passes the same `<clone>` value to every call.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.

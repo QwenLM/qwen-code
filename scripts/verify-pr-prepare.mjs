@@ -673,7 +673,7 @@ function runGit(args) {
  * file, so the gate refuses it instead of reading a steered status.
  */
 export function inspectInfoExclude(root) {
-  const resolved = runGit([
+  let resolved = runGit([
     '-C',
     root,
     'rev-parse',
@@ -682,9 +682,24 @@ export function inspectInfoExclude(root) {
     'info/exclude',
   ]);
   if (resolved.status !== 0 || resolved.stdout.trim() === '') {
-    throw new Error(
-      (resolved.stderr || '').trim() || 'could not resolve git info/exclude',
-    );
+    const fallback = runGit([
+      '-C',
+      root,
+      'rev-parse',
+      '--git-path',
+      'info/exclude',
+    ]);
+    if (fallback.status !== 0 || fallback.stdout.trim() === '') {
+      throw new Error(
+        (fallback.stderr || resolved.stderr || '').trim() ||
+          'could not resolve git info/exclude',
+      );
+    }
+    const raw = fallback.stdout.trim();
+    resolved = {
+      ...fallback,
+      stdout: isAbsolute(raw) ? raw : resolve(root, raw),
+    };
   }
   const path = resolved.stdout.trim();
   if (!existsSync(path)) return { path, hostile: false };
