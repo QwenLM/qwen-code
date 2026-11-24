@@ -17,6 +17,16 @@ export type ReviewExecutionClass =
   | 'trusted-shared-kernel'
   | 'hardware-isolated';
 
+/**
+ * How a report describes an execution that had no trust context to classify
+ * (e.g. a host `tmux` drive under `off`/`auto`, or a phase that was refused
+ * before a plan was consulted). Distinct from `hardware-isolated`, which is a
+ * real classification that forbids shared-kernel execution.
+ */
+export type ReviewBoundaryExecutionClass =
+  | ReviewExecutionClass
+  | 'unclassified';
+
 export type ReviewSandboxBackend =
   | 'direct'
   | 'container'
@@ -70,7 +80,7 @@ export interface ReviewTrustClassification {
 export interface ReviewExecutionBoundary {
   policy: 'off' | 'auto' | 'required' | 'tiered';
   prTrust: ReviewPrTrust;
-  executionClass: ReviewExecutionClass;
+  executionClass: ReviewBoundaryExecutionClass;
   backend: ReviewSandboxBackend;
   escalationReasons: string[];
   teardownStatus?: ReviewTeardownStatus;

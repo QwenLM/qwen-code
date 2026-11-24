@@ -51,6 +51,7 @@ import {
   describeExecutionBoundary,
   mountRootFor,
   refuseUnsandboxedPhase,
+  sandboxPolicy,
   sandboxVerdict,
   trustInputFromPlan,
   type ReviewExecutionBoundary,
@@ -218,6 +219,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // So the duplicate is gone rather than re-synchronised: one `run`, one place
   // where the boundary is decided, and no way for the two sides to drift again.
   // `kind` defaults to 'test', which is the restrictive shape (no network).
+  const policy = sandboxPolicy();
   const trustContext = args.plan ? trustInputFromPlan(args.plan) : undefined;
   const exec =
     args.exec ??
@@ -258,15 +260,20 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
         baseline,
         undefined,
         undefined,
-        undefined,
+        policy,
         trustContext,
       );
   if (refusal) {
+    const actionable =
+      policy === 'tiered' && !args.plan
+        ? `${refusal}; pass --plan <the Step 1 fetch plan> so a trusted PR can be classified for this rerun`
+        : refusal;
     return {
       ...empty(
-        `the base-side rerun did not happen, so NOTHING was attributed — ${refusal}`,
+        `the base-side rerun did not happen, so NOTHING was attributed — ${actionable}`,
       ),
       executionBoundary: describeExecutionBoundary({
+        policy,
         backend: 'refused',
         trustContext,
       }),
@@ -470,7 +477,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       `${skippedForBudget.length} failed command(s) not rerun — the whole-command budget was exhausted (${skippedForBudget.join(', ')}); their failures stay unattributed, judge them by the diff`,
     );
   }
-  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  const verdict = sandboxVerdict(policy, undefined, undefined, trustContext);
   const mountable = mountRootFor(baseline) !== null;
   const effectiveBackend =
     verdict.kind === 'container' && mountable ? 'container' : 'direct';
@@ -481,6 +488,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     skippedForBudget,
     note: parts.join('. ') || 'nothing to report',
     executionBoundary: describeExecutionBoundary({
+      policy,
       backend: effectiveBackend,
       trustContext,
       ...(verdict.kind === 'container' && !mountable

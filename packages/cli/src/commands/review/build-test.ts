@@ -1123,7 +1123,10 @@ function refusedReport(why: string): BuildTestReport {
  * one at a time in a function with several. There is exactly one place a
  * report can reach a caller, so the conversion belongs there.
  */
-function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
+function runBuildTestUnguarded(
+  args: BuildTestArgs,
+  trustContext: ReviewTrustInput | undefined = trustInputFromPlan(args.plan),
+): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
   // spawnSync as an invalid deadline — ERR_OUT_OF_RANGE with no report.
@@ -1140,6 +1143,10 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
   }
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
+  // `trustContext` is passed in from `runBuildTest`, which read it BEFORE this
+  // function executes anything. The plan lives under the container-visible
+  // temp mount, so re-reading it after the build would let a reviewed command
+  // rewrite its own trust report.
   const runIdentity: {
     sha?: string;
     root: string;
@@ -1238,7 +1245,6 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
       );
     }
   }
-  const trustContext = trustInputFromPlan(args.plan);
   const runArgs = {
     root,
     changedFiles,
@@ -1518,7 +1524,8 @@ export function applyHandOffPolicy(
 }
 
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
-  const report = runBuildTestUnguarded(args);
+  const trustContext = trustInputFromPlan(args.plan);
+  const report = runBuildTestUnguarded(args, trustContext);
   // The THIRD continuation exit, and the one the invariant had not reached.
   // "A continuation must never answer with a FRESH report" is enforced by a
   // throw at the refusal gate and at `!adapter`; this conversion was added
@@ -1542,7 +1549,6 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     );
   }
   const finalReport = applyHandOffPolicy(report);
-  const trustContext = trustInputFromPlan(args.plan);
   const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
   const teardownStatus = aggregateTeardownStatus(finalReport);
   const mountable = mountRootFor(resolve(args.worktree)) !== null;

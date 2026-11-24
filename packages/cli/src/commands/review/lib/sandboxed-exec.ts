@@ -71,6 +71,7 @@ import { CLI_VERSION } from '../../../generated/git-commit.js';
 import {
   classifyReviewTrust,
   forceHardwareRequested,
+  type ReviewBoundaryExecutionClass,
   type ReviewExecutionBoundary,
   type ReviewSandboxBackend,
   type ReviewTeardownStatus,
@@ -83,6 +84,7 @@ import {
 } from './sandbox-backends.js';
 
 export type {
+  ReviewBoundaryExecutionClass,
   ReviewExecutionBoundary,
   ReviewExecutionClass,
   ReviewPrTrust,
@@ -548,7 +550,15 @@ export function describeExecutionBoundary(opts: {
   const env = opts.env ?? process.env;
   const fileSourced = opts.fileSourced ?? isFileSourcedEnvKey;
   const policy = opts.policy ?? sandboxPolicy(env, undefined, fileSourced);
-  const trust = classifyReviewTrust(opts.trustContext, env, fileSourced);
+  // No trust context means this execution was never classified — saying
+  // `unknown -> hardware-isolated` here would contradict a `direct` backend
+  // and describe a rule that was never applied.
+  const trust =
+    opts.trustContext === undefined
+      ? null
+      : classifyReviewTrust(opts.trustContext, env, fileSourced);
+  const executionClass: ReviewBoundaryExecutionClass =
+    trust?.executionClass ?? 'unclassified';
   const backend: ReviewSandboxBackend =
     opts.backend ??
     (opts.verdict?.kind === 'container'
@@ -558,10 +568,10 @@ export function describeExecutionBoundary(opts: {
         : 'direct');
   return {
     policy,
-    prTrust: trust.prTrust,
-    executionClass: trust.executionClass,
+    prTrust: trust?.prTrust ?? 'unknown',
+    executionClass,
     backend,
-    escalationReasons: trust.escalationReasons,
+    escalationReasons: trust?.escalationReasons ?? [],
     ...(opts.teardownStatus !== undefined
       ? { teardownStatus: opts.teardownStatus }
       : {}),

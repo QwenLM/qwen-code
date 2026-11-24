@@ -1330,6 +1330,20 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       escalationReasons: ['cross-repository-pr'],
       teardownStatus: 'not-applicable',
     });
+
+    const unclassified = describeExecutionBoundary({
+      policy: 'off',
+      backend: 'direct',
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(unclassified).toEqual({
+      policy: 'off',
+      prTrust: 'unknown',
+      executionClass: 'unclassified',
+      backend: 'direct',
+      escalationReasons: [],
+    });
   });
 
   it('handOffRefused also rejects unsupported hand-offs under tiered and forceHardware', () => {

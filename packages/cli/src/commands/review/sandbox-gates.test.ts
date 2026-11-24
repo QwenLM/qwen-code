@@ -211,4 +211,45 @@ describe('host-execution bypass gates (drive, ab-drive, capture-tui)', () => {
     });
     expect(delta.note).toContain('cross-repository-pr');
   });
+
+  it('tells the operator to pass --plan when tiered test-delta has no plan, and refuses without one', () => {
+    vi.stubEnv('QWEN_REVIEW_SANDBOX', 'tiered');
+    const buildReportPath = join(dir, 'build-test.json');
+    writeFileSync(
+      buildReportPath,
+      JSON.stringify({
+        toolchain: 'npm',
+        affected: ['packages/cli'],
+        buildSet: ['packages/cli'],
+        widenedWith: [],
+        install: null,
+        build: [],
+        test: [
+          {
+            command: 'npm test',
+            exitCode: 1,
+            seconds: 1,
+            timedOut: false,
+            output: 'FAIL src/a.test.ts',
+            failingFiles: ['src/a.test.ts'],
+          },
+        ],
+        timedOut: [],
+        ok: false,
+        note: 'failed',
+      }),
+    );
+    const exec = vi.fn();
+    const delta = runTestDelta({
+      report: buildReportPath,
+      baseline: dir,
+      timeout: 30,
+      exec,
+    });
+    expect(exec).not.toHaveBeenCalled();
+    expect(delta.entries).toEqual([]);
+    expect(delta.executionBoundary?.backend).toBe('refused');
+    expect(delta.executionBoundary?.executionClass).toBe('unclassified');
+    expect(delta.note).toContain('pass --plan <the Step 1 fetch plan>');
+  });
 });

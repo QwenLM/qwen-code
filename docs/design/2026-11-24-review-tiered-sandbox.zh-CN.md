@@ -96,19 +96,21 @@
 
 ### 3.5 执行面覆盖与旁路封堵
 
-| 子命令          | 执行待审代码方式               | 策略门禁行为                                                                                                                                                                              |
-| --------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `build-test`    | `npm ci`、build、test          | 调用 `refuseUnsandboxedPhase(root, ..., trustContext)`；在 `BuildTestReport` 中记录 `executionBoundary` 与 `teardownStatus`。                                                             |
-| `test-efficacy` | mutation 与 revert Vitest 探针 | 调用 `refuseUnsandboxedPhase(probeWorktree, ..., trustContext)`；在 `TestEfficacyReport` 中记录 `executionBoundary` 与 `teardownStatus`。                                                 |
-| `test-delta`    | 基线侧失败测试重跑             | 调用 `refuseUnsandboxedPhase(baseline, ..., trustContext)`；在 `TestDeltaReport` 中记录 `executionBoundary`。                                                                             |
-| `base-tree`     | 委托 `build-test` 构建         | 自动继承 `build-test` 的门禁与拒绝语义。                                                                                                                                                  |
-| `drive`         | 宿主机 `tmux` + `bash -lc`     | 调用 `refuseHostExecutionPhase()`；在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下不启动 `tmux`，直接返回 `outcome: 'unavailable', observed: false` 及 `executionBoundary`。 |
-| `ab-drive`      | 双臂宿主机 `tmux` + `bash -lc` | 调用 `refuseHostExecutionPhase()`；在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下不启动 `tmux`，直接返回 `observed: false` 及 `executionBoundary`。                         |
-| `capture-tui`   | 宿主机 `tmux` + TUI 截屏       | 调用 `refuseHostExecutionPhase()`；在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下在启动 `tmux` 与写 `--out` 前直接 `refuse(...)`（exit 3）。                                |
+| 子命令          | 执行待审代码方式               | 策略门禁行为                                                                                                                                                                                                             |
+| --------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `build-test`    | `npm ci`、build、test          | 调用 `refuseUnsandboxedPhase(root, ..., trustContext)`；在 `BuildTestReport` 中记录 `executionBoundary` 与 `teardownStatus`。                                                                                            |
+| `test-efficacy` | mutation 与 revert Vitest 探针 | 调用 `refuseUnsandboxedPhase(probeWorktree, ..., trustContext)`；在 `TestEfficacyReport` 中记录 `executionBoundary` 与 `teardownStatus`。                                                                                |
+| `test-delta`    | 基线侧失败测试重跑             | 调用 `refuseUnsandboxedPhase(baseline, ..., trustContext)`；在 `TestDeltaReport` 中记录 `executionBoundary`。`tiered` 下必须传入 `--plan`；缺失时信任上下文未知，基线重跑会 fail-closed 拒绝并在 note 中给出可操作提示。 |
+| `base-tree`     | 委托 `build-test` 构建         | 自动继承 `build-test` 的门禁与拒绝语义。                                                                                                                                                                                 |
+| `drive`         | 宿主机 `tmux` + `bash -lc`     | 调用 `refuseHostExecutionPhase()`；在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下不启动 `tmux`，直接返回 `outcome: 'unavailable', observed: false` 及 `executionBoundary`。                                |
+| `ab-drive`      | 双臂宿主机 `tmux` + `bash -lc` | 调用 `refuseHostExecutionPhase()`；在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下不启动 `tmux`，直接返回 `observed: false` 及 `executionBoundary`。                                                        |
+| `capture-tui`   | 宿主机 `tmux` + TUI 截屏       | 调用 `refuseHostExecutionPhase()`；在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下在启动 `tmux` 与写 `--out` 前直接 `refuse(...)`（exit 3）。                                                               |
 
 ### 3.6 零额外 API 信任透传（`fetch-pr.ts` & `lib/platform/github.ts`）
 
 `githubReader.getFetchMeta()` 本身已调用 `gh pr view --json ...`。只需在字段列表中追加 `authorAssociation`，即可将其填入 `FetchMeta.authorAssociation` 并随 `isCrossRepository` 和 `files` 一同落盘到 `fetch-pr` 的 plan JSON。下游 `build-test`、`test-efficacy`、`test-delta` 在有 `--plan` 时直接推导 `ReviewTrustInput`（缺少 PR 元数据时在 `tiered` 下按 `unknown` fail-closed 处理）。
+
+**执行前读取信任上下文。** plan 位于容器可读写的评审临时目录内，被审代码在一次受信运行期间可以改写它。因此每个阶段都只在执行第一条命令前读取一次 `ReviewTrustInput`，报告使用这份已捕获的值；`build-test` 不再在构建结束后重读 plan 来生成 `executionBoundary`。这不影响门禁不变量：`hardware-isolated` 的 plan 在任何被审代码执行前就被拒绝，因而其代码没有机会改写 plan；受信运行的后续阶段可能看到被改写的 plan，但这个 PR 本来就已经被允许执行，且被改写的 plan 无法让 `hardware-isolated` 运行获得执行许可。完全没有信任上下文的执行会如实标记为 `executionClass: 'unclassified'`，而不是误标为 `hardware-isolated`。
 
 ## 4. 风险与缓解
 
