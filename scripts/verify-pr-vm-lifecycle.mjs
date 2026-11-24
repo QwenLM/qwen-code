@@ -509,38 +509,51 @@ function revokeApprovedToken(tokenPath, approvedRoots, report) {
   report.token = { path: tokenPath, action: 'revoked' };
 }
 
-function resolveFirecrackerWorkerPid(record) {
-  const token = record.expectedExeTokens?.[0];
+export function resolveFirecrackerWorkerPid(
+  record,
+  { procRoot = '/proc', platform = process.platform } = {},
+) {
+  const token =
+    record.expectedExeTokens?.[0] ?? record.worker?.expectedExeTokens?.[0];
   if (
-    process.platform !== 'linux' ||
+    platform !== 'linux' ||
     record.backend !== 'firecracker' ||
     typeof token !== 'string' ||
     token === '' ||
     token.includes('/') ||
     !Number.isInteger(record.vmmUid) ||
     record.vmmUid <= 0 ||
-    typeof record.runId !== 'string'
+    typeof record.runId !== 'string' ||
+    record.runId === ''
   ) {
     return { pid: null, error: null };
   }
   const candidates = [];
   let entries;
   try {
-    entries = readdirSync('/proc');
+    entries = readdirSync(procRoot);
   } catch (error) {
     return { pid: null, error: `firecracker-proc-enumeration:${error.code}` };
   }
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (pid <= 1 || pid === process.pid) continue;
     try {
-      const exe = readlinkSync(`/proc/${entry}/exe`);
+      const exe = readlinkSync(join(procRoot, entry, 'exe'));
       if (exe !== token && !exe.endsWith(`/${token}`)) continue;
-      const status = readFileSync(`/proc/${entry}/status`, 'utf8');
+      const status = readFileSync(join(procRoot, entry, 'status'), 'utf8');
+      const stateLine = status
+        .split('\n')
+        .find((line) => line.startsWith('State:'));
+      if (stateLine && /^State:\s+[ZX]/.test(stateLine)) continue;
       const uidLine = status
         .split('\n')
         .find((line) => line.startsWith('Uid:'));
       if (Number(uidLine?.split(/\s+/)[1]) !== record.vmmUid) continue;
-      const argv = readFileSync(`/proc/${entry}/cmdline`, 'utf8').split('\0');
+      const argv = readFileSync(join(procRoot, entry, 'cmdline'), 'utf8').split(
+        '\0',
+      );
       if (
         !argv.some(
           (arg, index) => arg === '--id' && argv[index + 1] === record.runId,
@@ -548,7 +561,7 @@ function resolveFirecrackerWorkerPid(record) {
       ) {
         continue;
       }
-      candidates.push(Number(entry));
+      candidates.push(pid);
     } catch {
       // A process can exit between /proc enumeration and identity reads.
     }
@@ -632,11 +645,16 @@ export function reapOwnership(
   }
 
   const recovery = resolveFirecrackerWorkerPid(record);
-  if (
-    recovery.pid &&
-    (!Number.isInteger(record.worker?.pid) ||
-      !inspectPidState(record.worker.pid).alive)
-  ) {
+  if (recovery.pid && recovery.pid !== record.worker?.pid) {
+    if (
+      Number.isInteger(record.worker?.pid) &&
+      record.worker.pid > 1 &&
+      inspectPidState(record.worker.pid).alive
+    ) {
+      record.helpers = Array.isArray(record.helpers)
+        ? [...record.helpers, record.worker]
+        : [record.worker];
+    }
     record.worker = {
       ...record.worker,
       pid: recovery.pid,

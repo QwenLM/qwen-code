@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
@@ -1242,5 +1243,65 @@ describe('per-round token revocation, request budget, and UDS listener (microVM 
     child.kill('SIGTERM');
     const [exitCode] = await once(child, 'exit');
     expect(exitCode).toBe(1);
+    expect(readFileSync(socketPath, 'utf8')).toBe('unowned-replacement');
+  });
+
+  it('preserves a replacement Unix socket with a different dev/ino on SIGTERM and rejects unsafe maxRequests', async () => {
+    expect(() => parseArgs(['--max-requests', '1e30'])).toThrow(
+      /--max-requests requires a positive integer/,
+    );
+    expect(() =>
+      createModelProxy({
+        baseUrl: 'http://127.0.0.1:9',
+        apiKey: REAL_KEY,
+        token: TOKEN,
+        nonce: NONCE,
+        maxRequests: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toThrow(/maxRequests must be a positive integer/);
+
+    const tmp = mkdtempSync('/tmp/qc-mp-uds-');
+    cleanups.push(() => rmSync(tmp, { recursive: true, force: true }));
+    const socketPath = join(tmp, 'm.sock');
+    const child = spawn(
+      process.execPath,
+      [SCRIPT, '--socket', socketPath, '--max-requests', '1'],
+      {
+        env: {
+          ...process.env,
+          REVIEW_OPENAI_BASE_URL: 'http://127.0.0.1:9',
+          REVIEW_OPENAI_API_KEY: 'local-placeholder',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    cleanups.push(() => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+    });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', () => reject(new Error('proxy exited before ready')));
+    });
+
+    unlinkSync(socketPath);
+    const replacement = net.createServer((sock) => sock.end('replacement-ok'));
+    await new Promise((resolve, reject) => {
+      replacement.once('error', reject);
+      replacement.listen(socketPath, resolve);
+    });
+    cleanups.push(() => replacement.close());
+
+    child.kill('SIGTERM');
+    const [exitCode] = await once(child, 'exit');
+    expect(exitCode).toBe(1);
+    expect(existsSync(socketPath)).toBe(true);
+    const reply = await new Promise((resolve, reject) => {
+      const client = net.createConnection(socketPath);
+      const chunks = [];
+      client.on('data', (c) => chunks.push(c));
+      client.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      client.on('error', reject);
+    });
+    expect(reply).toBe('replacement-ok');
   });
 });

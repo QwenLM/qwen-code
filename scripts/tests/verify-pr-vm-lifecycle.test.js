@@ -24,6 +24,7 @@ import {
   inspectPidState,
   isPathWithinApprovedRoots,
   reapOwnership,
+  resolveFirecrackerWorkerPid,
   writeExecutionRecordAndBoundary,
   writeOwnershipRecord,
 } from '../../scripts/verify-pr-vm-lifecycle.mjs';
@@ -300,6 +301,195 @@ describe('verify-pr-vm-lifecycle reap', () => {
       }
     }
   });
+
+  it('recovers a Firecracker worker PID from /proc entries and fails closed on ambiguity or unreadable procRoot', () => {
+    const procRoot = makeTmpDir('verify-pr-proc-');
+    const plantProc = (pid, { exe, uid, state = 'S (sleeping)', argv }) => {
+      const dir = join(procRoot, String(pid));
+      mkdirSync(dir, { recursive: true });
+      symlinkSync(exe, join(dir, 'exe'));
+      writeFileSync(
+        join(dir, 'status'),
+        `Name:\tfirecracker\nState:\t${state}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n`,
+      );
+      writeFileSync(join(dir, 'cmdline'), `${argv.join('\0')}\0`);
+    };
+
+    const baseRec = {
+      runId: 'fc-rec-1',
+      backend: 'firecracker',
+      vmmUid: 65534,
+      worker: { expectedExeTokens: ['firecracker-v1.18.0-aarch64'] },
+    };
+
+    // 0 candidates: zombie, wrong UID, missing --id, self PID are all ignored
+    plantProc(4001, {
+      exe: '/firecracker-v1.18.0-aarch64',
+      uid: 65534,
+      state: 'Z (zombie)',
+      argv: ['/firecracker-v1.18.0-aarch64', '--id', 'fc-rec-1'],
+    });
+    plantProc(4002, {
+      exe: '/firecracker-v1.18.0-aarch64',
+      uid: 1000,
+      argv: ['/firecracker-v1.18.0-aarch64', '--id', 'fc-rec-1'],
+    });
+    plantProc(4003, {
+      exe: '/firecracker-v1.18.0-aarch64',
+      uid: 65534,
+      argv: ['/firecracker-v1.18.0-aarch64', '--id', 'other-run'],
+    });
+    plantProc(process.pid, {
+      exe: '/firecracker-v1.18.0-aarch64',
+      uid: 65534,
+      argv: ['/firecracker-v1.18.0-aarch64', '--id', 'fc-rec-1'],
+    });
+    expect(
+      resolveFirecrackerWorkerPid(baseRec, { procRoot, platform: 'linux' }),
+    ).toEqual({ pid: null, error: null });
+
+    // Non-Linux skips /proc scan
+    plantProc(4010, {
+      exe: '/firecracker-v1.18.0-aarch64',
+      uid: 65534,
+      argv: ['/firecracker-v1.18.0-aarch64', '--id', 'fc-rec-1'],
+    });
+    expect(
+      resolveFirecrackerWorkerPid(baseRec, { procRoot, platform: 'darwin' }),
+    ).toEqual({ pid: null, error: null });
+
+    // Exact 1 match succeeds (even when token comes only from worker.expectedExeTokens)
+    expect(
+      resolveFirecrackerWorkerPid(baseRec, { procRoot, platform: 'linux' }),
+    ).toEqual({ pid: 4010, error: null });
+
+    // 2 matching candidates fail closed with ambiguity error
+    plantProc(4011, {
+      exe: '/firecracker-v1.18.0-aarch64',
+      uid: 65534,
+      argv: ['/firecracker-v1.18.0-aarch64', '--id', 'fc-rec-1'],
+    });
+    expect(
+      resolveFirecrackerWorkerPid(baseRec, { procRoot, platform: 'linux' }),
+    ).toEqual({
+      pid: null,
+      error: 'firecracker-worker-recovery-ambiguous:fc-rec-1',
+    });
+
+    // Unreadable/missing procRoot reports enumeration error
+    const enumErr = resolveFirecrackerWorkerPid(baseRec, {
+      procRoot: join(procRoot, 'missing-proc'),
+      platform: 'linux',
+    });
+    expect(enumErr.pid).toBeNull();
+    expect(enumErr.error).toMatch(/^firecracker-proc-enumeration:/);
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'reaps a live worker via real Linux /proc recovery, kills both live supervisor and recovered worker, and refuses ambiguous matches',
+    async () => {
+      const root = makeTmpDir('verify-pr-linux-proc-');
+      const hostUid = process.getuid();
+      const targetUid = hostUid === 0 ? 65534 : hostUid;
+      const targetGid = hostUid === 0 ? 65534 : process.getgid();
+      const spawnOpts = hostUid === 0 ? { uid: targetUid, gid: targetGid } : {};
+      const exeName = process.execPath.split('/').pop();
+      const spawnTagged = async (runId) => {
+        const c = spawn(
+          process.execPath,
+          [
+            '-e',
+            'process.stdout.write("R");setTimeout(()=>{},60000)',
+            '--',
+            '--id',
+            runId,
+          ],
+          { ...spawnOpts, stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+        children.push(c);
+        let stderr = '';
+        c.stderr.on('data', (chunk) => {
+          stderr += chunk.toString('utf8');
+        });
+        await new Promise((resolve, reject) => {
+          c.stdout.once('data', resolve);
+          c.once('error', reject);
+          c.once('exit', (code) =>
+            reject(new Error(`tagged worker exited ${code}: ${stderr}`)),
+          );
+        });
+        return c;
+      };
+
+      // 1. Dead recorded PID + 1 live matching worker -> recovered & reaped
+      const w1 = await spawnTagged('fc-live-1');
+      const own1 = join(root, 'own1.json');
+      writeOwnershipRecord(own1, {
+        runId: 'fc-live-1',
+        backend: 'firecracker',
+        vmmUid: targetUid,
+        expectedExeTokens: [exeName],
+        worker: { pid: 999999, expectedExeTokens: [exeName] },
+      });
+      const rep1 = reapOwnership(own1, { approvedRoots: [root], graceMs: 100 });
+      expect(rep1.errors).toEqual([]);
+      expect(rep1.status).toBe('reaped');
+      expect(rep1.resolvedWorkerPid).toBe(w1.pid);
+      expect(inspectPidState(w1.pid).alive).toBe(false);
+
+      // 2. Live supervisor + separate live matching worker -> both killed
+      const sup2 = spawnSleeper('sup2');
+      const w2 = await spawnTagged('fc-live-2');
+      const own2 = join(root, 'own2.json');
+      writeOwnershipRecord(own2, {
+        runId: 'fc-live-2',
+        backend: 'firecracker',
+        vmmUid: targetUid,
+        expectedExeTokens: [exeName],
+        worker: { pid: sup2.pid, expectedExeTokens: [exeName] },
+      });
+      const rep2 = reapOwnership(own2, { approvedRoots: [root], graceMs: 100 });
+      expect(rep2.errors).toEqual([]);
+      expect(rep2.status).toBe('reaped');
+      expect(rep2.resolvedWorkerPid).toBe(w2.pid);
+      expect(inspectPidState(sup2.pid).alive).toBe(false);
+      expect(inspectPidState(w2.pid).alive).toBe(false);
+
+      // 3. 2 matching live workers -> fail closed ambiguous, neither killed
+      const a1 = await spawnTagged('fc-ambig-3');
+      const a2 = await spawnTagged('fc-ambig-3');
+      const own3 = join(root, 'own3.json');
+      writeOwnershipRecord(own3, {
+        runId: 'fc-ambig-3',
+        backend: 'firecracker',
+        vmmUid: targetUid,
+        expectedExeTokens: [exeName],
+        worker: { pid: 999998, expectedExeTokens: [exeName] },
+      });
+      const rep3 = reapOwnership(own3, { approvedRoots: [root], graceMs: 100 });
+      expect(rep3.status).toBe('failed');
+      expect(rep3.errors).toContain(
+        'firecracker-worker-recovery-ambiguous:fc-ambig-3',
+      );
+      expect(inspectPidState(a1.pid).alive).toBe(true);
+      expect(inspectPidState(a2.pid).alive).toBe(true);
+
+      // 4. 0 matching workers (wrong --id) -> no kill, resolvedWorkerPid null
+      const other = await spawnTagged('fc-other-4');
+      const own4 = join(root, 'own4.json');
+      writeOwnershipRecord(own4, {
+        runId: 'fc-none-4',
+        backend: 'firecracker',
+        vmmUid: targetUid,
+        expectedExeTokens: [exeName],
+        worker: { pid: 999997, expectedExeTokens: [exeName] },
+      });
+      const rep4 = reapOwnership(own4, { approvedRoots: [root], graceMs: 100 });
+      expect(rep4.status).toBe('reaped');
+      expect(rep4.resolvedWorkerPid).toBeNull();
+      expect(inspectPidState(other.pid).alive).toBe(true);
+    },
+  );
 });
 
 describe('verify-pr-vm-lifecycle finalize -> verify-pr-check end-to-end', () => {

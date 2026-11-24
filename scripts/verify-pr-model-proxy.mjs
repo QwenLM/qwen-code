@@ -126,7 +126,7 @@ export function parseArgs(argv) {
     } else if (arg === '--max-requests') {
       const raw = argv[++i];
       const value = Number(raw);
-      if (!Number.isInteger(value) || value <= 0) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
         throw new Error('--max-requests requires a positive integer');
       }
       options.maxRequests = value;
@@ -240,7 +240,7 @@ export function createModelProxy({
   }
   if (
     maxRequests !== null &&
-    (!Number.isInteger(maxRequests) || maxRequests <= 0)
+    (!Number.isSafeInteger(maxRequests) || maxRequests <= 0)
   ) {
     throw new Error('maxRequests must be a positive integer when provided');
   }
@@ -477,23 +477,7 @@ async function main(argv) {
     const socketStat = lstatSync(options.socketPath);
     const socketIdentity = { dev: socketStat.dev, ino: socketStat.ino };
     let socketCleanupFailed = false;
-    try {
-      chmodSync(options.socketPath, 0o600);
-      if (
-        Number.isInteger(options.vmmUid) &&
-        Number.isInteger(options.vmmGid)
-      ) {
-        chownSync(options.socketPath, options.vmmUid, options.vmmGid);
-      }
-    } catch (error) {
-      server.close();
-      try {
-        unlinkSync(options.socketPath);
-      } catch {
-        // Ignore cleanup failure.
-      }
-      throw error;
-    }
+    let socketIdentityChanged = false;
     const removeSocket = () => {
       let st;
       try {
@@ -508,6 +492,7 @@ async function main(argv) {
         st.ino !== socketIdentity.ino
       ) {
         socketCleanupFailed = true;
+        socketIdentityChanged = true;
         process.stderr.write('model-proxy: socket identity changed\n');
         return false;
       }
@@ -521,12 +506,34 @@ async function main(argv) {
       }
       return !socketCleanupFailed;
     };
+    try {
+      chmodSync(options.socketPath, 0o600);
+      if (
+        Number.isInteger(options.vmmUid) &&
+        Number.isInteger(options.vmmGid)
+      ) {
+        chownSync(options.socketPath, options.vmmUid, options.vmmGid);
+      }
+    } catch (error) {
+      removeSocket();
+      if (socketIdentityChanged) {
+        server.unref();
+      } else {
+        server.close();
+      }
+      throw error;
+    }
     server.on('close', removeSocket);
     const onSignal = () => {
       if (typeof server.closeAllConnections === 'function') {
         server.closeAllConnections();
       }
       removeSocket();
+      if (socketIdentityChanged) {
+        // libuv uv_pipe_close() unlinks the bound path unconditionally; exit
+        // directly so the OS closes our fd without deleting the replacement.
+        process.exit(1);
+      }
       server.close(() => {
         process.exit(socketCleanupFailed ? 1 : 0);
       });

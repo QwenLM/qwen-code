@@ -1305,12 +1305,16 @@ export async function runHardwareRound({
   let destroyedAt = null;
 
   try {
-    // Establish the recovery record before either listener or process launch.
-    // A failed spawn still has an approved working disk/token to clean up.
+    // Establish the recovery record for already-validated per-round assets
+    // before listener or process launch. Socket paths are added only after
+    // collector.ready succeeds so refusing a pre-existing socket never deletes
+    // it during teardown.
     if (isLocalVmm) {
       ownershipPath = join(realLauncher, 'ownership.json');
       writeOwnershipRecord(ownershipPath, {
         ...plan.ownershipTemplate,
+        socketPaths: [],
+        socketDir: undefined,
         tokenFile,
       });
     }
@@ -1385,6 +1389,12 @@ export async function runHardwareRound({
         vmmGid: plan.vmmGid ?? null,
       });
       await collector.ready;
+      if (isLocalVmm && ownershipPath) {
+        writeOwnershipRecord(ownershipPath, {
+          ...plan.ownershipTemplate,
+          tokenFile,
+        });
+      }
     }
 
     // 3. Launch hardware backend (or injected driver) and record ownership
@@ -1609,20 +1619,32 @@ export async function runHardwareRound({
     //    before reapOwnership rmdirs it), then reap local VMM or destroy
     //    provider VM, revoke token.json, and verify source golden immutability.
     if (proxyServer) {
+      let proxyIdentityChanged = false;
       if (proxySocketOwned && modelProxy?.socketPath) {
         const cleanupError = removeOwnedSocket(
           modelProxy.socketPath,
           proxySocketIdentity,
         );
-        if (cleanupError) errors.push(cleanupError);
+        if (cleanupError) {
+          errors.push(cleanupError);
+          proxyIdentityChanged =
+            cleanupError === 'proxy-socket-identity-changed';
+        }
       }
       if (proxyServer.listening) {
-        await new Promise((done) => {
-          if (typeof proxyServer.closeAllConnections === 'function') {
-            proxyServer.closeAllConnections();
-          }
-          proxyServer.close(() => done());
-        });
+        if (typeof proxyServer.closeAllConnections === 'function') {
+          proxyServer.closeAllConnections();
+        }
+        if (proxyIdentityChanged) {
+          // Avoid libuv uv_pipe_close() blind-unlinking the replacement entry;
+          // the old listening inode is already unlinked and unref() prevents
+          // the handle from keeping the event loop alive.
+          proxyServer.unref();
+        } else {
+          await new Promise((done) => {
+            proxyServer.close(() => done());
+          });
+        }
       }
     }
 
@@ -1933,7 +1955,15 @@ async function main(argv) {
       'rejectControlChars',
     ]) {
       if (rawCollector[key] !== undefined) {
-        resolvedCollectorOptions[key] = rawCollector[key];
+        if (
+          key === 'allowedFiles' &&
+          Array.isArray(rawCollector[key]) &&
+          rawCollector[key].every((name) => typeof name === 'string')
+        ) {
+          resolvedCollectorOptions[key] = new Set(rawCollector[key]);
+        } else {
+          resolvedCollectorOptions[key] = rawCollector[key];
+        }
       }
     }
     const result = await runHardwareRound({

@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1573,7 +1573,7 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
   });
 
   it('handles proxy socket replacement and requires failed unlink to block publication', async () => {
-    for (const mode of ['file-replaced', 'locked']) {
+    for (const mode of ['file-replaced', 'socket-replaced', 'locked']) {
       // POSIX root ignores directory permission bits; that cell requires a
       // non-root proxy process, covered by the model-proxy SIGTERM fixture.
       if (mode === 'locked' && process.getuid?.() === 0) continue;
@@ -1591,6 +1591,7 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
       const guard = join(root, 'outside-guard');
       writeFileSync(guard, 'preserve');
       const proxySocket = join(root, 'proxy.sock');
+      let replacementServer = null;
       try {
         const res = await runHardwareRound({
           ...ctx,
@@ -1598,7 +1599,12 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
           vaultDir: join(root, 'v'),
           approvedRoots: [root],
           plan: buildVfkitLaunchPlan({
-            runId: mode === 'file-replaced' ? 'sub01' : 'ulk01',
+            runId:
+              mode === 'file-replaced'
+                ? 'sub01'
+                : mode === 'socket-replaced'
+                  ? 'sub02'
+                  : 'ulk01',
             vfkitBin: '/opt/vfkit',
             seatbeltProfile: '/opt/sb',
             pocDir: root,
@@ -1624,6 +1630,15 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
             if (mode === 'file-replaced') {
               unlinkSync(proxyInfo.socketPath);
               writeFileSync(proxyInfo.socketPath, 'unowned-replacement');
+            } else if (mode === 'socket-replaced') {
+              unlinkSync(proxyInfo.socketPath);
+              replacementServer = createServer((sock) =>
+                sock.end('victim-uds-alive'),
+              );
+              await new Promise((resolve, reject) => {
+                replacementServer.once('error', reject);
+                replacementServer.listen(proxyInfo.socketPath, resolve);
+              });
             } else {
               chmodSync(root, 0o500);
             }
@@ -1662,11 +1677,29 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
         expect(res.teardownStatus).toBe('failed');
         expect(res.boundaryPath).toBeNull();
         expect(res.errors.join('\n')).toMatch(
-          mode === 'file-replaced'
-            ? /proxy-socket-identity-changed/
-            : /proxy-socket-remove-failed:EACCES/,
+          mode === 'locked'
+            ? /proxy-socket-remove-failed:EACCES/
+            : /proxy-socket-identity-changed/,
         );
+        if (mode === 'file-replaced') {
+          expect(readFileSync(proxySocket, 'utf8')).toBe('unowned-replacement');
+        } else if (mode === 'socket-replaced') {
+          expect(existsSync(proxySocket)).toBe(true);
+          const reply = await new Promise((resolve, reject) => {
+            const client = createConnection(proxySocket);
+            const chunks = [];
+            client.on('data', (c) => chunks.push(c));
+            client.on('end', () =>
+              resolve(Buffer.concat(chunks).toString('utf8')),
+            );
+            client.on('error', reject);
+          });
+          expect(reply).toBe('victim-uds-alive');
+        }
       } finally {
+        if (replacementServer) {
+          await new Promise((done) => replacementServer.close(() => done()));
+        }
         chmodSync(root, 0o700);
       }
     }
@@ -1754,5 +1787,138 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
         if (child && inspectPidState(child.pid).alive) child.kill('SIGKILL');
       }
     }
+  });
+
+  it('pins workerIdentityUnproven teardown failure, preserves pre-existing hostVsockPath, and converts CLI allowedFiles arrays', async () => {
+    const root = mkdtempSync('/tmp/qc-orch-unproven-');
+    tmpDirs.push(root);
+    const ctx = writeHostContext(root);
+    const kernel = join(root, 'k');
+    const golden = join(root, 'golden');
+    writeFileSync(kernel, 'k');
+    writeFileSync(golden, 'golden');
+
+    const exitFastBin = join(root, 'exit-fast.sh');
+    writeFileSync(exitFastBin, '#!/bin/sh\nexit 1\n');
+    chmodSync(exitFastBin, 0o755);
+
+    // 1. Firecracker default spawn exits without writing workerPidFile ->
+    //    workerIdentityUnproven must force teardownStatus=failed and
+    //    workerExitEvidence=unknown in execution-record.json (pins M8).
+    const fcPlan = buildFirecrackerLaunchPlan({
+      runId: 'unp01',
+      jailBaseDir: join(root, 'j1'),
+      jailerBin: exitFastBin,
+      firecrackerBin: '/opt/firecracker-v1.18.0',
+      vmmUid: process.getuid?.() || 65534,
+      vmmGid: process.getgid?.() || 65534,
+    });
+    mkdirSync(fcPlan.jailRoot, { recursive: true });
+    writeFileSync(fcPlan.kernelPath, 'k');
+    writeFileSync(fcPlan.ownershipTemplate.workDiskPath, 'golden');
+    const unpRes = await runHardwareRound({
+      ...ctx,
+      launcherDir: join(root, 'l1'),
+      vaultDir: join(root, 'v1'),
+      approvedRoots: [root],
+      plan: fcPlan,
+      sourceKernelPath: kernel,
+      sourceRootfsPath: golden,
+      trustedInputDigest: SHA('9'),
+    });
+    expect(unpRes.ok).toBe(false);
+    expect(unpRes.teardownStatus).toBe('failed');
+    expect(unpRes.boundaryPath).toBeNull();
+    expect(existsSync(fcPlan.ownershipTemplate.workDiskPath)).toBe(false);
+    const unpRec = JSON.parse(readFileSync(unpRes.executionRecordPath, 'utf8'));
+    expect(unpRec.teardownStatus).toBe('failed');
+    expect(unpRec.workerExitEvidence).toBe('unknown');
+
+    // 2. Pre-existing file at hostVsockPath is refused by collector and MUST
+    //    NOT be deleted by teardown reapOwnership().
+    const fcPre = buildFirecrackerLaunchPlan({
+      runId: 'pre01',
+      jailBaseDir: join(root, 'j2'),
+      jailerBin: exitFastBin,
+      firecrackerBin: '/opt/firecracker-v1.18.0',
+      vmmUid: process.getuid?.() || 65534,
+      vmmGid: process.getgid?.() || 65534,
+    });
+    mkdirSync(fcPre.jailRoot, { recursive: true });
+    writeFileSync(fcPre.kernelPath, 'k');
+    writeFileSync(fcPre.ownershipTemplate.workDiskPath, 'golden');
+    writeFileSync(fcPre.hostVsockPath, 'preserve-existing-vsock');
+    const preRes = await runHardwareRound({
+      ...ctx,
+      launcherDir: join(root, 'l2'),
+      vaultDir: join(root, 'v2'),
+      approvedRoots: [root],
+      plan: fcPre,
+      sourceKernelPath: kernel,
+      sourceRootfsPath: golden,
+      trustedInputDigest: SHA('a'),
+    });
+    expect(preRes.ok).toBe(false);
+    expect(preRes.boundaryPath).toBeNull();
+    expect(existsSync(fcPre.ownershipTemplate.workDiskPath)).toBe(false);
+    expect(readFileSync(fcPre.hostVsockPath, 'utf8')).toBe(
+      'preserve-existing-vsock',
+    );
+    expect(
+      JSON.parse(readFileSync(join(root, 'l2', 'token.json'), 'utf8')).revoked,
+    ).toBe(true);
+
+    // 3. CLI `run --config` accepts JSON array collectorOptions.allowedFiles
+    //    and converts it to a Set rather than failing collector option validation.
+    const fcCli = buildFirecrackerLaunchPlan({
+      runId: 'cli01',
+      jailBaseDir: join(root, 'j3'),
+      jailerBin: exitFastBin,
+      firecrackerBin: '/opt/firecracker-v1.18.0',
+      vmmUid: process.getuid?.() || 65534,
+      vmmGid: process.getgid?.() || 65534,
+    });
+    mkdirSync(fcCli.jailRoot, { recursive: true });
+    writeFileSync(fcCli.kernelPath, 'k');
+    writeFileSync(fcCli.ownershipTemplate.workDiskPath, 'golden');
+    const cliCfgPath = join(root, 'cli-allowed.json');
+    writeFileSync(
+      cliCfgPath,
+      JSON.stringify({
+        backend: 'firecracker',
+        contextPath: ctx.contextPath,
+        contextSha256: ctx.contextSha256,
+        launcherDir: join(root, 'l3'),
+        vaultDir: join(root, 'v3'),
+        approvedRoots: [root],
+        sourceKernelPath: kernel,
+        sourceRootfsPath: golden,
+        trustedInputDigest: SHA('b'),
+        collectorOptions: {
+          allowedFiles: ['verdict.txt', 'assertions.json', 'report.md'],
+        },
+        planOptions: {
+          runId: 'cli01',
+          jailBaseDir: join(root, 'j3'),
+          jailerBin: exitFastBin,
+          firecrackerBin: '/opt/firecracker-v1.18.0',
+          vmmUid: process.getuid?.() || 65534,
+          vmmGid: process.getgid?.() || 65534,
+        },
+      }),
+    );
+    const cliRun = spawnSync(
+      process.execPath,
+      [RUNNER_SCRIPT, 'run', '--config', cliCfgPath],
+      { encoding: 'utf8' },
+    );
+    expect(cliRun.status).toBe(1);
+    const cliOut = JSON.parse(cliRun.stdout);
+    expect(cliOut.errors.join('\n')).not.toMatch(
+      /allowedFiles must be null or a Set/,
+    );
+    expect(cliOut.errors.join('\n')).toMatch(
+      /timed out waiting for firecracker worker pid file/,
+    );
   });
 });
