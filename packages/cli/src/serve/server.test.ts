@@ -921,6 +921,9 @@ const EXPECTED_REGISTERED_FEATURES = [
         'managed_session_journal_delta_v1',
       ];
     }
+    if (feature === 'workspace_file_upload') {
+      return [feature, 'turn_skill_file_snapshot', 'session_retire_if_idle'];
+    }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
     }
