@@ -2,7 +2,7 @@
 
 [English](turn-scoped-resource-revisions.md) | [简体中文](turn-scoped-resource-revisions.zh-CN.md)
 
-**Status: RFC for maintainer feedback.** This proposal describes a possible serve-mode implementation and its acceptance tests. It changes no runtime behavior.
+**Draft for design and implementation review.** This document describes the target contract. The same PR implements opt-in Skill file snapshots, managed extension Store leases, generation-aware MCP reuse, and idle retirement. The [Serve protocol](../developers/qwen-serve-protocol.md) and [executable regression](../../integration-tests/cli/qwen-serve-turn-resources.test.ts) describe the implemented subset. Session-scoped grants or hooks declared by a managed Skill still require separate support. Running two incompatible full extensions concurrently requires separate Stores.
 
 Discussion: [#18178](https://github.com/QwenLM/qwen-code/issues/18178).
 

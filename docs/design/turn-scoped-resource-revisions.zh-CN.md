@@ -2,7 +2,7 @@
 
 [English](turn-scoped-resource-revisions.md) | [简体中文](turn-scoped-resource-revisions.zh-CN.md)
 
-**状态：RFC，征求维护者意见。** 本提案讨论 serve 模式的一种实现及其验收方式。当前改动仅包含设计。
+**设计与实现评审草案。** 本文描述目标契约。同一 PR 已实现可选的 Skill 文件快照、受管套件安装目录的读保护、按套件制品区分 MCP 连接，以及原生会话空闲退役。[Serve 协议](../developers/qwen-serve-protocol.md)和[可执行回归](../../integration-tests/cli/qwen-serve-turn-resources.test.ts)说明当前覆盖范围。受管 Skill 自身声明的会话级授权或 Hook 仍需单独支持。两个不兼容的完整套件并行执行时需要独立安装目录。
 
 讨论见 [#18178](https://github.com/QwenLM/qwen-code/issues/18178)。
 
