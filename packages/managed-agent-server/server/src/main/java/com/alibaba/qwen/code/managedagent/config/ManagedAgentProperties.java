@@ -413,6 +413,18 @@ public class ManagedAgentProperties
             throw new IllegalStateException("Hosted Workspace Shell requires Workspace files"
                     + " and default or auto-edit approval mode");
         }
+        // External foreground Shell (#15512 slice C) is its own switch on top
+        // of external files: it never enables the local Shell surface, and it
+        // cannot run under yolo because every command must reach approval.
+        if (harness.isExternalWorkspaceShellEnabled()
+                && (!isExternalWorkspaceFilesConfigured()
+                        || !toolPublication.isEnabled()
+                        || mode == null
+                        || !Set.of("default", "auto-edit").contains(mode.toLowerCase(Locale.ROOT)))) {
+            throw new IllegalStateException("External Workspace Shell requires configured"
+                    + " external-workspace files, tool publication, and default or auto-edit"
+                    + " approval mode");
+        }
         if (harness.isWorkspaceFilesEnabled()
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
@@ -549,6 +561,23 @@ public class ManagedAgentProperties
         } catch (IllegalStateException | IllegalArgumentException invalid) {
             return false;
         }
+    }
+
+    /**
+     * Static configuration eligibility for the external foreground-Shell
+     * profile (#15512 slice C): its own switch, external files already
+     * eligible, durable tool publication, and an approval mode that can
+     * actually ask. Never a readiness or worker-proof verdict.
+     */
+    public boolean isExternalWorkspaceShellConfigured() {
+        if (!harness.isExternalWorkspaceShellEnabled()
+                || !toolPublication.isEnabled()
+                || !isExternalWorkspaceFilesConfigured()) {
+            return false;
+        }
+        return harness.getApprovalMode() != null
+                && Set.of("default", "auto-edit")
+                        .contains(harness.getApprovalMode().toLowerCase(Locale.ROOT));
     }
 
     public void validateRuntimeProvider() {
@@ -690,6 +719,7 @@ public class ManagedAgentProperties
         private boolean enabled;
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
+        private boolean externalWorkspaceShellEnabled;
         private boolean workspaceChildAgentsEnabled = true;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";

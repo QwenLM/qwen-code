@@ -6,6 +6,7 @@
 import { expect, it } from 'vitest';
 import {
   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
@@ -21,7 +22,7 @@ import {
   isHostedWorkspacePublicShellProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
-  hasHostedExternalFilesExcludedOptions,
+  hasHostedExternalExcludedOptions,
 } from './hosted-workspace-profiles.js';
 
 it('admits the saved internal TeamLead as Shell execution without search', () => {
@@ -90,7 +91,7 @@ it('rejects the removed Shell profile', () => {
   expect(isHostedWorkspaceGlobProfile('hosted-workspace-shell/2')).toBe(false);
 });
 
-it('refuses every closed option the external-files profile cannot serve', () => {
+it('refuses every closed option the external lanes cannot serve', () => {
   for (const key of [
     'agentDefinition',
     'sessionSkillsRef',
@@ -104,17 +105,43 @@ it('refuses every closed option the external-files profile cannot serve', () => 
     'memoryStoreId',
   ]) {
     expect(
-      hasHostedExternalFilesExcludedOptions({ [key]: 'value' }),
+      hasHostedExternalExcludedOptions(
+        { [key]: 'value' },
+        HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      ),
       `${key} must be refused at create`,
     ).toBe(true);
   }
-  expect(hasHostedExternalFilesExcludedOptions({})).toBe(false);
-  expect(hasHostedExternalFilesExcludedOptions(null)).toBe(false);
+  expect(
+    hasHostedExternalExcludedOptions({}, HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(false);
+  expect(
+    hasHostedExternalExcludedOptions(
+      null,
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
+  ).toBe(false);
   // memoryStoreId is the lane the profile's own turn guard rejects as
   // `External files profile does not support optional lanes.`, so the create
   // surface must refuse it rather than admit a Session whose every turn fails.
   expect(
-    hasHostedExternalFilesExcludedOptions({ memoryStoreId: 'mem-1' }),
+    hasHostedExternalExcludedOptions(
+      { memoryStoreId: 'mem-1' },
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
+  ).toBe(true);
+  // The Shell lane requires captureBytes instead, so only that key differs.
+  expect(
+    hasHostedExternalExcludedOptions(
+      { captureBytes: 4096 },
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+    ),
+  ).toBe(false);
+  expect(
+    hasHostedExternalExcludedOptions(
+      { memoryStoreId: 'mem-1' },
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+    ),
   ).toBe(true);
 });
 

@@ -309,7 +309,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean supportsLifecycle(String profile) {
         try {
-            if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+            if (WorkspaceToolProfiles.isExternal(profile)) {
                 return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
             }
             return WorkspaceToolProfiles.FILES.equals(profile)
@@ -324,13 +324,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public boolean supportsSavedLifecycle(String profile) {
-        if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+        if (!WorkspaceToolProfiles.isExternal(profile)) {
             return supportsLifecycle(profile);
         }
         try {
             var capabilities = client().capabilities();
             return capabilities.getLifecycleProtocolVersion() == 1
-                    && capabilities.getFeatures().contains(WorkspaceToolProfiles.EXTERNAL_FILES);
+                    && capabilities.getFeatures().contains(profile);
         } catch (DaemonException | IllegalStateException unavailable) {
             return false;
         }
@@ -540,7 +540,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             if (actionResponse) {
                 workspaceExecution.authorizeActionResponse(session);
-                if (!passiveManagedRuntimeRecovery && (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                if (!passiveManagedRuntimeRecovery && (!WorkspaceToolProfiles.isExternal(session.toolProfile())
                         || !workspaceExecution.isExternal(session.workspace()))) {
                     workspaceExecution.verifyMountForProbe(session.workspace());
                 }
@@ -1751,7 +1751,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             if (actionResponse) {
                 workspaceExecution.authorizeActionResponse(session);
-                if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) || !workspaceExecution.isExternal(session.workspace())) {
+                if (!WorkspaceToolProfiles.isExternal(session.toolProfile()) || !workspaceExecution.isExternal(session.workspace())) {
                     workspaceExecution.verifyMountForProbe(session.workspace());
                 }
             } else {
@@ -1791,6 +1791,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             if (toolPublication.isEnabled()
                     && (WorkspaceToolProfiles.isPublicShell(profile)
+                            || WorkspaceToolProfiles.isExternalShell(profile)
                             || WorkspaceToolProfiles.isInternalTeamLead(profile))) {
                 builder.captureBytes(toolPublication.getExecutionBytes());
             }
@@ -2174,7 +2175,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void requireShellApproval(SessionRecord session) {
-        if (session.workspace() != null && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+        if (session.workspace() != null
+                && (WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+                        || WorkspaceToolProfiles.isExternalShell(session.toolProfile()))
                 && (actions == null || !WorkspaceToolProfiles.supportsApprovalMode(
                         actions.approvalMode(session.tenantId(), session.sessionId())))) {
             throw new IllegalStateException("Hosted Workspace Shell requires a valid persisted approval mode");
@@ -2182,7 +2185,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void requireApprovalSelectionSupport(SessionRecord session) {
-        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+        if (WorkspaceToolProfiles.isExternal(session.toolProfile())) {
             if (!supportsLifecycle(session.toolProfile()) || session.workspace() == null
                     || workspaceExecution == null || !workspaceExecution.isExternal(session.workspace())
                     || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
@@ -2190,7 +2193,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     || sessions.findChildLineage(session.tenantId(), session.sessionId()) != null
                     || sessionSkills != null && (!sessionSkills.effective(session).isEmpty()
                             || initialSelection(session) != null)) {
-                throw new IllegalStateException("External Workspace files profile is unavailable");
+                throw new IllegalStateException("External Workspace profile is unavailable");
             }
         }
         var active = sessions.findActiveTurns(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
@@ -2198,7 +2201,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .orElseThrow(() -> new IllegalStateException("The active Turn is missing"));
         if (activeTurn != null && activeTurn.input().stream().anyMatch(block -> "image".equals(block.get("type"))
                 || "resource".equals(block.get("type")))
-                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) || !supportsInputAttachments())) {
+                && (WorkspaceToolProfiles.isExternal(session.toolProfile()) || !supportsInputAttachments())) {
             throw new IllegalStateException("Hosted input attachments are unavailable");
         }
         if (!WorkspaceToolProfiles.supportsApprovalSelection(session)) {
@@ -2207,7 +2210,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         var selected = sessions.findApprovalSelections(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
         requireExtendedApprovalSupport(selected);
         if (selected != null && selected.planMode()
-                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) || !supportsPlanMode())) {
+                && (WorkspaceToolProfiles.isExternal(session.toolProfile()) || !supportsPlanMode())) {
             throw new IllegalStateException("Hosted Plan mode is unavailable");
         }
         boolean changed = selected != null && selected.revision() > 0;
@@ -2225,7 +2228,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 if (policy.revision() < selected.revision() && !supportsLiveApprovalSelection()) {
                     throw new IllegalStateException("Hosted live approval selection is unavailable");
                 }
-                if (policy.planMode() && !supportsPlanMode()) {
+                if (policy.planMode() && (WorkspaceToolProfiles.isExternal(session.toolProfile()) || !supportsPlanMode())) {
                     throw new IllegalStateException("Hosted Plan mode is unavailable");
                 }
             }
@@ -2333,7 +2336,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private boolean foregroundOnly(SessionRecord session) {
-        return sshWorkspace(session) && !(session.publicChildAgentsVersion() == 1
+        // The external Shell lane is foreground-only by contract (#15512 slice
+        // C): background Shell and monitor need their own evidence story, so
+        // the Harness is told to keep its detached lanes closed here.
+        return WorkspaceToolProfiles.isExternalShell(session.toolProfile())
+                || sshWorkspace(session) && !(session.publicChildAgentsVersion() == 1
                 && settings.getExtensions().isEnabled() && settings.getManagedExtensions().isEnabled());
     }
 

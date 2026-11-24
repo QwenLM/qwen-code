@@ -195,7 +195,8 @@ public final class JdbcExternalWorkspaceOwnership {
                         || !harness.equals(row.getString("session_id")) || row.getObject("deleted_at") != null
                         || !"qwen-code".equals(row.getString("agent_id")) || row.getObject("agent_definition_digest") != null
                         || row.getObject("parent_session_id") != null
-                        || !"hosted-workspace-external-files/1".equals(row.getString("tool_profile"))
+                        || !com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
+                                .isExternal(row.getString("tool_profile"))
                         || !WorkspaceExecutionProfile.CONFIG_REF.equals(row.getString("workspace_config_ref"))
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(row.getString("workspace_policy_ref"))
                         || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))

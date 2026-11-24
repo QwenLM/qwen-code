@@ -218,7 +218,8 @@ public final class ExternalWorkspaceRetirementService {
         for (var member : members) {
             require("PUBLIC".equals(member.get("session_kind"))
                     && List.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED").contains(member.get("status"))
-                    && List.of("none", WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.EXTERNAL_FILES).contains(member.get("tool_profile"))
+                    && List.of("none", WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.EXTERNAL_FILES,
+                            WorkspaceToolProfiles.EXTERNAL_SHELL).contains(member.get("tool_profile"))
                     && member.get("workspace_generation") instanceof Number generation
                     && generation.longValue() == request.workspaceGeneration()
                     && request.workspaceId().equals(member.get("workspace_storage_id")));

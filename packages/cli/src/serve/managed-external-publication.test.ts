@@ -32,6 +32,7 @@ let root: string;
 let boot: ManagedExternalContextBoot;
 let publication: ManagedExternalPublication | undefined;
 const closers: Array<() => Promise<void>> = [];
+const captureId = 'capture-a';
 const request = {
   reference: {
     sessionId: 'runtime-session-a',
@@ -278,6 +279,7 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
     expect(worker.ready.publication?.paths).toEqual([
       '/internal/managed-runtime/v2/publication:begin',
       '/internal/managed-runtime/v2/publication:read',
+      '/internal/managed-runtime/v2/publication:renew',
       '/internal/managed-runtime/v2/publication:stop-drained',
     ]);
     expect(worker.ready.publication?.url).toBeDefined();
@@ -301,6 +303,7 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       protocolVersion: 2,
       ...request,
       expiresAt: Date.now() + 60_000,
+      captureId,
     });
     let channelId: string | undefined;
     for (const origin of origins) {
@@ -420,8 +423,8 @@ describe.skipIf(process.platform === 'win32')(
         'publication is closed',
       );
       const expiresAt = Date.now() + 60_000;
-      const id = await publication!.begin(request, expiresAt);
-      expect(await publication!.begin(request, expiresAt)).toBe(id);
+      const id = await publication!.begin(request, expiresAt, captureId);
+      expect(await publication!.begin(request, expiresAt, captureId)).toBe(id);
       await expect(
         publication!.begin(
           {
@@ -429,6 +432,7 @@ describe.skipIf(process.platform === 'win32')(
             reference: { ...request.reference, argsDigest: 'b'.repeat(64) },
           },
           expiresAt,
+          captureId,
         ),
       ).rejects.toThrow('publication is closed');
       await expect(
@@ -444,7 +448,11 @@ describe.skipIf(process.platform === 'win32')(
     });
 
     it('captures real binary stdout/stderr with bounded replay and refuses drain until acknowledged EOF', async () => {
-      const channelId = await publication!.begin(request, Date.now() + 60_000);
+      const channelId = await publication!.begin(
+        request,
+        Date.now() + 60_000,
+        captureId,
+      );
       const { sink, identity } = await publication!.prepare(request);
       const handle = await ShellExecutionService.executeLaunch(
         {
@@ -518,6 +526,7 @@ describe.skipIf(process.platform === 'win32')(
             capture: { ...request.capture, executionCallId: 'later' },
           },
           Date.now() + 60_000,
+          captureId,
         ),
       ).rejects.toThrow('publication is closed');
     });
@@ -525,7 +534,7 @@ describe.skipIf(process.platform === 'win32')(
 );
 
 it.skipIf(process.platform === 'win32')(
-  'persists replayable drain proof after real executor capture and acknowledgements',
+  'persists replayable drain proof after real executor capture without an acknowledgement',
   async () => {
     publication = new ManagedExternalPublication(root, boot);
     const ledger = ManagedRuntimeLedger.create({
@@ -558,6 +567,7 @@ it.skipIf(process.platform === 'win32')(
     const channelId = await publication.begin(
       { ...request, reference },
       Date.now() + 60_000,
+      captureId,
     );
     await executor.executeV3({
       reference,
@@ -592,15 +602,10 @@ it.skipIf(process.platform === 'win32')(
         sequence++;
       }
     }
-    expect(await publication.stopDrained(executor)).toEqual({
-      state: 'unknown',
-    });
-    executor.acknowledgeV3(reference, {
-      executionCallId: request.capture.executionCallId,
-      manifest: result.capture!.manifest,
-      deliveryStatus: 'committed',
-      historyRevision: 1,
-    });
+    // This lane retires on the drained stop itself. Its worker holds no
+    // control-plane credential, so no ACK ever reaches its journal and waiting
+    // for one would refuse every close; the acknowledged EOF sequences above
+    // are the whole proof it needs.
     const drained = await publication.stopDrained(executor);
     expect(drained).toMatchObject({
       state: 'drained',

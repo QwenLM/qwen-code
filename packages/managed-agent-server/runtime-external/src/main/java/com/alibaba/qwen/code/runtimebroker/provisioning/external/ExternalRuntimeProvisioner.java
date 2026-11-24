@@ -52,7 +52,7 @@ import java.util.concurrent.Executors;
 public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     public static final String KIND = "external-scratch";
     static final int MAX_PLACEMENTS = 1024;
-    private static final int HANDLE_VERSION = 1;
+    protected static final int HANDLE_VERSION = 1;
     private static final int BOOT_LIMIT = 32 * 1024;
     private final ExternalRuntimeClient client;
     private final String providerId;
@@ -75,6 +75,25 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     @Override
     public String kind() {
         return KIND;
+    }
+
+    /**
+     * The resource-handle version minted for this request. Profiles with a
+     * separate capability override it so a handle minted for one profile can
+     * never be adopted as another's, even under the same provider and storage.
+     */
+    protected int handleVersion(RuntimeProvisionRequest request) {
+        return HANDLE_VERSION;
+    }
+
+    /**
+     * Whether a saved handle version is recoverable at startup, where only the
+     * handle is available. {@link #validateHandle} still checks the version the
+     * request itself demands, so this wider predicate never adopts a handle
+     * across profiles.
+     */
+    protected boolean admitsHandleVersion(int version) {
+        return version == HANDLE_VERSION;
     }
 
     @Override
@@ -106,7 +125,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             Placement retained = admitPlacement(request, seed, knownHandle, true);
             RuntimeResourceHandle original = knownHandle != null ? knownHandle : retained.handle();
             RuntimeResourceHandle handle = original != null ? original
-                    : new RuntimeResourceHandle(kind(), HANDLE_VERSION, Map.of(
+                    : new RuntimeResourceHandle(kind(), handleVersion(request), Map.of(
                             "providerId", providerId,
                             "provisionRequestId", seed.getProvisionRequestId(),
                             "identity", identity(request, seed),
@@ -118,7 +137,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
-        return handle != null && kind().equals(handle.getKind()) && handle.getVersion() == HANDLE_VERSION;
+        return handle != null && kind().equals(handle.getKind()) && admitsHandleVersion(handle.getVersion());
     }
 
     @Override
@@ -155,7 +174,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             long pause = 200;
             try {
                 while (System.nanoTime() < deadline) {
-                    RuntimeObservation observed = observe(request, seed, saved.handle());
+                    RuntimeObservation observed = observe(request, seed, saved.handle(), true);
                     if (observed.getOutcome() == RuntimeObservation.Outcome.READY) {
                         savePlacement(new Placement(request, seed, saved.handle(), observed.getEndpoint()));
                         return lease(seed, observed.getEndpoint());
@@ -187,6 +206,18 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     @Override
     public CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, RuntimeLease lastLease) {
+        return reconcile(request, seed, handle, lastLease, true);
+    }
+
+    /**
+     * {@code establishing} is false only for the confirm of an already live
+     * binding, which re-runs the provider observe without the profile's extra
+     * establishment probe. Everything that brings a placement up or repairs one
+     * keeps the full evidence rule.
+     */
+    private CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, RuntimeResourceHandle handle, RuntimeLease lastLease,
+            boolean establishing) {
         return CompletableFuture.supplyAsync(() -> {
             Placement retained = null;
             try {
@@ -196,7 +227,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                     throw conflict();
                 }
                 retained = admitPlacement(request, seed, handle, true);
-                RuntimeObservation observation = observe(request, seed, handle);
+                RuntimeObservation observation = observe(request, seed, handle, establishing);
                 URI originalEndpoint = retained.endpoint() != null ? retained.endpoint()
                         : lastLease == null ? null : lastLease.getEndpoint();
                 // The endpoint-evidence guard runs before any provider call:
@@ -235,7 +266,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         if (saved == null || !saved.request().equals(request) || !lease.getEndpoint().equals(saved.endpoint())) {
             return CompletableFuture.failedFuture(executor.isShutdown() ? unavailable() : conflict());
         }
-        return reconcile(request, saved.seed(), saved.handle(), lease).thenCompose(observation -> {
+        return reconcile(request, saved.seed(), saved.handle(), lease, false).thenCompose(observation -> {
             if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
                     || observation.getOutcome() == RuntimeObservation.Outcome.STARTING) {
                 throw unavailable();
@@ -276,8 +307,14 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         }
     }
 
+    /**
+     * One provider observe, mapped by the profile's own evidence rule.
+     * {@code establishing} is true only while the placement is being brought up
+     * or reconciled; the confirm of an already live binding passes false, so an
+     * extra readiness probe never adds an exchange to every dispatch.
+     */
     private RuntimeObservation observe(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            RuntimeResourceHandle handle) {
+            RuntimeResourceHandle handle, boolean establishing) {
         validateHandle(request, seed, handle);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 1);
@@ -285,7 +322,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         body.put("identity", identity(request, seed));
         body.put("handle", handle.getValue().get("provider"));
         Map<String, Object> response = call(client.observe(Map.copyOf(body)));
-        return observation(request, seed, handle, response);
+        return observation(request, seed, handle, response, establishing);
     }
 
     private RuntimeObservation reattach(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -299,7 +336,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         body.put("handle", handle.getValue().get("provider"));
         body.put("endpoint", endpoint.toString());
         Map<String, Object> response = call(client.reattach(Map.copyOf(body)));
-        return observation(request, seed, handle, response);
+        return observation(request, seed, handle, response, true);
     }
 
     /**
@@ -314,9 +351,13 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     /**
      * Maps one provider observe response onto a Broker observation. Profiles that
      * carry extra evidence override this and delegate the state mapping here.
+     *
+     * <p>{@code establishing} tells the override whether this observation is
+     * bringing a placement up or reconciling one, as opposed to confirming an
+     * already live binding. An extra probe belongs only to the former.
      */
     protected RuntimeObservation observation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            RuntimeResourceHandle handle, Map<String, Object> response) {
+            RuntimeResourceHandle handle, Map<String, Object> response, boolean establishing) {
         Object state = response.get("state");
         if ("RUNNING".equals(state)) {
             return RuntimeObservation.ready(handle, endpoint(response.get("endpoint")),
@@ -509,7 +550,8 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     private void validateHandle(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, Map<String, Object> boot) {
-        if (!supportsStartupRecovery(handle) || handle.getValue().size() != 4
+        if (!supportsStartupRecovery(handle) || handle.getVersion() != handleVersion(request)
+                || handle.getValue().size() != 4
                 || !providerId.equals(handle.getValue().get("providerId"))
                 || !seed.getProvisionRequestId().equals(handle.getValue().get("provisionRequestId"))
                 || !identity(request, boot).equals(handle.getValue().get("identity"))) {

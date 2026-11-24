@@ -77,6 +77,8 @@ public final class WorkspaceRuntimeResolver {
                         properties.getHarness().getCapabilityDigest())
                 || WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
                 properties.getHarness().getCapabilityDigest())
+                || WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())
                 || com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())) {
             throw new IllegalStateException("Workspace execution profile is reserved");
@@ -142,7 +144,7 @@ public final class WorkspaceRuntimeResolver {
             }
             return new Resolved(saved, new RuntimeScope(session.tenantId(), saved.getWorkspaceId(),
                     Long.toString(saved.getWorkspaceGeneration()), registered.mountRoot(),
-                    WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                    externalDigest(session.toolProfile()),
                     boundSessionIsolationClass)
                     .withLifecycleAuthority(lifecycle));
         }
@@ -253,6 +255,19 @@ public final class WorkspaceRuntimeResolver {
         } catch (RuntimeException error) {
             return false;
         }
+    }
+
+    /**
+     * The capability digest of a registered external placement, chosen from
+     * the Session's pinned tool profile. A Session pinned to files keeps the
+     * files digest for its whole life even after Shell is enabled, so its
+     * saved binding, handle and admission never change shape.
+     */
+    private static String externalDigest(String toolProfile) {
+        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
+                .isExternalShell(toolProfile)
+                ? WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST
+                : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
     }
 
     private String extensionDigest(String platform) {
@@ -374,7 +389,10 @@ public final class WorkspaceRuntimeResolver {
             RuntimeScope scope, String storageId) {
         if (externalRegistrations == null
                 || !scope.getWorkspaceId().equals(storageId)
-                || !WorkspaceExecutionProfile.isBoundWorkspaceScope(scope)
+                // The Shell profile is Session-isolated by construction: a
+                // shared placement has no owning Session to pin its profile,
+                // so it stays on the files capability.
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())
                 || !"workspace".equals(scope.getIsolationClass())) {
             throw WorkspaceExecutionStore.unavailable();
         }

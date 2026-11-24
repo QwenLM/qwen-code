@@ -544,7 +544,7 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsLifecycle(String profile) {
-        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+        if (WorkspaceToolProfiles.isExternal(profile)) {
             return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
         }
         return contract != null && (WorkspaceToolProfiles.FILES.equals(profile)
@@ -554,8 +554,8 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsSavedLifecycle(String profile) {
-        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
-                ? contract != null && contract.lifecycle() == 1 && contract.features().contains(WorkspaceToolProfiles.EXTERNAL_FILES)
+        return WorkspaceToolProfiles.isExternal(profile)
+                ? contract != null && contract.lifecycle() == 1 && contract.features().contains(profile)
                 : supportsLifecycle(profile);
     }
 

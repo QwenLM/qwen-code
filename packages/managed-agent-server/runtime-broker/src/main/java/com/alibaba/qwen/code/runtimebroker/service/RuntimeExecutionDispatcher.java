@@ -10,8 +10,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
@@ -19,7 +17,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
-import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
@@ -44,15 +41,12 @@ import java.util.concurrent.locks.ReentrantLock;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.evidenceUnavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.invalid;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isDetachedCapture;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isProtocolV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isV3Family;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
 
@@ -65,6 +59,8 @@ final class RuntimeExecutionDispatcher {
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
     private final RuntimePublicationVerifier publicationVerifier;
+    private final RuntimeExecutionExternalShell externalShellLane;
+    private final RuntimeToolAcknowledgements acknowledgements;
     private final String brokerOwnerId;
     private final Duration dispatchLeaseDuration;
     private final Duration v3ResultWindow;
@@ -105,6 +101,8 @@ final class RuntimeExecutionDispatcher {
         this.provisioner = provisioner;
         this.transport = transport;
         this.publicationVerifier = publicationVerifier;
+        this.externalShellLane = new RuntimeExecutionExternalShell(publicationVerifier, executionRepository);
+        this.acknowledgements = new RuntimeToolAcknowledgements(sessionRepository, transport);
         this.brokerOwnerId = brokerOwnerId;
         this.dispatchLeaseDuration = dispatchLeaseDuration;
         this.v3ResultWindow = v3ResultWindow;
@@ -155,7 +153,30 @@ final class RuntimeExecutionDispatcher {
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant,
             VerifiedDispatchPayload verifiedPayload) {
-        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+        beginDispatch(context, prepared, payload, grant, verifiedPayload, null);
+    }
+
+    void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
+        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalShellRequest(
+                context.binding().getRequest())
+                && (!isPublicationV3(prepared.getReference())
+                        || prepared.getReference().containsKey("runtimeProtocol")
+                        || !prepared.isCancelRequested() && (grant == null
+                                || publicationVerifier == null
+                                || publicationVerifier.externalShell() == null
+                                || payload == null
+                                || !"run_shell_command".equals(String.valueOf(payload.get("toolName")))
+                                || !(payload.get("input") instanceof Map<?, ?> input)
+                                || input.containsKey("is_background") || input.containsKey("is_monitor")))) {
+            throw invalid("runtime_payload_invalid",
+                    "External Shell requires a foreground Tool v3 Shell payload");
+        }
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalShellRequest(
+                context.binding().getRequest())
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null
@@ -186,7 +207,7 @@ final class RuntimeExecutionDispatcher {
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared, payload, grant, verifiedPayload);
+            operation = dispatch(context, prepared, payload, grant, verifiedPayload, externalChannelId);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -209,7 +230,7 @@ final class RuntimeExecutionDispatcher {
     private CompletionStage<Void> dispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant,
-            VerifiedDispatchPayload verifiedPayload) {
+            VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
         ToolExecutionRecord claimed = claimDispatchForPayload(
                 context, prepared, verifiedPayload);
         if (claimed == null
@@ -219,9 +240,9 @@ final class RuntimeExecutionDispatcher {
                 && HarnessOwnership.sharesRuntimeSessions(
                         context.binding().getRequest())) {
             return awaitSharedDispatch(context, prepared, payload, grant,
-                    verifiedPayload);
+                    verifiedPayload, externalChannelId);
         }
-        return dispatchClaimed(context, claimed, payload, grant);
+        return dispatchClaimed(context, claimed, payload, grant, externalChannelId);
     }
 
     private ToolExecutionRecord claimDispatchForPayload(
@@ -244,7 +265,7 @@ final class RuntimeExecutionDispatcher {
     private CompletionStage<Void> awaitSharedDispatch(
             SessionContext context, ToolExecutionRecord prepared,
             Map<String, Object> payload, RuntimePublicationGrant grant,
-            VerifiedDispatchPayload verifiedPayload) {
+            VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
         // Keep a single Future per waiting request; a long-lived UNKNOWN
         // occupant must not build a recursive chain. The wait is bounded like
         // the v3 result poll: backoff between attempts and a deadline, so an
@@ -309,7 +330,7 @@ final class RuntimeExecutionDispatcher {
                                 TimeUnit.MILLISECONDS);
                     } else {
                         dispatchClaimed(
-                                context, next, payload, grant)
+                                context, next, payload, grant, externalChannelId)
                                 .whenComplete((ignored, error) -> {
                                     if (error == null) {
                                         queued.complete(null);
@@ -371,7 +392,7 @@ final class RuntimeExecutionDispatcher {
     private CompletionStage<Void> dispatchClaimed(
             SessionContext context, ToolExecutionRecord claimed,
             Map<String, Object> payload,
-            RuntimePublicationGrant grant) {
+            RuntimePublicationGrant grant, String externalChannelId) {
         if (claimed == null
                 || claimed.getState()
                         != ToolExecutionRecord.State.DISPATCHING) {
@@ -389,7 +410,16 @@ final class RuntimeExecutionDispatcher {
             executionState.markUnknown(executing);
             return CompletableFuture.completedFuture(null);
         }
-        DispatchRenewal renewal = new DispatchRenewal(executing);
+        // A dispatch this process did not start (the recovery arm) arrives
+        // without a channel. `begin` is idempotent per execution, so opening it
+        // here gets the same channel the original dispatch used. It runs on the
+        // invocation's own stage, never under the session lock, and it must
+        // complete before the Shell starts: the worker prepares against a
+        // channel that already exists.
+        CompletionStage<String> channel = externalChannelId != null
+                ? CompletableFuture.completedFuture(externalChannelId)
+                : externalShellLane.channel(context, executing, grant);
+        DispatchRenewal renewal = new DispatchRenewal(executing, context, grant, channel);
         try {
             renewal.start();
         } catch (RuntimeException | Error exception) {
@@ -397,47 +427,13 @@ final class RuntimeExecutionDispatcher {
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
-        CompletionStage<Map<String, Object>> invocation =
-                RuntimeToolMeasurements.selected(executing.getReference())
-                        ? safeStage(() -> transport.executeV4(
-                                context.lease(), context.session(),
-                                dispatchReference(executing, context.binding().getRequest().getScope()),
-                                payload, grant == null ? null : capture(grant)))
-                                .thenCompose(answer -> {
-                                    if ("settled".equals(answer.get("state"))
-                                            && answer.get("result") instanceof Map<?, ?> raw) {
-                                        @SuppressWarnings("unchecked")
-                                        Map<String, Object> result = (Map<String, Object>) raw;
-                                        return CompletableFuture.completedFuture(result);
-                                    }
-                                    return awaitV3Result(context, executing, clock.instant().plus(v3ResultWindow));
-                                })
-                        : grant == null
-                ? safeStage(() -> payload == null
-                        ? transport.execute(context.lease(), context.session(), executing.getReference())
-                        : transport.execute(context.lease(), context.session(),
-                                dispatchReference(executing, context.binding().getRequest().getScope()), payload))
-                : safeStage(() -> transport.executeV3(context.lease(), context.session(),
-                        executing.getReference(), payload, capture(grant)))
-                        .handle((answer, error) -> {
-                            if (nonRetryableToolV3(error)) {
-                                throw new CompletionException(unwrap(error));
-                            }
-                            if (error == null && answer != null
-                                    && "settled".equals(answer.get("state"))
-                                    && answer.get("result") instanceof Map<?, ?> result
-                                    && "not_started".equals(result.get("executionStatus"))) {
-                                @SuppressWarnings("unchecked")
-                                Map<String, Object> notStarted = (Map<String, Object>) result;
-                                return notStarted;
-                            }
-                            return null;
-                        })
-                        .thenCompose(notStarted -> notStarted != null
-                                ? CompletableFuture.completedFuture(notStarted)
-                                : awaitV3Result(context, executing,
-                                        clock.instant().plus(v3ResultWindow)));
+        CompletionStage<Map<String, Object>> invocation = channel.thenCompose(id ->
+                invoke(context, executing, payload, grant));
         return invocation
+                .thenCompose(result -> result == null
+                        ? CompletableFuture.<Map<String, Object>>completedFuture(null)
+                        : channel.thenCompose(id -> externalShellLane.move(
+                                context, executing, grant, id, result)))
                 .<Void>handle((result, error) -> {
                     // Stop counting as running before the outcome is
                     // written, so a cancel that reads that outcome does not
@@ -466,6 +462,52 @@ final class RuntimeExecutionDispatcher {
                             ? acknowledgePersistedTools(context.binding(), settled).exceptionally(error -> null)
                             : CompletableFuture.completedFuture(null);
                 }).whenComplete((ignored, error) -> renewal.close());
+    }
+
+    private CompletionStage<Map<String, Object>> invoke(SessionContext context,
+            ToolExecutionRecord executing, Map<String, Object> payload,
+            RuntimePublicationGrant grant) {
+        boolean externalShell = RuntimeExecutionExternalShell.lane(context, executing);
+        return RuntimeToolMeasurements.selected(executing.getReference())
+                ? safeStage(() -> transport.executeV4(
+                        context.lease(), context.session(),
+                        dispatchReference(executing, context.binding().getRequest().getScope()),
+                        payload, grant == null ? null : capture(grant)))
+                        .thenCompose(answer -> {
+                            if ("settled".equals(answer.get("state"))
+                                    && answer.get("result") instanceof Map<?, ?> raw) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> result = (Map<String, Object>) raw;
+                                return CompletableFuture.completedFuture(result);
+                            }
+                            return awaitV3Result(context, executing, clock.instant().plus(v3ResultWindow));
+                        })
+                : grant == null
+                ? safeStage(() -> payload == null
+                        ? transport.execute(context.lease(), context.session(), executing.getReference())
+                        : transport.execute(context.lease(), context.session(),
+                                dispatchReference(executing, context.binding().getRequest().getScope()), payload))
+                : safeStage(() -> transport.executeV3(context.lease(), context.session(),
+                        executing.getReference(), payload, capture(grant)))
+                        .handle((answer, error) -> {
+                            if (nonRetryableToolV3(error)) {
+                                throw new CompletionException(unwrap(error));
+                            }
+                            if (error == null && answer != null
+                                    && "settled".equals(answer.get("state"))
+                                    && answer.get("result") instanceof Map<?, ?> result
+                                    && (externalShell
+                                            || "not_started".equals(result.get("executionStatus")))) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> settled = (Map<String, Object>) result;
+                                return settled;
+                            }
+                            return null;
+                        })
+                        .thenCompose(notStarted -> notStarted != null
+                                ? CompletableFuture.completedFuture(notStarted)
+                                : awaitV3Result(context, executing,
+                                        clock.instant().plus(v3ResultWindow)));
     }
 
     @SuppressWarnings("unchecked")
@@ -505,6 +547,7 @@ final class RuntimeExecutionDispatcher {
             boolean measured =
                     RuntimeToolMeasurements.selected(
                             original.getReference());
+            boolean externalShell = RuntimeExecutionExternalShell.lane(context, original);
             Map<String, Object> finished =
                     publicationVerifier == null ? null : publicationVerifier.finished(original);
             if (finished != null && !measured) {
@@ -530,7 +573,12 @@ final class RuntimeExecutionDispatcher {
                             answer.completeExceptionally(unwrap(error));
                             return;
                         }
-                        if (measured && error == null && status != null
+                        // The external lane's worker settles on its own local
+                        // capture and publishes nothing, so its status is the
+                        // result the drain below moves. A foreground Shell may
+                        // outlive the execute call's own request timeout, and
+                        // this poll is then the only way its outcome arrives.
+                        if ((measured || externalShell) && error == null && status != null
                                 && "settled".equals(status.get("state"))
                                 && status.get("result") instanceof Map<?, ?> raw) {
                             @SuppressWarnings("unchecked")
@@ -635,63 +683,7 @@ final class RuntimeExecutionDispatcher {
     }
 
     CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
-        boolean external = WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
-        if (external && (!execution.isSettled() || execution.getResult() == null
-                || execution.getResult().containsKey("capture")
-                || !execution.getReference().keySet().equals(
-                        Set.of("sessionId", "promptId", "callId", "argsDigest", "dispatchMode"))
-                || !"deferred".equals(execution.getReference().get("dispatchMode")))) {
-            return failed(conflict("workspace_close_identity_unverified", "External drain requires settled file Tool v2 results"));
-        }
-        if ((!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
-                        && !RuntimeToolMeasurements.selected(execution.getReference()) && !external)
-                || !execution.isSettled() || execution.getResult() == null
-                || ProviderRuntimeProtocol.isReference(execution.getReference())) {
-            return CompletableFuture.completedFuture(null);
-        }
-        Map<String, Object> noStart = sshNoStartReceipt(binding, execution);
-        if (noStart == null && (execution.getResult().containsKey("capture")
-                || isV3Family(execution.getReference()))) {
-            return CompletableFuture.completedFuture(null);
-        }
-        RuntimeSessionRecord session = sessionRepository.findById(binding.getRequest().getScope(),
-                execution.getRuntimeSessionId());
-        if (binding.getLease() == null || session == null || !execution.belongsTo(session)
-                || !binding.getBindingId().equals(execution.getBindingId())
-                || binding.getGeneration() != execution.getRuntimeGeneration()
-                || !binding.getRequest().getScope().equals(session.getSession().getScope())
-                // Shared workspace bindings carry no session isolation key; ownership
-                // there rests on belongsTo + bindingId + generation + scope above, the
-                // same shape acquireRecovery uses (#16023 R1-25).
-                || !com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
-                        && !execution.getHarnessSessionId().equals(binding.getRequest().getIsolationKey())) {
-            return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
-        }
-        if (noStart != null) {
-            CompletionStage<Map<String, Object>> acknowledgement = isPublicationV3(execution.getReference())
-                    ? transport.acknowledgeV3(binding.getLease(), session.getSession(), execution.getReference(), noStart)
-                    : transport.acknowledge(binding.getLease(), session.getSession(), execution.getReference(), noStart);
-            return acknowledgement.thenAccept(answer -> {
-                if (answer == null || !Set.of("settled", "unknown").contains(answer.get("state"))) {
-                    throw conflict("runtime_execution_conflict", "Original Runtime did not confirm the no-start acknowledgement");
-                }
-            });
-        }
-        var original = session.getSession();
-        var authority = binding.getRequest().getScope().getLifecycleAuthority();
-        if (external && authority != null) {
-            original = new RuntimeSession(original.getHarnessSessionId(), original.getRuntimeSessionId(),
-                    original.getTurnKind(), original.getScope().withLifecycleAuthority(authority));
-        }
-        return RuntimeToolMeasurements.selected(
-                        execution.getReference())
-                ? transport.acknowledgeV4(
-                        binding.getLease(),
-                        original,
-                        execution.getReference(),
-                        execution.getResult(),
-                        null)
-                : transport.acknowledgeV2(binding.getLease(), original, execution.getReference());
+        return acknowledgements.acknowledgePersistedTools(binding, execution);
     }
 
     private static boolean ownsDispatch(ToolExecutionRecord current,
@@ -707,10 +699,17 @@ final class RuntimeExecutionDispatcher {
         // calls must not pin the caller's carrier while they block.
         private final ReentrantLock monitor = new ReentrantLock();
         private final ToolExecutionRecord original;
+        private final SessionContext context;
+        private final RuntimePublicationGrant grant;
+        private final CompletionStage<String> externalChannel;
         private ScheduledFuture<?> task;
 
-        DispatchRenewal(ToolExecutionRecord original) {
+        DispatchRenewal(ToolExecutionRecord original, SessionContext context,
+                RuntimePublicationGrant grant, CompletionStage<String> externalChannel) {
             this.original = original;
+            this.context = context;
+            this.grant = grant;
+            this.externalChannel = externalChannel;
         }
 
         void start() {
@@ -743,6 +742,9 @@ final class RuntimeExecutionDispatcher {
                     } else if (!renewed.sameIdentity(original) || !renewed.sameAuthorization(original)
                             || !ownsDispatch(renewed, original)) {
                         closeLocked();
+                    } else {
+                        externalShellLane.renewChannel(context, original, grant,
+                                externalChannel, closed);
                     }
                 } catch (RuntimeException exception) {
                     if (exception instanceof RuntimeBrokerException failure && !failure.isRetryable()

@@ -40,7 +40,7 @@ const PREFIX = '/internal/managed-runtime/v2/publication:';
 const READ_BYTES = 32 * 1024;
 const CLOSED = 'Managed Runtime publication is closed.';
 export const EXTERNAL_PUBLICATION_ROUTES = Object.freeze(
-  ['begin', 'read', 'stop-drained'].map((key) =>
+  ['begin', 'read', 'renew', 'stop-drained'].map((key) =>
     Object.freeze({
       key,
       method: 'POST',
@@ -56,7 +56,12 @@ export const EXTERNAL_PUBLICATION_ROUTES = Object.freeze(
 type Stream = 'stdout' | 'stderr';
 interface Channel {
   readonly requestDigest: string;
-  readonly expiresAt: number;
+  /**
+   * The grant's horizon, which the Broker renews for as long as it owns the
+   * Session. A foreground Shell may outlive one horizon, so this is not fixed
+   * at `begin`: the Broker pushes each renewed value on `publication:renew`.
+   */
+  readonly horizon: { expiresAt: number };
   readonly identity: ToolResultExpectedIdentity;
   readonly capture: LocalShellResultCapture;
   readonly resources: LocalManagedSessionResourceStore;
@@ -68,7 +73,10 @@ interface Channel {
   finalReceipt?: ManagedSessionDurableRef;
 }
 
-function requestDigest(request: LocalShellCaptureRequest): string {
+function requestDigest(
+  request: LocalShellCaptureRequest,
+  captureId: string,
+): string {
   const { reference: r, capture: c } = request;
   return createHash('sha256')
     .update(
@@ -83,15 +91,25 @@ function requestDigest(request: LocalShellCaptureRequest): string {
         c.executionCallId,
         c.bindingGeneration,
         c.capturePolicy,
+        captureId,
       ]),
     )
     .digest('hex');
 }
 
+/** The publication token rule, shared by the binding and every manifest. */
+const CAPTURE_ID_PATTERN = /^[a-z0-9_-]{1,128}$/;
+
 /** Foreground captures are local O1a stores; only the authenticated reader is remote. */
 export class ManagedExternalPublication
   implements ManagedShellCapturePublisher
 {
+  /**
+   * This lane's proof is the drained stop below, not an acknowledgement: the
+   * worker holds no control-plane credential, so the Broker acknowledges its
+   * sequences out of band and no ACK ever reaches its journal.
+   */
+  readonly retiresOnDrainProof = true;
   private readonly channels = new Map<string, Channel>();
   private readonly executions = new Map<string, string>();
   private readonly retirementId = randomUUID();
@@ -122,12 +140,13 @@ export class ManagedExternalPublication
   }
 
   private live(channel: Channel): void {
-    if (channel.expiresAt <= Date.now()) throw new Error(CLOSED);
+    if (channel.horizon.expiresAt <= Date.now()) throw new Error(CLOSED);
   }
 
   async begin(
     request: LocalShellCaptureRequest,
     expiresAt: number,
+    captureId: string,
   ): Promise<string> {
     return this.serialize(async () => {
       if (
@@ -135,22 +154,29 @@ export class ManagedExternalPublication
         request.capture.tenantId !== this.boot.tenantId ||
         request.capture.background ||
         request.capture.monitoring ||
+        !CAPTURE_ID_PATTERN.test(captureId) ||
         !Number.isSafeInteger(expiresAt) ||
         expiresAt <= Date.now()
       )
         throw new Error(CLOSED);
-      const digest = requestDigest(request);
+      const digest = requestDigest(request, captureId);
       const priorId = this.executions.get(request.capture.executionCallId);
       if (priorId) {
         const prior = this.channels.get(priorId)!;
         this.live(prior);
-        if (prior.requestDigest !== digest || prior.expiresAt !== expiresAt)
-          throw new Error(CLOSED);
+        // The captured input is fixed for the execution's life; the horizon is
+        // not, because the grant that bounds it is renewed. A recovered
+        // dispatch therefore offers its own current horizon.
+        if (prior.requestDigest !== digest) throw new Error(CLOSED);
+        prior.horizon.expiresAt = Math.max(prior.horizon.expiresAt, expiresAt);
         return priorId;
       }
       if (this.channels.size >= 64) throw new Error(CLOSED);
       const channelId = randomUUID();
       const directory = await mkdtemp(path.join(this.directory, 'channel-'));
+      // Shared with the channel so `publication:renew` moves the capture's own
+      // write gate forward while a long command is still writing.
+      const horizon = { expiresAt };
       const sessionKey = {
         tenantId: this.boot.tenantId,
         workspaceId: this.boot.workspaceId,
@@ -179,12 +205,18 @@ export class ManagedExternalPublication
           turnId: request.capture.turnId,
           executionCallId: request.capture.executionCallId,
           callId: request.reference.callId,
-          invocationDigest: request.reference.argsDigest.replace(
-            /^sha256:/,
-            '',
-          ),
+          // The manifest identity is the publication binding's own wire
+          // digest, prefix included: the control plane compares it against
+          // `binding.reference.argsDigest` verbatim, so a stripped digest here
+          // would refuse every finished capture.
+          invocationDigest: request.reference.argsDigest.startsWith('sha256:')
+            ? request.reference.argsDigest
+            : `sha256:${request.reference.argsDigest}`,
           bindingGeneration: request.capture.bindingGeneration,
-          captureId: channelId,
+          // The Broker's publication binding already fixed this token before
+          // dispatch, and the control plane compares every finished manifest
+          // against it verbatim. A worker-chosen id could never match.
+          captureId,
           revision: 1,
         };
         const capture = new LocalShellResultCapture(
@@ -192,7 +224,7 @@ export class ManagedExternalPublication
           resources,
           identity,
           async () => {
-            if (expiresAt <= Date.now()) throw new Error(CLOSED);
+            if (horizon.expiresAt <= Date.now()) throw new Error(CLOSED);
             await lease.assertOwnedAndUnchanged();
           },
         );
@@ -210,7 +242,7 @@ export class ManagedExternalPublication
         if (this.sealed || expiresAt <= Date.now()) throw new Error(CLOSED);
         this.channels.set(channelId, {
           requestDigest: digest,
-          expiresAt,
+          horizon,
           identity,
           capture,
           resources,
@@ -235,7 +267,8 @@ export class ManagedExternalPublication
     if (
       !channel ||
       this.sealed ||
-      channel.requestDigest !== requestDigest(request)
+      channel.requestDigest !==
+        requestDigest(request, channel.identity.captureId)
     )
       throw new Error(CLOSED);
     this.live(channel);
@@ -246,7 +279,8 @@ export class ManagedExternalPublication
     identity: ToolResultExpectedIdentity,
     result: ToolResultEnvelope,
   ): Promise<void> {
-    const channel = this.channels.get(identity.captureId);
+    const id = this.executions.get(identity.executionCallId);
+    const channel = id && this.channels.get(id);
     if (!channel || channel.identity !== identity) throw new Error(CLOSED);
     this.live(channel);
     channel.finalReceipt = await channel.resources.publish(
@@ -261,6 +295,35 @@ export class ManagedExternalPublication
       ),
     );
     channel.final = result;
+  }
+
+  /**
+   * Extends one channel to the Broker's current grant horizon. The grant is
+   * bounded by the writer lease, which the Harness renews, while a foreground
+   * Shell may run far longer than one lease; without this the capture would
+   * close mid-command and the drain could never complete.
+   */
+  async renew(channelId: string, expiresAt: number): Promise<void> {
+    const channel = this.channels.get(channelId);
+    if (
+      !channel ||
+      this.sealed ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= Date.now()
+    )
+      throw new Error(CLOSED);
+    this.live(channel);
+    channel.horizon.expiresAt = Math.max(channel.horizon.expiresAt, expiresAt);
+    await channel.resources.publish(
+      'external-publication',
+      Buffer.from(
+        JSON.stringify({
+          type: 'renew',
+          channelId,
+          expiresAt: channel.horizon.expiresAt,
+        }),
+      ),
+    );
   }
 
   private async manifest(channel: Channel) {
@@ -338,7 +401,11 @@ export class ManagedExternalPublication
         sequence,
         byteLength: bytes.length,
         digest: createHash('sha256').update(bytes).digest('hex'),
-        eof: sequence === endSequence,
+        // The empty EOF sequence follows the last block instead of sharing it:
+        // `acknowledgedSequence` must stay below the sequence being read, so an
+        // EOF that coincided with a block could never be acknowledged and every
+        // drain would report undrained.
+        eof: sequence === endSequence && bytes.length === 0,
       };
       if (sequence > channel.delivered[streamId]) {
         await channel.resources.publish(
@@ -352,6 +419,11 @@ export class ManagedExternalPublication
         state: 'ready' as const,
         receipt,
         bytes: bytes.toString('base64'),
+        // The Broker rebuilds the result manifest from these bytes, and the
+        // envelope it settles carries no process facts: without them the
+        // rebuilt manifest would record an unknown exit for every call.
+        exitCode: manifest.value.exitCode,
+        signal: manifest.value.signal,
       };
     });
   }
@@ -439,6 +511,7 @@ export class ManagedExternalPublication
                 'reference',
                 'capture',
                 'expiresAt',
+                'captureId',
               ]);
               const reference = parseManagedToolReference(body['reference']);
               const capture = parseManagedShellCapture(body['capture']);
@@ -446,14 +519,30 @@ export class ManagedExternalPublication
                 body['protocolVersion'] !== 2 ||
                 !reference ||
                 !capture ||
-                typeof body['expiresAt'] !== 'number'
+                typeof body['expiresAt'] !== 'number' ||
+                typeof body['captureId'] !== 'string'
               )
                 throw new Error(CLOSED);
               const channelId = await this.begin(
                 { reference, capture },
                 body['expiresAt'],
+                body['captureId'],
               );
               res.json({ protocolVersion: 2, channelId });
+            } else if (route.key === 'renew') {
+              const body = publisherFields(req.body, [
+                'protocolVersion',
+                'channelId',
+                'expiresAt',
+              ]);
+              if (
+                body['protocolVersion'] !== 2 ||
+                typeof body['channelId'] !== 'string' ||
+                typeof body['expiresAt'] !== 'number'
+              )
+                throw new Error(CLOSED);
+              await this.renew(body['channelId'], body['expiresAt']);
+              res.json({ protocolVersion: 2, renewed: true });
             } else if (route.key === 'read') {
               const body = publisherFields(req.body, [
                 'protocolVersion',

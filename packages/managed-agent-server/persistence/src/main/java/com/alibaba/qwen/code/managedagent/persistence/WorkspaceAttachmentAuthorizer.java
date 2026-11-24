@@ -37,7 +37,7 @@ final class WorkspaceAttachmentAuthorizer {
     void authorizeAttachment(SessionRecord session, boolean cancellation,
             boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
             boolean legacyClose, boolean committedStop) {
-        boolean external = WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && store.isExternal(session.workspace());
+        boolean external = WorkspaceToolProfiles.isExternal(session.toolProfile()) && store.isExternal(session.workspace());
         if (external && (!"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null)) {
             throw unavailable();
         }
@@ -62,7 +62,7 @@ final class WorkspaceAttachmentAuthorizer {
         }
         var resident = residents.find(binding);
         if (external) {
-            if (!store.isExternal(binding) || !"hosted-workspace-external-files/1".equals(session.toolProfile())) {
+            if (!store.isExternal(binding) || !WorkspaceToolProfiles.isExternal(session.toolProfile())) {
                 throw unavailable();
             }
         } else if (resident == null) {
