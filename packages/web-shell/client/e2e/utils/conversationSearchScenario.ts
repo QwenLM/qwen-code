@@ -146,7 +146,7 @@ export async function setupConversationSearch(
   await page.goto(
     `${options.externalNavigation ? '/e2e/message-navigation-harness.html?sessionId=' : '/session/'}${scenario.sessionId}${options.externalNavigation ? '&' : '?'}timeline=${options.timeline ?? false}&theme=${options.theme ?? 'light'}&language=${options.language ?? 'en'}`,
   );
-  await daemon.sse.waitForConnection(scenario.sessionId, { timeout: 30_000 });
+  await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({
       sessionId: scenario.sessionId,

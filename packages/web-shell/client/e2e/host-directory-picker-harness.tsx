@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
+// Include the shell module graph in document load so boot retry can cover it.
+import { WebShellWithProviders } from '../index';
 
-const indexEntry = '../index.tsx';
-const { WebShellWithProviders } = await import(/* @vite-ignore */ indexEntry);
 const params = new URLSearchParams(window.location.search);
 document.documentElement.classList.add('theme-dark', 'dark');
 

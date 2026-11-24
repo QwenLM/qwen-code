@@ -1,8 +1,12 @@
 import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
-import type { WebShellApi, WebShellMessageNavigationRequest } from '../index';
-const entry = '../index.tsx';
-const { WebShellWithProviders } = await import(/* @vite-ignore */ entry);
+// Include the shell module graph in document load so boot retry can cover it.
+import {
+  WebShellWithProviders,
+  type WebShellApi,
+  type WebShellMessageNavigationRequest,
+} from '../index';
+
 const params = new URLSearchParams(window.location.search);
 const theme = params.get('theme') === 'dark' ? 'dark' : 'light';
 document.documentElement.classList.add(`theme-${theme}`);
