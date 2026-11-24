@@ -1213,7 +1213,9 @@ describe('local container recipe pins', () => {
         if (overflow) return true;
         if (
           /^(?:[^\s;|&()]*\$\([^)]*\))/.test(stripped) ||
-          /^\$'[^']*'/.test(stripped) ||
+          /^(?:[^\s;|&()'"]|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")*\$(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/.test(
+            stripped,
+          ) ||
           (!rawLine && /^(?:[^\s;|&()]*`[^`]+`)/.test(stripped))
         ) {
           return true;
@@ -1236,7 +1238,16 @@ describe('local container recipe pins', () => {
         const headToken = /^[^\s;|&()]+/.exec(stripped)?.[0];
         if (!headToken) return false;
         const rest = stripped.slice(headToken.length).trimStart();
+        const openBrace = headToken.indexOf('{');
+        const closeBrace = headToken.lastIndexOf('}');
+        const hasHeadBraceExpansion =
+          openBrace !== -1 &&
+          closeBrace > openBrace &&
+          /,|\.\./.test(headToken.slice(openBrace + 1, closeBrace)) &&
+          !(rawLine && headToken.startsWith('`')) &&
+          !(!wrapped && rest === '' && /^\{"[^"]+":/.test(headToken));
         if (
+          hasHeadBraceExpansion ||
           /\$\{(?!\{)[^}]*\}/.test(headToken) ||
           (rest !== '' && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(headToken)) ||
           /^[A-Za-z0-9_./'"\\-]+\$[A-Za-z_][A-Za-z0-9_]*/.test(headToken)
@@ -3573,10 +3584,20 @@ describe('local container recipe pins', () => {
       ],
       ['text fence IFS expansion', '```text\ngh${IFS}pr${IFS}merge <n>\n```'],
       ['text fence param expansion', '```text\ng${x:-h} pr merge <n>\n```'],
+      ['text fence brace expansion', '```text\n{gh,} pr merge <n>\n```'],
+      ['text fence partial brace', '```text\ng{h,} pr merge <n>\n```'],
+      ['text fence concat ansi-c', "```text\ng$'\\x68' pr merge <n>\n```"],
       ['console IFS expansion', '```console\ngh${IFS}pr${IFS}merge <n>\n```'],
+      ['console brace expansion', '```console\n{gh,} pr merge <n>\n```'],
+      ['console concat ansi-c', "```console\ng$'\\x68' pr merge <n>\n```"],
       ['bare IFS expansion', 'gh${IFS}pr${IFS}merge <n>'],
       ['bare param expansion', 'g${x:-h} pr merge <n>'],
       ['bare var command', '$cmd pr merge <n>'],
+      ['bare brace expansion', '{gh,} pr merge <n>'],
+      ['bare quoted brace expansion', '{"gh",} pr merge <n>'],
+      ['bare nested brace expansion', '{gh,a{b}} pr merge <n>'],
+      ['bare concat ansi-c', "g$'\\x68' pr merge <n>"],
+      ['bare concat locale quote', 'g$"h" pr merge <n>'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
@@ -3590,6 +3611,13 @@ describe('local container recipe pins', () => {
       '`${cmd} pr merge <n>`',
       '`$cmd pr merge <n>`',
       '`gh$IFS"pr"`',
+      '`{gh,} pr merge <n>`',
+      '`g{h,} pr merge <n>`',
+      '`{"gh",} pr merge <n>`',
+      '`{gh,a{b}} pr merge <n>`',
+      "`g$'\\x68' pr merge <n>`",
+      "`gh$'\\x20'pr`",
+      '`g$"h" pr merge <n>`',
       '`gh api -X DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
       '`gh api --method DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
       '`gh api -XDELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
