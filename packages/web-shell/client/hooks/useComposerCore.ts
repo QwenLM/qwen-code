@@ -5897,8 +5897,10 @@ export function useComposerCore(
     [],
   );
   const retainDraftDuringSessionCreation = useCallback(
-    async <T,>(
-      operation: (onSessionAllocated: (sessionId: string) => void) => Promise<T>,
+    async <T>(
+      operation: (
+        onSessionAllocated: (sessionId: string) => void,
+      ) => Promise<T>,
     ): Promise<T> => {
       const identity = { ...composerIdentityRef.current };
       const existing = draftSessionAssignmentRef.current;
@@ -5922,7 +5924,8 @@ export function useComposerCore(
             composerIdentityRef.current.promptHistoryStorageKey ===
               identity.promptHistoryStorageKey &&
             current.storageKey === identity.draftStorageKey
-          ) current.assignedSessionId = sessionId;
+          )
+            current.assignedSessionId = sessionId;
         });
       } finally {
         if (!existing && draftSessionAssignmentRef.current === assignment)
