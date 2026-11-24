@@ -95,7 +95,7 @@ not, and keeps its existing fence.
     re-read;
   - a lapsed lease with a spent guard budget still fences the log;
   - a permanent fence still stops keepalive.
-- `packages/cli/src/serve/hosted-harness-session.test.ts`
+- `packages/cli/src/serve/hosted-harness-session.child-operations.test.ts`
   - an unsettled message append answers 503 `session_message_failed`, not a
     409 record refusal.
 - `packages/cli/src/serve/hosted-workspace-tool-turn.commands.test.ts`

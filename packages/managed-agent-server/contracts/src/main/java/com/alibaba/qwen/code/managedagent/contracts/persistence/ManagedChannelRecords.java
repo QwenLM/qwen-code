@@ -95,7 +95,7 @@ public final class ManagedChannelRecords {
         ManagedExtensionRecords.closed(record, DELIVERY_KEYS,
                 "channelDelivery");
         String deliveryId = ManagedExtensionRecords.id(
-                record.get("deliveryId"), "channelDelivery.deliveryId");
+                record.get("deliveryId"), "channelDelivery.deliveryId", 256);
         ManagedExtensionRecords.id(record.get("routeId"), "routeId");
         ManagedExtensionRecords.count(record.get("routeRevision"), 1,
                 Long.MAX_VALUE, "routeRevision");
@@ -117,7 +117,7 @@ public final class ManagedChannelRecords {
             ManagedExtensionRecords.closed(segment, SEGMENT_KEYS,
                     "channelDelivery.segments[" + index + "]");
             String segmentId = ManagedExtensionRecords.id(
-                    segment.get("segmentId"), "segmentId");
+                    segment.get("segmentId"), "segmentId", 320);
             require(seen.add(segmentId), "Channel delivery segment "
                     + segmentId + " is named twice");
             require(ManagedExtensionRecords.count(segment.get("ordinal"), 0,

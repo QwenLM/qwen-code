@@ -14,6 +14,7 @@ import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { GenerateContentResponse } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ModAcpHost, ModTurn } from '../../services/mod-session.js';
+import { AcpDisplayTranslationRows } from './acp-display-translation-rows.js';
 import {
   ACP_MODS_FAILED,
   AcpModSession,
@@ -40,6 +41,7 @@ vi.mock('../../services/mod-session.js', () => ({
         flushLogs: mocks.flushLogs,
         startTurn: mocks.startTurn,
         syncSession: mocks.syncSession,
+        canTranslateRow: () => false,
         askRow: mocks.askRow,
         close: mocks.close,
       };
@@ -50,6 +52,158 @@ vi.mock('../../services/mod-session.js', () => ({
 const settings = (mods: boolean) =>
   ({ merged: { experimental: { mods } } }) as unknown as LoadedSettings;
 const config = {} as Config;
+
+it('settles a row only when a preparing tool creates a card', async () => {
+  let sessionId = 'session-1';
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => sessionId,
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  const firstAttempt = {};
+  rows.observe('Before the tool.', 'AssistantMessage', firstAttempt);
+  rows.observeRootToolCall('read-report', true);
+  const completed = await rows.authorize(
+    'AssistantMessage',
+    'Before the tool.',
+  );
+  expect(completed?.isCurrent()).toBe(true);
+
+  const nextAttempt = {};
+  rows.observe('During the next attempt.', 'AssistantMessage', nextAttempt);
+  rows.observeRootToolCall('read-report', true);
+  await expect(
+    rows.authorize('AssistantMessage', 'During the next attempt.'),
+  ).resolves.toBeUndefined();
+
+  sessionId = 'session-2';
+  rows.observe('A different session.', 'AssistantMessage', nextAttempt);
+  rows.observeRootToolCall('read-report', true);
+  const next = await rows.authorize('AssistantMessage', 'A different session.');
+  expect(next?.isCurrent()).toBe(true);
+});
+
+it('keeps earlier live rows eligible in non-recorded sessions', async () => {
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => 'session',
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  for (let index = 0; index < 40; index++) {
+    rows.rememberCompleted('AssistantMessage', `Model reply ${index}.`);
+  }
+  const earliest = await rows.authorize('AssistantMessage', 'Model reply 0.');
+  expect(earliest?.isCurrent()).toBe(true);
+});
+
+it('drops live translation rows when a session clears without a recorder', async () => {
+  let sessionId = 'before-clear';
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => sessionId,
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  const attempt = {};
+  rows.observe('A completed model reply.', 'AssistantMessage', attempt);
+  rows.settleAttempt(attempt, true);
+  const isAuthorized = await rows.authorize(
+    'AssistantMessage',
+    'A completed model reply.',
+  );
+  expect(isAuthorized?.isCurrent()).toBe(true);
+
+  sessionId = 'after-clear';
+  expect(isAuthorized?.isCurrent()).toBe(false);
+  expect(isAuthorized?.signal.aborted).toBe(true);
+  await expect(
+    rows.authorize('AssistantMessage', 'A completed model reply.'),
+  ).resolves.toBeUndefined();
+});
+
+it('rewinds live row authorization to a checkpoint and aborts the old generation', async () => {
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => 'session',
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  rows.recordLiveCheckpoint('first');
+  rows.rememberCompleted('AssistantMessage', 'Retained reply.');
+  rows.recordLiveCheckpoint('second');
+  rows.rememberCompleted('AssistantMessage', 'Retained reply.');
+  rows.rememberCompleted('Thinking', 'Removed thought.');
+  rows.observeRootToolCall('reused-tool', true);
+  const removed = await rows.authorize('Thinking', 'Removed thought.');
+  expect(removed?.isCurrent()).toBe(true);
+
+  rows.rewindLiveRows('second');
+  expect(removed?.isCurrent()).toBe(false);
+  expect(removed?.signal.aborted).toBe(true);
+  await expect(
+    rows.authorize('Thinking', 'Removed thought.'),
+  ).resolves.toBeUndefined();
+  const retained = await rows.authorize('AssistantMessage', 'Retained reply.');
+  expect(retained?.signal.aborted).toBe(false);
+
+  const newAttempt = {};
+  rows.observe('New branch reply.', 'AssistantMessage', newAttempt);
+  rows.observeRootToolCall('reused-tool', true);
+  const replacement = await rows.authorize(
+    'AssistantMessage',
+    'New branch reply.',
+  );
+  expect(replacement?.isCurrent()).toBe(true);
+
+  rows.rewindLiveRows('first');
+  await expect(
+    rows.authorize('AssistantMessage', 'Retained reply.'),
+  ).resolves.toBeUndefined();
+});
+
+it('keeps persisted prefixes untranslated until the full live continuation ends', async () => {
+  const readActiveTranscriptChain = vi.fn().mockResolvedValue([
+    {
+      uuid: 'earlier',
+      parentUuid: null,
+      sessionId: 'session',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'assistant',
+      message: { role: 'model', parts: [{ text: 'An earlier reply.' }] },
+    },
+    {
+      uuid: 'prefix',
+      parentUuid: 'earlier',
+      sessionId: 'session',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'assistant',
+      message: { role: 'model', parts: [{ text: 'First half' }] },
+    },
+  ]);
+  const recorder = {
+    getBranchGeneration: () => 1,
+    getBranchAbortSignal: () => new AbortController().signal,
+    getTranscriptCursor: () => ({ recordId: 'prefix' }),
+    readActiveTranscriptChain,
+  };
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => 'session',
+    getChatRecordingService: () => recorder,
+  } as unknown as Config);
+  const attempt = {};
+  rows.observe('First half', 'AssistantMessage', attempt);
+  await expect(
+    rows.authorize('AssistantMessage', 'First half'),
+  ).resolves.toBeUndefined();
+  expect(readActiveTranscriptChain).not.toHaveBeenCalled();
+
+  const earlier = await rows.authorize('AssistantMessage', 'An earlier reply.');
+  expect(earlier?.isCurrent()).toBe(true);
+  rows.observe(' and remainder.', 'AssistantMessage', attempt);
+  await expect(
+    rows.authorize('AssistantMessage', 'First half'),
+  ).resolves.toBeUndefined();
+  rows.settleAttempt(attempt, true);
+  const completed = await rows.authorize(
+    'AssistantMessage',
+    'First half and remainder.',
+  );
+  expect(completed?.isCurrent()).toBe(true);
+});
 
 describe('AcpModSession', () => {
   afterEach(() => {
@@ -69,6 +223,18 @@ describe('AcpModSession', () => {
       AcpModSession.create(config, settings(false), 'acp-1', client),
     ).toBeUndefined();
     expect(mocks.host).toBeUndefined();
+    // The display translation alone starts them.
+    mocks.initialize.mockResolvedValue();
+    expect(
+      AcpModSession.create(
+        config,
+        {
+          merged: { general: { displayLanguage: 'en' } },
+        } as unknown as LoadedSettings,
+        'acp-1',
+        client,
+      ),
+    ).toBeInstanceOf(AcpModSession);
   });
 
   it("sends each log line under the session's ACP id", async () => {
@@ -94,11 +260,14 @@ describe('AcpModSession', () => {
       _meta: { 'qwen.modRows': ['Thinking', 'AssistantMessage', 'Pane'] },
     });
     // Rows this host answers, of those the client draws.
-    expect(sites).toEqual(['AssistantMessage']);
+    expect(sites).toEqual(['AssistantMessage', 'Thinking']);
+    expect(
+      acpModRowSites({ _meta: { 'qwen.modRows': ['AssistantMessage'] } }),
+    ).toEqual(['AssistantMessage']);
     const client = { extNotification: vi.fn() };
     AcpModSession.create(config, settings(true), 'acp-1', client, sites);
     expect(mocks.host!.surface).toBe('desktop');
-    expect(mocks.host!.sites!()).toEqual(['AssistantMessage']);
+    expect(mocks.host!.sites!()).toEqual(['AssistantMessage', 'Thinking']);
   });
 
   it('asks the Mods for a row once they loaded, checking what the client sent', async () => {
@@ -124,22 +293,32 @@ describe('AcpModSession', () => {
       'AssistantMessage',
       props,
       expect.any(AbortSignal),
+      undefined,
     );
     await expect(mods.askRow('Pane', {})).resolves.toEqual({
       status: 'unhooked',
     });
+    await mods.askRow('Thinking', { text: 'Hm' });
+    expect(mocks.askRow).toHaveBeenLastCalledWith(
+      'Thinking',
+      { text: 'Hm' },
+      expect.any(AbortSignal),
+      undefined,
+    );
     for (const [component, bad] of [
       [7, props],
       ['AssistantMessage', null],
       ['AssistantMessage', { text: 'Hi' }],
       ['AssistantMessage', { text: 1, isFirstOfReply: true }],
       ['AssistantMessage', { ...props, extra: true }],
+      ['Thinking', props],
+      ['Thinking', { text: 1 }],
     ])
       await expect(mods.askRow(component, bad)).rejects.toMatchObject({
         code: -32602,
         data: { errorKind: 'invalid_mod_row' },
       });
-    expect(mocks.askRow).toHaveBeenCalledOnce();
+    expect(mocks.askRow).toHaveBeenCalledTimes(2);
   });
 
   it('answers unhooked once the Mods failed to load', async () => {

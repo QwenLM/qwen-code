@@ -42,7 +42,7 @@
 - 会话已不再 live（被关闭、被回收，或 daemon 重启后）而 detached 后台 shell 仍在
   跑。shell 注册表是纯内存的，因此客户端根本拿不到
   `hasRunningBackgroundTasks`。证据：远端某会话的 shell pid 已存活约 26 小时，
-  但它不在 live-state 里，目录行也没有后台字段。
+  但它不在 live-state 里，目录行也没有后台字段。跟踪于 #17819。
 - 重新评定 Session Overview 面板卡片的等级。「仅后台」会话在那里仍读作 `idle`，
   从而保持面板的排序与显示状态不变；它的两个破坏性卡片动作另行加闸（见下），
   因为只靠该等级会把它们放出来。
@@ -94,10 +94,17 @@
   live 启动中的行会把圆点换成它自己的 spinner，此时标记要把名字接回来，而不是让
   这一格无人命名。
 - `SessionDetailsTooltip` 中，只要有后台任务在跑，就给「等待审批」「等待回答」
-  「回合进行中」三支追加 ` · background.running`。「仅后台」那一支已经命名过，
-  保持原样；等待态的优先级不变。
+  「回合进行中」「completed-unread」四支追加 ` · background.running`；override
+  标签（`statusLabel`，如语音启动提示）出于同样的「隐藏后台仍须命名」理由也带该后缀。「仅后台」支
+  （`!hasActivePrompt && hasRunningBackgroundTasks`）已经命名过，保持原样。
+  completed-unread 支与行圆点同序：优先于 running/active-work/unknown 支，
+  「仅后台」支优先于它；等待态的优先级不变（#18070）。
 
-状态圆点的优先级不变：回合在跑为绿色，仅后台任务为琥珀色，其他活跃工作为蓝色。
+状态圆点优先级与该链一致（#18070）：live 启动 Spinner 顶替圆点；仅后台圆点
+（`!hasActivePrompt && hasRunningBackgroundTasks`）优先于 unread 圆点；
+unread 圆点优先于 running 与 active-work 圆点（回合进行中时门控关闭仅后台圆
+点）。配色：回合在跑或其他活跃工作均为绿色（#18072 将 active-work 从蓝色改为复
+用运行绿色，使蓝色仅保留给完成未读会话），仅后台任务为琥珀色，完成未读为蓝色。
 
 ## 设计决策与理由
 
@@ -173,14 +180,24 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
 1. bg-only 行显示右侧琥珀忙标记，且整行只播报 `background.running` 一次。
 2. 回合进行中且有后台任务的行显示琥珀标记，可访问名为 `Running`，`title` 为组合
    文案。
-3. 两种状态并存时详情浮层都同时说出两者，包括在等待审批或等待回答之后，且不重排
-   等待态的优先级。
+3. 两种状态并存时详情浮层都同时说出两者，包括在等待审批或等待回答之后、以及
+   override 标签（如语音启动提示）之下，且不重排等待态的优先级；unread 支优先于
+   running/active-work/unknown，且位于「仅后台」支之下。
 4. 有后台工作的会话，在项目行（无论是否为本客户端所连接的那个）、recent 行、
    Session Overview 卡片上都不提供归档与删除，删除弹窗亦然。空闲的当前会话仍
    可删除。批量归档要跟随勾选之后标志的变化；勾选后才变忙的行要被取消勾选、
    不再计入计数，并从请求中剔除。
-5. 圆点优先级、触屏布局、既有悬停契约均不变。
-6. 上述每条断言在对应变异下都会失败。
+5. 圆点优先级与 hover 链一致（启动 Spinner 优先于全部，仅后台琥珀色优先于
+   unread，unread 优先于 running/active-work，回合进行中门控关闭仅后台圆点，
+   且其他活跃工作按 #18072 复用运行绿色、蓝色仅保留给完成未读）；触屏布局与
+   既有悬停契约均成立。
+6. 每条被钉住的断言在对应变异下都会失败：tooltip 矩阵（含逐支后缀出现计数与
+   unread 优先于 running 行）覆盖组合 hover 链；行侧见证以控制相钉住
+   running→idle 晋升、background 优先于 unread 的槽位、unread 优先于
+   active-work 的槽位（配仅 active 对照行）、以及已完成会话重新运行时 tracker
+   清除 unread 身份。行上 running 圆点的 `!completedUnread` 守卫是面向 effect
+   前渲染瞬态的防御性守卫，unread 优先于 running 这一环在 hover 侧由 tooltip
+   矩阵钉住。
 
 ## 待决问题 / 后续
 

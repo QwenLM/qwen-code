@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteFileSync } from './atomicFileWrite.js';
 import readline from 'node:readline';
+import { addAbortSignal } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
 import {
@@ -43,6 +44,7 @@ type JsonlReadOptions = {
 
 type JsonlReadLinesOptions = {
   signal?: AbortSignal;
+  stream?: fs.ReadStream;
 };
 
 interface ParsedJsonlLine<T> {
@@ -210,11 +212,13 @@ async function readLinesWithIntegrityInternal<T = unknown>(
   options: JsonlReadLinesOptions = {},
   budget: 'records' | 'lines' = 'records',
 ): Promise<{ records: T[]; complete: boolean }> {
-  let fileStream: fs.ReadStream | undefined;
+  let fileStream = options.stream;
   let rl: readline.Interface | undefined;
   try {
     options.signal?.throwIfAborted();
-    fileStream = options.signal
+    if (fileStream && options.signal)
+      addAbortSignal(options.signal, fileStream);
+    fileStream ??= options.signal
       ? fs.createReadStream(filePath, { signal: options.signal })
       : fs.createReadStream(filePath);
     rl = readline.createInterface({
@@ -343,10 +347,14 @@ interface TailDiagnosticEntry {
   attempts: number;
   pending: boolean;
   retained: boolean;
+  retryAfter: number;
 }
 const diagnosedTailReadFailures = new Map<string, TailDiagnosticEntry>();
 const MAX_DIAGNOSED_TAIL_READ_FAILURES = 128;
 const MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS = 3;
+// Same magnitude as the token-usage write-failure cooldown, so best-effort
+// local write diagnostics share one retry window.
+const TAIL_DIAGNOSTIC_RETRY_COOLDOWN_MS = 60_000;
 // Tail inspection deliberately keeps its own short-lived handle per append:
 // it checks the record boundary left by an interrupted append, and staying
 // separate from the append/fsync path keeps this bugfix focused. Merging the
@@ -359,25 +367,45 @@ function reportUninspectableTail(
   error: unknown,
 ): void {
   const previous = diagnosedTailReadFailures.get(diagnosticKey);
-  // An in-flight write already covers this key; a retained one needs no
-  // repeat, and a permanently broken sink must not be retried forever.
+  // An in-flight write already covers this key, and a delivered one needs no
+  // repeat.
   if (previous?.retained || previous?.pending) return;
-  if (previous && previous.attempts >= MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS) {
-    return;
-  }
+  const now = Date.now();
+  const exhausted =
+    previous !== undefined &&
+    previous.attempts >= MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS;
+  // A spent budget admits one probe per cooldown window rather than staying
+  // silent forever, so a repaired sink can report again. The counter is never
+  // reset: clearing it would retry a permanently broken sink on every append.
+  if (exhausted && now < previous.retryAfter) return;
 
-  const entry: TailDiagnosticEntry = {
-    attempts: (previous?.attempts ?? 0) + 1,
-    pending: true,
-    retained: false,
-  };
   if (
     !previous &&
     diagnosedTailReadFailures.size >= MAX_DIAGNOSED_TAIL_READ_FAILURES
   ) {
-    const oldest = diagnosedTailReadFailures.keys().next().value;
-    if (oldest !== undefined) diagnosedTailReadFailures.delete(oldest);
+    // Only a slot whose delivery already failed is reclaimable. A retained slot
+    // owns a delivered suppression and a pending slot owns an in-flight one;
+    // discarding either is what let a churn of distinct paths re-warn on every
+    // pass. With no reclaimable slot, skip the diagnostic instead.
+    const reclaimable = [...diagnosedTailReadFailures].find(
+      ([, entry]) => !entry.retained && !entry.pending,
+    );
+    if (!reclaimable) return;
+    diagnosedTailReadFailures.delete(reclaimable[0]);
   }
+
+  const attempts = exhausted
+    ? MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS
+    : (previous?.attempts ?? 0) + 1;
+  const entry: TailDiagnosticEntry = {
+    attempts,
+    pending: true,
+    retained: false,
+    retryAfter:
+      attempts >= MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS
+        ? now + TAIL_DIAGNOSTIC_RETRY_COOLDOWN_MS
+        : 0,
+  };
   diagnosedTailReadFailures.set(diagnosticKey, entry);
 
   const message = `Cannot inspect JSONL tail in ${filePath}; appending with a conservative newline separator:`;
@@ -446,6 +474,23 @@ function canAppendWithoutTailInspection(
 }
 
 /**
+ * Descriptor-based syscalls (`FileHandle.read`, `FileHandle.stat`, `fstatSync`)
+ * do not carry the pathname Node attaches to path-based errors, so a fatal tail
+ * inspection would otherwise reach the caller without naming the file. Annotate
+ * in place rather than wrapping: callers match on the original error object and
+ * its `code`, and the substantive message stays a verbatim prefix.
+ */
+function withTailInspectionFileContext(
+  error: unknown,
+  filePath: string,
+): unknown {
+  if (error instanceof Error && !error.message.includes(filePath)) {
+    error.message = `${error.message} (file: ${filePath})`;
+  }
+  return error;
+}
+
+/**
  * Test-only: clear the per-write caches. Needed when tests mutate fs state at
  * the same paths across cases.
  */
@@ -502,14 +547,20 @@ export async function writeLine(
         }
       } catch (error) {
         if (!canAppendWithoutTailInspection(filePath, error)) {
-          throw error;
+          throw withTailInspectionFileContext(error, filePath);
         }
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          appendHandle = await fs.promises.open(filePath, 'a');
-          existing = appendHandle;
-          const stats = await appendHandle.stat();
-          appendHandleReady = true;
-          if (stats.isFile() && stats.size > 0) prefix = '\n';
+          // Recovery runs inside the catch, so its own descriptor errors would
+          // otherwise escape without the file context the rethrow above adds.
+          try {
+            appendHandle = await fs.promises.open(filePath, 'a');
+            existing = appendHandle;
+            const stats = await appendHandle.stat();
+            appendHandleReady = true;
+            if (stats.isFile() && stats.size > 0) prefix = '\n';
+          } catch (recoveryError) {
+            throw withTailInspectionFileContext(recoveryError, filePath);
+          }
         } else {
           prefix = '\n';
         }
@@ -602,14 +653,20 @@ export function writeLineSync(filePath: string, data: unknown): void {
     }
   } catch (error) {
     if (!canAppendWithoutTailInspection(filePath, error)) {
-      throw error;
+      throw withTailInspectionFileContext(error, filePath);
     }
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      appendDescriptor = fs.openSync(filePath, 'a');
-      descriptor = appendDescriptor;
-      const stats = fs.fstatSync(appendDescriptor);
-      appendDescriptorReady = true;
-      if (stats.isFile() && stats.size > 0) prefix = '\n';
+      // Recovery runs inside the catch, so its own descriptor errors would
+      // otherwise escape without the file context the rethrow above adds.
+      try {
+        appendDescriptor = fs.openSync(filePath, 'a');
+        descriptor = appendDescriptor;
+        const stats = fs.fstatSync(appendDescriptor);
+        appendDescriptorReady = true;
+        if (stats.isFile() && stats.size > 0) prefix = '\n';
+      } catch (recoveryError) {
+        throw withTailInspectionFileContext(recoveryError, filePath);
+      }
     } else {
       prefix = '\n';
     }

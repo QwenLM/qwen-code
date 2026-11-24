@@ -24,6 +24,7 @@ export {
   useDaemonTranscriptStore,
   useDaemonTurnNavigationState,
   useDaemonTurnNavigationStore,
+  useOptionalDaemonHistoryNavigationStore,
 } from './DaemonSessionProvider.js';
 export type { DaemonTranscriptHistory } from './DaemonSessionProvider.js';
 export { createDaemonTurnNavigationStore } from './turn-navigation-store.js';

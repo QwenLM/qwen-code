@@ -68,6 +68,28 @@ it('keeps the Mod reasoning opt-out and disables redirects on the real Google SD
   ).toEqual({ includeThoughts: true, thinkingLevel: 'HIGH' });
 });
 
+it('does not send a Google SDK request whose signal was already aborted', async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>();
+  vi.stubGlobal('fetch', fetch);
+  const generator = new LlmContentGenerator({
+    apiKey: 'test-key',
+    vertexai: false,
+    httpOptions: { baseUrl: 'https://example.test' },
+  });
+
+  await expect(
+    generator.generateContent(
+      {
+        model: 'gemini-test',
+        contents: 'hello',
+        config: { abortSignal: AbortSignal.abort() },
+      },
+      'mod',
+    ),
+  ).rejects.toMatchObject({ name: 'AbortError' });
+  expect(fetch).not.toHaveBeenCalled();
+});
+
 it.each([
   [false, 'GOOGLE_GEMINI_BASE_URL'],
   [true, 'GOOGLE_VERTEX_BASE_URL'],

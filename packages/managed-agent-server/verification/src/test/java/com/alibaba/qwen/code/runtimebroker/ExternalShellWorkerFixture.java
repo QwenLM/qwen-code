@@ -48,15 +48,21 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
     public record Copied(String bytes, List<Boolean> eofs) { }
 
     public final Process process;
+
+    // Process-side inspection may truncate or omit the original argument vector.
+    final List<String> launchCommand;
+
     public final RuntimeScope scope;
     public final RuntimeProvisionRequest request;
     public final RuntimeProvisionSeed seed;
     public final RuntimeLease lease;
     public final long revision;
 
-    private ExternalShellWorkerFixture(Process process, URI origin, RuntimeProvisionSeed seed,
-            RuntimeScope scope, RuntimeProvisionRequest request, long revision) {
+    private ExternalShellWorkerFixture(Process process, List<String> launchCommand,
+            URI origin, RuntimeProvisionSeed seed, RuntimeScope scope,
+            RuntimeProvisionRequest request, long revision) {
         this.process = process;
+        this.launchCommand = List.copyOf(launchCommand);
         this.seed = seed;
         this.scope = scope;
         this.request = request;
@@ -93,47 +99,71 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
         LocalProcessRuntimeProvisionerTest.requireNode();
         var script = Path.of("src/test/resources/external-shell-worker.mjs").toAbsolutePath();
         assumeTrue(Files.isRegularFile(script), "The worker stand-in is required");
-        var command = new ArrayList<>(List.of("node", script.toString(),
-                "--stdout=" + stdout, "--stderr=" + stderr,
-                "--storage-revision=" + revision));
-        command.addAll(List.of(extra));
-        var process = new ProcessBuilder(command).redirectErrorStream(false).start();
-        var scope = request.getScope();
-        var boot = new LinkedHashMap<String, Object>();
-        boot.put("type", "boot");
-        boot.put("version", 2);
-        boot.put("managedContext", "managed-context/1");
-        boot.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
-        boot.put("runtimeIncarnation", seed.getGatewayIncarnation());
-        boot.put("leaseId", seed.getLeaseId());
-        boot.put("epoch", seed.getEpoch());
-        boot.put("provisionRequestId", seed.getProvisionRequestId());
-        boot.put("token", seed.getToken());
-        boot.put("tenantId", scope.getTenantId());
-        boot.put("workspaceId", scope.getWorkspaceId());
-        boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
-        boot.put("storageId", request.getStorageId());
-        boot.put("mountRoot", scope.getCanonicalCwd());
-        boot.put("capabilityDigest", scope.getCapabilityDigest());
-        boot.put("isolationClass", scope.getIsolationClass());
-        try (OutputStream stdin = process.getOutputStream()) {
-            stdin.write(JSON.writeValueAsBytes(boot));
-        }
-        var reader = new BufferedReader(new InputStreamReader(
-                process.getInputStream(), StandardCharsets.UTF_8));
-        var ready = reader.readLine();
-        if (ready == null) {
-            process.destroyForcibly();
-            throw new AssertionError("The worker never became ready");
-        }
+        var outputFiles = new ArrayList<Path>();
         try {
-            return new ExternalShellWorkerFixture(process,
-                    URI.create(JSON.readTree(ready).get("url").asText()),
-                    seed, scope, request, revision);
-        } catch (RuntimeException invalid) {
-            process.destroyForcibly();
-            throw invalid;
+            var stdoutArgument = "--stdout=" + stdout;
+            var stderrArgument = "--stderr=" + stderr;
+            // Large captures cannot be passed in a Windows command line.
+            if (stdout.length() > 8 * 1024) {
+                stdoutArgument = stageOutput(stdout, "stdout", outputFiles);
+            }
+            if (stderr.length() > 8 * 1024) {
+                stderrArgument = stageOutput(stderr, "stderr", outputFiles);
+            }
+            var command = new ArrayList<>(List.of("node", script.toString(),
+                    stdoutArgument, stderrArgument,
+                    "--storage-revision=" + revision));
+            command.addAll(List.of(extra));
+            var process = new ProcessBuilder(command).redirectErrorStream(false).start();
+            var scope = request.getScope();
+            var boot = new LinkedHashMap<String, Object>();
+            boot.put("type", "boot");
+            boot.put("version", 2);
+            boot.put("managedContext", "managed-context/1");
+            boot.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+            boot.put("runtimeIncarnation", seed.getGatewayIncarnation());
+            boot.put("leaseId", seed.getLeaseId());
+            boot.put("epoch", seed.getEpoch());
+            boot.put("provisionRequestId", seed.getProvisionRequestId());
+            boot.put("token", seed.getToken());
+            boot.put("tenantId", scope.getTenantId());
+            boot.put("workspaceId", scope.getWorkspaceId());
+            boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
+            boot.put("storageId", request.getStorageId());
+            boot.put("mountRoot", scope.getCanonicalCwd());
+            boot.put("capabilityDigest", scope.getCapabilityDigest());
+            boot.put("isolationClass", scope.getIsolationClass());
+            try (OutputStream stdin = process.getOutputStream()) {
+                stdin.write(JSON.writeValueAsBytes(boot));
+            }
+            var reader = new BufferedReader(new InputStreamReader(
+                    process.getInputStream(), StandardCharsets.UTF_8));
+            var ready = reader.readLine();
+            if (ready == null) {
+                process.destroyForcibly();
+                throw new AssertionError("The worker never became ready");
+            }
+            try {
+                return new ExternalShellWorkerFixture(process, command,
+                        URI.create(JSON.readTree(ready).get("url").asText()),
+                        seed, scope, request, revision);
+            } catch (RuntimeException invalid) {
+                process.destroyForcibly();
+                throw invalid;
+            }
+        } finally {
+            for (Path outputFile : outputFiles) {
+                Files.deleteIfExists(outputFile);
+            }
         }
+    }
+
+    private static String stageOutput(String output, String stream, List<Path> outputFiles)
+            throws IOException {
+        var file = Files.createTempFile("external-shell-worker-" + stream + "-", ".txt");
+        outputFiles.add(file);
+        Files.writeString(file, output, StandardCharsets.UTF_8);
+        return "--" + stream + "-file=" + file;
     }
 
     public HttpRuntimeTransport transport() {

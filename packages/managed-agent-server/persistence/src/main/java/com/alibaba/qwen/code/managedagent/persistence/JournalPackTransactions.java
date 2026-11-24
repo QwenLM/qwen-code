@@ -2,8 +2,10 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,62 +65,63 @@ public class JournalPackTransactions {
     }
 
     /** Commits the BUILDING catalog row on its own, before the object PUT. */
-    public void insertBuilding(String packId, String scope, String tenant, String workspace,
+    public void insertBuilding(String packId, String tenant, String workspace,
             String session, long from, long through, String objectKey, long byteLength,
             String objectSha, long now, String builderId, long reclaimCutoff) {
         transactions.executeWithoutResult(status -> {
             requireActiveSession(tenant, session);
             // Expiry releases the range, not the old key: its single PUT may still land later.
             jdbc.update("UPDATE ma_journal_pack SET state = 'RETIRED', gmt_modified = ?"
-                            + " WHERE session_scope_key = ? AND active_from_revision = ?"
+                            + " WHERE tenant_id = ? AND session_id = ? AND active_from_revision = ?"
                             + " AND state = 'BUILDING' AND gmt_modified <= ?",
-                    now, scope, from, reclaimCutoff);
+                    now, tenant, session, from, reclaimCutoff);
             jdbc.update("INSERT INTO ma_journal_pack"
-                            + " (pack_id, session_scope_key, tenant_id, workspace_id, session_id,"
-                            + " from_revision, through_revision, manifest_resource_key, object_key,"
+                            + " (pack_id, tenant_id, workspace_id, session_id,"
+                            + " from_revision, through_revision, manifest_resource_ref, object_key,"
                             + " state, byte_length, sha256, builder_id, gmt_create, gmt_modified)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BUILDING', ?, ?, ?, ?, ?)",
-                    packId, scope, tenant, workspace, session, from, through, "", objectKey,
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BUILDING', ?, ?, ?, ?, ?)",
+                    packId, tenant, workspace, session, from, through, "", objectKey,
                     byteLength, objectSha, builderId, now, now);
         });
     }
 
     /** Records closure independently, including for an already retired attempt. */
-    public void markPutClosed(String packId, String scope, String tenant, String session,
+    public void markPutClosed(String packId, String tenant, String session,
             String objectKey) {
         transactions.executeWithoutResult(status -> {
             ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
             jdbc.update("UPDATE ma_journal_pack SET is_put_closed = 1 WHERE pack_id = ?"
-                            + " AND session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                            + " AND tenant_id = ? AND session_id = ?"
                             + " AND object_key = ? AND is_put_closed = 0",
-                    packId, scope, tenant, session, objectKey);
+                    packId, tenant, session, objectKey);
         });
     }
 
     /** A failed attempt never retires a different builder or a published pack. */
-    public void retireBuilding(String packId, String scope, String tenant, String session) {
+    public void retireBuilding(String packId, String tenant, String session) {
         transactions.executeWithoutResult(status -> {
             ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
             jdbc.update("UPDATE ma_journal_pack SET state = 'RETIRED', gmt_modified = ?"
-                            + " WHERE pack_id = ? AND session_scope_key = ? AND tenant_id = ?"
+                            + " WHERE pack_id = ? AND tenant_id = ?"
                             + " AND session_id = ? AND state = 'BUILDING'",
-                    System.currentTimeMillis(), packId, scope, tenant, session);
+                    System.currentTimeMillis(), packId, tenant, session);
         });
     }
 
     /** Atomically verifies, advances the head watermark and publishes the pack + manifest. */
-    public void publish(String packId, String scope, String tenant, String workspace,
+    public void publish(String packId, String tenant, String workspace,
             String session, long from, long through, byte[] manifest) {
         String manifestId = "manifest-" + packId;
+        String manifestRef = ManagedIdentityRefs.resourceRef(tenant, session, manifestId);
         transactions.executeWithoutResult(status -> {
             requireActiveSession(tenant, session);
             // Root -> head -> pack -> resource, matching retirement and eviction.
             int verified = jdbc.update("UPDATE ma_journal_pack SET state = 'VERIFIED',"
-                            + " gmt_modified = ? WHERE pack_id = ? AND session_scope_key = ?"
+                            + " gmt_modified = ? WHERE pack_id = ?"
                             + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
                             + " AND from_revision = ? AND through_revision = ?"
                             + " AND state = 'BUILDING' AND is_put_closed = 1",
-                    System.currentTimeMillis(), packId, scope, tenant, workspace, session,
+                    System.currentTimeMillis(), packId, tenant, workspace, session,
                     from, through);
             if (verified != 1) {
                 throw JournalStoreRows.conflict("managed_journal_pack_conflict",
@@ -136,27 +139,27 @@ public class JournalPackTransactions {
                         "The head watermark moved while the pack was being built.");
             }
             int publishedRow = jdbc.update("UPDATE ma_journal_pack SET state = 'PUBLISHED',"
-                            + " manifest_resource_key = ?, gmt_modified = ? WHERE pack_id = ?"
+                            + " manifest_resource_ref = ?, gmt_modified = ? WHERE pack_id = ?"
                             + " AND state = 'VERIFIED'",
-                    ManagedSessionStore.resourceKey(scope, manifestId),
+                    ManagedSchemaKeys.identity(manifestRef),
                     System.currentTimeMillis(), packId);
             if (publishedRow != 1) {
                 throw JournalStoreRows.conflict("managed_journal_pack_conflict",
                         "The pack row was reclaimed by a concurrent compaction before publication.");
             }
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+            jdbc.update("INSERT INTO ma_resource (tenant_id,"
                             + " workspace_id, session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, 'managed-journal-pack-manifest', 1, ?, ?,"
+                            + " VALUES (?, ?, ?, ?, 'managed-journal-pack-manifest', 1, ?, ?,"
                             + " 'MYSQL_INLINE', ?, 'REFERENCED', ?)",
-                    ManagedSessionStore.resourceKey(scope, manifestId), scope, tenant, workspace,
+                    tenant, workspace,
                     session, manifestId, manifest.length, JournalStoreRows.sha256(manifest),
                     manifest, System.currentTimeMillis());
-            jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                            + " resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, ?, ?, ?)",
-                    scope, packId, ManagedSessionStore.resourceKey(scope, manifestId), tenant,
-                    workspace, session, manifestId, System.currentTimeMillis());
+            jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
+                            + " owner_revision, tenant_id, workspace_id, session_id,"
+                            + " resource_id, gmt_create) VALUES ('JOURNAL', ?, 1, ?, ?, ?, ?, ?)",
+                    ManagedSchemaKeys.identity(ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, packId)),
+                    tenant, workspace, session, manifestId, System.currentTimeMillis());
         });
     }
 
@@ -172,10 +175,14 @@ public class JournalPackTransactions {
                 String tenant = text(candidate.get("tenant_id"));
                 String session = text(candidate.get("session_id"));
                 ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
+                // SEALED is the normal resting state between writer leases; an ACTIVE-only
+                // recheck leaves aged sealed-head packs PUBLISHED forever, and 32 of them
+                // stall the global LIMIT 32 window fleet-wide. Coverage is proven by the
+                // packed-through-revision comparison below, for any head state.
                 List<Map<String, Object>> heads = jdbc.queryForList(
                         "SELECT packed_through_revision FROM ma_session_head WHERE tenant_id = ?"
                                 + " AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
-                                + " AND state = 'ACTIVE' AND COALESCE(compacted_through_revision, 0) = 0 FOR UPDATE",
+                                + " AND COALESCE(compacted_through_revision, 0) = 0 FOR UPDATE",
                         tenant, session);
                 Map<String, Object> pack = lockPack(candidate);
                 if (heads.isEmpty() || pack == null || !"PUBLISHED".equals(pack.get("state"))
@@ -251,7 +258,7 @@ public class JournalPackTransactions {
                     if (!matchesObject(pack)) {
                         continue;
                     }
-                    markPutClosed(text(pack.get("pack_id")), text(pack.get("session_scope_key")),
+                    markPutClosed(text(pack.get("pack_id")),
                             text(pack.get("tenant_id")), text(pack.get("session_id")), key);
                 }
                 store.deleteIfPresent(key);
@@ -265,15 +272,20 @@ public class JournalPackTransactions {
                             || !pack.get("id").equals(locked.get("id"))) {
                         return 0;
                     }
-                    String scope = text(locked.get("session_scope_key"));
-                    String manifestKey = text(locked.get("manifest_resource_key"));
-                    if (!manifestKey.isEmpty()) {
-                        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
-                                        + " AND owner_kind = 'JOURNAL' AND owner_key = ?"
-                                        + " AND resource_key = ?",
-                                scope, locked.get("pack_id"), manifestKey);
-                        jdbc.update("DELETE FROM ma_resource WHERE resource_key = ?"
-                                + " AND session_scope_key = ?", manifestKey, scope);
+                    String manifestRef = text(locked.get("manifest_resource_ref"));
+                    if (!manifestRef.isEmpty()) {
+                        String manifestId = ManagedIdentityRef.decode(
+                                manifestRef.getBytes(StandardCharsets.US_ASCII)).get(2);
+                        jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+                                        + " AND owner_kind = 'JOURNAL' AND owner_ref = ?"
+                                        + " AND resource_id = ?",
+                                locked.get("tenant_id"), locked.get("session_id"),
+                                ManagedSchemaKeys.identity(ManagedIdentityRefs.ref(
+                                        ManagedIdentityRefs.OWNER_REF_BYTES, text(locked.get("pack_id")))),
+                                manifestId);
+                        jdbc.update("DELETE FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
+                                + " AND resource_id = ?", locked.get("tenant_id"),
+                                locked.get("session_id"), manifestId);
                     }
                     return jdbc.update("DELETE FROM ma_journal_pack WHERE id = ? AND pack_id = ?"
                                     + " AND state = 'RETIRED' AND is_put_closed = 1 AND object_key = ?",

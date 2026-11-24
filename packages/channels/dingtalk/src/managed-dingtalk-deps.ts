@@ -12,10 +12,7 @@ import type {
   ManagedDingtalkStreamClient,
   DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
-import {
-  withConnectLoggingSuppressed,
-  withConsoleLogSuppressedSync,
-} from './connect-logging.js';
+import { withConsoleLogSuppressedSync } from './connect-logging.js';
 import { splitChunks } from './markdown.js';
 import {
   DingtalkInteractiveCardClient,
@@ -32,18 +29,131 @@ import {
 const WEBHOOK_TIMEOUT_MS = 30_000;
 const RECONNECT_RETRY_MS = 5_000;
 // The SDK's connect() resolves when the WebSocket is *constructed*, not when it
-// opens, and getEndpoint() has no timeout. Bound the whole attempt so a blocked
-// wss: upgrade or a hung endpoint call becomes a rejection, not a deaf start.
+// opens. One clock covers the whole attempt — discovery and the wss: upgrade
+// together — so a blocked handshake becomes a rejection, not a deaf start.
+// Discovery's abort shares this horizon rather than taking a shorter one: a
+// shorter bound would narrow the allowance discovery already had, and a
+// slow-but-succeeding tenant would start failing every attempt.
 const CONNECT_TIMEOUT_MS = 20_000;
+// The discovery contract, pinned against dingtalk-stream-sdk-nodejs 2.0.4
+// dist/client.mjs getEndpoint(); a bump that changes it must change these.
+const TOKEN_URL = 'https://oapi.dingtalk.com/gettoken';
+const GATEWAY_URL = 'https://api.dingtalk.com/v1.0/gateway/connections/open';
 const SOCKET_OPEN = 1; // ws.WebSocket.OPEN
 // Provider verdicts a retry can heal: system busy (-1), throttled (88), and the
 // send-rate limits (410100 / 130101). Classifying these definitive would settle
 // a rate-limited chunk's whole delivery rejected and never send the rest.
 const TRANSIENT_ERRCODES = new Set([-1, 88, 410100, 130101]);
 
+// One proxy dispatcher per call, destroyed afterwards, shared by endpoint
+// discovery and the webhook send so both egress the same way. In the bundled
+// CLI a dynamic import of the CJS undici package is default-only, so a named
+// destructure would bind undefined and throw before the first request; read
+// the constructor off the default namespace. The Legacy sender uses this shape
+// too.
+async function withProxyDispatcher<T>(
+  proxy: string | undefined,
+  fn: (dispatcher: import('undici').Dispatcher | undefined) => Promise<T>,
+): Promise<T> {
+  let dispatcher: import('undici').Dispatcher | undefined;
+  try {
+    if (proxy) {
+      const { default: undici } = await import('undici');
+      dispatcher = new undici.EnvHttpProxyAgent({
+        httpProxy: proxy,
+        httpsProxy: proxy,
+      });
+    }
+    return await fn(dispatcher);
+  } finally {
+    await dispatcher?.destroy().catch(() => undefined);
+  }
+}
+
+// Bounded, abortable and silent endpoint discovery. Every failure message is a
+// static string: the token URL carries the appsecret and the gateway response
+// carries the connect ticket, so neither the payload nor the transport error
+// may be echoed.
+async function discoverEndpoint(
+  config: {
+    clientId: string;
+    clientSecret: string;
+    ua?: string;
+    subscriptions: Array<{ type: string; topic: string }>;
+  },
+  signal: AbortSignal,
+  proxy?: string,
+): Promise<{ accessToken: string; endpoint: string; ticket: string }> {
+  const tokenUrl =
+    `${TOKEN_URL}?appkey=${encodeURIComponent(config.clientId)}` +
+    `&appsecret=${encodeURIComponent(config.clientSecret)}`;
+  // Route discovery through the same resolved proxy the webhook send uses.
+  // Relying on the ambient global dispatcher instead would make egress depend
+  // on who installed it: the CLI installs one, a daemon worker may not, and
+  // the SDK's axios ignored it entirely — so the same setting would mean
+  // different egress per path.
+  return withProxyDispatcher(proxy, async (dispatcher) => {
+    const via = dispatcher ? { dispatcher } : {};
+    // No redirect following on either leg: the token URL carries the appsecret
+    // and the gateway request carries the access token, so a redirect would
+    // hand that credential to another host. Same guard the webhook send applies.
+    const tokenResponse = await fetch(tokenUrl, {
+      signal,
+      redirect: 'error',
+      ...via,
+    });
+    if (!tokenResponse.ok) {
+      throw new Error(
+        'DingTalk endpoint discovery failed: token request refused.',
+      );
+    }
+    const token = (await tokenResponse.json()) as { access_token?: string };
+    if (!token?.access_token) {
+      throw new Error('DingTalk endpoint discovery failed: no access token.');
+    }
+    const gatewayResponse = await fetch(GATEWAY_URL, {
+      method: 'POST',
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'access-token': token.access_token,
+      },
+      body: JSON.stringify({
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+        ua: config.ua,
+        subscriptions: config.subscriptions,
+      }),
+      redirect: 'error',
+      ...via,
+    });
+    if (!gatewayResponse.ok) {
+      throw new Error(
+        'DingTalk endpoint discovery failed: gateway request refused.',
+      );
+    }
+    const gateway = (await gatewayResponse.json()) as {
+      endpoint?: string;
+      ticket?: string;
+    };
+    if (!gateway?.endpoint || !gateway?.ticket) {
+      throw new Error(
+        'DingTalk endpoint discovery failed: no endpoint or ticket.',
+      );
+    }
+    return {
+      accessToken: token.access_token,
+      endpoint: gateway.endpoint,
+      ticket: gateway.ticket,
+    };
+  });
+}
+
 function createStreamClient(
   settings: DingtalkSettings,
   onMessage: (messageId: string, data: string) => boolean,
+  proxy?: string,
 ): ManagedDingtalkStreamClient {
   const client = new DWClient({
     clientId: settings.clientId,
@@ -54,6 +164,8 @@ function createStreamClient(
     debug: boolean;
     onDownStream: (data: unknown) => void;
     connect: () => Promise<void>;
+    getEndpoint: () => Promise<unknown>;
+    dw_url: string;
     heartbeatIntervallId?: ReturnType<typeof setInterval>;
     socket?: {
       readyState: number;
@@ -68,6 +180,24 @@ function createStreamClient(
   // Assigned on the instance because the constructor's options type omits the
   // field, while the config it exposes carries it.
   client.config.autoReconnect = false;
+  // Replace the SDK's endpoint discovery with the bounded, silent one above.
+  // Its own getEndpoint() logs the resolved config and the gateway response and
+  // never times out, so wrapping it in a console suppression muted the whole
+  // process for as long as it stayed pending — past the attempt budget, which
+  // rejects the attempt without settling that promise (#17173 R11).
+  internals.getEndpoint = async () => {
+    const discovered = await discoverEndpoint(
+      client.config,
+      AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+      proxy,
+    );
+    client.config.access_token = discovered.accessToken;
+    // The SDK stores the whole gateway object here even though its published
+    // type says string; nothing reads it back, so store the endpoint itself.
+    client.config.endpoint = discovered.endpoint;
+    internals.dw_url = `${discovered.endpoint}?ticket=${discovered.ticket}`;
+    return client;
+  };
   // The SDK creates a heartbeat interval on every socket open but never
   // clears it on close, and the next open overwrites the only stored handle —
   // the old interval keeps pinging the replacement socket. Retire it on close,
@@ -165,8 +295,9 @@ function createStreamClient(
       socket.on('close', fail);
     });
   };
-  // Bound the whole attempt (getEndpoint has no timeout either) so a hung
-  // endpoint call or handshake becomes a rejection instead of a pending promise.
+  // Bound the whole attempt so a hung discovery or handshake becomes a
+  // rejection instead of a pending promise. Discovery's abort shares this
+  // horizon and additionally cancels the request the attempt abandons.
   const attempt = (): Promise<void> =>
     new Promise<void>((resolve, reject) => {
       let timedOut = false;
@@ -177,7 +308,7 @@ function createStreamClient(
         client.disconnect();
         reject(new Error('DingTalk stream connect timed out.'));
       }, CONNECT_TIMEOUT_MS);
-      withConnectLoggingSuppressed(sdkConnect)
+      sdkConnect()
         .then(() => {
           // Each attempt constructs a fresh socket; arm the heartbeat retire
           // and the reconnect on its close, so a drop of a healthy socket is
@@ -287,22 +418,10 @@ async function sendWebhook(
     throw webhookFailure('DingTalk webhook URL rejected.', true);
   }
   // In a proxy-only egress the reply must still leave: route this send through
-  // the resolved proxy with a per-send dispatcher (the Legacy sender's shape),
-  // destroyed afterwards so it never leaks. Only the webhook send is proxied —
-  // the internal control-plane traffic is left untouched.
-  let dispatcher: import('undici').Dispatcher | undefined;
-  try {
-    if (proxy) {
-      // Read the constructor off the default namespace: in the bundled CLI a
-      // dynamic import of the CJS undici package is default-only, so a named
-      // destructure would bind undefined and throw before the POST. The Legacy
-      // sender uses this same shape.
-      const { default: undici } = await import('undici');
-      dispatcher = new undici.EnvHttpProxyAgent({
-        httpProxy: proxy,
-        httpsProxy: proxy,
-      });
-    }
+  // the resolved proxy with a per-send dispatcher, destroyed afterwards so it
+  // never leaks. Endpoint discovery uses the same helper; the SDK's internal
+  // control-plane traffic is left untouched.
+  return withProxyDispatcher(proxy, async (dispatcher) => {
     // DingTalk caps one text message at DINGTALK_MAX_CHUNK_LENGTH units, while
     // a ledger segment can be larger; split and send the chunks in order. One
     // receipt still covers the whole ledger segment. Each chunk gets its own
@@ -337,9 +456,7 @@ async function sendWebhook(
         clearTimeout(timer);
       }
     }
-  } finally {
-    await dispatcher?.destroy().catch(() => undefined);
-  }
+  });
 }
 
 async function postTextChunk(
@@ -588,7 +705,8 @@ export function createManagedDingtalkDeps(
   credentials?: ManagedDingtalkCardCredentials,
 ): ManagedDingtalkAdapterDeps {
   return {
-    createStreamClient,
+    createStreamClient: (settings, onMessage) =>
+      createStreamClient(settings, onMessage, proxy),
     sendWebhook: (webhook, text) => sendWebhook(webhook, text, proxy),
     ...(credentials
       ? { sendCardSegment: createCardSender(credentials, proxy) }

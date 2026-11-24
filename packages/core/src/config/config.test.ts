@@ -49,11 +49,18 @@ import {
 } from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 
+/** The surfaces the kernel is on for when nothing sets it. */
+const KERNEL_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
+  'headless',
+  'ink',
+]);
+
 /** The surfaces the shared loop is on for when nothing sets it. */
 const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
   'headless',
   'acp',
   'ink',
+  'opentui',
   'agent-core',
 ]);
 import { Storage } from './storage.js';
@@ -7471,11 +7478,34 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to off for every surface', () => {
+      it('defaults to on for headless and the Ink TUI and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
-          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(
+            KERNEL_BY_DEFAULT.has(surface),
+          );
         }
       });
+
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on the procedural path when the setting is false',
+        (surface) => {
+          expect(
+            makeConfig({
+              eventBusAgentLoopEnabled: false,
+            }).isEventBusAgentLoopEnabled(surface),
+          ).toBe(false);
+        },
+      );
+
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on the procedural path when the environment turns it off',
+        (surface) => {
+          vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', `${surface}=0`);
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+          vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+        },
+      );
 
       it('honors the constructor parameter', () => {
         expect(
@@ -7562,7 +7592,7 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to on for headless, ACP, the Ink TUI and AgentCore and off for every other surface', () => {
+      it('defaults to on for headless, ACP, both TUIs and AgentCore and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
             ON_BY_DEFAULT.has(surface),
@@ -7570,7 +7600,7 @@ describe('Server Config (config.ts)', () => {
         }
       });
 
-      it.each(['headless', 'acp', 'ink', 'agent-core'] as const)(
+      it.each(['headless', 'acp', 'ink', 'opentui', 'agent-core'] as const)(
         'keeps %s on its own loop when the setting is false',
         (surface) => {
           expect(
@@ -7581,7 +7611,7 @@ describe('Server Config (config.ts)', () => {
         },
       );
 
-      it.each(['headless', 'acp', 'ink', 'agent-core'] as const)(
+      it.each(['headless', 'acp', 'ink', 'opentui', 'agent-core'] as const)(
         'keeps %s on its own loop when the environment turns it off',
         (surface) => {
           vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', `${surface}=0`);
@@ -7623,21 +7653,21 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('forces only the surfaces named in an env list', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=1,ink=0');
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=0,ink=0');
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(false);
         expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
-        // An unnamed surface falls back to its default, on for headless.
+        // Unnamed surfaces fall back to their own defaults.
         expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('hosted')).toBe(false);
       });
 
       it('resolves each surface independently', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'speculation');
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(true);
         expect(config.isUnifiedAgentLoopEnabled('hosted')).toBe(false);
-        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
       });
     });
 
@@ -7660,22 +7690,22 @@ describe('Server Config (config.ts)', () => {
         // table is flipped — re-merging the two tables reds this case.
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        UNIFIED_SURFACE_DEFAULTS.opentui = true;
+        UNIFIED_SURFACE_DEFAULTS.speculation = true;
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
-        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(
-          savedEventBus.opentui,
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('speculation')).toBe(
+          savedEventBus.speculation,
         );
       });
 
       it('flipping an event-bus surface default does not flip the unified default', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        EVENT_BUS_SURFACE_DEFAULTS.opentui = true;
+        EVENT_BUS_SURFACE_DEFAULTS.speculation = true;
         const config = makeConfig();
-        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(
-          savedUnified.opentui,
+        expect(config.isEventBusAgentLoopEnabled('speculation')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(
+          savedUnified.speculation,
         );
       });
     });
@@ -7687,10 +7717,14 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to shared for headless, ACP, the Ink TUI and AgentCore and legacy for every other surface', () => {
+      it('defaults to the kernel for headless and the Ink TUI, shared for ACP, OpenTUI and AgentCore, and legacy elsewhere', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().getAgentLoopPath(surface)).toBe(
-            ON_BY_DEFAULT.has(surface) ? 'shared' : 'legacy',
+            KERNEL_BY_DEFAULT.has(surface)
+              ? 'kernel'
+              : ON_BY_DEFAULT.has(surface)
+                ? 'shared'
+                : 'legacy',
           );
         }
       });
@@ -7723,12 +7757,22 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('follows the env overrides that drive the switches', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless');
-        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless');
+        // Name surfaces whose defaults are off, so each env override shows.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'hosted');
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'acp');
         const config = makeConfig();
-        expect(config.getAgentLoopPath('headless')).toBe('kernel');
-        expect(config.getAgentLoopPath('hosted')).toBe('legacy');
+        expect(config.getAgentLoopPath('acp')).toBe('kernel');
+        expect(config.getAgentLoopPath('hosted')).toBe('shared');
+        expect(config.getAgentLoopPath('opentui')).toBe('shared');
       });
+
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on the shared loop when the kernel is turned off',
+        (surface) => {
+          vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', `${surface}=0`);
+          expect(makeConfig().getAgentLoopPath(surface)).toBe('shared');
+        },
+      );
 
       it('caps speculation and hosted at shared even with both switches on', () => {
         // runSpeculationModelRound and the Hosted Harness model round only call
@@ -9229,7 +9273,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     const policy = config.getAutoMemoryPrompt();
-    expect(policy).toContain('## Types and where they go');
+    expect(policy).toContain('Check the current catalog for duplicates first.');
     expect(policy).not.toContain('<types>');
     expect(policy).not.toContain('load the `auto-memory` skill');
     const subagent = deriveConfig(config);
@@ -10728,7 +10772,7 @@ describe('Server Config (config.ts)', () => {
         'MEMORY.md is currently empty',
       );
       expect(config.getAutoMemoryContext()).toContain(
-        'MEMORY.md is currently empty',
+        'The auto-memory catalog is empty.',
       );
     }
   });

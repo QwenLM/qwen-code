@@ -797,6 +797,7 @@ export default {
   'Debug Keystroke Logging': '調試按鍵記錄',
   'Language: UI': '語言：界面',
   'Language: Model': '語言：模型',
+  'Language: Display Translation': '語言：顯示翻譯',
   'Output Format': '輸出格式',
   'Hide Window Title': '隱藏窗口標題',
   'Show Status in Title': '在標題中顯示狀態',
@@ -1583,6 +1584,8 @@ export default {
     '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
   'Could not compress chat history due to an API error.':
     '由於 API 錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because it is too large for the context window.':
+    '聊天歷史過大，超出上下文窗口，無法壓縮。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':

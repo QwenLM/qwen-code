@@ -2,11 +2,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.ParkedMcpOwners;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
 
 import java.time.Duration;
 import java.util.List;
@@ -21,33 +22,42 @@ class JdbcParkedMcpOwnersTest {
     private JdbcTemplate jdbc;
     private JdbcParkedMcpOwners owners;
 
-    @BeforeEach
-    void setUp() {
+    protected DataSource dataSource() {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:parked-mcp-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return source;
+    }
+
+    @BeforeEach
+    void setUp() {
+        DataSource source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
         owners = new JdbcParkedMcpOwners(jdbc);
     }
 
     private void runtimeSession(String id, String state, String storageKey) {
-        jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_session (scope_id, runtime_session_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
                 + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at,"
-                + " execution_storage_key) VALUES (?, ?, ?, 'workspace', '1', '/workspace', 'digest', 'workspace',"
+                + " execution_storage_id) VALUES (?, ?, ?, 'workspace', '1', '/workspace', 'digest', 'workspace',"
                 + " 'session', 'bootstrap', 'binding', 1, ?, 1, 0, ?)",
                 "a".repeat(64), id, TENANT, state, storageKey);
     }
 
     private void head(String state, long sealedForMillis) {
+        head(state, sealedForMillis, null);
+    }
+
+    private void head(String state, long sealedForMillis, String parkedPromptId) {
         long now = System.currentTimeMillis();
-        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, tenant_key, harness_key,"
-                + " head_kind, state, storage_version, writer_generation, journal_revision, committed_sequence,"
-                + " activation_epoch, gmt_create, gmt_modified) VALUES (?, 'session', 'session', ?, ?,"
-                + " 'MANAGED_SESSION', ?, 1, 1, 0, 0, 0, ?, ?)",
-                TENANT, RuntimeAdmissionFences.harnessDrainKey(TENANT), RuntimeAdmissionFences.harnessDrainKey("session"),
-                state, now, now - sealedForMillis);
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, "
+                + " head_kind, state, writer_generation, journal_revision, committed_sequence,"
+                + " activation_epoch, gmt_create, gmt_modified, wake_seal_revision, wake_seal_parked_prompt_id)"
+                + " VALUES (?, 'session', 'session', 'MANAGED_SESSION', ?, 1, 0, 0, 0, ?, ?, 0, ?)",
+                TENANT,
+                state, now, now - sealedForMillis, parkedPromptId);
     }
 
     private static ParkedMcpOwners.Owner owner() {
@@ -91,6 +101,14 @@ class JdbcParkedMcpOwnersTest {
         Duration sealed = owners.sealedFor(owner()).orElseThrow();
         assertTrue(sealed.compareTo(Duration.ofMinutes(45)) >= 0);
         assertTrue(sealed.compareTo(Duration.ofMinutes(46)) < 0);
+    }
+
+    // Reclaiming the owner would drop the catalog the parked Turn's continuation
+    // pins, so the Turn could no longer resume.
+    @Test
+    void aSealThatParksATurnKeepsItsOwner() {
+        head("SEALED", Duration.ofHours(2).toMillis(), "prompt");
+        assertTrue(owners.sealedFor(owner()).isEmpty());
     }
 
     @Test

@@ -188,6 +188,9 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      // This fixture creates fresh children to exercise unrelated route
+      // contracts, whose setup must remain deterministic on loaded CI hosts.
+      '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
@@ -399,6 +402,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_sub_session_send',
       'session_prompt',
       'session_turn_status',
+      'session_turn_feedback',
       'session_attachments',
       'session_attachment_chunk_upload',
       'session_attachment_list',
@@ -553,6 +557,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_archived_session_export',
       'workspace_session_live_state',
       'workspace_session_live_state_batch',
+      'restart_recovery',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',

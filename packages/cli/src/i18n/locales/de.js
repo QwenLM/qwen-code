@@ -458,6 +458,7 @@ export default {
   'Debug Keystroke Logging': 'Debug-Protokollierung von Tastatureingaben',
   'Language: UI': 'Sprache: Benutzeroberfläche',
   'Language: Model': 'Sprache: Modell',
+  'Language: Display Translation': 'Sprache: Anzeigeübersetzung',
   'Output Format': 'Ausgabeformat',
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
@@ -1148,6 +1149,8 @@ export default {
     'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
   'Could not compress chat history due to an API error.':
     'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Chatverlauf konnte nicht komprimiert werden, da er für das Kontextfenster zu groß ist.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

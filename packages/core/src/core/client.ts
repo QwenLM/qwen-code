@@ -225,10 +225,14 @@ import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/su
 import {
   createUserPromptSubmitContextPart,
   deliveredUserPromptSubmitContexts,
+  isUserPromptSubmitContextPartText,
 } from '../hooks/user-prompt-submit-context.js';
 import {
   appendAsyncHookContextPart,
   drainAsyncHookContextPart,
+  isAsyncHookContextPartText,
+  isStampedAsyncHookContextPart,
+  mergeAsyncHookContextParts,
 } from '../hooks/async-hook-context.js';
 import {
   TrustedUserAnswers,
@@ -297,6 +301,7 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
+    ...(options?.retractToolCallsOnRetry && { retractToolCallsOnRetry: true }),
     ...(options?.interactionSpan && {
       interactionSpan: options.interactionSpan,
     }),
@@ -526,6 +531,12 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * The consumer buffers streamed `functionCall` parts until end-of-stream and
+   * discards them on `LlmEventType.Retry`, so a transport cut that delivered
+   * only thinking and unexecuted tool calls can replay cleanly.
+   */
+  retractToolCallsOnRetry?: boolean;
   /**
    * Stable model-availability ledger turn key for this send, when it differs
    * from the send's `prompt_id`. A headless runtime Goal run keeps the
@@ -796,6 +807,12 @@ export class LlmClient {
   // stay refused even after a new main turn starts, and prompt ids are per-turn
   // unique, so a recorded id is never legitimately reused.
   private readonly concurrentSideQueryPromptIds = new Set<string>();
+  // Async hook blocks drained by a send that consumed them but never pushed
+  // them to history (a pre-send exit or a chat-side pre-push throw). Held here
+  // so the next drain-eligible send re-attaches them instead of losing them;
+  // settled by the history-push snapshot, never by prompt id (a TUI Retry mints
+  // a new id). Re-attachment re-checks the ownership gate.
+  private readonly retainedAsyncHookParts: Array<{ text: string }> = [];
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -4380,6 +4397,9 @@ export class LlmClient {
       return typeof published === 'number' ? published : undefined;
     };
     let pushInitiated = false;
+    // Async hook blocks attached to this send's request; settled in the finally
+    // by the push snapshot (retained for the next send if the push never landed).
+    const attachedAsyncHookParts: Array<{ text: string }> = [];
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -4429,6 +4449,33 @@ export class LlmClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      // The stripped orphaned entry carries the async block the failed attempt
+      // drained and pushed. Recover it into the retention so the drain point
+      // re-attaches it (the registry is already cleared); removing it from the
+      // stripped entry keeps the restore path from re-adding a second copy.
+      let recoveredAsyncParts = 0;
+      for (const entry of strippedRetryEntries) {
+        const parts = entry.parts;
+        if (!parts) continue;
+        // Recover only parts this client stamped when it appended them; a
+        // shape-matched part the caller authored stays in the entry as text.
+        const isAsyncPart = (p: (typeof parts)[number]) =>
+          typeof p.text === 'string' && isStampedAsyncHookContextPart(p);
+        const asyncTexts = parts
+          .filter(isAsyncPart)
+          .map((p) => ({ text: p.text as string }));
+        if (asyncTexts.length > 0) {
+          entry.parts = parts.filter((p) => !isAsyncPart(p));
+          this.retainedAsyncHookParts.push(...asyncTexts);
+          recoveredAsyncParts += asyncTexts.length;
+        }
+      }
+      if (recoveredAsyncParts > 0) {
+        debugLogger.info('[AsyncHook] recovered blocks from stripped entries', {
+          entries: strippedRetryEntries.length,
+          recovered: recoveredAsyncParts,
+        });
+      }
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -5303,6 +5350,7 @@ export class LlmClient {
           messageType !== SendMessageType.Teammate &&
           !this.backgroundInteractionPromptIds.has(prompt_id),
         options?.ledgerTurnKey,
+        options?.retractToolCallsOnRetry,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -5321,38 +5369,9 @@ export class LlmClient {
             appendedHookContexts,
           );
       }
-      // Background (async) hooks may have produced output since the last
-      // turn. Drain it (get-and-clear) and deliver it to the model on this
-      // request, before the send and its auto-compaction so the threshold
-      // sees the same tail the provider will (capability ledger L11). Splice
-      // it ahead of the trailing UserPromptSubmit receipt so that block stays
-      // last for the resume/projection/title strips that recognize it only in
-      // last position. getHookSystem is read defensively: a config double
-      // without it (or a hook system without pending output) delivers nothing.
-      // A concurrent `/btw` side query must not consume the running turn's
-      // pending block: its first send carries isConcurrentSideQuery, but its
-      // tool-result continuation arrives unflagged, so the prompt id recorded
-      // at that flagged first send is what refuses the continuation. Every
-      // other ToolResult drains — the owning turn's continuation and a
-      // continue-interrupted turn that sends ToolResult first under an id no
-      // side query claimed. The exploration-budget prompt id cannot serve as
-      // that discriminator: it is only claimed on startsInteraction, so a
-      // ToolResult-first turn (fresh or stale budget id) would be refused and
-      // silently lose the block.
-      const skipAsyncHookDrain =
-        options?.isConcurrentSideQuery === true ||
-        (messageType === SendMessageType.ToolResult &&
-          this.concurrentSideQueryPromptIds.has(prompt_id));
-      const asyncHookContextPart = skipAsyncHookDrain
-        ? null
-        : drainAsyncHookContextPart(this.config.getHookSystem?.());
-      if (asyncHookContextPart) {
-        requestToSend = appendAsyncHookContextPart(
-          requestToSend,
-          asyncHookContextPart,
-          Boolean(appendedHookContext),
-        );
-      }
+      // The async hook drain runs immediately before turn.run (below), not at
+      // assembly: a turn that exits between here and the send must not consume
+      // the get-and-clear block (capability ledger L11, #17284 R1-2).
       if (ideContextText) {
         const firstText = requestToSend.find(
           (part) => typeof part === 'string' || 'text' in part,
@@ -5805,6 +5824,87 @@ export class LlmClient {
             )
           : null;
 
+      // Background (async) hooks may have produced output since the last turn.
+      // Drain (get-and-clear) and deliver on this request immediately before the
+      // send — not at assembly — so a turn that exited earlier (loop detection,
+      // a pre-send throw, an abandoned stream) never consumed the block
+      // (capability ledger L11, #17284 R1-2). Re-attach any block a prior send
+      // consumed but never pushed. This stays upstream of the send's
+      // auto-compaction, so the threshold sees the same tail the provider will.
+      // Splice ahead of a trailing UserPromptSubmit receipt so that block stays
+      // last for the resume/projection/title strips. The ownership gate refuses
+      // a concurrent side query and its unflagged ToolResult continuations (the
+      // recorded prompt id, not the flag); getHookSystem is read defensively.
+      const skipAsyncHookDrain =
+        options?.isConcurrentSideQuery === true ||
+        (messageType === SendMessageType.ToolResult &&
+          this.concurrentSideQueryPromptIds.has(prompt_id));
+      if (!skipAsyncHookDrain) {
+        const retained = this.retainedAsyncHookParts.splice(0);
+        const drained = drainAsyncHookContextPart(
+          this.config.getHookSystem?.(),
+        );
+        const candidates = drained ? [...retained, drained] : retained;
+        // A continue-interrupted Retry payload clones the pushed trailing entry
+        // (envelope included), so drop a candidate the request already carries
+        // and any byte-identical repeat; merge the rest into one bounded block so
+        // repeated pre-push exits cannot stack N envelopes on a single request.
+        const present = new Set(
+          requestToSend
+            .map((p) =>
+              typeof p === 'object' &&
+              p !== null &&
+              'text' in p &&
+              typeof p.text === 'string'
+                ? p.text
+                : undefined,
+            )
+            .filter(
+              (t): t is string =>
+                typeof t === 'string' && isAsyncHookContextPartText(t),
+            )
+            .map((t) => t.trim()),
+        );
+        const seen = new Set<string>();
+        const deduped: Array<{ text: string }> = [];
+        for (const part of candidates) {
+          if (present.has(part.text.trim())) {
+            // The request already carries it, so do not append a second copy —
+            // but the retention entry was consumed above, and only this send's
+            // push snapshot decides whether it survives. Register it for
+            // settlement without re-appending, or a pre-push exit would lose it
+            // (the restored Retry entry no longer carries it).
+            attachedAsyncHookParts.push({ text: part.text });
+            continue;
+          }
+          if (seen.has(part.text.trim())) continue;
+          seen.add(part.text.trim());
+          deduped.push(part);
+        }
+        const merged = mergeAsyncHookContextParts(deduped);
+        if (merged) {
+          const lastPart = requestToSend[requestToSend.length - 1];
+          const syncReceiptTrailing =
+            typeof lastPart === 'object' &&
+            lastPart !== null &&
+            'text' in lastPart &&
+            typeof lastPart.text === 'string' &&
+            isUserPromptSubmitContextPartText(lastPart.text);
+          requestToSend = appendAsyncHookContextPart(
+            requestToSend,
+            merged,
+            syncReceiptTrailing,
+          );
+          attachedAsyncHookParts.push(merged);
+        }
+        debugLogger.info('[AsyncHook] drain before send', {
+          retained: retained.length,
+          drained: drained ? 1 : 0,
+          droppedDuplicates: candidates.length - deduped.length,
+          attached: merged ? 1 : 0,
+        });
+      }
+
       // The acceptance snapshot for the attached carrier is published by
       // `chat.sendMessageStream` on `requestToSend` immediately before the
       // actual history push (see `userContentPushSnapshotKey`); a
@@ -6240,11 +6340,7 @@ export class LlmClient {
           };
         }
 
-        if (
-          goalPermit &&
-          (stopOutput?.isBlockingDecision() ||
-            stopOutput?.shouldStopExecution())
-        ) {
+        if (goalPermit && stopOutput?.isBlockingDecision()) {
           const continueReason = stopOutput.getEffectiveReason();
           const { iterationCount, reasons, cap, capped } =
             this.nextStopHookBlock(prompt_id, continueReason);
@@ -6329,12 +6425,9 @@ export class LlmClient {
           }
         }
 
-        // For Stop hooks, blocking/stop execution should force continuation
-        if (
-          !goalPermit &&
-          (stopOutput?.isBlockingDecision() ||
-            stopOutput?.shouldStopExecution())
-        ) {
+        // A blocking Stop hook forces continuation. `continue: false` without
+        // a block lets the turn end.
+        if (!goalPermit && stopOutput?.isBlockingDecision()) {
           // Check if aborted before continuing
           if (signal.aborted) {
             endCurrentInteraction('cancelled');
@@ -6443,6 +6536,14 @@ export class LlmClient {
           // ToolResult turn still needs to consume the recall result.
           normalCompletion = true;
           return hookTurn;
+        }
+
+        if (stopOutput?.shouldStopExecution() && stopOutput.stopReason) {
+          yield {
+            type: LlmEventType.HookSystemMessage,
+            value: stopOutput.stopReason,
+            isStopReason: true,
+          };
         }
 
         // The stop was allowed, so this prompt is no longer hook-forced.
@@ -6723,6 +6824,29 @@ export class LlmClient {
         settleSteerInput(attachedSteerInput);
       }
       restoreStrippedRetryEntries();
+      // Settle the async hook blocks attached to this send by the same push
+      // snapshot: if the push landed they are already in history (a post-push
+      // failure rides the next request), so do not retain them; otherwise the
+      // send consumed them without pushing — keep them for the next
+      // drain-eligible send. Settling by acceptance instead would retain a
+      // block already in history after a post-push failure and double-deliver.
+      if (attachedAsyncHookParts.length > 0) {
+        const asyncPushSnapshot = attachedPushSnapshot();
+        const asyncPushed =
+          pushInitiated &&
+          asyncPushSnapshot !== undefined &&
+          currentPushCount() > asyncPushSnapshot;
+        if (!asyncPushed) {
+          this.retainedAsyncHookParts.push(...attachedAsyncHookParts);
+        }
+        debugLogger.info('[AsyncHook] settle attached blocks', {
+          attached: attachedAsyncHookParts.length,
+          pushInitiated,
+          asyncPushSnapshot,
+          pushCount: currentPushCount(),
+          retained: !asyncPushed,
+        });
+      }
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught
       // exception thrown out of the streaming loop still ends the message,

@@ -8,7 +8,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -124,12 +123,10 @@ public final class WorkspaceMigrationStore {
                     "request_json", request.toString(), "state", "RETIRING",
                     "source_registration_json", JSON.valueToTree(source).toString(),
                     "target_registration_id", UUID.randomUUID().toString()));
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+            jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
                     + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                     + " fence_operation_id = COALESCE(fence_operation_id, VALUES(fence_operation_id))",
-                    RuntimeAdmissionFences.storageAliasKey(tenant, storage),
-                    RuntimeAdmissionFences.storageFenceKey(tenant), RuntimeAdmissionFences.storageFenceKey(storage),
                     tenant, storage, id);
             requireOwner();
         });
@@ -374,7 +371,7 @@ public final class WorkspaceMigrationStore {
         // hostage: its acceptance is unknown and its task may still use this
         // storage, so the move waits for the reconciler (D7-2).
         check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_operation o"
-                + " ON o.session_scope_key = s.session_scope_key AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
+                + " ON o.tenant_id = s.tenant_id AND o.session_id = s.session_id AND s.is_publication_retention_registered = 1 WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')"),
                 "migration_work_unsettled");
         check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_request_receipt c"
@@ -387,9 +384,9 @@ public final class WorkspaceMigrationStore {
         check(!existsIn(reader, "SELECT 1 FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT' AND tenant_id = ?"
                 + " AND storage_id = ? AND child_state NOT IN ('merged', 'discarded', 'failed', 'conflicted')"),
                 "migration_work_unsettled");
-        check(reader.queryForList("SELECT 1 FROM ma_session_worktree WHERE physical_key IN"
-                        + " (SELECT physical_key FROM ma_storage WHERE alias_key = ?) AND state <> 'REMOVED' LIMIT 1", Integer.class,
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage)).isEmpty(),
+        check(reader.queryForList("SELECT 1 FROM ma_session_worktree WHERE physical_id IN"
+                        + " (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?) AND state <> 'REMOVED' LIMIT 1", Integer.class,
+                tenant, storage).isEmpty(),
                 "migration_work_unsettled");
         long now = reader.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
@@ -409,7 +406,7 @@ public final class WorkspaceMigrationStore {
                 break;
             }
         }
-        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")"),
+        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND s.is_publication_retention_registered = 1 WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")"),
                 "migration_writer_active");
     }
 
@@ -450,7 +447,7 @@ public final class WorkspaceMigrationStore {
     private void clearFence() {
         // The same index as owner(), which already locked this row.
         check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL"
-                + " WHERE alias_key = ? AND fence_operation_id = ?", RuntimeAdmissionFences.storageAliasKey(tenant, storage),
+                + " WHERE tenant_id = ? AND storage_id = ? AND fence_operation_id = ?", tenant, storage,
                 id) == 1, "migration_conflict");
     }
 

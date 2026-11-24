@@ -40,6 +40,15 @@ interface AoneCursor {
   baselineAt: string;
   /** Per-repo last processed event id. Aone has no server-side mark-read. */
   repos: Record<string, number>;
+  /**
+   * Per-repo instant (ISO) of the last poll. Optional for backward compat
+   * with cursors written before it existed. Discriminates the two cursor-0
+   * states: an empty-window baseline polled recently (the window fills
+   * normally, no aging) vs a stale empty baseline older than the window
+   * start (genuine aging loss). Kept separate from `repos` (a number record)
+   * so adding it does not invalidate existing cursors.
+   */
+  lastPoll?: Record<string, string>;
 }
 
 const cursorSchema = z.object({
@@ -47,6 +56,7 @@ const cursorSchema = z.object({
   // reject it so the channel re-baselines instead.
   baselineAt: z.string().refine((s) => !Number.isNaN(Date.parse(s))),
   repos: z.record(z.string(), z.number()),
+  lastPoll: z.record(z.string(), z.string()).optional(),
 });
 
 /** One `a1 events repo --type comments` entry (the fields we read). */
@@ -156,6 +166,13 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
   private botAccount = '';
   private baselineMs = NaN;
   private viewCache = new Map<string, { title: string; url: string }>();
+  // Dedupes the cursor_aged_out journal record per aging episode within this
+  // process's lifetime: a chronically backlogged repo re-enters the aging
+  // branch every poll with a constant stale lastPoll, so one record per
+  // distinct stale instant. In-memory only — a restart re-records an episode
+  // the journal already holds (the dedupe is per process, not per repo
+  // lifetime); persisting it would require another optional cursor field.
+  private agedOutJournal = new Map<string, string>();
 
   constructor(
     name: string,
@@ -217,42 +234,72 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open", "allowlist" (with the repository listed), or "pairing" (after one-time group approval) for comments to be dispatched\n`,
       );
     }
-    // The management UI seeds groupPolicy from the descriptor default
-    // (open, GitLab/GitHub parity); its shared group-sender fields write
-    // groups["*"].senders / allowedUsers (channel-wide) and its allowlist
-    // membership field creates groups[<repo>] entries, but per-repository
-    // SENDERS overrides exist only for github/gitlab. A UI-created channel
-    // is permissive only while the operator leaves Group senders at its
-    // default — warn about the repos that are ACTUALLY open, not the
-    // wildcard entry alone (a per-repo allowlist with no "*" entry is
-    // restricted and must not warn).
+    // Aone is configured by hand in settings.json: it is not in the Web
+    // Shell's SUPPORTED_CHANNEL_TYPES, so the channel editor cannot create
+    // or edit it and the descriptor's groupPolicy default (open) never
+    // seeds an editor draft. An absent groupPolicy in a hand-written config
+    // resolves to disabled (warned above). The diagnostics below therefore
+    // describe the hand-written posture, not a UI-seeded one.
     //
-    // Reachability first: under allowlist, GroupGate.check rejects a repo
-    // with no groups entry (not_allowlisted) BEFORE the sender gate runs,
-    // so such a repo's sender policy is never reached — it is dead, not
-    // open, and must be excluded from the permissive warning. The entry
-    // check mirrors ChannelBase.groupConfigFor (private): exact key, then
-    // normalized-match.
+    // One posture-resolution pass per watched repo, reproducing the base
+    // gate order: GroupGate.check (allowlist membership) runs BEFORE the
+    // sender gate, so a repo the group gate rejects is dead regardless of
+    // its senders. groupConfigFor mirrors ChannelBase.groupConfigFor
+    // (private): exact key, then normalized-match; the allowedUsers chain
+    // mirrors groupAllowedUsersFor (repo -> "*" -> empty, and an empty
+    // allowlist denies everyone — it does not fall through to open).
     const groups = this.config.groups ?? {};
-    const hasGroupsEntry = (repo: string) => {
-      if (Object.hasOwn(groups, repo)) return true;
-      const normalized = this.normalizeGroupId(repo);
-      return Object.keys(groups).some(
-        (key) => this.normalizeGroupId(key) === normalized,
-      );
+    const groupConfigFor = (key: string) => {
+      if (Object.hasOwn(groups, key)) return groups[key];
+      const normalized = this.normalizeGroupId(key);
+      for (const [groupId, group] of Object.entries(groups)) {
+        if (this.normalizeGroupId(groupId) === normalized) return group;
+      }
+      return undefined;
     };
+    const hasGroupsEntry = (repo: string) => groupConfigFor(repo) !== undefined;
+    const resolvedAllowedUsers = (repo: string) =>
+      groupConfigFor(repo)?.allowedUsers ??
+      groupConfigFor('*')?.allowedUsers ??
+      [];
+    const policy = cfg.groupPolicy;
+    // Whether the group gate admits the repo now. Pairing needs a one-time
+    // approval that connect cannot assume, so it is not immediately
+    // reachable (its open-senders note below is conditioned on approval).
+    const groupReachable = (repo: string) =>
+      policy === 'open' || (policy === 'allowlist' && hasGroupsEntry(repo));
+    const sendersFor = (repo: string) => this.groupSendersFor({ chatId: repo });
+
     const allowlistDeadRepos =
-      cfg.groupPolicy === 'allowlist'
+      policy === 'allowlist'
         ? this.repos.filter((repo) => !hasGroupsEntry(repo))
         : [];
     const openRepos = this.repos.filter(
-      (repo) =>
-        this.groupSendersFor({ chatId: repo }) === 'open' &&
-        !allowlistDeadRepos.includes(repo),
+      (repo) => groupReachable(repo) && sendersFor(repo) === 'open',
     );
+    const senderDeadRepos = this.repos.filter(
+      (repo) =>
+        groupReachable(repo) &&
+        sendersFor(repo) === 'allowlist' &&
+        resolvedAllowedUsers(repo).length === 0,
+    );
+    const pairingOpenRepos =
+      policy === 'pairing'
+        ? this.repos.filter((repo) => sendersFor(repo) === 'open')
+        : [];
+    // Pairing + sender-dead: groupReachable is false under pairing (approval
+    // pending), so the reachable-only senderDeadRepos filter above misses it;
+    // after approval the empty allowlist still denies every sender.
+    const pairingSenderDeadRepos =
+      policy === 'pairing'
+        ? this.repos.filter(
+            (repo) =>
+              sendersFor(repo) === 'allowlist' &&
+              resolvedAllowedUsers(repo).length === 0,
+          )
+        : [];
     const deadAllowlist =
-      cfg.groupPolicy === 'allowlist' &&
-      allowlistDeadRepos.length === this.repos.length;
+      policy === 'allowlist' && allowlistDeadRepos.length === this.repos.length;
     if (deadAllowlist) {
       // Every watched repo is dead: nothing dispatches at all.
       process.stderr.write(
@@ -266,17 +313,35 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         `[Channel:${this.name}] warning: no groups entry for ${allowlistDeadRepos.join(', ')} under groupPolicy "allowlist" — events on those repositories will be rejected as not_allowlisted (the "*" entry is a default, not a wildcard, under allowlist)\n`,
       );
     }
-    if (
-      (cfg.groupPolicy === 'open' || cfg.groupPolicy === 'allowlist') &&
-      openRepos.length > 0
-    ) {
-      // Permissive posture: open senders on a reachable watched repo —
-      // under groupPolicy open directly, or under allowlist via a
-      // membership entry whose senders fall back to an open "*" default.
-      // openRepos already excludes allowlist-dead repos, so the all-dead
-      // posture never reaches here (nothing dispatches there).
+    if (senderDeadRepos.length > 0) {
+      // Sender-layer dead: the group gate admits these repos but their
+      // effective senders policy is allowlist with an empty resolved list,
+      // so every event dies group_sender_denied while the poll journals ok.
+      process.stderr.write(
+        `[Channel:${this.name}] warning: senders "allowlist" with no allowedUsers on ${senderDeadRepos.join(', ')} — every event will be rejected as group_sender_denied; set groups["<repo>"].allowedUsers (or groups["*"].allowedUsers) to admit specific commenters\n`,
+      );
+    }
+    if ((policy === 'open' || policy === 'allowlist') && openRepos.length > 0) {
+      // Permissive posture: open senders on a reachable watched repo.
+      // openRepos excludes group-dead repos, so the all-dead posture never
+      // reaches here (nothing dispatches there).
       process.stderr.write(
         `[Channel:${this.name}] warning: open group senders on ${openRepos.join(', ')} — any commenter on those repositories can drive the agent as the a1-login account; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict (see the design doc sample)\n`,
+      );
+    }
+    if (pairingOpenRepos.length > 0) {
+      // Pairing: not immediately reachable (group approval pending), so do
+      // not claim current reachability — warn about the post-approval
+      // posture instead.
+      process.stderr.write(
+        `[Channel:${this.name}] warning: groupPolicy "pairing" with open group senders on ${pairingOpenRepos.join(', ')} — once a group is approved, any commenter on those repositories can drive the agent; set groups["<repo>"].senders to "allowlist" with allowedUsers to restrict\n`,
+      );
+    }
+    if (pairingSenderDeadRepos.length > 0) {
+      // Pairing + sender-dead: post-approval framing (the group still needs
+      // approval), and exclusive from pairing-open (allowlist vs open senders).
+      process.stderr.write(
+        `[Channel:${this.name}] warning: groupPolicy "pairing" with senders "allowlist" and no allowedUsers on ${pairingSenderDeadRepos.join(', ')} — once a group is approved, every event on those repositories will be rejected as group_sender_denied; set groups["<repo>"].allowedUsers (or groups["*"].allowedUsers) to admit specific commenters\n`,
       );
     }
 
@@ -344,6 +409,14 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         // it in the watch list (the base loop restarts from repos[0] on a
         // failed poll, so an uncaught throw skips every later repo forever).
         failures.push(err);
+        // Sanitize once for both sinks: the cause is a1-derived text, so a
+        // newline-bearing message must not forge a second stderr log line
+        // and a long one must stay bounded. The journal write path caps too,
+        // but stderr is the adapter's own responsibility.
+        const message = sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        );
         // Durable trace: a partial failure resolves the round, so the base
         // loop journals it ok — without this record the broken repo would
         // leave no trace the status page can show while its comments age out.
@@ -351,13 +424,10 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
           type: 'poll',
           outcome: 'repo_failed',
           repository: repo,
-          error: sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            200,
-          ),
+          error: message,
         });
         process.stderr.write(
-          `[Channel:${this.name}] poll failed for ${repo}: ${err}\n`,
+          `[Channel:${this.name}] poll failed for ${repo}: ${message}\n`,
         );
       }
     }
@@ -386,12 +456,25 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     const sinceStr = localDate(since);
     const untilStr = localDate(until);
 
+    // Capture the PREVIOUS successful poll instant: it discriminates genuine
+    // aging (the repo was not successfully polled within the window, so
+    // events since the last observation aged out) from a quiet repo that was
+    // polled continuously and simply received no comments (nothing lost).
+    // Unknown (a cursor written before lastPoll existed) is treated as stale
+    // — the safe base behavior. The instant is stamped only at the SUCCESS
+    // exits below, never here: a poll whose fetch throws must not count as an
+    // observation, or a long a1 outage would keep refreshing it and silence
+    // the aging diagnostic on recovery.
+    const prevPollIso = this.cursor.lastPoll?.[repo];
+    const prevPollMs = prevPollIso ? Date.parse(prevPollIso) : NaN;
+
     const cursorId = this.cursor.repos[repo];
     if (cursorId === undefined) {
       // First observation: baseline to the newest event id, dispatch nothing
       // (GitLab first-poll drain precedent). Page 1 is newest-first.
       const page = await this.fetchEventsPage(repo, 1, sinceStr, untilStr);
       this.cursor.repos[repo] = page.reduce((m, e) => Math.max(m, e.id), 0);
+      (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
       this.saveCursor();
       return;
     }
@@ -422,12 +505,41 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       }
     }
 
-    // The cursor event itself aged out of the 3-day window: events between
-    // the cursor and the window's oldest are gone to window aging, and the
-    // cursor will jump over them. Diagnose the jump (only when there is
-    // something to resume to — a dormant repo with an empty window skips
-    // nothing and must not warn every poll).
-    if (!reachedCursor && fresh.length > 0) {
+    // The cursor event itself aged out of the 3-day window. Fire only when
+    // the walk missed the cursor, there is something to resume to, AND the
+    // previous fully-drained poll predates the window start (agedOut): that
+    // is genuine loss — events since the last complete observation fell
+    // outside the window. This covers both an outage (no successful poll) and
+    // a drain slower than arrival: a capped poll does not refresh lastPoll
+    // (see the success exit), so a chronically backlogged repo keeps its last
+    // fully-drained instant until it precedes the window and the loss is
+    // diagnosed. A repo polled continuously within the window (fresh
+    // lastPoll) lost nothing even if its cursor event aged out (a quiet gap),
+    // and a recent empty-window baseline (cursor 0) fills normally — neither
+    // is aging. Keying on the last fully-drained poll, not the cursor value or
+    // the channel baseline, also keeps a repo added to a mature channel (fresh
+    // baseline) from false-positiving. A dormant repo (empty fresh) skips
+    // nothing. The loss is permanent, so leave a durable journal record
+    // beside the stderr line (the poll itself resolves ok).
+    const agedOut = Number.isNaN(prevPollMs) || prevPollMs < since.getTime();
+    if (!reachedCursor && fresh.length > 0 && agedOut) {
+      const resumedFrom = fresh.reduce(
+        (m, e) => Math.min(m, e.id),
+        fresh[0]!.id,
+      );
+      // A chronically backlogged repo (drain slower than arrival) re-enters
+      // this branch every poll with the same stale lastPoll; journal once per
+      // distinct stale instant, not once per poll.
+      const episode = prevPollIso ?? '';
+      if (this.agedOutJournal.get(repo) !== episode) {
+        this.recordChannelEvent({
+          type: 'poll',
+          outcome: 'cursor_aged_out',
+          repository: repo,
+          detail: { cursor: cursorId, resumedFrom },
+        });
+        this.agedOutJournal.set(repo, episode);
+      }
       process.stderr.write(
         `[Channel:${this.name}] cursor for ${repo} aged out of the events window; events older than the window were lost to aging; resuming from the oldest fetched event\n`,
       );
@@ -453,14 +565,14 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       const createdMs = Date.parse(event.createdAt ?? '');
       if (Number.isNaN(createdMs)) {
         process.stderr.write(
-          `[Channel:${this.name}] unparseable createdAt on event ${event.id} (${String(event.createdAt)}); skipping\n`,
+          `[Channel:${this.name}] unparseable createdAt on event ${event.id} (${sanitizeLogText(String(event.createdAt), 200)}); skipping\n`,
         );
       } else if (createdMs >= this.baselineMs) {
         try {
           await this.dispatchEvent(repo, event);
         } catch (err) {
           process.stderr.write(
-            `[Channel:${this.name}] error processing event ${event.id}: ${err}\n`,
+            `[Channel:${this.name}] error processing event ${event.id}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
           );
           await this.postErrorComment(repo, event).catch(() => {});
         }
@@ -472,6 +584,19 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       this.cursor.repos[repo] = event.id;
       this.saveCursor();
     }
+    // Success exit: stamp the last-poll instant only when this poll is a
+    // complete observation that actually covers the gap. A capped poll (drain
+    // slower than arrival, fresh > slice) is not complete. An EMPTY window is
+    // complete only when it is not itself aged out: a quiet repo's dormant
+    // poll (agedOut false) stamps and stays silent, but an outage's recovery
+    // poll whose window is already empty (agedOut true) observed nothing of
+    // the gap, so it must keep the instant stale — otherwise the next
+    // non-empty poll would see a fresh lastPoll and swallow the outage's
+    // permanent loss. A poll that threw above never reaches here either.
+    if (fresh.length <= slice.length && (fresh.length > 0 || !agedOut)) {
+      (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
+    }
+    this.saveCursor();
   }
 
   private async fetchEventsPage(
@@ -596,7 +721,7 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         vars['url'] = view.url;
       } catch (err) {
         process.stderr.write(
-          `[Channel:${this.name}] fetchView failed (metadata only): ${err}\n`,
+          `[Channel:${this.name}] fetchView failed (metadata only): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
         vars['title'] = '';
         vars['url'] = '';

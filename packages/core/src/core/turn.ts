@@ -539,6 +539,16 @@ export enum CompressionStatus {
    * apart from model output quality failures.
    */
   COMPRESSION_FAILED_API_ERROR,
+
+  /**
+   * The compression request could not leave the summary a usable output
+   * budget in the receiving model's window, even after its text was
+   * truncated (#9455).
+   * Either it was refused before it was sent, or the provider rejected it for
+   * context length and no smaller request could be built, or the one retry
+   * was rejected for context length too.
+   */
+  COMPRESSION_FAILED_INPUT_TOO_LARGE,
 }
 
 export function isCompressionFailureStatus(
@@ -549,7 +559,8 @@ export function isCompressionFailureStatus(
     status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
     status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
   );
 }
 
@@ -625,6 +636,7 @@ export type ServerLlmCitationEvent = {
 export type ServerLlmHookSystemMessageEvent = {
   type: LlmEventType.HookSystemMessage;
   value: string;
+  isStopReason?: true;
 };
 
 export type ServerLlmGoalSettlementFailedEvent = {
@@ -802,6 +814,7 @@ export class Turn {
     private readonly isExplicitRetry?: boolean,
     private readonly isSessionTurn?: boolean,
     private readonly ledgerTurnKey?: string,
+    private readonly retractToolCallsOnRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -834,6 +847,9 @@ export class Turn {
         ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
         ...(this.retractDeliveredOutputOnRetry
           ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.retractToolCallsOnRetry
+          ? { retractToolCallsOnRetry: true }
           : {}),
         ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
         ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),
