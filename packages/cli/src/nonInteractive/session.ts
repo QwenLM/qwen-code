@@ -19,6 +19,10 @@ import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ModSession } from '../services/mod-session.js';
 import { waitForPendingMemoryTasks } from './memory-tasks.js';
+import {
+  collectFailedMcpServers,
+  formatFailedMcpServers,
+} from '../utils/mcp-failure-warning.js';
 import { cancelAndSettleWorkflowRuns } from './workflow-shutdown.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
@@ -231,13 +235,12 @@ class Session {
       // silently run with only built-in tools.
       // Defensive against tests that pass a stubbed Config without
       // `getFailedMcpServerNames`.
-      const failedMcpServers =
-        typeof this.config.getFailedMcpServerNames === 'function'
-          ? this.config.getFailedMcpServerNames()
-          : [];
+      const failedMcpServers = collectFailedMcpServers(this.config);
       if (failedMcpServers.length > 0) {
         process.stderr.write(
-          `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+          `Warning: MCP server(s) failed to start: ${formatFailedMcpServers(
+            failedMcpServers,
+          )}. ` +
             `Continuing with built-in tools and any servers that did connect.\n`,
         );
       }

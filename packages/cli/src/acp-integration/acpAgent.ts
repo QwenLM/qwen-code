@@ -8,6 +8,10 @@ import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth
 import { isSubscriptionSessionExpired } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
 import {
+  collectFailedMcpServers,
+  formatFailedMcpServers,
+} from '../utils/mcp-failure-warning.js';
+import {
   proposeMemoryImport,
   type MemoryImportModelInput,
 } from '@qwen-code/qwen-code-core/memory/import-model.js';
@@ -17528,13 +17532,12 @@ class QwenAgent implements Agent {
       return;
     }
 
-    const failedMcpServers =
-      typeof config.getFailedMcpServerNames === 'function'
-        ? config.getFailedMcpServerNames()
-        : [];
+    const failedMcpServers = collectFailedMcpServers(config);
     if (failedMcpServers.length > 0) {
       process.stderr.write(
-        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+        `Warning: MCP server(s) failed to start: ${formatFailedMcpServers(
+          failedMcpServers,
+        )}. ` +
           `Continuing with built-in tools and any servers that did connect.\n`,
       );
     }
