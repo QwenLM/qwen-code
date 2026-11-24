@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { BOOT_READY_TIMEOUT_MS } from './client/e2e/utils/bootRetry';
 
 const port = Number(process.env['PLAYWRIGHT_PORT'] ?? 5174);
 const baseURL =
@@ -13,10 +14,7 @@ export default defineConfig({
   outputDir: './client/e2e/test-results',
   timeout: 60_000,
   expect: {
-    // A pool host runs other jobs beside this suite, so its first paint can
-    // miss the hosted 10 s budget: run 39185024821 lost ten @smoke tests to
-    // visibility waits while the same commit passed on a quieter host.
-    timeout: 20_000,
+    timeout: BOOT_READY_TIMEOUT_MS,
   },
   forbidOnly: !!process.env['CI'],
   retries: process.env['CI'] ? 2 : 0,

@@ -13,8 +13,11 @@ export const BOOT_RELOAD_BACKOFF_MS = [
   500, 1_500, 3_500, 6_000, 8_000,
 ] as const;
 
-/** Startup waits must allow for the backoff and rebuilding the module graph. */
-export const BOOT_READY_TIMEOUT_MS = 40_000;
+/** Allow the full reload ladder plus 20 s for the shell to become ready. */
+export const BOOT_READY_TIMEOUT_MS = BOOT_RELOAD_BACKOFF_MS.reduce<number>(
+  (budget, delay) => budget + delay,
+  20_000,
+);
 
 /** Reloads allowed for one tab whose boot keeps failing. */
 export const MAX_BOOT_RELOADS = BOOT_RELOAD_BACKOFF_MS.length;

@@ -570,7 +570,11 @@ test('@smoke browses files with Pierre, previews Markdown and source, and restor
     content.getByRole('heading', { name: 'Workspace guide' }),
   ).toBeVisible();
   await tree.getByRole('treeitem', { name: 'src', exact: true }).click();
-  await tree.getByRole('treeitem', { name: 'app.ts', exact: true }).click();
+  // Auto-scrolling this virtual row during a pointer click can hit a neighbor
+  // while the tree is still updating. Open it with the tree's keyboard action.
+  await tree
+    .getByRole('treeitem', { name: 'app.ts', exact: true })
+    .press('Enter');
   await expect(content.getByTestId('pierre-file-preview')).toContainText(
     'Hello, files',
   );

@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import { BOOT_READY_TIMEOUT_MS } from './bootRetry';
 
 export interface SseConnectionRecord {
   url: string;
@@ -170,9 +171,10 @@ export async function installSseTransport<TEvent>(
   const frameFor = (event: TEvent) => `data: ${JSON.stringify(event)}\n\n`;
 
   const transport: SseTransport<TEvent> = {
-    // Matches the suite's visibility budget in playwright.config.ts: the
-    // handshake loses the same race against first paint on a busy pool host.
-    async waitForConnection(sessionId, { timeout = 20_000 } = {}) {
+    async waitForConnection(
+      sessionId,
+      { timeout = BOOT_READY_TIMEOUT_MS } = {},
+    ) {
       await page.waitForFunction(
         ({ targetSessionId }) => {
           const harness = window.__webShellSseHarness;

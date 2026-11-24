@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { DaemonUpdateStatus } from '@qwen-code/sdk/daemon';
+import { BOOT_READY_TIMEOUT_MS } from './utils/bootRetry';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -8,6 +9,9 @@ import {
 test('downloads silently, shows an update action in More and restarts in place @smoke', async ({
   page,
 }, testInfo) => {
+  // Each stored sidebar width requires a reload. Leave one startup recovery
+  // budget within the test timeout in addition to those expected navigations.
+  test.setTimeout(testInfo.timeout + BOOT_READY_TIMEOUT_MS);
   const scenario = createWebShellDaemonScenario();
   scenario.capabilities.features.push('daemon_update');
   scenario.capabilities.qwenCodeVersion = '0.24.4';
