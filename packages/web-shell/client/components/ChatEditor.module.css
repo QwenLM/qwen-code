@@ -681,6 +681,9 @@
 }
 
 .slashDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   min-height: 0;
   max-height: min(
     180px,
@@ -691,20 +694,71 @@
 }
 
 .slashDetailCommand {
-  margin-bottom: 5px;
+  flex-shrink: 0;
   color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
-  font-weight: 400;
-  line-height: 22px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: normal;
+}
+
+.slashDetailExtension {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.slashDetailExtension:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.slashDetailExtensionLabel {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.slashDetailExtensionIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.slashDetailExtensionName {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  overflow-wrap: anywhere;
   white-space: normal;
 }
 
 .slashDetailText {
+  flex-shrink: 0;
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 400;
-  line-height: 20px;
+  line-height: 19px;
   white-space: pre-wrap;
 }
 
