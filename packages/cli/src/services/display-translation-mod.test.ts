@@ -197,6 +197,10 @@ describe('translateDisplayText', () => {
     ['Run `npm test`.', '运行 `npm run build`。'],
     ['See [docs](https://a.example).', '参见[文档](https://evil.example)。'],
     ['See the docs.', '参见文档。![](https://evil.example/p)'],
+    [
+      'See https://github.com for the docs.',
+      '文档见 https://github.com．ｅｖｉｌ．ｃｏｍ',
+    ],
     ['Run this.\n\n    npm test', '运行这个。\n\n    npm run build'],
     ['Run this.\n\n> ~~~sh\n> npm test\n> ~~~', '运行这个。'],
     ['Run the command.', '运行命令。\n\n~~~sh\nnpm run build\n~~~'],

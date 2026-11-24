@@ -67,7 +67,11 @@ async function inspectMarkdown(text: string) {
         shown !== undefined &&
         /^(?:https?|mailto):/i.test(url) &&
         [shown, `mailto:${shown}`, `http://${shown}`].includes(url);
-      spans.push(`url:${bare ? url.replace(/[^\x21-\x7e]+$/u, '') : url}`);
+      // Full-width letters and digits map to ASCII in a browser's URL.
+      const tail = bare ? /[^\x21-\x7e]+$/u.exec(url)?.[0] : undefined;
+      spans.push(
+        `url:${tail && !/[a-z0-9]/i.test(tail.normalize('NFKC')) ? url.slice(0, -tail.length) : url}`,
+      );
     }
   });
   return { prose: words.join(' '), code: { fences, spans: spans.sort() } };
