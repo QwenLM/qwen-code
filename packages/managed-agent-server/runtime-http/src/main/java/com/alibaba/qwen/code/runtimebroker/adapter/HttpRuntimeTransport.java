@@ -150,7 +150,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         return this;
     }
 
-    private Map<String, Object> contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+    private ManagedContextProtocol.Boot contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         String digest = request.getScope().getCapabilityDigest();
         return ManagedContextProtocol.boot(request, seed,
                 ManagedExtensionExecutionProfile.admits(digest)
@@ -248,8 +248,8 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                     "seed must bind the lease");
         }
         if (request.isManagedContext()) {
-            Map<String, Object> boot = contextBoot(request, seed);
-            Map<String, Object> body = ManagedContextProtocol.attestationRequest(boot);
+            ManagedContextProtocol.Boot boot = contextBoot(request, seed);
+            Map<String, Object> body = ManagedContextProtocol.attestationRequest(boot.toWire());
             String path = ManagedContextProtocol.ATTEST_PATH;
             byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
             long started = System.nanoTime();
@@ -274,7 +274,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                     .thenApply(bytes -> {
                         var actual = ManagedContextProtocol.parse(bytes);
                         ManagedContextProtocol.verify(actual,
-                                ManagedContextProtocol.attestationResponse(boot));
+                                ManagedContextProtocol.attestationResponse(boot.toWire()));
                         return new RuntimeAttestation(seed.getProvisionalRuntimeId(),
                                 seed.getGatewayIncarnation(), seed.getLeaseId(),
                                 seed.getEpoch(), request.getScope(),
