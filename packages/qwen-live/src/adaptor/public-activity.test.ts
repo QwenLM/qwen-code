@@ -50,6 +50,33 @@ describe('public backend activity', () => {
     expect(JSON.stringify(result)).not.toContain('private');
   });
 
+  it.each([
+    'background_task_completed',
+    'background_notification',
+    'background_notification_turn_started',
+    'teammate_activity',
+  ])('keeps display-only %s frames out of public activity', (source) => {
+    expect(
+      publicActivity({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'teammate chatter' },
+        _meta: { source },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('still publishes the leader reply a notification turn produced', () => {
+    // The exclusion is per-source: the leader's own answer to a teammate
+    // report is real agent output and must stay public.
+    expect(
+      publicActivity({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'leader answer' },
+        _meta: { source: 'background_notification_response' },
+      })?.text,
+    ).toBe('leader answer');
+  });
+
   it('bounds every public activity without serializing untrusted nested structures', () => {
     const result = publicActivity({
       sessionUpdate: 'agent_message_chunk',

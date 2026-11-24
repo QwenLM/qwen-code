@@ -1079,7 +1079,8 @@ async function awaitFirstTurn(
             (!options?.requirePromptId && e.promptId === undefined)) &&
           d.update._meta?.source !== 'background_task_completed' &&
           d.update._meta?.source !== 'background_notification' &&
-          d.update._meta?.source !== 'background_notification_turn_started'
+          d.update._meta?.source !== 'background_notification_turn_started' &&
+          d.update._meta?.source !== 'teammate_activity'
         ) {
           appendChunk(d.update.content.text);
         }

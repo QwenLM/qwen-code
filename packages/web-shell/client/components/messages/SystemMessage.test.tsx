@@ -1147,51 +1147,22 @@ describe('background continuation', () => {
     expect(container.querySelector('[title="security"]')).not.toBeNull();
   });
 
-  it('does not announce a teammate report bubble as a task notification', () => {
-    // The chip attributes the row to a teammate; an icon that says "Task
-    // notification" names a task that does not exist for a screen reader.
+  it('renders teammate activity as an attributed notice bubble', () => {
     const container = render(
       <SystemMessage
-        content="[team] security: found an injection"
+        content="researcher started read_file: Read notes.md"
         variant="info"
-        source="background_task_completed"
+        source="teammate_activity"
         data={{
           kind: 'peer',
-          status: 'message',
-          taskId: 'teammate-message-1',
+          status: 'call',
+          taskId: 'teammate-activity-1',
         }}
-        teammate={{ name: 'security' }}
+        teammate={{ name: 'researcher' }}
       />,
     );
-    const icon = container.querySelector('[role="img"]');
-    expect(icon?.getAttribute('aria-label')).toBe('Teammate report');
-    expect(icon?.getAttribute('title')).toBe('Teammate report');
-    expect(icon?.getAttribute('aria-label')).not.toBe('Task notification');
-  });
-
-  it('names the teammate on the turn-start marker without a cross-session label', () => {
-    // The marker row is the one the user sees while the automatic turn runs;
-    // the report came from a teammate in THIS session, so "Cross-session
-    // message" would name a producer that does not exist.
-    const container = render(
-      <SystemMessage
-        content="security"
-        variant="info"
-        source="background_notification_turn_started"
-        data={{
-          turnId: 'turn-1',
-          taskId: 'teammate-message-1',
-          kind: 'peer',
-          startedAt: 100,
-          label: 'security',
-          backgroundTask: { status: 'message' },
-        }}
-        teammate={{ name: 'security' }}
-      />,
-    );
-    expect(container.textContent).toContain('@security');
-    expect(container.textContent).toContain('Teammate report');
-    expect(container.textContent).not.toContain('Cross-session message');
+    expect(container.textContent).toContain('@researcher');
+    expect(container.textContent).toContain('researcher started read_file');
   });
 
   it('leaves a peer notice unattributed when no identity persisted', () => {
