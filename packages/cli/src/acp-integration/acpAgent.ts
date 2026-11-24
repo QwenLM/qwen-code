@@ -6463,6 +6463,10 @@ class QwenAgent implements Agent {
                   );
                 }
               }
+              // Paginated live loads already streamed their replay updates;
+              // this response carries only bounded modes/models/configOptions
+              // plus the statically capped artifactSnapshot, so it cannot
+              // exceed the frame ceiling and must not throw after streaming.
               return withRestoreHint(liveSession, response);
             }
 

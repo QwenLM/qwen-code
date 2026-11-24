@@ -35287,6 +35287,72 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('rejects a cold bulk load whose artifactSnapshot pushes the complete frame over the transport ceiling', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    const oneMiBChunk = 'a'.repeat(1024 * 1024);
+    const replayRecords = Array.from({ length: 63 }, (_, index) => ({
+      uuid: `cold-${index}`,
+      parentUuid: index === 0 ? null : `cold-${index - 1}`,
+      type: index % 2 === 0 ? 'user' : 'assistant',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      message: {
+        role: index % 2 === 0 ? 'user' : 'model',
+        parts: [{ text: oneMiBChunk }],
+      },
+    }));
+    innerConfig.getSessionService().readRestoreProjection.mockResolvedValue({
+      sessionId: 'persisted-1',
+      filePath: '/tmp/session.jsonl',
+      startTime: '2026-07-16T00:00:00.000Z',
+      lastUpdated: '2026-07-16T00:00:02.000Z',
+      runtime: {
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        recording: {
+          lastCompletedUuid: 'cold-62',
+          turnParentUuids: [],
+        },
+        artifactSnapshot: {
+          v: 1,
+          artifacts: Array.from({ length: 500 }, (_, index) => ({
+            path: `/tmp/artifact-${index}.txt`,
+            description: 'd'.repeat(8000),
+          })),
+          warnings: [],
+        },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      },
+      replay: { records: replayRecords, gaps: [], hasMore: false },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+      }),
+    ).rejects.toMatchObject({
+      code: -32012,
+      data: {
+        errorKind: 'transcript_page_too_large',
+        sessionId: 'persisted-1',
+        reason: 'bytes',
+        limit: DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - 4 * 1024,
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('live load appends the legacy Goal supersession after the replayed page', async () => {
     // A daemon session that resumed a pre-#7895 transcript drives no Goal.
     // A client refreshing against it replays the page, which ends on the

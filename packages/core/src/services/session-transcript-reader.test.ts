@@ -139,8 +139,15 @@ import {
 import { Storage } from '../config/storage.js';
 import { localManagedSessionKey } from '../utils/sessionStorageUtils.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
-import { LocalManagedSessionAuthority } from '../managed-runtime/managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  readManagedSessionLog,
+} from '../managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import {
+  assertManagedSessionDurableRef,
+  managedSessionReaderFacingBody,
+} from '../managed-runtime/managed-session-records.js';
 import { ManagedSessionMessageProjection } from '../managed-runtime/managed-session-message-projection.js';
 import type { Config } from '../config/config.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -778,7 +785,7 @@ describe('SessionTranscriptReader', () => {
         { class: 'trusted_entry' },
       );
     for (const item of texts) await commit(item.uuid, item.parent, item.text);
-    return { file, authority, commit };
+    return { file, authority, commit, store, sessionKey };
   }
 
   /** Same inode, byte length and (pinned) mtime, but u1 renamed to x1. */
@@ -5402,6 +5409,45 @@ describe('SessionTranscriptReader', () => {
       ).rejects.toMatchObject({ dimension: 'replay' });
       await expect(
         newReader().readLiveRestoreProjection(sessionId, all(false)),
+      ).rejects.toMatchObject({ dimension: 'replay' });
+    } finally {
+      setSessionTranscriptMaxAllReplayBytesForTest(undefined);
+    }
+  });
+
+  it('stops Managed all-replay before reading a body past the byte budget', async () => {
+    const first = record('u1', null, 'a'.repeat(2048));
+    const second = record('a1', 'u1', 'b'.repeat(2048));
+    const third = record('u2', 'a1', 'c'.repeat(2048));
+    const { file, authority, store, sessionKey } = await openManagedFixture([
+      { uuid: first.uuid, parent: null, text: 'a'.repeat(2048) },
+      { uuid: second.uuid, parent: first.uuid, text: 'b'.repeat(2048) },
+      { uuid: third.uuid, parent: second.uuid, text: 'c'.repeat(2048) },
+    ]);
+    await authority.close();
+    const scan = await readManagedSessionLog({
+      transcriptPath: file,
+      runtimeBaseDir: runtimeDir,
+      sessionKey,
+    });
+    const bodies = scan.events
+      .map((event) => managedSessionReaderFacingBody(event))
+      .filter((body) => body !== undefined);
+    expect(bodies).toHaveLength(3);
+    const thirdRef = assertManagedSessionDurableRef(
+      bodies[2]!.ref,
+      'third body ref',
+    );
+    await fs.unlink(
+      path.join(store.sessionRoot, thirdRef.kind, thirdRef.resourceId),
+    );
+    const firstBytes = Buffer.byteLength(JSON.stringify(first), 'utf8');
+    setSessionTranscriptMaxAllReplayBytesForTest(firstBytes + 1);
+    try {
+      // If maxBodyBytes is not wired for replay.kind=all, projection reaches
+      // the now-missing third body and surfaces snapshot-unavailable instead.
+      await expect(
+        newReader().readRestoreProjection(sessionId, all(false)),
       ).rejects.toMatchObject({ dimension: 'replay' });
     } finally {
       setSessionTranscriptMaxAllReplayBytesForTest(undefined);
