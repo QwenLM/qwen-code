@@ -99,7 +99,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                         // let 256 foreground PREPARED rows starve every
                         // background run sorting past the cutoff.
                         + " AND e.execution_call_id LIKE '%:process'"
-                        + " ORDER BY e.binding_id, e.execution_call_id_hash LIMIT 256",
+                        + " ORDER BY e.binding_id, e.execution_call_id LIMIT 256",
                 (rs, index) -> {
                     String rawCallId = utf8(rs, "execution_call_id");
                     if (!rawCallId.endsWith(PROCESS_SUFFIX)) {
@@ -107,11 +107,11 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                     }
                     String invocationId = rawCallId.substring(0, rawCallId.length() - PROCESS_SUFFIX.length());
                     return new PullableRun(
-                            utf8(rs, "tenant_id"),
-                            utf8(rs, "workspace_id"),
-                            utf8(rs, "harness_session_id"),
-                            utf8(rs, "runtime_session_id"),
-                            utf8(rs, "binding_id"),
+                            rs.getString("tenant_id"),
+                            rs.getString("workspace_id"),
+                            rs.getString("harness_session_id"),
+                            rs.getString("runtime_session_id"),
+                            rs.getString("binding_id"),
                             rs.getLong("runtime_generation"),
                             invocationId);
                 }).stream().filter(item -> item != null).toList();
@@ -154,7 +154,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                                 nextGen,
                                 Instant.ofEpochMilli(leaseUntilMs));
                     },
-                    bytes(bindingId),
+                    bindingId,
                     runtimeGeneration);
             if (rows.isEmpty() || rows.getFirst() == null) {
                 return null;
@@ -166,7 +166,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                     bytes(ownerId),
                     claimed.leaseUntil().toEpochMilli(),
                     claimed.pullerGeneration(),
-                    bytes(bindingId),
+                    bindingId,
                     runtimeGeneration);
             return claimed;
         });
@@ -182,7 +182,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                             + " WHERE binding_id = ? AND runtime_generation = ? AND binding_state = 'READY'"
                             + " AND observation_owner = ? AND observation_generation = ?",
                     leaseUntilMs,
-                    bytes(claim.bindingId()),
+                    claim.bindingId(),
                     claim.runtimeGeneration(),
                     bytes(claim.ownerId()),
                     claim.pullerGeneration());
@@ -204,7 +204,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                 "UPDATE ma_runtime_binding SET observation_owner = NULL, observation_lease_until = NULL"
                         + " WHERE binding_id = ? AND runtime_generation = ?"
                         + " AND observation_owner = ? AND observation_generation = ?",
-                bytes(claim.bindingId()),
+                claim.bindingId(),
                 claim.runtimeGeneration(),
                 bytes(claim.ownerId()),
                 claim.pullerGeneration()));
@@ -295,7 +295,6 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                 }
 
                 long carriedBytes = writeEntryResources(
-                        scopeKey,
                         request.tenantId(),
                         request.workspaceId(),
                         request.harnessSessionId(),
@@ -349,17 +348,24 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
             }
 
             if (batchWakeWorthy && headState.headPresent()) {
+                // A park certificate stays, but falls due now, so a park CAS
+                // still to come releases the Turn for immediate dispatch.
                 jdbc.update(
                         "UPDATE ma_session_head SET is_wake_pending = 1,"
                                 + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
                                 + " THEN ? ELSE wake_retry_at END,"
+                                + " wake_seal_parked_until = CASE WHEN wake_seal_parked_until > ?"
+                                + " THEN ? ELSE wake_seal_parked_until END,"
                                 + " gmt_modified = ?"
                                 + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         nowMs,
                         nowMs,
                         nowMs,
-                        bytes(request.tenantId()),
-                        bytes(request.harnessSessionId()));
+                        nowMs,
+                        nowMs,
+                        request.tenantId(),
+                        request.harnessSessionId());
+                AgentActionParking.unparkActionTurns(jdbc, request.tenantId(), request.harnessSessionId(), nowMs);
             }
             return new StageOutcome(true, stagedThrough, terminalSettled, batchWakeWorthy, hardCapReached);
         });
@@ -419,8 +425,8 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                             + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'"
                             + " FOR UPDATE",
                     (rs, index) -> rs.getLong("writer_generation"),
-                    bytes(tenantId),
-                    bytes(harnessSessionId));
+                    tenantId,
+                    harnessSessionId);
             if (generations.isEmpty() || writerGeneration < generations.getFirst()) {
                 throw new RuntimeBrokerException(
                         409,
@@ -440,10 +446,10 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
         String callHash = RuntimeRequestKeys.valueKey(executionCallId);
         jdbc.update(
                 "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'"
-                        + " AND owner_key = ? AND owner_revision <= ?",
-                bytes(tenantId),
-                bytes(sessionId),
-                callHash,
+                        + " AND owner_ref = ? AND owner_revision <= ?",
+                tenantId,
+                sessionId,
+                ManagedSchemaKeys.identity(callHash),
                 throughSeq);
         jdbc.update(
                 "DELETE FROM ma_runtime_stage WHERE runtime_session_key = ?"
@@ -478,8 +484,8 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                             && !leaseNull
                             && leaseUntil > nowMs;
                 },
-                bytes(tenantId),
-                bytes(harnessSessionId));
+                tenantId,
+                harnessSessionId);
         if (valid.isEmpty() || !Boolean.TRUE.equals(valid.getFirst())) {
             throw new RuntimeBrokerException(
                     409,
@@ -505,7 +511,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                             && !leaseNull
                             && leaseUntil > nowMs;
                 },
-                bytes(claim.bindingId()),
+                claim.bindingId(),
                 claim.runtimeGeneration());
         return !ok.isEmpty() && Boolean.TRUE.equals(ok.getFirst());
     }
@@ -517,8 +523,8 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                     rs.getLong("retired_at");
                     return !rs.wasNull();
                 },
-                bytes(tenantId),
-                bytes(sessionId));
+                tenantId,
+                sessionId);
         if (!sessionRetired.isEmpty() && Boolean.TRUE.equals(sessionRetired.getFirst())) {
             return new SessionHeadState(false, true);
         }
@@ -527,8 +533,8 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                         + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'"
                         + " FOR UPDATE",
                 (rs, index) -> rs.getString("state"),
-                bytes(tenantId),
-                bytes(sessionId));
+                tenantId,
+                sessionId);
         if (headStates.isEmpty()) {
             return new SessionHeadState(false, !sessionRetired.isEmpty());
         }
@@ -566,7 +572,6 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
 
     @SuppressWarnings("unchecked")
     private long writeEntryResources(
-            String scopeKey,
             String tenantId,
             String workspaceId,
             String sessionId,
@@ -604,19 +609,17 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
             }
             totalBytes += byteLength;
 
-            String resourceKey = ManagedSessionStore.resourceKey(scopeKey, resourceId);
             String state = isSegment ? "PUBLISHED" : "REFERENCED";
             try {
                 jdbc.update(
-                        "INSERT INTO ma_resource (resource_key, tenant_id, workspace_id,"
+                        "INSERT INTO ma_resource (tenant_id, workspace_id,"
                                 + " session_id, resource_id, kind, schema_version, byte_length, sha256,"
                                 + " storage_kind, inline_bytes, publish_command_id, state, gmt_create,"
-                                + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE',"
+                                + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE',"
                                 + " ?, ?, ?, ?, ?)",
-                        resourceKey,
-                        bytes(tenantId),
-                        bytes(workspaceId),
-                        bytes(sessionId),
+                        tenantId,
+                        workspaceId,
+                        sessionId,
                         bytes(resourceId),
                         kind,
                         schemaVersion,
@@ -628,21 +631,20 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                         nowMs,
                         nowMs);
             } catch (DuplicateKeyException duplicate) {
-                verifyExistingResource(resourceKey, kind, schemaVersion, byteLength, digest);
+                verifyExistingResource(tenantId, sessionId, resourceId, kind, schemaVersion, byteLength, digest);
             }
 
             if (!isSegment) {
                 try {
                     jdbc.update(
-                            "INSERT INTO ma_resource_ref (owner_kind, owner_key,"
-                                    + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                                    + " resource_id, gmt_create) VALUES ('RUNTIME_STAGE', ?, ?, ?, ?, ?, ?, ?, ?)",
-                            callHash,
+                            "INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
+                                    + " owner_revision, tenant_id, workspace_id, session_id,"
+                                    + " resource_id, gmt_create) VALUES ('RUNTIME_STAGE', ?, ?, ?, ?, ?, ?, ?)",
+                            ManagedSchemaKeys.identity(callHash),
                             deliverySeq,
-                            resourceKey,
-                            bytes(tenantId),
-                            bytes(workspaceId),
-                            bytes(sessionId),
+                            tenantId,
+                            workspaceId,
+                            sessionId,
                             bytes(resourceId),
                             nowMs);
                 } catch (DuplicateKeyException duplicate) {
@@ -654,18 +656,23 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
     }
 
     private void verifyExistingResource(
-            String resourceKey,
+            String tenantId,
+            String sessionId,
+            String resourceId,
             String kind,
             int schemaVersion,
             long byteLength,
             String digest) {
         List<Boolean> matches = jdbc.query(
-                "SELECT kind, schema_version, byte_length, sha256 FROM ma_resource WHERE resource_key = ?",
+                "SELECT kind, schema_version, byte_length, sha256 FROM ma_resource"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 (rs, index) -> kind.equals(rs.getString("kind"))
                         && schemaVersion == rs.getInt("schema_version")
                         && byteLength == rs.getLong("byte_length")
                         && digest.equals(rs.getString("sha256")),
-                resourceKey);
+                tenantId,
+                sessionId,
+                resourceId);
         if (matches.isEmpty() || !Boolean.TRUE.equals(matches.getFirst())) {
             throw new RuntimeBrokerException(
                     409,

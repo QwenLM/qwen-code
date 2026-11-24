@@ -422,13 +422,13 @@ final class AgentTurnExecution {
         }
         jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " ma_event_stream WHERE tenant_id"
-                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " FOR UPDATE",
                 Long.class, tenantId, sessionId);
         List<EventRecord> deltas =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
-                            + " = X'' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
+                            + " = '' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
                             + " event_type IN ('item.output_text.delta', 'item.reasoning.delta')"
                             + " ORDER BY sequence_id ASC",
                         eventJournal.eventMapper,
@@ -445,7 +445,7 @@ final class AgentTurnExecution {
             data.put("text", "");
             jdbc.update(
                     "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND session_id ="
-                        + " ? AND stream_kind = 'SESSION' AND stream_id = X'' AND sequence_id = ?",
+                        + " ? AND stream_kind = 'SESSION' AND stream_id = '' AND sequence_id = ?",
                     storeRows.writeJson(data),
                     tenantId,
                     sessionId,
@@ -497,7 +497,7 @@ final class AgentTurnExecution {
         if (!eventJournal.hasSourceEvent(tenantId, sessionId, reconciliationKey)) {
             jdbc.queryForObject(
                     "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                         + " UPDATE",
                     Long.class,
                     tenantId,
@@ -505,7 +505,7 @@ final class AgentTurnExecution {
             List<EventRecord> deltas =
                     jdbc.query(
                             "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                                + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
+                                + " stream_id = '' AND tenant_id = ? AND session_id = ? AND"
                                 + " turn_id = ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
                             eventJournal.eventMapper,
@@ -524,7 +524,7 @@ final class AgentTurnExecution {
                 data.put("text", "");
                 jdbc.update(
                         "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' AND"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' AND"
                             + " sequence_id = ?",
                         storeRows.writeJson(data),
                         tenantId,
@@ -691,11 +691,12 @@ final class AgentTurnExecution {
         }
         // The locked, fenced writer cannot admit a late HTTP request. Even an
         // idle journal may contain this prompt's completed admission: replay
-        // its real result instead of replacing it with cancellation.
+        // its real result instead of replacing it with cancellation. Owed
+        // cleanup stays protected and does not prevent cancelling an unadmitted turn.
         java.util.Set<String> accepted;
         try {
             accepted = JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
-                    tenantId, sessionId, false,
+                    tenantId, sessionId, true,
                     WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2, packs);
         } catch (ManagedAgentException unverified) {
             return false;
