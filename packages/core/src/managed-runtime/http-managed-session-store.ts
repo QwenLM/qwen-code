@@ -195,6 +195,10 @@ export interface HttpManagedSessionStores {
   /** Whether this control plane lets a background Session suspend behind the pull. */
   supportsRuntimeObservation(): boolean;
   supportsActionParking(): boolean;
+  /** Whether a park certificate may share its seal with a background hold. */
+  supportsBackgroundActionParking(): boolean;
+  /** Whether a wake-started Turn's approval wait may park. */
+  supportsWakeActionParking(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -441,6 +445,9 @@ export function createHttpManagedSessionStores(
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
     supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
     supportsActionParking: () => client.supportsActionParking(),
+    supportsBackgroundActionParking: () =>
+      client.supportsBackgroundActionParking(),
+    supportsWakeActionParking: () => client.supportsWakeActionParking(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -994,6 +1001,8 @@ interface WriterGrant {
   readonly wakeDispatch: boolean;
   readonly runtimeObservation: boolean;
   readonly actionParking: boolean;
+  readonly backgroundActionParking: boolean;
+  readonly wakeActionParking: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1070,6 +1079,14 @@ class ManagedSessionStoreHttpClient {
 
   supportsActionParking(): boolean {
     return this.grant?.actionParking === true;
+  }
+
+  supportsBackgroundActionParking(): boolean {
+    return this.grant?.backgroundActionParking === true;
+  }
+
+  supportsWakeActionParking(): boolean {
+    return this.grant?.wakeActionParking === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -3147,6 +3164,8 @@ class ManagedSessionStoreHttpClient {
         wakeDispatch: renewed.wakeDispatch,
         runtimeObservation: renewed.runtimeObservation,
         actionParking: renewed.actionParking,
+        backgroundActionParking: renewed.backgroundActionParking,
+        wakeActionParking: renewed.wakeActionParking,
       };
       this.scheduleRenewal();
     })();
@@ -3792,6 +3811,8 @@ function parseWriterGrant(value: unknown): WriterGrant {
     wakeDispatch: record['wakeDispatch'] === true,
     runtimeObservation: record['runtimeObservation'] === true,
     actionParking: record['actionParking'] === true,
+    backgroundActionParking: record['backgroundActionParking'] === true,
+    wakeActionParking: record['wakeActionParking'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
