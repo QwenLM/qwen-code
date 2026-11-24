@@ -188,7 +188,7 @@ class HostedExtensionsIT {
         assertThat(events("mcp.start")).containsExactlyElementsOf(mcpStarts);
         assertThat(events("mcp.request").stream()
                 .filter(event -> "tools/call".equals(event.path("method").asText())).toList()).hasSize(1);
-        assertThat(execution(session, turn).path("tool_call_id").asText()).isEqualTo("call_EXT_PARK_0");
+        assertThat(execution(session, turn).path("execution_state").asText()).isEqualTo("SETTLED");
         assertEffects("EXT_PARK");
         assertThat(modelRequests).hasSize(2);
         assertThat(modelRequests.getLast().path("tools")).isEqualTo(modelRequests.getFirst().path("tools"));

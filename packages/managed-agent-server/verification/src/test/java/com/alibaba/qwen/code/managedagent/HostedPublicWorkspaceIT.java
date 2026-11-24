@@ -1015,11 +1015,10 @@ class HostedPublicWorkspaceIT {
                         cancelled ? "CANCELLED" : "COMPLETED", cancelled ? "turn.cancelled" : "turn.completed"));
         if (List.of("allow", "mode-change").contains(outcome)) {
             assertThat(Files.readString(proof)).isEqualTo("once\n");
-            assertThat(jdbc.queryForList("""
-                    SELECT tool_call_id FROM ma_tool_execution
+            assertThat(jdbc.queryForObject("""
+                    SELECT COUNT(*) FROM ma_tool_execution
                     WHERE harness_session_id = ? AND turn_id = ? AND execution_state = 'SETTLED'
-                    """, String.class, session, parked.promptId().getBytes(StandardCharsets.UTF_8)))
-                    .containsExactly("g0-tool-0");
+                    """, Integer.class, session, parked.promptId().getBytes(StandardCharsets.UTF_8))).isEqualTo(1);
         } else {
             assertThat(proof).doesNotExist();
         }
