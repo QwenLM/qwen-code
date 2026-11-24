@@ -7,12 +7,15 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
@@ -730,6 +733,7 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
           destroy: async () => ({ terminated: true, diskDeleted }),
         },
       });
+      if (expectOk) expect(pvRes.errors).toEqual([]);
       expect(pvRes.ok).toBe(expectOk);
       if (expectOk) {
         expect(pvRes.checkExitCode).toBe(0);
@@ -844,6 +848,8 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
     // 5. Refuses existing modelProxy.socketPath without deleting the pre-existing file
     const existingSock = join(rm, 'preexisting-proxy.sock');
     writeFileSync(existingSock, 'do-not-delete');
+    writeFileSync(rM, 'original-golden');
+    writeFileSync(wM, 'original-golden');
     const sockRes = await runHardwareRound({
       ...ctxM,
       launcherDir: join(rm, 'l-sock'),
@@ -870,6 +876,7 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
         baseUrl: 'http://127.0.0.1:9999',
         apiKey: 'fake',
         socketPath: existingSock,
+        maxRequests: 1,
       },
     });
     expect(sockRes.ok).toBe(false);
@@ -905,6 +912,8 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
       /sourceKernelPath rejected/,
     );
 
+    writeFileSync(rM, 'original-golden');
+    writeFileSync(wM, 'original-golden');
     const lTokSym = join(rm, 'l-toksym');
     mkdirSync(lTokSym, { recursive: true });
     symlinkSync(join(rm, 'nope'), join(lTokSym, 'token.json'));
@@ -1228,39 +1237,31 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
     }
 
     // 3. Default spawn ENOENT fails cleanly without unhandled error and revokes token.json
-    const wEnoent = join(root, 'work-enoent');
-    writeFileSync(wEnoent, 'golden-r');
-    const sockEnoent = join(root, 's-en');
-    mkdirSync(sockEnoent, { recursive: true });
+    const enoentPlan = buildFirecrackerLaunchPlan({
+      runId: 'en01',
+      jailBaseDir: join(root, 'ej'),
+      jailerBin: '/nonexistent/verify-pr-jailer',
+      firecrackerBin: '/opt/firecracker',
+      vmmUid: process.getuid() || 65534,
+      vmmGid: process.getgid() || 65534,
+    });
+    mkdirSync(enoentPlan.jailRoot, { recursive: true });
+    writeFileSync(enoentPlan.kernelPath, 'k');
+    writeFileSync(enoentPlan.ownershipTemplate.workDiskPath, 'golden-r');
     const lEnoent = join(root, 'l-en');
     const enoentRes = await runHardwareRound({
       ...ctx,
       launcherDir: lEnoent,
       vaultDir: join(root, 'v-en'),
       approvedRoots: [root],
-      plan: {
-        ...buildVfkitLaunchPlan({
-          runId: 'en01',
-          vfkitBin: '/opt/vfkit',
-          seatbeltProfile: '/opt/sb',
-          pocDir: root,
-          socketDir: sockEnoent,
-          kernelPath: kPath,
-          initramfsPath: kPath,
-          rootfsPath: wEnoent,
-          guestLogPath: join(root, 'gen.log'),
-          pidFile: join(root, 'pen.pid'),
-          homeDir: join(root, 'hen'),
-          tmpDir: root,
-        }),
-        argv: ['/nonexistent/verify-pr-vmm-binary'],
-      },
+      plan: enoentPlan,
       sourceKernelPath: kPath,
       sourceRootfsPath: rPath,
       trustedInputDigest: SHA('7'),
     });
     expect(enoentRes.ok).toBe(false);
     expect(enoentRes.boundaryPath).toBeNull();
+    expect(existsSync(enoentPlan.ownershipTemplate.workDiskPath)).toBe(false);
     expect(enoentRes.errors.join('\n')).toMatch(/ENOENT/);
     expect(
       JSON.parse(readFileSync(join(lEnoent, 'token.json'), 'utf8')).revoked,
@@ -1292,7 +1293,6 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
           homeDir: join(root, 'hea'),
           tmpDir: root,
         }),
-        argv: [process.execPath, '-e', 'process.exit(1)'],
       },
       sourceKernelPath: kPath,
       sourceRootfsPath: rPath,
@@ -1304,5 +1304,455 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
     expect(earlyRes.boundaryPath).toBeNull();
     expect(earlyRes.errors).toContain('worker-exited-before-collector-done');
     expect(elapsedMs).toBeLessThan(5_000);
+  });
+
+  it('binds provider plans, local golden inputs, proxy settings, and hardware upgrades fail-closed', async () => {
+    const root = mkdtempSync('/tmp/qc-orch-bind-');
+    tmpDirs.push(root);
+    const ctx = writeHostContext(root);
+    let allocateCalled = false;
+    const providerDriver = {
+      allocate: async () => {
+        allocateCalled = true;
+        return {
+          allocationId: 'i-bind',
+          freshDiskId: 'd-bind',
+          outputStatus: 'complete',
+        };
+      },
+      destroy: async () => ({ terminated: true, diskDeleted: true }),
+    };
+    const mismatch = await runHardwareRound({
+      ...ctx,
+      launcherDir: join(root, 'l-pm'),
+      vaultDir: join(root, 'v-pm'),
+      plan: buildAliyunProviderPlan({
+        runId: 'bpm01',
+        headRefOid: 'c'.repeat(40),
+        region: 'cn-hangzhou',
+        zone: 'cn-hangzhou-h',
+        vpcId: 'vpc-1',
+        vSwitchId: 'vsw-1',
+        imageId: 'debian_12.vhd',
+      }),
+      trustedInputDigest: SHA('d'),
+      providerDriver,
+      runChecker: false,
+      verifyLivePid: false,
+    });
+    expect(mismatch.ok).toBe(false);
+    expect(mismatch.errors.join('\n')).toMatch(/must match the host context/);
+    expect(allocateCalled).toBe(false);
+
+    const staleTagPlan = buildAliyunProviderPlan({
+      runId: 'bpt01',
+      headRefOid: 'c'.repeat(40),
+      region: 'cn-hangzhou',
+      zone: 'cn-hangzhou-h',
+      vpcId: 'vpc-1',
+      vSwitchId: 'vsw-1',
+      imageId: 'debian_12.vhd',
+    });
+    staleTagPlan.headRefOid = HEAD_OID;
+    const staleTag = await runHardwareRound({
+      ...ctx,
+      launcherDir: join(root, 'l-pt'),
+      vaultDir: join(root, 'v-pt'),
+      plan: staleTagPlan,
+      trustedInputDigest: SHA('d'),
+      providerDriver,
+      runChecker: false,
+      verifyLivePid: false,
+    });
+    expect(staleTag.ok).toBe(false);
+    expect(staleTag.errors.join('\n')).toMatch(/launch argv head/);
+    expect(allocateCalled).toBe(false);
+
+    const k = join(root, 'kernel');
+    const golden = join(root, 'golden');
+    const work = join(root, 'work');
+    writeFileSync(k, 'kernel');
+    writeFileSync(golden, 'golden');
+    writeFileSync(work, 'golden');
+    const socketDir = join(root, 's');
+    mkdirSync(socketDir);
+    const makePlan = (runId, extra = {}) => ({
+      ...buildVfkitLaunchPlan({
+        runId,
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/sb',
+        pocDir: root,
+        socketDir,
+        kernelPath: k,
+        initramfsPath: k,
+        rootfsPath: work,
+        guestLogPath: join(root, 'g'),
+        pidFile: join(root, 'p'),
+        homeDir: join(root, 'h'),
+        tmpDir: root,
+      }),
+      ...extra,
+    });
+    const localArgs = (suffix, plan = makePlan(suffix)) => ({
+      ...ctx,
+      launcherDir: join(root, `l-${suffix}`),
+      vaultDir: join(root, `v-${suffix}`),
+      approvedRoots: [root],
+      plan,
+      sourceKernelPath: k,
+      sourceRootfsPath: golden,
+      trustedInputDigest: SHA('e'),
+    });
+    unlinkSync(work);
+    linkSync(golden, work);
+    const hardlink = await runHardwareRound({
+      ...localArgs('hl01'),
+      launchBackend: async () => {
+        throw new Error('must not launch');
+      },
+      runChecker: false,
+      verifyLivePid: false,
+    });
+    expect(hardlink.ok).toBe(false);
+    expect(hardlink.errors.join('\n')).toMatch(/shared inode/);
+    expect(readFileSync(golden, 'utf8')).toBe('golden');
+    unlinkSync(work);
+    writeFileSync(work, 'unrelated');
+    const wrongDisk = await runHardwareRound(localArgs('wd01'));
+    expect(wrongDisk.ok).toBe(false);
+    expect(wrongDisk.errors.join('\n')).toMatch(/matching sourceRootfsPath/);
+    writeFileSync(work, 'golden');
+    const wrongKernelPath = join(root, 'other-kernel');
+    writeFileSync(wrongKernelPath, 'other');
+    const wrongKernel = await runHardwareRound(
+      localArgs('wk01', makePlan('wk01', { kernelPath: wrongKernelPath })),
+    );
+    expect(wrongKernel.ok).toBe(false);
+    expect(wrongKernel.errors.join('\n')).toMatch(/matching sourceKernelPath/);
+
+    const argvFork = makePlan('av01');
+    const bootloaderIndex = argvFork.argv.indexOf('--bootloader');
+    argvFork.argv[bootloaderIndex + 1] =
+      `linux,kernel=${wrongKernelPath},initrd=${k},cmdline="root=/dev/vda"`;
+    const argvMismatch = await runHardwareRound(localArgs('av01', argvFork));
+    expect(argvMismatch.ok).toBe(false);
+    expect(argvMismatch.errors.join('\n')).toMatch(/validated kernel/);
+
+    const extraDiskPlan = makePlan('ed01');
+    extraDiskPlan.argv.push('--device', `virtio-blk,path=${golden}`);
+    const extraDisk = await runHardwareRound(localArgs('ed01', extraDiskPlan));
+    expect(extraDisk.ok).toBe(false);
+    expect(extraDisk.errors.join('\n')).toMatch(/validated working disk/);
+    expect(readFileSync(golden, 'utf8')).toBe('golden');
+
+    const fcPlan = buildFirecrackerLaunchPlan({
+      runId: 'fcv01',
+      jailBaseDir: join(root, 'fc'),
+      jailerBin: '/opt/jailer',
+      firecrackerBin: '/opt/firecracker',
+    });
+    mkdirSync(fcPlan.jailRoot, { recursive: true });
+    writeFileSync(fcPlan.kernelPath, 'kernel');
+    writeFileSync(fcPlan.ownershipTemplate.workDiskPath, 'golden');
+    fcPlan.vmConfig['boot-source'].kernel_image_path = '/wrong-kernel';
+    const configMismatch = await runHardwareRound(localArgs('fcv01', fcPlan));
+    expect(configMismatch.ok).toBe(false);
+    expect(configMismatch.errors.join('\n')).toMatch(/argv\/config/);
+
+    fcPlan.vmConfig['boot-source'].kernel_image_path = '/vmlinuz';
+    fcPlan.vmConfig.drives.push({
+      drive_id: 'extra',
+      path_on_host: golden,
+      is_root_device: false,
+      is_read_only: false,
+    });
+    const extraFcDisk = await runHardwareRound(localArgs('fcd01', fcPlan));
+    expect(extraFcDisk.ok).toBe(false);
+    expect(extraFcDisk.errors.join('\n')).toMatch(/argv\/config/);
+
+    for (const [proxy, expected] of [
+      [{ baseUrl: 'http://127.0.0.1:1', apiKey: 'x' }, /maxRequests/],
+      [
+        {
+          baseUrl: 'http://127.0.0.1:1',
+          apiKey: 'x',
+          maxRequests: 1,
+          listenHost: '',
+        },
+        /listenHost/,
+      ],
+      [
+        {
+          baseUrl: 'http://127.0.0.1:1',
+          apiKey: 'x',
+          socketPath: join(root, 'uid.sock'),
+          maxRequests: 1,
+          vmmUid: 0,
+          vmmGid: 0,
+        },
+        /vmmUid/,
+      ],
+      [
+        {
+          baseUrl: 'http://127.0.0.1:1',
+          apiKey: 'x',
+          socketPath: join(root, 'uid.sock'),
+          maxRequests: 1,
+          vmmUid: 65534,
+        },
+        /provided together/,
+      ],
+      [
+        {
+          baseUrl: 'http://127.0.0.1:1',
+          apiKey: 'x',
+          maxRequests: 1,
+          vmmUid: 65534,
+          vmmGid: 65534,
+        },
+        /require socketPath/,
+      ],
+    ]) {
+      const res = await runHardwareRound({
+        ...localArgs('px01'),
+        modelProxy: proxy,
+        launchBackend: async () => {
+          throw new Error('must not launch');
+        },
+        runChecker: false,
+        verifyLivePid: false,
+      });
+      expect(res.ok).toBe(false);
+      expect(res.errors.join('\n')).toMatch(expected);
+    }
+
+    const upgradeRoot = join(root, 'upgrade');
+    mkdirSync(upgradeRoot);
+    const upCtx = writeHostContext(upgradeRoot, {
+      trustClassification: {
+        prTrust: 'collaborator',
+        executionClass: 'trusted-shared-kernel',
+        escalationReasons: [],
+        headRefOid: HEAD_OID,
+      },
+    });
+    const vault = join(upgradeRoot, 'v');
+    mkdirSync(join(vault, 'evidence'), { recursive: true });
+    writeFileSync(join(vault, 'evidence', '01-pv.png'), PNG_BYTES);
+    writeFileSync(join(vault, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(vault, 'assertions.json'),
+      '{"pass":1,"fail":0,"total":1}\n',
+    );
+    writeFileSync(
+      join(vault, 'report.md'),
+      `merge-ready · 1 passed · 0 failed · 1 total · ${HEAD_OID}\n\n## Methodology\n\n**Boundary.** Explicit hardware upgrade.\n`,
+    );
+    const upgraded = await runHardwareRound({
+      ...upCtx,
+      launcherDir: join(upgradeRoot, 'l'),
+      vaultDir: vault,
+      plan: buildAliyunProviderPlan({
+        runId: 'upg01',
+        headRefOid: HEAD_OID,
+        region: 'cn-hangzhou',
+        zone: 'cn-hangzhou-h',
+        vpcId: 'vpc-1',
+        vSwitchId: 'vsw-1',
+        imageId: 'debian_12.vhd',
+      }),
+      trustedInputDigest: SHA('f'),
+      providerDriver,
+    });
+    expect(upgraded.errors).toEqual([]);
+    expect(upgraded.ok).toBe(true);
+    expect(
+      JSON.parse(readFileSync(upgraded.executionRecordPath, 'utf8'))
+        .executionClass,
+    ).toBe('hardware-isolated');
+  });
+
+  it('handles proxy socket replacement and requires failed unlink to block publication', async () => {
+    for (const mode of ['file-replaced', 'locked']) {
+      // POSIX root ignores directory permission bits; that cell requires a
+      // non-root proxy process, covered by the model-proxy SIGTERM fixture.
+      if (mode === 'locked' && process.getuid?.() === 0) continue;
+      const root = mkdtempSync('/tmp/qc-orch-sub-');
+      tmpDirs.push(root);
+      const ctx = writeHostContext(root);
+      const kernel = join(root, 'k');
+      const golden = join(root, 'r');
+      const work = join(root, 'w');
+      writeFileSync(kernel, 'k');
+      writeFileSync(golden, 'r');
+      writeFileSync(work, 'r');
+      const socketDir = join(root, 's');
+      mkdirSync(socketDir);
+      const guard = join(root, 'outside-guard');
+      writeFileSync(guard, 'preserve');
+      const proxySocket = join(root, 'proxy.sock');
+      try {
+        const res = await runHardwareRound({
+          ...ctx,
+          launcherDir: join(root, 'l'),
+          vaultDir: join(root, 'v'),
+          approvedRoots: [root],
+          plan: buildVfkitLaunchPlan({
+            runId: mode === 'file-replaced' ? 'sub01' : 'ulk01',
+            vfkitBin: '/opt/vfkit',
+            seatbeltProfile: '/opt/sb',
+            pocDir: root,
+            socketDir,
+            kernelPath: kernel,
+            initramfsPath: kernel,
+            rootfsPath: work,
+            guestLogPath: join(root, 'g'),
+            pidFile: join(root, 'p'),
+            homeDir: join(root, 'h'),
+            tmpDir: root,
+          }),
+          sourceKernelPath: kernel,
+          sourceRootfsPath: golden,
+          trustedInputDigest: SHA('1'),
+          modelProxy: {
+            baseUrl: 'http://127.0.0.1:1/v1',
+            apiKey: 'x',
+            socketPath: proxySocket,
+            maxRequests: 1,
+          },
+          launchBackend: async ({ proxyInfo, collectorSocketPath }) => {
+            if (mode === 'file-replaced') {
+              unlinkSync(proxyInfo.socketPath);
+              writeFileSync(proxyInfo.socketPath, 'unowned-replacement');
+            } else {
+              chmodSync(root, 0o500);
+            }
+            const worker = spawn(
+              process.execPath,
+              ['-e', 'setTimeout(()=>{},60000)'],
+              { stdio: 'ignore' },
+            );
+            void sendRoundFiles(
+              collectorSocketPath,
+              Buffer.concat([
+                makeFrame('H', 'report-v1'),
+                makeWholeFile('verdict.txt', 'merge-ready\n'),
+                makeWholeFile(
+                  'assertions.json',
+                  '{"pass":1,"fail":0,"total":1}\n',
+                ),
+                makeWholeFile(
+                  'report.md',
+                  `merge-ready · 1 passed · 0 failed · 1 total · ${HEAD_OID}\n\n## Methodology\n\n**Boundary.** vfkit.\n`,
+                ),
+                makeBinaryFile('evidence/01-ab.png', PNG_BYTES),
+                makeFrame('R'),
+              ]),
+            );
+            return {
+              workerPid: worker.pid,
+              workerExe: process.execPath,
+              expectedExeTokens: ['node'],
+              child: worker,
+            };
+          },
+        });
+        expect(readFileSync(guard, 'utf8')).toBe('preserve');
+        expect(res.ok).toBe(false);
+        expect(res.teardownStatus).toBe('failed');
+        expect(res.boundaryPath).toBeNull();
+        expect(res.errors.join('\n')).toMatch(
+          mode === 'file-replaced'
+            ? /proxy-socket-identity-changed/
+            : /proxy-socket-remove-failed:EACCES/,
+        );
+      } finally {
+        chmodSync(root, 0o700);
+      }
+    }
+  });
+
+  it('preserves distinct supervisors and does not claim cleanup when a protected helper is alive', async () => {
+    const root = mkdtempSync('/tmp/qc-orch-helper-');
+    tmpDirs.push(root);
+    const kernel = join(root, 'k');
+    const golden = join(root, 'golden');
+    const work = join(root, 'work');
+    writeFileSync(kernel, 'k');
+    writeFileSync(golden, 'r');
+    writeFileSync(work, 'r');
+    mkdirSync(join(root, 's'));
+    let worker = null;
+    let supervisor = null;
+    try {
+      const res = await runHardwareRound({
+        ...writeHostContext(root),
+        launcherDir: join(root, 'l'),
+        vaultDir: join(root, 'v'),
+        approvedRoots: [root],
+        plan: buildVfkitLaunchPlan({
+          runId: 'help1',
+          vfkitBin: '/opt/vfkit',
+          seatbeltProfile: '/opt/sb',
+          pocDir: root,
+          socketDir: join(root, 's'),
+          kernelPath: kernel,
+          initramfsPath: kernel,
+          rootfsPath: work,
+          guestLogPath: join(root, 'g'),
+          pidFile: join(root, 'p'),
+          homeDir: join(root, 'h'),
+          tmpDir: root,
+        }),
+        sourceKernelPath: kernel,
+        sourceRootfsPath: golden,
+        trustedInputDigest: SHA('1'),
+        launchBackend: async ({ collectorSocketPath }) => {
+          worker = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], {
+            stdio: 'ignore',
+          });
+          supervisor = spawn('/bin/sleep', ['600'], { stdio: 'ignore' });
+          void sendRoundFiles(
+            collectorSocketPath,
+            Buffer.concat([
+              makeFrame('H', 'report-v1'),
+              makeWholeFile('verdict.txt', 'merge-ready\n'),
+              makeWholeFile(
+                'assertions.json',
+                '{"pass":1,"fail":0,"total":1}\n',
+              ),
+              makeWholeFile(
+                'report.md',
+                `merge-ready · 1 passed · 0 failed · 1 total · ${HEAD_OID}\n\n## Methodology\n\n**Boundary.** vfkit.\n`,
+              ),
+              makeBinaryFile('evidence/01-ab.png', PNG_BYTES),
+              makeFrame('R'),
+            ]),
+          );
+          return {
+            workerPid: worker.pid,
+            supervisorPid: supervisor.pid,
+            workerExe: process.execPath,
+            expectedExeTokens: ['node'],
+            child: worker,
+          };
+        },
+      });
+      const ownership = JSON.parse(
+        readFileSync(join(root, 'l/ownership.json'), 'utf8'),
+      );
+      expect(ownership.helpers?.[0]?.pid).toBe(supervisor.pid);
+      expect(res.ok).toBe(false);
+      expect(res.teardownStatus).toBe('failed');
+      expect(res.boundaryPath).toBeNull();
+      expect(res.errors.join('\n')).toMatch(
+        /pid-identity-mismatch:helper-0:\d+:observed=/,
+      );
+      expect(inspectPidState(supervisor.pid).alive).toBe(true);
+    } finally {
+      for (const child of [worker, supervisor]) {
+        if (child && inspectPidState(child.pid).alive) child.kill('SIGKILL');
+      }
+    }
   });
 });

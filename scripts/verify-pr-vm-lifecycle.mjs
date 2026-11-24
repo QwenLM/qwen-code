@@ -32,6 +32,8 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmdirSync,
@@ -254,9 +256,117 @@ export function writeOwnershipRecord(ownershipPath, record) {
   writeAtomicPrivate(ownershipPath, `${JSON.stringify(payload, null, 2)}\n`);
 }
 
+function readProcessGroupId(pid) {
+  const result = spawnSync('ps', ['-p', String(pid), '-o', 'pgid='], {
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) return null;
+  const groupId = Number(result.stdout.trim());
+  return Number.isInteger(groupId) && groupId > 0 ? groupId : null;
+}
+
+function hasLiveProcessGroupMember(groupId) {
+  const members = spawnSync('ps', ['-eo', 'pgid=,stat='], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  });
+  if (members.status !== 0) return null;
+  return members.stdout.split('\n').some((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\S+)/);
+    return match && Number(match[1]) === groupId && !/^[ZX]/.test(match[2]);
+  });
+}
+
+function signalProcessGroup(groupId, signal, label, report) {
+  try {
+    process.kill(-groupId, signal);
+    return 'sent';
+  } catch (error) {
+    if (
+      error.code === 'ESRCH' ||
+      (error.code === 'EPERM' && hasLiveProcessGroupMember(groupId) === false)
+    ) {
+      return 'absent';
+    }
+    report.errors.push(
+      `process-group-${signal.toLowerCase()}-failed:${label}:${groupId}:${error.code}`,
+    );
+    return 'error';
+  }
+}
+
+function stopOwnedProcessGroup(groupId, label, graceMs, report) {
+  if (!Number.isInteger(groupId) || groupId <= 1) {
+    report.errors.push(`invalid-process-group:${label}:${groupId}`);
+    return;
+  }
+  const ownGroup = readProcessGroupId(process.pid);
+  if (ownGroup === null) {
+    report.errors.push(`process-group-self-probe-failed:${label}`);
+    return;
+  }
+  if (groupId === process.pid || groupId === ownGroup) {
+    report.errors.push(`refusing-own-process-group:${label}:${groupId}`);
+    return;
+  }
+  const observedGroup = readProcessGroupId(groupId);
+  if (observedGroup !== null && observedGroup !== groupId) {
+    report.errors.push(`process-group-mismatch:${label}:${groupId}`);
+    return;
+  }
+  // The supervisor may already have exited while its group still contains
+  // workers. Only the trusted launcher writes this run-owned group id.
+  if (signalProcessGroup(groupId, 'SIGTERM', label, report) !== 'sent') {
+    return;
+  }
+  const deadline = Date.now() + graceMs;
+  let present = true;
+  while (Date.now() < deadline && present) {
+    try {
+      process.kill(-groupId, 0);
+      sleepMs(25);
+    } catch (error) {
+      if (error.code === 'ESRCH') present = false;
+      else if (
+        error.code === 'EPERM' &&
+        hasLiveProcessGroupMember(groupId) === false
+      ) {
+        // macOS may use EPERM for a zombie-only group.
+        present = false;
+      } else {
+        report.errors.push(
+          `process-group-probe-failed:${label}:${groupId}:${error.code}`,
+        );
+        return;
+      }
+    }
+  }
+  if (!present) return;
+  if (signalProcessGroup(groupId, 'SIGKILL', label, report) === 'sent') {
+    report.processes.push({ label, pid: groupId, action: 'group-killed' });
+  }
+}
+
 function stopVerifiedPid(entry, label, report, { graceMs, killWaitMs }) {
   const pid = entry?.pid;
   const expectedTokens = entry?.expectedExeTokens ?? [];
+  if (
+    entry?.processGroupId !== undefined &&
+    Number.isInteger(pid) &&
+    pid > 1 &&
+    inspectPidState(pid).alive
+  ) {
+    const observed = inspectPidIdentity(pid);
+    if (observed && !identityMatches(observed, expectedTokens)) {
+      report.errors.push(
+        `pid-identity-mismatch:${label}:${pid}:observed=${observed.exe}`,
+      );
+      return;
+    }
+    if (observed) {
+      stopOwnedProcessGroup(entry.processGroupId, label, graceMs, report);
+    }
+  }
   if (!Number.isInteger(pid) || pid <= 1) {
     report.errors.push(`invalid-pid:${label}:${pid}`);
     return;
@@ -399,6 +509,59 @@ function revokeApprovedToken(tokenPath, approvedRoots, report) {
   report.token = { path: tokenPath, action: 'revoked' };
 }
 
+function resolveFirecrackerWorkerPid(record) {
+  const token = record.expectedExeTokens?.[0];
+  if (
+    process.platform !== 'linux' ||
+    record.backend !== 'firecracker' ||
+    typeof token !== 'string' ||
+    token === '' ||
+    token.includes('/') ||
+    !Number.isInteger(record.vmmUid) ||
+    record.vmmUid <= 0 ||
+    typeof record.runId !== 'string'
+  ) {
+    return { pid: null, error: null };
+  }
+  const candidates = [];
+  let entries;
+  try {
+    entries = readdirSync('/proc');
+  } catch (error) {
+    return { pid: null, error: `firecracker-proc-enumeration:${error.code}` };
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const exe = readlinkSync(`/proc/${entry}/exe`);
+      if (exe !== token && !exe.endsWith(`/${token}`)) continue;
+      const status = readFileSync(`/proc/${entry}/status`, 'utf8');
+      const uidLine = status
+        .split('\n')
+        .find((line) => line.startsWith('Uid:'));
+      if (Number(uidLine?.split(/\s+/)[1]) !== record.vmmUid) continue;
+      const argv = readFileSync(`/proc/${entry}/cmdline`, 'utf8').split('\0');
+      if (
+        !argv.some(
+          (arg, index) => arg === '--id' && argv[index + 1] === record.runId,
+        )
+      ) {
+        continue;
+      }
+      candidates.push(Number(entry));
+    } catch {
+      // A process can exit between /proc enumeration and identity reads.
+    }
+  }
+  if (candidates.length > 1) {
+    return {
+      pid: null,
+      error: `firecracker-worker-recovery-ambiguous:${record.runId}`,
+    };
+  }
+  return { pid: candidates[0] ?? null, error: null };
+}
+
 /**
  * Idempotently reaps only the resources named in `ownershipPath`.
  * Refuses to kill PIDs whose executable identity does not match or to touch
@@ -468,14 +631,30 @@ export function reapOwnership(
     };
   }
 
+  const recovery = resolveFirecrackerWorkerPid(record);
+  if (
+    recovery.pid &&
+    (!Number.isInteger(record.worker?.pid) ||
+      !inspectPidState(record.worker.pid).alive)
+  ) {
+    record.worker = {
+      ...record.worker,
+      pid: recovery.pid,
+      expectedExeTokens:
+        record.worker?.expectedExeTokens ?? record.expectedExeTokens ?? [],
+      processGroupId: undefined,
+    };
+  }
+
   const report = {
     status: 'reaped',
     runId: record.runId ?? null,
     backend: record.backend ?? null,
+    resolvedWorkerPid: recovery.pid,
     processes: [],
     paths: [],
     token: null,
-    errors: [],
+    errors: recovery.error ? [recovery.error] : [],
   };
 
   if (record.worker && typeof record.worker === 'object') {

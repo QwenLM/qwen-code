@@ -474,6 +474,9 @@ async function main(argv) {
       server.once('error', reject);
       server.listen(options.socketPath, resolve);
     });
+    const socketStat = lstatSync(options.socketPath);
+    const socketIdentity = { dev: socketStat.dev, ino: socketStat.ino };
+    let socketCleanupFailed = false;
     try {
       chmodSync(options.socketPath, 0o600);
       if (
@@ -492,22 +495,41 @@ async function main(argv) {
       throw error;
     }
     const removeSocket = () => {
+      let st;
+      try {
+        st = lstatSync(options.socketPath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') socketCleanupFailed = true;
+        return !socketCleanupFailed;
+      }
+      if (
+        !st.isSocket() ||
+        st.dev !== socketIdentity.dev ||
+        st.ino !== socketIdentity.ino
+      ) {
+        socketCleanupFailed = true;
+        process.stderr.write('model-proxy: socket identity changed\n');
+        return false;
+      }
       try {
         unlinkSync(options.socketPath);
-      } catch {
-        // Already removed.
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          socketCleanupFailed = true;
+          process.stderr.write('model-proxy: unable to remove owned socket\n');
+        }
       }
+      return !socketCleanupFailed;
     };
     server.on('close', removeSocket);
     const onSignal = () => {
       if (typeof server.closeAllConnections === 'function') {
         server.closeAllConnections();
       }
-      server.close(() => {
-        removeSocket();
-        process.exit(0);
-      });
       removeSocket();
+      server.close(() => {
+        process.exit(socketCleanupFailed ? 1 : 0);
+      });
     };
     process.once('SIGTERM', onSignal);
     process.once('SIGINT', onSignal);

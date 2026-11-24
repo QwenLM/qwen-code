@@ -207,6 +207,30 @@ describe('verify-pr-vm-lifecycle reap', () => {
     expect(selfRep.errors.join('\n')).toMatch(/refusing-self-pid:worker:/);
   });
 
+  it('checks process identity before signaling an owned process group', () => {
+    const root = makeTmpDir('verify-pr-group-identity-');
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)'],
+      { detached: true, stdio: 'ignore' },
+    );
+    children.push(child);
+    const ownership = join(root, 'ownership.json');
+    writeOwnershipRecord(ownership, {
+      runId: 'wrong-group-id',
+      backend: 'firecracker',
+      worker: {
+        pid: child.pid,
+        processGroupId: child.pid,
+        expectedExeTokens: ['wrong-vmm-identity'],
+      },
+    });
+    const report = reapOwnership(ownership, { approvedRoots: [root] });
+    expect(report.status).toBe('failed');
+    expect(report.errors.join('\n')).toMatch(/pid-identity-mismatch/);
+    expect(inspectPidState(child.pid).alive).toBe(true);
+  });
+
   it('refuses paths outside approved roots, filesystem root approvals, and symlink token files', () => {
     const root = makeTmpDir();
     const outside = makeTmpDir('verify-pr-vm-outside-');
@@ -230,6 +254,51 @@ describe('verify-pr-vm-lifecycle reap', () => {
     expect(rep.errors.join('\n')).toMatch(/unapproved-path:work-disk:/);
     expect(rep.errors.join('\n')).toMatch(/invalid-token-file:/);
     expect(existsSync(secret)).toBe(true);
+  });
+
+  it('reaps an owned process group including a child with no recorded worker PID', async () => {
+    const root = makeTmpDir('verify-pr-owned-group-');
+    const supervisor = spawn(
+      process.execPath,
+      [
+        '-e',
+        "const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{stdio:'ignore'});process.stdout.write(`${child.pid}\\n`);setTimeout(()=>{},60000)",
+      ],
+      { detached: true, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    children.push(supervisor);
+    let grandchildPid = null;
+    try {
+      grandchildPid = await new Promise((resolve) => {
+        supervisor.stdout.once('data', (chunk) =>
+          resolve(Number(chunk.toString('utf8').trim())),
+        );
+      });
+      expect(Number.isInteger(grandchildPid)).toBe(true);
+      const ownership = join(root, 'ownership.json');
+      writeOwnershipRecord(ownership, {
+        runId: 'owned-group',
+        backend: 'firecracker',
+        worker: {
+          pid: supervisor.pid,
+          processGroupId: supervisor.pid,
+          expectedExeTokens: ['node'],
+        },
+      });
+      const report = reapOwnership(ownership, {
+        approvedRoots: [root],
+        graceMs: 100,
+      });
+      expect(report.errors).toEqual([]);
+      expect(report.status).toBe('reaped');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(inspectPidState(supervisor.pid).alive).toBe(false);
+      expect(inspectPidState(grandchildPid).alive).toBe(false);
+    } finally {
+      for (const pid of [supervisor.pid, grandchildPid]) {
+        if (inspectPidState(pid).alive) process.kill(pid, 'SIGKILL');
+      }
+    }
   });
 });
 

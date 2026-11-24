@@ -314,6 +314,7 @@ export function buildFirecrackerLaunchPlan({
     backend: 'firecracker',
     runId,
     jailRoot,
+    kernelPath: join(jailRoot, 'vmlinuz'),
     hostVsockPath,
     workerPidFile: join(jailRoot, `${execName}.pid`),
     vmConfig,
@@ -323,6 +324,7 @@ export function buildFirecrackerLaunchPlan({
     ownershipTemplate: {
       runId,
       backend: 'firecracker',
+      vmmUid,
       expectedExeTokens: [execName],
       workDiskPath: join(jailRoot, 'rootfs.ext4'),
       socketPaths: [hostVsockPath, join(jailRoot, 'v.sock')],
@@ -428,6 +430,7 @@ export function buildVfkitLaunchPlan({
   return {
     backend: 'vfkit',
     runId,
+    kernelPath,
     hostVsockPath,
     socketDir,
     pidFile,
@@ -849,8 +852,74 @@ function sha256RegularFile(filePath) {
   }
   return {
     error: null,
+    dev: st.dev,
+    ino: st.ino,
+    nlink: st.nlink,
     digest: createHash('sha256').update(readFileSync(filePath)).digest('hex'),
   };
+}
+
+function removeOwnedSocket(filePath, identity) {
+  let st;
+  try {
+    st = lstatSync(filePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return `proxy-socket-stat-failed:${error.code}`;
+  }
+  if (!st.isSocket() || st.dev !== identity.dev || st.ino !== identity.ino) {
+    return 'proxy-socket-identity-changed';
+  }
+  try {
+    unlinkSync(filePath);
+    return null;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return `proxy-socket-remove-failed:${error.code}`;
+  }
+}
+
+function validateDefaultLaunchInputs(plan) {
+  if (plan.backend === 'firecracker') {
+    const kernelImage = plan.vmConfig?.['boot-source']?.kernel_image_path;
+    const rootDrives = plan.vmConfig?.drives?.filter(
+      (drive) => drive.drive_id === 'rootfs',
+    );
+    const rootImage =
+      rootDrives?.length === 1 ? rootDrives[0].path_on_host : null;
+    const configArgs = plan.argv.flatMap((arg, i) =>
+      arg === '--config-file' ? [plan.argv[i + 1]] : [],
+    );
+    return kernelImage === '/vmlinuz' &&
+      rootImage === '/rootfs.ext4' &&
+      Array.isArray(plan.vmConfig?.drives) &&
+      plan.vmConfig.drives.length === 1 &&
+      plan.kernelPath === join(plan.jailRoot, 'vmlinuz') &&
+      plan.ownershipTemplate.workDiskPath ===
+        join(plan.jailRoot, 'rootfs.ext4') &&
+      configArgs.length > 0 &&
+      configArgs.every((arg) => arg === '/config.json')
+      ? null
+      : 'firecracker argv/config does not match validated launch inputs';
+  }
+  const bootIndices = plan.argv.flatMap((arg, index) =>
+    arg === '--bootloader' ? [index] : [],
+  );
+  if (
+    bootIndices.length !== 1 ||
+    !plan.argv[bootIndices[0] + 1]?.startsWith(
+      `linux,kernel=${plan.kernelPath},`,
+    )
+  ) {
+    return 'vfkit argv does not match the validated kernel';
+  }
+  const diskArgs = plan.argv.filter(
+    (arg) => typeof arg === 'string' && arg.startsWith('virtio-blk,path='),
+  );
+  return diskArgs.length === 1 &&
+    diskArgs[0] === `virtio-blk,path=${plan.ownershipTemplate.workDiskPath}`
+    ? null
+    : 'vfkit argv does not match the validated working disk';
 }
 
 function readSingleLinkJsonFile(filePath) {
@@ -1001,6 +1070,99 @@ export async function runHardwareRound({
     return { ok: false, errors: tcCheck.errors };
   }
 
+  if (
+    plan.backend === 'provider-vm' &&
+    plan.headRefOid !== contextSnapshot.headRefOid
+  ) {
+    return {
+      ok: false,
+      errors: ['provider plan headRefOid must match the host context'],
+    };
+  }
+  if (
+    plan.backend === 'provider-vm' &&
+    typeof plan.runInstancesArgv === 'function'
+  ) {
+    let launchHeadMatches = false;
+    try {
+      const argv = plan.runInstancesArgv('preflight-validation');
+      const keyIndex = argv.indexOf('--Tag.3.Key');
+      launchHeadMatches =
+        keyIndex >= 0 &&
+        argv[keyIndex + 1] === 'qwen-head-oid' &&
+        argv[keyIndex + 3] === contextSnapshot.headRefOid;
+    } catch {
+      launchHeadMatches = false;
+    }
+    if (!launchHeadMatches) {
+      return {
+        ok: false,
+        errors: ['provider launch argv head must match the host context'],
+      };
+    }
+  }
+  if (modelProxy !== null) {
+    if (
+      typeof modelProxy !== 'object' ||
+      Array.isArray(modelProxy) ||
+      !Number.isSafeInteger(modelProxy.maxRequests) ||
+      modelProxy.maxRequests <= 0
+    ) {
+      return {
+        ok: false,
+        errors: [
+          'modelProxy.maxRequests is required and must be a positive safe integer',
+        ],
+      };
+    }
+    if (
+      modelProxy.listenHost !== undefined &&
+      (typeof modelProxy.listenHost !== 'string' ||
+        modelProxy.listenHost === '')
+    ) {
+      return {
+        ok: false,
+        errors: ['modelProxy.listenHost must be a non-empty string'],
+      };
+    }
+    if (
+      modelProxy.socketPath !== undefined &&
+      (typeof modelProxy.socketPath !== 'string' ||
+        modelProxy.socketPath.trim() === '')
+    ) {
+      return {
+        ok: false,
+        errors: ['modelProxy.socketPath must be a non-empty string'],
+      };
+    }
+    for (const field of ['vmmUid', 'vmmGid']) {
+      if (
+        modelProxy[field] !== undefined &&
+        (!Number.isInteger(modelProxy[field]) || modelProxy[field] <= 0)
+      ) {
+        return {
+          ok: false,
+          errors: [`modelProxy.${field} must be a positive integer`],
+        };
+      }
+    }
+    if (
+      (modelProxy.vmmUid === undefined) !==
+      (modelProxy.vmmGid === undefined)
+    ) {
+      return {
+        ok: false,
+        errors: ['modelProxy.vmmUid and vmmGid must be provided together'],
+      };
+    }
+    if (modelProxy.vmmUid !== undefined && !modelProxy.socketPath) {
+      return {
+        ok: false,
+        errors: ['modelProxy.vmmUid and vmmGid require socketPath'],
+      };
+    }
+  }
+
   const isLocalVmm = plan.backend === 'firecracker' || plan.backend === 'vfkit';
   let kernelDigest = null;
   let rootfsDigest = null;
@@ -1042,23 +1204,60 @@ export async function runHardwareRound({
         errors: [`sourceRootfsPath rejected (${rHash.error})`],
       };
     }
+    const launchKernel = sha256RegularFile(plan.kernelPath);
+    if (launchKernel.error || launchKernel.digest !== kHash.digest) {
+      return {
+        ok: false,
+        errors: [
+          'planned kernel must be a regular file matching sourceKernelPath',
+        ],
+      };
+    }
     const workDisk = plan.ownershipTemplate?.workDiskPath;
-    if (workDisk) {
-      const realSrcRootfs = realpathSync(resolve(sourceRootfsPath));
-      let realWorkDisk = resolve(workDisk);
-      try {
-        realWorkDisk = realpathSync(realWorkDisk);
-      } catch {
-        // Keep lexical resolved path if working disk does not exist yet.
-      }
-      if (realWorkDisk === realSrcRootfs) {
-        return {
-          ok: false,
-          errors: [
-            'working disk path must be a per-round copy distinct from sourceRootfsPath',
-          ],
-        };
-      }
+    if (!workDisk) {
+      return {
+        ok: false,
+        errors: ['local VMM plan requires ownershipTemplate.workDiskPath'],
+      };
+    }
+    const realSrcRootfs = realpathSync(resolve(sourceRootfsPath));
+    let realWorkDisk = resolve(workDisk);
+    try {
+      realWorkDisk = realpathSync(realWorkDisk);
+    } catch {
+      // Keep lexical resolved path if working disk does not exist yet.
+    }
+    if (realWorkDisk === realSrcRootfs) {
+      return {
+        ok: false,
+        errors: [
+          'working disk path must be a per-round copy distinct from sourceRootfsPath',
+        ],
+      };
+    }
+    const launchDisk = sha256RegularFile(workDisk);
+    if (launchDisk.error || launchDisk.digest !== rHash.digest) {
+      return {
+        ok: false,
+        errors: [
+          'working disk must be a regular-file copy matching sourceRootfsPath',
+        ],
+      };
+    }
+    if (
+      launchDisk.nlink !== 1 ||
+      (launchDisk.dev === rHash.dev && launchDisk.ino === rHash.ino)
+    ) {
+      return {
+        ok: false,
+        errors: [
+          'working disk must be independently owned storage, not a hardlink or shared inode',
+        ],
+      };
+    }
+    if (typeof launchBackend !== 'function') {
+      const launchError = validateDefaultLaunchInputs(plan);
+      if (launchError) return { ok: false, errors: [launchError] };
     }
     kernelDigest = kHash.digest;
     rootfsDigest = rHash.digest;
@@ -1079,6 +1278,7 @@ export async function runHardwareRound({
   let proxyServer = null;
   let proxyInfo = null;
   let proxySocketOwned = false;
+  let proxySocketIdentity = null;
   let collector = null;
   let ownershipPath = null;
   let launched = null;
@@ -1097,6 +1297,7 @@ export async function runHardwareRound({
   let supervisorPid = null;
   let workerExe = null;
   let workerExitEvidence = 'unknown';
+  let workerIdentityUnproven = false;
   let providerLifecycle = null;
 
   const startedAt = new Date().toISOString();
@@ -1104,6 +1305,16 @@ export async function runHardwareRound({
   let destroyedAt = null;
 
   try {
+    // Establish the recovery record before either listener or process launch.
+    // A failed spawn still has an approved working disk/token to clean up.
+    if (isLocalVmm) {
+      ownershipPath = join(realLauncher, 'ownership.json');
+      writeOwnershipRecord(ownershipPath, {
+        ...plan.ownershipTemplate,
+        tokenFile,
+      });
+    }
+
     // 1. Optional host-side model proxy bound to this round's token.json
     if (modelProxy) {
       proxyServer = createModelProxy({
@@ -1113,7 +1324,7 @@ export async function runHardwareRound({
         nonce: proxyNonce,
         idleTimeoutMs: modelProxy.idleTimeoutMs,
         tokenFile,
-        maxRequests: modelProxy.maxRequests ?? null,
+        maxRequests: modelProxy.maxRequests,
       });
       if (modelProxy.socketPath) {
         const sockLen = validateSocketPathLength(modelProxy.socketPath);
@@ -1131,6 +1342,8 @@ export async function runHardwareRound({
           proxyServer.listen(modelProxy.socketPath, res);
         });
         proxySocketOwned = true;
+        const socketStat = lstatSync(modelProxy.socketPath);
+        proxySocketIdentity = { dev: socketStat.dev, ino: socketStat.ino };
         chmodSync(modelProxy.socketPath, 0o600);
         const proxyUid = modelProxy.vmmUid ?? plan.vmmUid ?? null;
         const proxyGid = modelProxy.vmmGid ?? plan.vmmGid ?? null;
@@ -1210,6 +1423,7 @@ export async function runHardwareRound({
       } else {
         const child = spawn(plan.argv[0], plan.argv.slice(1), {
           stdio: 'ignore',
+          detached: plan.backend === 'firecracker',
         });
         let spawnError = null;
         let childExited = false;
@@ -1231,6 +1445,31 @@ export async function runHardwareRound({
           child.once('spawn', resolveSpawn);
           child.once('error', rejectSpawn);
         });
+        const expectedExeTokens = plan.ownershipTemplate.expectedExeTokens;
+        launched = {
+          workerPid: child.pid,
+          supervisorPid: child.pid,
+          workerExe: expectedExeTokens[0],
+          child,
+          childExited: () => childExited,
+          ...(plan.backend === 'firecracker'
+            ? { processGroupId: child.pid }
+            : {}),
+        };
+        workerPid = child.pid;
+        supervisorPid = child.pid;
+        workerExe = expectedExeTokens[0];
+        writeOwnershipRecord(ownershipPath, {
+          ...plan.ownershipTemplate,
+          worker: {
+            pid: child.pid,
+            expectedExeTokens,
+            ...(plan.backend === 'firecracker'
+              ? { processGroupId: child.pid }
+              : {}),
+          },
+          tokenFile,
+        });
         let pid = child.pid;
         let supPid = child.pid;
         if (plan.backend === 'firecracker' && plan.workerPidFile) {
@@ -1240,24 +1479,39 @@ export async function runHardwareRound({
             () => childExited,
           );
           if (!fcPid) {
-            try {
-              child.kill('SIGKILL');
-            } catch {
-              // Ignore kill error.
-            }
+            workerIdentityUnproven = true;
             throw new Error(
               `timed out waiting for firecracker worker pid file ${plan.workerPidFile}`,
             );
           }
           pid = fcPid;
         }
-        launched = {
-          workerPid: pid,
-          supervisorPid: supPid,
-          workerExe: plan.ownershipTemplate.expectedExeTokens[0],
-          child,
-          childExited: () => childExited,
-        };
+        launched.workerPid = pid;
+        launched.supervisorPid = supPid;
+        workerPid = pid;
+        supervisorPid = supPid;
+        workerExe = plan.ownershipTemplate.expectedExeTokens[0];
+        writeOwnershipRecord(ownershipPath, {
+          ...plan.ownershipTemplate,
+          worker: {
+            pid,
+            expectedExeTokens: plan.ownershipTemplate.expectedExeTokens,
+            ...(launched.processGroupId > 1
+              ? { processGroupId: launched.processGroupId }
+              : {}),
+          },
+          ...(child.pid !== pid
+            ? {
+                helpers: [
+                  {
+                    pid: child.pid,
+                    expectedExeTokens: plan.ownershipTemplate.expectedExeTokens,
+                  },
+                ],
+              }
+            : {}),
+          tokenFile,
+        });
       }
 
       workerPid = launched?.workerPid ?? null;
@@ -1276,7 +1530,25 @@ export async function runHardwareRound({
             launched?.expectedExeTokens ??
             plan.ownershipTemplate?.expectedExeTokens ??
             [],
+          ...(launched?.processGroupId > 1
+            ? { processGroupId: launched.processGroupId }
+            : {}),
         },
+        ...(Number.isInteger(launched?.supervisorPid) &&
+        launched.supervisorPid > 1 &&
+        launched.supervisorPid !== workerPid
+          ? {
+              helpers: [
+                {
+                  pid: launched.supervisorPid,
+                  expectedExeTokens:
+                    launched.expectedExeTokens ??
+                    plan.ownershipTemplate?.expectedExeTokens ??
+                    [],
+                },
+              ],
+            }
+          : {}),
         tokenFile,
       });
 
@@ -1337,6 +1609,13 @@ export async function runHardwareRound({
     //    before reapOwnership rmdirs it), then reap local VMM or destroy
     //    provider VM, revoke token.json, and verify source golden immutability.
     if (proxyServer) {
+      if (proxySocketOwned && modelProxy?.socketPath) {
+        const cleanupError = removeOwnedSocket(
+          modelProxy.socketPath,
+          proxySocketIdentity,
+        );
+        if (cleanupError) errors.push(cleanupError);
+      }
       if (proxyServer.listening) {
         await new Promise((done) => {
           if (typeof proxyServer.closeAllConnections === 'function') {
@@ -1345,15 +1624,11 @@ export async function runHardwareRound({
           proxyServer.close(() => done());
         });
       }
-      if (proxySocketOwned && modelProxy?.socketPath) {
-        try {
-          unlinkSync(modelProxy.socketPath);
-        } catch {
-          // Already removed.
-        }
-      }
     }
 
+    const proxyCleanupFailed = errors.some((error) =>
+      error.startsWith('proxy-socket-'),
+    );
     if (isLocalVmm) {
       let reapClean = true;
       if (ownershipPath && existsSync(ownershipPath)) {
@@ -1364,12 +1639,23 @@ export async function runHardwareRound({
           ...(plan.jailRoot ? [dirname(plan.jailRoot)] : []),
         ];
         const reapRes = reapOwnership(ownershipPath, { approvedRoots: roots });
+        if (
+          reapRes.status === 'reaped' &&
+          Number.isInteger(reapRes.resolvedWorkerPid) &&
+          reapRes.resolvedWorkerPid > 1
+        ) {
+          workerPid = reapRes.resolvedWorkerPid;
+          workerIdentityUnproven = false;
+        }
         if (reapRes.status !== 'reaped') {
           reapClean = false;
           errors.push(...reapRes.errors.map((e) => `reap:${e}`));
         }
       } else {
-        // Launch failed before ownership.json existed: still revoke token.json.
+        reapClean = false;
+        errors.push('ownership-record-missing-at-teardown');
+        // No trusted ownership record: revoke the token without guessing
+        // which other paths are safe to delete.
         try {
           writePrivateSafeFile(
             tokenFile,
@@ -1391,7 +1677,17 @@ export async function runHardwareRound({
         Number.isInteger(workerPid) && workerPid > 1
           ? inspectPidState(workerPid).alive
           : false;
-      workerExitEvidence = aliveAfterReap ? 'alive' : 'absent';
+      const supervisorAlive =
+        Number.isInteger(supervisorPid) &&
+        supervisorPid > 1 &&
+        supervisorPid !== workerPid &&
+        inspectPidState(supervisorPid).alive;
+      workerExitEvidence =
+        workerIdentityUnproven || supervisorAlive
+          ? 'unknown'
+          : aliveAfterReap
+            ? 'alive'
+            : 'absent';
       const workDisk = plan.ownershipTemplate?.workDiskPath;
       diskDestroyed = workDisk ? !existsSync(workDisk) : true;
       tokenRevoked = isTokenFileRevoked(tokenFile);
@@ -1405,6 +1701,9 @@ export async function runHardwareRound({
       }
       teardownStatus =
         reapClean &&
+        !proxyCleanupFailed &&
+        !workerIdentityUnproven &&
+        !supervisorAlive &&
         !aliveAfterReap &&
         diskDestroyed &&
         tokenRevoked &&
@@ -1440,7 +1739,11 @@ export async function runHardwareRound({
       diskDestroyed = destroyRes?.diskDeleted === true;
       const terminated = destroyRes?.terminated === true;
       teardownStatus =
-        destroyClean && terminated && diskDestroyed && tokenRevoked
+        destroyClean &&
+        !proxyCleanupFailed &&
+        terminated &&
+        diskDestroyed &&
+        tokenRevoked
           ? 'destroyed'
           : 'failed';
       destroyedAt = new Date().toISOString();
@@ -1479,6 +1782,7 @@ export async function runHardwareRound({
     workerExe,
     workerExitEvidence,
     providerLifecycle,
+    executionClass: 'hardware-isolated',
   });
 
   const finalized = writeExecutionRecordAndBoundary({

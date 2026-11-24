@@ -7,12 +7,17 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import {
+  chmodSync,
+  chownSync,
+  copyFileSync,
   existsSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
@@ -1138,5 +1143,104 @@ describe('per-round token revocation, request budget, and UDS listener (microVM 
         tokenFile: '   ',
       }),
     ).toThrow(/tokenFile must be a non-empty path/);
+  });
+
+  it('exits nonzero on SIGTERM when the owned Unix socket cannot be removed', async () => {
+    const tmp = mkdtempSync('/tmp/qc-mp-term-');
+    chmodSync(tmp, 0o755);
+    const workDir = join(tmp, 'work');
+    mkdirSync(workDir, { mode: 0o777 });
+    mkdirSync(join(workDir, 'lib'));
+    const script = join(workDir, 'verify-pr-model-proxy.mjs');
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o444);
+    copyFileSync(
+      fileURLToPath(
+        new URL('../../scripts/verify-pr-vm-collector.mjs', import.meta.url),
+      ),
+      join(workDir, 'verify-pr-vm-collector.mjs'),
+    );
+    chmodSync(join(workDir, 'verify-pr-vm-collector.mjs'), 0o444);
+    copyFileSync(
+      fileURLToPath(
+        new URL('../../scripts/lib/entry-point.js', import.meta.url),
+      ),
+      join(workDir, 'lib/entry-point.js'),
+    );
+    chmodSync(join(workDir, 'lib/entry-point.js'), 0o444);
+    if (process.getuid?.() === 0) chownSync(workDir, 65534, 65534);
+    chmodSync(workDir, 0o700);
+    const socketPath = join(workDir, 'm.sock');
+    cleanups.push(() => {
+      chmodSync(workDir, 0o700);
+      chmodSync(tmp, 0o700);
+      rmSync(tmp, { recursive: true, force: true });
+    });
+    const child = spawn(
+      process.execPath,
+      [script, '--socket', socketPath, '--max-requests', '1'],
+      {
+        env: {
+          ...process.env,
+          REVIEW_OPENAI_BASE_URL: 'http://127.0.0.1:9',
+          REVIEW_OPENAI_API_KEY: 'local-placeholder',
+        },
+        ...(process.getuid?.() === 0 ? { uid: 65534, gid: 65534 } : {}),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    cleanups.push(() => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', () =>
+        reject(new Error(`proxy exited before ready: ${stderr}`)),
+      );
+    });
+    let exitCode = null;
+    try {
+      chmodSync(workDir, 0o500);
+      child.kill('SIGTERM');
+      [exitCode] = await once(child, 'exit');
+      expect(existsSync(socketPath)).toBe(true);
+    } finally {
+      chmodSync(workDir, 0o700);
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it('does not erase an altered socket identity from the shutdown result', async () => {
+    const tmp = mkdtempSync('/tmp/qc-mp-sub-');
+    cleanups.push(() => rmSync(tmp, { recursive: true, force: true }));
+    const socketPath = join(tmp, 'm.sock');
+    const child = spawn(
+      process.execPath,
+      [SCRIPT, '--socket', socketPath, '--max-requests', '1'],
+      {
+        env: {
+          ...process.env,
+          REVIEW_OPENAI_BASE_URL: 'http://127.0.0.1:9',
+          REVIEW_OPENAI_API_KEY: 'local-placeholder',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    cleanups.push(() => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+    });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', () => reject(new Error('proxy exited before ready')));
+    });
+    unlinkSync(socketPath);
+    writeFileSync(socketPath, 'unowned-replacement');
+    child.kill('SIGTERM');
+    const [exitCode] = await once(child, 'exit');
+    expect(exitCode).toBe(1);
   });
 });
