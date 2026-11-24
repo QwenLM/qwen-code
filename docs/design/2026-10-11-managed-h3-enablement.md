@@ -51,7 +51,7 @@ the implementation match it.
   honesty contract the pinned fault gate asserts: a Session closing over a
   refused release parks its Monitors `runtime_lost` rather than minting
   `stop_requested` for a process nobody stopped
-  (hosted-harness-session.test.ts:6715).
+  (hosted-harness-session.runtime-cleanup.test.ts).
 - **The broker release sweep drains.** `settleUnprovenBackgroundRows`
   (RuntimeBrokerService.java:1911) runs status → `shell-terminate` → status
   for every live `:process` row, and `releaseSessionAfterSweep` (:2122)
