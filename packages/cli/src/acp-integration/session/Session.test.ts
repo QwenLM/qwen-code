@@ -71067,5 +71067,52 @@ describe('Session', () => {
         expect.stringContaining('test-session-id########'),
       );
     });
+
+    it('passes retractToolCallsOnRetry on the unified agent loop path', async () => {
+      const sendSpy = vi.fn(async function* () {
+        yield {
+          type: core.LlmEventType.Finished,
+          value: { reason: FinishReason.STOP },
+        };
+        return {};
+      });
+      Object.assign(mockLlmClient, {
+        admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+        sendMessageStream: sendSpy,
+      });
+      mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello unified' }],
+      });
+
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          toolCallPreparations: true,
+          retractToolCallsOnRetry: true,
+        }),
+      );
+    });
+
+    it('does not wrap a cause-less long Error into RequestError solely due to truncation', async () => {
+      const longErr = new Error('x'.repeat(1200));
+      mockChat.sendMessageStream = vi.fn().mockRejectedValue(longErr);
+
+      let rejection: unknown;
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+      } catch (err) {
+        rejection = err;
+      }
+
+      expect(rejection).toBe(longErr);
+    });
   });
 });

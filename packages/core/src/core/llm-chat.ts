@@ -284,24 +284,20 @@ function hasNonThoughtCandidateParts(
   );
 }
 
-function hasNonThoughtNonToolCandidateParts(
+function hasVisibleNonToolCandidateParts(
   response: GenerateContentResponse,
 ): boolean {
   return Boolean(
     response.candidates?.some((candidate) =>
       candidate.content?.parts?.some((part) => {
         if (part.thought || part.functionCall) return false;
-        if (
-          typeof part.text === 'string' &&
-          part.text.length === 0 &&
-          !part.inlineData &&
-          !part.fileData &&
-          !part.executableCode &&
-          !part.codeExecutionResult
-        ) {
-          return false;
-        }
-        return true;
+        return Boolean(
+          (typeof part.text === 'string' && part.text.length > 0) ||
+            part.inlineData ||
+            part.fileData ||
+            part.executableCode ||
+            part.codeExecutionResult,
+        );
       }),
     ),
   );
@@ -4766,7 +4762,7 @@ export class LlmChat {
               if (hasNonThoughtCandidateParts(chunk)) {
                 streamYieldedContentChunk = true;
               }
-              if (hasNonThoughtNonToolCandidateParts(chunk)) {
+              if (hasVisibleNonToolCandidateParts(chunk)) {
                 streamYieldedVisibleContent = true;
               }
               // Mirror the visible text into the continuation buffer as it is
@@ -5140,11 +5136,11 @@ export class LlmChat {
                   : 'Transport stream retry not taken',
                 {
                   retryPath: 'stream',
-                  retryDecision: attemptClosedWithOwnOutput
-                    ? 'skipped_terminal_finish_reason'
-                    : !canReplayAttempt
-                      ? 'skipped_after_content'
-                      : 'exhausted',
+                  retryDecision: canReplayAttempt
+                    ? 'exhausted'
+                    : attemptClosedWithOwnOutput
+                      ? 'skipped_terminal_finish_reason'
+                      : 'skipped_after_content',
                   attempts: streamReplayRetryCount,
                   maxRetries: STREAM_RETRY_CONFIG.maxRetries,
                   continuationAttempts: transportContinuationCount,

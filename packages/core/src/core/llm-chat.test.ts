@@ -12231,6 +12231,64 @@ describe('LlmChat', async () => {
             ?.parts?.some((part) => part.functionCall?.id === 'call_3'),
         ).toBe(true);
       });
+
+      it('replays a cut after an unsigned thoughtSignature-only part and functionCall under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        mockStreamsOnce(
+          cutAfter([
+            modelChunk([{ text: 'Thinking…', thought: true }]),
+            modelChunk([{ thoughtSignature: 'sig-opaque-1' } as Part]),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+          streamOf(
+            modelChunk(
+              [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2')],
+              'STOP',
+            ),
+          ),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-thought-signature-only',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(1);
+        expectStreamCalls(2);
+      });
+
+      it('logs exhausted when retractToolCallsOnRetry spends its replay budget on terminal-finish tool-call cuts', async () => {
+        vi.useFakeTimers();
+        streamMock().mockImplementation(() =>
+          Promise.resolve(
+            cutAfter([
+              modelChunk(
+                [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_stop')],
+                'STOP',
+              ),
+            ]),
+          ),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-stop-exhausted',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeInstanceOf(Error);
+        expectStreamCalls(3);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'exhausted',
+        });
+      });
     });
 
     it('falls back after yielding only tool preparation metadata', async () => {

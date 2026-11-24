@@ -301,6 +301,7 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
+    ...(options?.retractToolCallsOnRetry && { retractToolCallsOnRetry: true }),
     ...(options?.interactionSpan && {
       interactionSpan: options.interactionSpan,
     }),
