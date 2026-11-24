@@ -404,6 +404,54 @@ describe('worktree restoration preview metadata', () => {
     expect(map.get(second.id)!.worktree?.canRestore).toBe(true);
   });
 
+  it('does not advertise canRestore for archived sessions or mismatched coordinates', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target);
+
+    // Mismatched managed coordinates with an existing binding must not be restorable.
+    await writeWorktreeSession(record.sidecarPath, {
+      ...record.sidecar,
+      worktreePath: path.join(
+        path.dirname(record.worktreePath),
+        'different-slug-dir',
+      ),
+      worktreeRemoved: { archiveKey: record.archiveKey },
+    });
+    const mismatchedMap = summaries(target, record.id);
+    await enrichWorktreeSidecars(mismatchedMap, target.service, 'active');
+    expect(mismatchedMap.get(record.id)!.worktree?.canRestore).toBe(false);
+
+    // Archived sessions require unarchiving before restoration.
+    await writeWorktreeSession(record.sidecarPath, {
+      ...record.sidecar,
+      worktreeRemoved: { archiveKey: record.archiveKey },
+    });
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        record.id,
+        'archived',
+      );
+    fs.mkdirSync(path.dirname(archivedSidecar), { recursive: true });
+    fs.renameSync(record.sidecarPath, archivedSidecar);
+    for (const file of fs.readdirSync(path.dirname(record.sidecarPath))) {
+      if (
+        file.startsWith(`${record.id}.`) &&
+        file.includes('.worktree-snapshot.')
+      ) {
+        fs.renameSync(
+          path.join(path.dirname(record.sidecarPath), file),
+          path.join(path.dirname(archivedSidecar), file),
+        );
+      }
+    }
+    const archivedMap = summaries(target, record.id);
+    await enrichWorktreeSidecars(archivedMap, target.service, 'archived');
+    expect(archivedMap.get(record.id)!.worktree?.worktreeRemoved).toEqual({
+      archiveKey: record.archiveKey,
+    });
+    expect(archivedMap.get(record.id)!.worktree?.canRestore).toBe(false);
+  });
+
   it('removes a cached projection when its current marker has a new owner', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const session = await makeRetainedSession(target, {

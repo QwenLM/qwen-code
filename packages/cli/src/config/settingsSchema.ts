@@ -3490,7 +3490,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
+          'Allow the bundled ripgrep binary. When true (the default), a healthy system-level "rg" is preferred and the bundled binary is used only if PATH rg is missing or cannot run. When false, only the system-level "rg" command is used. This setting is only effective when tools.useRipgrep is true.',
         showInDialog: false,
       },
       workflowsEnabled: {
@@ -4662,9 +4662,10 @@ const SETTINGS_SCHEMA = {
         label: 'Event-Bus Agent Loop',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: undefined as boolean | undefined,
+        unsetToggleValue: true,
         description:
-          'Run the shared agent loop on the event-bus architecture (experimental). Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI and subagents by default; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+          'Run the shared agent loop on the event-bus architecture. Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI and subagents by default; other surfaces keep their current loop internals. When unset, headless sessions run on the kernel, and the other surfaces on the shared loop use its procedural path. `true` selects the kernel, and `false` selects the procedural path, including for headless. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       modelAvailabilityTracking: {

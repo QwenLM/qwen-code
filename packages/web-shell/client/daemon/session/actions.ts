@@ -1069,43 +1069,63 @@ export function createDaemonSessionActions({
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
+    let restoredAdopted = false;
+    const detachUnadoptedRestored = () => {
+      if (!restoredAdopted && options?.restoredSession) {
+        void options.restoredSession.detach().catch(() => {});
+      }
+    };
     if (replaySource !== 'memory') {
       clearLiveJournalRepair();
     }
     if (signal?.aborted) {
+      detachUnadoptedRestored();
       return Promise.reject(
         new DOMException('Session load cancelled', 'AbortError'),
       );
     }
-    manualSessionClearRef.current = false;
-    const currentSession = sessionRef.current;
-    const currentSessionId = currentSession?.sessionId;
-    const currentConnection = getConnection();
-    const currentSessionContext =
-      currentConnection.sessionContext ??
-      (currentConnection.workspaceCwd
-        ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
-        : daemonClientSessionContext(currentSession));
-    const fallbackContext = currentConnection.error
-      ? getDefaultSessionContext()
-      : (currentSessionContext ?? getDefaultSessionContext());
-    const targetSessionContext = resolveActionSessionContext(
-      options?.sessionContext,
-      options?.workspaceCwd,
-      fallbackContext,
-    );
-    const targetWorkspaceCwd =
-      targetSessionContext?.kind === 'workspace'
-        ? targetSessionContext.cwd
-        : undefined;
-    const loadPromise = startPendingSessionLoad(
-      sessionId,
-      mode,
-      targetSessionContext,
-      signal,
-      replaySource,
-      options?.restoredSession,
-    );
+    let targetSessionContext: DaemonProductSessionContext | undefined;
+    let targetWorkspaceCwd: string | undefined;
+    let currentSession: DaemonSessionClient | undefined;
+    let currentSessionId: string | undefined;
+    let currentConnection: ReturnType<typeof getConnection>;
+    let currentSessionContext: DaemonProductSessionContext | undefined;
+    let loadPromise: Promise<void>;
+    try {
+      manualSessionClearRef.current = false;
+      currentSession = sessionRef.current;
+      currentSessionId = currentSession?.sessionId;
+      currentConnection = getConnection();
+      currentSessionContext =
+        currentConnection.sessionContext ??
+        (currentConnection.workspaceCwd
+          ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
+          : daemonClientSessionContext(currentSession));
+      const fallbackContext = currentConnection.error
+        ? getDefaultSessionContext()
+        : (currentSessionContext ?? getDefaultSessionContext());
+      targetSessionContext = resolveActionSessionContext(
+        options?.sessionContext,
+        options?.workspaceCwd,
+        fallbackContext,
+      );
+      targetWorkspaceCwd =
+        targetSessionContext?.kind === 'workspace'
+          ? targetSessionContext.cwd
+          : undefined;
+      loadPromise = startPendingSessionLoad(
+        sessionId,
+        mode,
+        targetSessionContext,
+        signal,
+        replaySource,
+        options?.restoredSession,
+      );
+      restoredAdopted = true;
+    } catch (error) {
+      detachUnadoptedRestored();
+      throw error;
+    }
     const pendingLoad = pendingSessionLoadRef.current;
     if (pendingLoad && options?.reconcilePromptActivity) {
       pendingLoad.reconcilePromptActivity = true;

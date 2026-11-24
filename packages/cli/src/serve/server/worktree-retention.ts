@@ -54,9 +54,17 @@ const RETENTION_INTERVAL_MS = 30_000;
 export interface RetentionScope {
   runtime: WorkspaceRuntime;
   root: string | undefined;
+  /**
+   * Managed worktree directories belonging to this runtime: the repository
+   * top-level root (shared-root collision key) plus the workspace cwd root
+   * when registered at a monorepo subdirectory.
+   */
+  managedRoots: ReadonlySet<string>;
   limit: number;
   /** An attested root with unreadable settings blocks only that root. */
   settingsError?: string;
+  /** A non-active, non-removed sibling workspace (transitioning/blocked/draining) shares this root. */
+  sharedWithNonActive?: boolean;
 }
 
 export interface WorktreeRetentionReport {
@@ -88,17 +96,17 @@ function retentionLimit(runtime: WorkspaceRuntime): number {
 }
 
 async function retentionRoot(
-  runtime: WorkspaceRuntime,
+  workspaceCwd: string,
 ): Promise<string | undefined> {
-  const service = new GitWorktreeService(runtime.workspaceCwd);
+  const service = new GitWorktreeService(workspaceCwd);
   const repoTop = await service.getRepoTopLevel();
   if (repoTop === null) {
-    let directory = path.resolve(runtime.workspaceCwd);
+    let directory = path.resolve(workspaceCwd);
     for (;;) {
       try {
         await fs.lstat(path.join(directory, '.git'));
         throw new Error(
-          `Git metadata exists but the repository root is unavailable: ${runtime.workspaceCwd}`,
+          `Git metadata exists but the repository root is unavailable: ${workspaceCwd}`,
         );
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -145,7 +153,7 @@ async function loadScopes(
   for (const candidate of registry.list()) {
     // Root discovery also covers maxRetained=0: conflicts still block all
     // automatic reclamation shared by more than one runtime.
-    const root = await retentionRoot(candidate);
+    const root = await retentionRoot(candidate.workspaceCwd);
     if (root === undefined) continue;
     // Untrusted scopes are never swept, but their roots still count in the
     // collision proof; their separately managed records must not be ignored.
@@ -156,12 +164,31 @@ async function loadScopes(
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
     }
+    const workspaceManagedRoot = canonicalPathForTesting(
+      new GitWorktreeService(
+        canonicalPathForTesting(candidate.workspaceCwd),
+      ).getUserWorktreesDir(),
+    );
     scopes.push({
       runtime: candidate,
       root,
+      managedRoots: new Set([root, workspaceManagedRoot]),
       limit,
       ...(settingsError === undefined ? {} : { settingsError }),
     });
+  }
+  // Registered siblings in transitioning/blocked/draining states are omitted
+  // from registry.list() but still claim their management root until removed.
+  const nonActiveRoots = new Set<string>();
+  for (const entry of registry.listEntries()) {
+    if (entry.state === 'active') continue;
+    const root = await retentionRoot(entry.workspaceCwd);
+    if (root !== undefined) nonActiveRoots.add(root);
+  }
+  for (const scope of scopes) {
+    if (scope.root !== undefined && nonActiveRoots.has(scope.root)) {
+      scope.sharedWithNonActive = true;
+    }
   }
   writeStderrLine(
     `qwen serve: retention scopes=${JSON.stringify(
@@ -266,7 +293,7 @@ async function collectEligible(
       const planRoot = canonicalPathForTesting(
         new GitWorktreeService(plan.sidecar.originalCwd).getUserWorktreesDir(),
       );
-      if (planRoot !== scope.root) {
+      if (!scope.managedRoots.has(planRoot)) {
         throw new Error('management root is not attested to this runtime');
       }
       const organization = new SessionOrganizationService(
@@ -301,7 +328,7 @@ async function collectEligible(
               plan.sessionId,
               plan.sidecarPath,
               plan.lockKey,
-              scope.root,
+              planRoot,
               (id) => sessionLiveOnBridge(scope.runtime.bridge, id),
             ))
               ? 'reconciled'
@@ -532,85 +559,124 @@ async function removeRetainedCheckout(
         return false;
       }
       let attemptSnapshot: WorktreeSnapshotPaths | undefined;
-      const outcome = await executeWorktreeCleanup(plan, {
-        requireSnapshot: true,
-        beforeRemoval: async (snapshot) => {
-          if (!assertCurrentRuntime(registry, runtime, canContinue)) {
-            return false;
-          }
-          if (await organization.isSessionPinnedStrict(plan.sessionId)) {
-            return false;
-          }
-          if (sessionLiveOnBridge(runtime.bridge, plan.sessionId)) return false;
-          if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
-            return false;
-          }
-          if (snapshot) {
-            await persistRetainedAttemptBinding(plan, snapshot);
-            attemptSnapshot = snapshot;
-          }
-          return true;
-        },
-        beforePhysicalRemoval: async () => {
-          if (
-            !runtime.trusted ||
-            expectedRoot === undefined ||
-            !assertCurrentRuntime(registry, runtime, canContinue)
-          ) {
-            return false;
-          }
-          const scopes = await loadScopes(runtime, registry);
-          if (!scopes) return false;
-          const current = scopes.find(
-            (candidate) => candidate.runtime === runtime,
-          );
-          if (current?.root !== expectedRoot) return false;
-          const evaluated = new Set(
-            scopes.map((candidate) => candidate.runtime),
-          );
-          for (const candidate of registry.list()) {
-            if (evaluated.has(candidate)) continue;
-            const root = await retentionRoot(candidate);
-            if (root === expectedRoot) return false;
-            // Plain non-Git workspaces are excluded only after the full ancestor
-            // probe proves that absence, never when Git discovery is unreadable.
-            evaluated.add(candidate);
-          }
-          const latest = registry.list();
-          if (latest.some((candidate) => !evaluated.has(candidate))) {
-            return false;
-          }
-          if (
-            !latest.includes(runtime) ||
-            !assertCurrentRuntime(registry, runtime, canContinue)
-          ) {
-            return false;
-          }
-          const holders = scopes.filter(
-            (candidate) => candidate.root === expectedRoot,
-          );
-          if (
-            holders.length !== 1 ||
-            holders[0]?.runtime !== runtime ||
-            holders.some((candidate) => candidate.settingsError !== undefined)
-          ) {
-            return false;
-          }
-          // These reads intentionally follow the current scope discovery, rather
-          // than repeating the stale state seen before binding persistence.
-          const organization = new SessionOrganizationService(
-            runtime.workspaceCwd,
-          );
-          if (await organization.isSessionPinnedStrict(plan.sessionId)) {
-            return false;
-          }
-          if (sessionLiveOnBridge(runtime.bridge, plan.sessionId)) return false;
-          if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
-            return false;
-          }
-          return runtime.trusted && canContinue();
-        },
-      });
+      let physicalRemovalEntered = false;
+      let outcome: Awaited<ReturnType<typeof executeWorktreeCleanup>>;
+      try {
+        outcome = await executeWorktreeCleanup(plan, {
+          requireSnapshot: true,
+          beforeRemoval: async (snapshot) => {
+            if (!assertCurrentRuntime(registry, runtime, canContinue)) {
+              return false;
+            }
+            if (await organization.isSessionPinnedStrict(plan.sessionId)) {
+              return false;
+            }
+            if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
+              return false;
+            if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
+              return false;
+            }
+            if (snapshot) {
+              attemptSnapshot = snapshot;
+              await persistRetainedAttemptBinding(plan, snapshot);
+            }
+            return true;
+          },
+          beforePhysicalRemoval: async () => {
+            if (
+              !runtime.trusted ||
+              expectedRoot === undefined ||
+              !assertCurrentRuntime(registry, runtime, canContinue)
+            ) {
+              return false;
+            }
+            const scopes = await loadScopes(runtime, registry);
+            if (!scopes) return false;
+            const current = scopes.find(
+              (candidate) => candidate.runtime === runtime,
+            );
+            if (current?.root !== expectedRoot || current.sharedWithNonActive) {
+              return false;
+            }
+            const evaluated = new Set(
+              scopes.map((candidate) => candidate.runtime.workspaceId),
+            );
+            for (const entry of registry.listEntries()) {
+              if (
+                entry.state === 'active' &&
+                evaluated.has(entry.workspaceId)
+              ) {
+                continue;
+              }
+              if (entry.workspaceId === runtime.workspaceId) {
+                if (entry.state !== 'active') return false;
+                continue;
+              }
+              const root = await retentionRoot(entry.workspaceCwd);
+              if (root === expectedRoot) return false;
+              // Plain non-Git workspaces are excluded only after the full ancestor
+              // probe proves that absence, never when Git discovery is unreadable.
+              evaluated.add(entry.workspaceId);
+            }
+            const latestEntries = registry.listEntries();
+            if (
+              latestEntries.some((entry) => !evaluated.has(entry.workspaceId))
+            ) {
+              return false;
+            }
+            if (
+              !registry.list().includes(runtime) ||
+              !assertCurrentRuntime(registry, runtime, canContinue)
+            ) {
+              return false;
+            }
+            const holders = scopes.filter(
+              (candidate) => candidate.root === expectedRoot,
+            );
+            if (
+              holders.length !== 1 ||
+              holders[0]?.runtime !== runtime ||
+              holders.some(
+                (candidate) =>
+                  candidate.settingsError !== undefined ||
+                  candidate.sharedWithNonActive,
+              )
+            ) {
+              return false;
+            }
+            // These reads intentionally follow the current scope discovery, rather
+            // than repeating the stale state seen before binding persistence.
+            const organization = new SessionOrganizationService(
+              runtime.workspaceCwd,
+            );
+            if (await organization.isSessionPinnedStrict(plan.sessionId)) {
+              return false;
+            }
+            if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
+              return false;
+            if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
+              return false;
+            }
+            const allowed = runtime.trusted && canContinue();
+            // Only the post-binding pass (after beforeRemoval assigned
+            // attemptSnapshot) precedes removeUserWorktree.
+            if (allowed && attemptSnapshot !== undefined) {
+              physicalRemovalEntered = true;
+            }
+            return allowed;
+          },
+        });
+      } catch (error) {
+        if (attemptSnapshot && !physicalRemovalEntered) {
+          await clearRejectedAttemptBinding(
+            runtime,
+            plan,
+            attemptSnapshot,
+            false,
+          ).catch(() => undefined);
+        }
+        throw error;
+      }
       if (outcome.removed) return outcome.snapshot !== undefined;
       if (
         attemptSnapshot &&
@@ -677,7 +743,11 @@ export async function sweepWorktreeRetentionOnce(
     report.skipped.push('retention settings cannot be read for this root');
     return report;
   }
-  if (holders.length !== 1 || holders[0]?.runtime !== runtime) {
+  if (
+    holders.length !== 1 ||
+    holders[0]?.runtime !== runtime ||
+    scope.sharedWithNonActive
+  ) {
     report.skipped.push('management root is shared');
     return report;
   }

@@ -1,13 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -17,7 +15,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,8 +65,7 @@ class ManagedExtensionCommandVerifierTest {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, approval_mode, gmt_create, gmt_modified)"
                 + " VALUES ('tenant', 'harness', 'agent', 'ACTIVE', 'default', 0, 0)");
         jdbc.update("UPDATE ma_session SET selected_approval_mode='yolo', approval_revision=1"
-                + " WHERE tenant_id=? AND session_id=?", "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                "harness".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                + " WHERE tenant_id=? AND session_id=?", "tenant", "harness");
         var sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant", "harness")).thenReturn(new SessionRecord("tenant", "harness", "agent", null, "Session",
                 "READY", null, null, 0, 0, 0, 0, 0, null, 0,
@@ -131,7 +127,7 @@ class ManagedExtensionCommandVerifierTest {
     void dispatchUsesTheLiveSqlSelectionAndRecoveryRetainsTheCommittedDecision() {
         verify();
         jdbc.update("UPDATE ma_session SET selected_approval_mode=NULL, approval_revision=0 WHERE tenant_id=? AND session_id=?",
-                "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8), "harness".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "tenant", "harness");
         assertThrows(RuntimeBrokerException.class, this::verify);
         operation.put("action", "status");
         verify();
@@ -176,19 +172,18 @@ class ManagedExtensionCommandVerifierTest {
     private ObjectNode resource(String kind, JsonNode body) throws IOException {
         byte[] bytes = JSON.writeValueAsBytes(body);
         String id = UUID.randomUUID().toString();
-        String scope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind,"
                         + " schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0)",
-                ManagedSchemaKeys.key(scope, id), id, kind, bytes.length, DigestUtils.sha256Hex(bytes), bytes);
+                        + " VALUES ('tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0)",
+                id, kind, bytes.length, DigestUtils.sha256Hex(bytes), bytes);
         return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length)
                 .put("digest", DigestUtils.sha256Hex(bytes));
     }
 
     private void project(String domain, String id, String opening, JsonNode ref) {
-        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id, gmt_create) VALUES (?, 'tenant', 'workspace', 'harness', ?, ?, ?, 1, ?, 0)", ManagedExtensionProjection.recordKey("harness", domain, id),
-                domain, id, DigestUtils.sha256Hex(opening), ref.get("resourceId").textValue());
+        jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id, domain, record_id,"
+                        + " operation_id, revision, record_resource_id, gmt_create) VALUES ('tenant', 'workspace', 'harness', ?, ?, ?, 1, ?, 0)",
+                domain, id, opening, ref.get("resourceId").textValue());
     }
 
     private static JsonNode fixtures(String name) throws IOException {

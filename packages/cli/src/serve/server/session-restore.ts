@@ -28,7 +28,10 @@ import {
   resolveSessionIdForRestore,
   type SessionArchiveCoordinator,
 } from './session-archive.js';
-import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
+import {
+  acquireWorktreeOwnershipOp,
+  canonicalWorktreePath,
+} from './worktree-ownership-op.js';
 import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
 import {
   WorktreeMarkerMissingError,
@@ -61,11 +64,7 @@ import type {
  * restore never attests it.
  */
 function ownershipLockKeyForWorktree(recordedPath: string): string {
-  try {
-    return fs.realpathSync(recordedPath);
-  } catch {
-    return recordedPath;
-  }
+  return canonicalWorktreePath(recordedPath);
 }
 
 export const ownershipLockKeyForWorktreeForTesting =

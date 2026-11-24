@@ -572,7 +572,10 @@ export async function enrichWorktreeSidecars(
             sessionService.getProjectRoot(),
             { quiet: true, runtimeRoots: await getRuntimeRoots() },
           );
-          if (candidate) {
+          if (
+            candidate &&
+            path.dirname(candidate.sidecarPath) === path.dirname(sidecarPath)
+          ) {
             try {
               await assertRestoreCoordinates(candidate);
               const selected = await selectWorktreeSnapshot({
@@ -600,7 +603,7 @@ export async function enrichWorktreeSidecars(
       }
     }
     let canRestore = false;
-    if (removed) {
+    if (removed && archiveState === 'active') {
       try {
         const candidate = await preclassifyWorktreeCleanup(
           sessionService,
@@ -608,14 +611,19 @@ export async function enrichWorktreeSidecars(
           sessionService.getProjectRoot(),
           { quiet: true, runtimeRoots: await getRuntimeRoots() },
         );
-        canRestore =
-          candidate !== undefined &&
-          (await selectWorktreeSnapshot({
-            directory: path.dirname(sidecarPath),
-            sessionId,
-            slug: sidecar.slug,
-            archiveKey: removed.archiveKey,
-          })) !== undefined;
+        if (
+          candidate &&
+          path.dirname(candidate.sidecarPath) === path.dirname(sidecarPath)
+        ) {
+          await assertRestoreCoordinates(candidate);
+          canRestore =
+            (await selectWorktreeSnapshot({
+              directory: path.dirname(sidecarPath),
+              sessionId,
+              slug: sidecar.slug,
+              archiveKey: removed.archiveKey,
+            })) !== undefined;
+        }
       } catch {
         // An unavailable pair is shown as such, never as a restore capability.
       }
@@ -1099,6 +1107,7 @@ function readPersistedSidecars(
       await enrichWorktreeSidecars(rows, service, archiveState, readSignal);
       await enrichPrSidecars(rows, service, archiveState, readSignal);
       await enrichArtifactSummaries(rows, service, archiveState, readSignal);
+      await enrichGoalSidecars(rows, service, archiveState, readSignal);
       readSignal.throwIfAborted();
       return rows.get(session.sessionId)!;
     };
@@ -1221,6 +1230,7 @@ async function enrichCatalogPage(
     if (details.prs !== undefined) session.prs = details.prs;
     if (details.artifactCount !== undefined)
       session.artifactCount = details.artifactCount;
+    if (details.goal !== undefined) session.goal = details.goal;
   }
 }
 
@@ -1236,6 +1246,7 @@ async function loadAllPersistedSummaries(
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
   let scanPages = 0;
+  let catalogReadFallbacks = 0;
   let cursor: number | string | undefined;
   do {
     scanPages += 1;
@@ -1244,9 +1255,11 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
+      forCatalog: true,
       excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     });
     signal.throwIfAborted();
+    catalogReadFallbacks += page.catalogReadFallbacks ?? 0;
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
     sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
@@ -1267,7 +1280,6 @@ async function loadAllPersistedSummaries(
   const bySessionId = new Map(
     sessions.map((session) => [session.sessionId, session]),
   );
-  await enrichGoalSidecars(bySessionId, sessionService, archiveState, signal);
   await enrichPromptContinuation(
     bySessionId,
     sessionService,
@@ -1279,6 +1291,7 @@ async function loadAllPersistedSummaries(
     sessions: [...bySessionId.values()],
     truncated,
     scanPages,
+    catalogReadFallbacks,
     scanDurationMs: Math.max(0, performance.now() - scanStartedAt),
   };
 }
@@ -1334,6 +1347,10 @@ async function listAllPersistedSummaries(
     addDaemonRequestAttribute(
       'qwen-code.daemon.session_list.scan_duration_ms',
       snapshot.scanDurationMs,
+    );
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.catalog_read_fallbacks',
+      snapshot.catalogReadFallbacks ?? 0,
     );
   }
   return {

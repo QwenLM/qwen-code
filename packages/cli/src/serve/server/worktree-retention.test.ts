@@ -66,6 +66,8 @@ import {
 
 const failedJsonWrite = vi.hoisted(() => ({
   filePath: undefined as string | undefined,
+  failAfterWrite: false,
+  threwAfterWrite: false,
 }));
 const captureGate = vi.hoisted(() => ({
   barrier: undefined as
@@ -91,6 +93,13 @@ vi.mock(
           options?: Parameters<typeof actual.atomicWriteJSON>[2],
         ) => {
           if (filePath === failedJsonWrite.filePath) {
+            if (failedJsonWrite.failAfterWrite) {
+              failedJsonWrite.filePath = undefined;
+              failedJsonWrite.failAfterWrite = false;
+              failedJsonWrite.threwAfterWrite = true;
+              await actual.atomicWriteJSON(filePath, data, options);
+              throw new Error('injected post-write persistence failure');
+            }
             throw new Error('injected binding persistence failure');
           }
           return actual.atomicWriteJSON(filePath, data, options);
@@ -1921,4 +1930,168 @@ describe('worktree retention with real repositories', () => {
     expect(fs.readFileSync(settings, 'utf8')).toBe('{not-json');
     expect(fs.existsSync(old.worktreePath)).toBe(true);
   });
+
+  it('sweeps a standalone monorepo subdirectory workspace without aborting on root mismatch', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    const subdir = path.join(primary.repo, 'packages', 'app');
+    fs.mkdirSync(subdir, { recursive: true });
+    const subRuntime = {
+      ...primary.runtime,
+      workspaceCwd: subdir,
+    };
+    const subTarget: RetentionTestRuntime = {
+      ...primary,
+      repo: subdir,
+      runtime: subRuntime,
+      service: createWorkspaceRuntimeSessionService(subRuntime),
+      git: new GitWorktreeService(subdir),
+    };
+    configureRetention(subTarget, 1);
+    const oldest = await makeRetainedSession(subTarget, {
+      slug: 'subdir-oldest',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(subTarget, {
+      slug: 'subdir-newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+
+    const outcome = await sweep(subTarget);
+
+    expect(outcome.issues).toEqual([]);
+    expect(outcome.removed).toEqual([oldest.id]);
+    expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(subTarget, oldest);
+  });
+
+  it('clears the persisted attempt binding when a post-binding guard throws before physical removal', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'post-binding-guard-throw',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'post-binding-guard-throw-newer',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const isPinned = SessionOrganizationService.prototype.isSessionPinnedStrict;
+    const removeSpy = vi.spyOn(
+      GitWorktreeService.prototype,
+      'removeUserWorktree',
+    );
+    let threwAfterBinding = false;
+    vi.spyOn(
+      SessionOrganizationService.prototype,
+      'isSessionPinnedStrict',
+    ).mockImplementation(async function (
+      this: SessionOrganizationService,
+      sessionId: string,
+    ) {
+      if (!threwAfterBinding && sessionId === session.id) {
+        const state = await readWorktreeSessionStrict(session.sidecarPath);
+        if (
+          state.state === 'valid' &&
+          state.session.worktreeRemoved !== undefined
+        ) {
+          threwAfterBinding = true;
+          throw new Error('injected post-binding guard exception');
+        }
+      }
+      return isPinned.call(this, sessionId);
+    });
+
+    const outcome = await sweep(target);
+
+    expect(threwAfterBinding).toBe(true);
+    expect(outcome.removed).toEqual([]);
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    const after = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(after.state).toBe('valid');
+    if (after.state === 'valid') {
+      expect(after.session.worktreeRemoved).toBeUndefined();
+    }
+  });
+
+  it('clears a persisted attempt binding when post-write verification throws inside beforeRemoval', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'post-write-verify-throw',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'post-write-verify-throw-newer',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const removeSpy = vi.spyOn(
+      GitWorktreeService.prototype,
+      'removeUserWorktree',
+    );
+    failedJsonWrite.filePath = session.sidecarPath;
+    failedJsonWrite.failAfterWrite = true;
+    failedJsonWrite.threwAfterWrite = false;
+
+    const outcome = await sweep(target);
+
+    expect(failedJsonWrite.threwAfterWrite).toBe(true);
+    expect(outcome.removed).toEqual([]);
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    const after = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(after.state).toBe('valid');
+    if (after.state === 'valid') {
+      expect(after.session.worktreeRemoved).toBeUndefined();
+    }
+  });
+
+  it.each(['draining', 'transitioning', 'blocked'] as const)(
+    'refuses a shared root while a sibling workspace is %s',
+    async (siblingState) => {
+      const primary = makeRetentionRepo(root, 'primary');
+      const sibling = makeRetentionRepo(root, 'secondary');
+      configureRetention(primary, 1);
+      const nestedDir = path.join(primary.repo, 'nested');
+      fs.mkdirSync(nestedDir, { recursive: true });
+      const siblingRuntime = {
+        ...sibling.runtime,
+        workspaceCwd: nestedDir,
+      };
+      const registry = createWorkspaceRegistry([
+        primary.runtime,
+        siblingRuntime,
+      ]);
+      const siblingEntry = registry.getManagedEntryByWorkspaceId(
+        siblingRuntime.workspaceId,
+      )!;
+      if (siblingState === 'draining') {
+        expect(registry.beginDrain(siblingRuntime)).toBe(true);
+      } else if (siblingState === 'transitioning') {
+        expect(registry.beginReplacement(siblingEntry, 'rev-2')).toBe(true);
+      } else {
+        expect(registry.beginReplacement(siblingEntry, 'rev-2')).toBe(true);
+        registry.blockReplacement(siblingEntry, 'injected blocked state');
+      }
+
+      const old = await makeRetainedSession(primary, {
+        slug: `shared-${siblingState}-old`,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(primary, {
+        slug: `shared-${siblingState}-new`,
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+
+      const report = await sweep(primary, registry);
+
+      expect(report.removed).toEqual([]);
+      expect(report.skipped).toContain('management root is shared');
+      expect(fs.existsSync(old.worktreePath)).toBe(true);
+    },
+  );
 });

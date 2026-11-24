@@ -32,7 +32,10 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { runGit } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
-import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
+import {
+  acquireWorktreeOwnershipOp,
+  canonicalWorktreePath,
+} from './worktree-ownership-op.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
 
@@ -65,11 +68,7 @@ export interface WorktreeCleanupPlan {
  * too.
  */
 function canonicalPath(candidate: string): string {
-  try {
-    return fs.realpathSync(candidate);
-  } catch {
-    return candidate;
-  }
+  return canonicalWorktreePath(candidate);
 }
 
 export const canonicalPathForTesting = canonicalPath;
@@ -217,6 +216,69 @@ export function acquireWorktreeCleanupLock(
   return acquireWorktreeOwnershipOp(plan.lockKey);
 }
 
+const PERMANENT_SIDECAR_CORRUPTION_REASONS = new Set([
+  'invalid sidecar JSON',
+  'invalid sidecar contents',
+  'unsafe sidecar size or identity',
+]);
+
+async function readSidecarForArchiveLock(sidecarPath: string) {
+  let sidecar = await readWorktreeSessionStrict(sidecarPath);
+  for (const delayMs of [5, 10, 20]) {
+    if (
+      sidecar.state !== 'invalid' ||
+      PERMANENT_SIDECAR_CORRUPTION_REASONS.has(sidecar.reason)
+    ) {
+      return sidecar;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    sidecar = await readWorktreeSessionStrict(sidecarPath);
+  }
+  return sidecar;
+}
+
+export async function withWorktreeArchiveMove<T>(
+  service: SessionService,
+  sessionId: string,
+  sourceState: 'active' | 'archived',
+  move: () => Promise<T>,
+): Promise<T> {
+  const otherState: 'active' | 'archived' =
+    sourceState === 'active' ? 'archived' : 'active';
+  const lockKeys = new Set<string>();
+  for (const state of [sourceState, otherState] as const) {
+    const sidecarPath = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      state,
+    );
+    const sidecar = await readSidecarForArchiveLock(sidecarPath);
+    if (sidecar.state === 'valid') {
+      lockKeys.add(canonicalPath(sidecar.session.worktreePath));
+    } else if (
+      sidecar.state === 'invalid' &&
+      !PERMANENT_SIDECAR_CORRUPTION_REASONS.has(sidecar.reason)
+    ) {
+      throw new Error(
+        `Could not read worktree sidecar for archive lock: ${sidecar.reason}`,
+      );
+    }
+  }
+  if (lockKeys.size === 0) return move();
+  const releases: Array<() => void> = [];
+  try {
+    // Acquire in deterministic order to avoid ABBA deadlocks if a conflict
+    // state names two different worktree paths across active/archived.
+    for (const key of [...lockKeys].sort()) {
+      releases.push(await acquireWorktreeOwnershipOp(key));
+    }
+    return await move();
+  } finally {
+    for (let i = releases.length - 1; i >= 0; i -= 1) {
+      releases[i]!();
+    }
+  }
+}
+
 export async function worktreeAllowedRoots(
   workspaceCwd: string,
   originalCwd: string,
@@ -317,7 +379,7 @@ export async function verifyWorktreeCleanupOwnership(
     directories.add(plan.otherStateSidecarDir);
   }
   const ownFile = path.resolve(plan.sidecarPath);
-  const tombstoneIds: string[] = [];
+  const tombstoneIds = new Set<string>();
   let olderTombstone = false;
   for (const directory of directories) {
     let entries: string[];
@@ -363,7 +425,7 @@ export async function verifyWorktreeCleanupOwnership(
       if (other.session.supersededBy === undefined) {
         return { ok: false, reason: `checkout shared with ${entry}` };
       }
-      tombstoneIds.push(entry.slice(0, -SIDECAR_SUFFIX.length));
+      tombstoneIds.add(entry.slice(0, -SIDECAR_SUFFIX.length));
       if (other.session.supersededBy !== sessionId) olderTombstone = true;
     }
   }
@@ -797,7 +859,17 @@ export async function executeWorktreeCleanup(
     // The eligibility callback may wait, but no new capture follows it. Close
     // that ack-to-removal window with the same fail-closed guards; a rejected
     // removal still preserves every new file and any non-content Git state.
-    if (!(await checkoutRemovalGuardsPass())) return preserved();
+    try {
+      if (!(await checkoutRemovalGuardsPass())) return preserved();
+    } catch (error) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        `post-binding guard failed before removal: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return preserved();
+    }
   }
   // originalCwd is the root the creating worktree service used; the
   // sidecar contract reserves it for exactly this resolution, and the

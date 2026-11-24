@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHarnessReleaseRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -16,6 +15,8 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.dao.DuplicateKeyException;
@@ -69,7 +70,7 @@ final class JournalWriterLifecycle {
             ManagedNativeJournalSnapshots.PublishRequest request) {
         JournalStoreRows.validateScope(tenant, request.workspaceId(), session);
         fencing.requireCredential(tenant, request.workspaceId(), session, token);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateStableId(request.snapshotId(), "snapshotId");
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         JournalStoreRows.validateCounter(request.expectedJournalRevision(), "expectedJournalRevision", 1);
@@ -142,7 +143,7 @@ final class JournalWriterLifecycle {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         validateLeaseMillis(request.leaseMillis());
         // Acquisition stays serialized with an in-flight delete/retire: while
         // a Session has no head row, the tenant CAS row is the only ordering
@@ -226,7 +227,6 @@ final class JournalWriterLifecycle {
         }
         JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         if ("DELETING".equals(head.state())
                 || "DELETED".equals(head.state())) {
             throw JournalStoreRows.conflict("managed_session_not_writable",
@@ -246,7 +246,7 @@ final class JournalWriterLifecycle {
                 throw JournalFencing.writerConflict();
             }
             if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.activityDiagnostics(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
-                    id -> storeRows.storedResource(scope, tenantId, request.workspaceId(), sessionId, id))) {
+                    id -> storeRows.storedResource(tenantId, request.workspaceId(), sessionId, id))) {
                 return null;
             }
             Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
@@ -262,7 +262,7 @@ final class JournalWriterLifecycle {
         long generation = JournalStoreRows.increment(head.writerGeneration(),
                 "writer generation");
         if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.activityDiagnostics(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
-                id -> storeRows.storedResource(scope, tenantId, request.workspaceId(), sessionId, id))) {
+                id -> storeRows.storedResource(tenantId, request.workspaceId(), sessionId, id))) {
             return null;
         }
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
@@ -271,7 +271,7 @@ final class JournalWriterLifecycle {
         // pace, so a crash after accepting an immediate input is recovered as
         // today; it never lowers a delay a claim just set.
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_seal_background = 0, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_id = ? AND harness_session_id = ?",
+                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_seal_background = 0, wake_seal_parked_prompt_id = NULL, wake_seal_parked_until = NULL, wake_seal_parked_approval_revision = NULL, wake_seal_parked_owner = NULL, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_id = ? AND harness_session_id = ?",
                 generation,
                 request.writerId(),
                 leaseUntil.getTime(),
@@ -291,7 +291,7 @@ final class JournalWriterLifecycle {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateLeaseMillis(request.leaseMillis());
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
@@ -317,7 +317,7 @@ final class JournalWriterLifecycle {
                 sessionId);
         if (request.activation() != null) {
             var activation = request.activation();
-            JournalStoreRows.validateStableId(activation.activationId(), "activationId");
+            JournalStoreRows.validateStableId(activation.activationId(), "activationId", 128);
             JournalStoreRows.validateCounter(activation.epoch(), "activation epoch", 1);
             JournalStoreRows.validateCounter(activation.renewalSeq(), "activation renewalSeq", 1);
             validateLeaseMillis(activation.leaseDurationMs());
@@ -358,7 +358,7 @@ final class JournalWriterLifecycle {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
         fencing.lockSessionFirst(tenantId, sessionId);
@@ -412,32 +412,67 @@ final class JournalWriterLifecycle {
                     "The wake stamp does not match the committed journal revision.");
         }
         boolean effectivePending = wake.pending() || stagedWake;
+        ManagedSessionStoreModels.ParkedTurn parked = wake.parkedTurn();
+        if (parked != null) {
+            // A coordinator Turn row is redispatched from its own retry time,
+            // so its park never claims a wake; a wake-started Turn has no row,
+            // and only the wake claim's due time brings it back. A background
+            // hold proves its runs separately, and staged work seals through
+            // the staged-wake path below, which makes the park due now.
+            boolean wakeOwned = "wake".equals(parked.owner());
+            if ((parked.owner() != null && !wakeOwned) || wake.pending() != wakeOwned) {
+                throw JournalStoreRows.invalid(
+                        "A parked Turn claims a wake exactly when the wake pump owns it.");
+            }
+            JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId", 64);
+            JournalStoreRows.validateCounter(parked.wakeAt(), "wake.parkedTurn.wakeAt", 0);
+            if (parked.approvalRevision() != null) {
+                JournalStoreRows.validateCounter(parked.approvalRevision(),
+                        "wake.parkedTurn.approvalRevision", 0);
+            }
+        }
         if (stagedWake) {
             jdbc.update(
                     "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
                         + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
                         + " wake_seal_background = ?, is_wake_pending = TRUE,"
+                        + " wake_seal_parked_prompt_id = ?, wake_seal_parked_until = ?,"
+                        + " wake_seal_parked_approval_revision = ?, wake_seal_parked_owner = ?,"
                         + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
                         + " THEN ? ELSE wake_retry_at END"
                         + " WHERE tenant_id = ? AND harness_session_id = ?",
                     now.getTime(),
                     wake.backgroundHeld(),
+                    parked == null ? null : parked.promptId(),
+                    parked == null ? null : Math.min(parked.wakeAt(), now.getTime()),
+                    parked == null ? null : parked.approvalRevision(),
+                    parked == null ? null : parked.owner(),
                     now.getTime(),
                     now.getTime(),
                     tenantId,
                     sessionId);
         } else {
+            List<Object> parameters = new java.util.ArrayList<>();
+            parameters.add(now.getTime());
+            parameters.add(wake.backgroundHeld());
+            parameters.add(effectivePending);
+            parameters.add(parked == null ? null : parked.promptId());
+            parameters.add(parked == null ? null : parked.wakeAt());
+            parameters.add(parked == null ? null : parked.approvalRevision());
+            parameters.add(parked == null ? null : parked.owner());
+            if (effectivePending) {
+                parameters.add(wake.dueAt());
+            }
+            parameters.add(tenantId);
+            parameters.add(sessionId);
             jdbc.update(
-                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
-                        + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
-                        + " wake_seal_background = ?, is_wake_pending = ?"
+                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?, wake_seal_revision = journal_revision,"
+                        + " wake_head_revision = journal_revision, wake_seal_background = ?, is_wake_pending = ?,"
+                        + " wake_seal_parked_prompt_id = ?, wake_seal_parked_until = ?,"
+                        + " wake_seal_parked_approval_revision = ?, wake_seal_parked_owner = ?"
                         + (effectivePending ? ", wake_retry_at = ?" : "")
                         + " WHERE tenant_id = ? AND harness_session_id = ?",
-                    effectivePending
-                            ? new Object[] {now.getTime(), wake.backgroundHeld(), true, wake.dueAt(),
-                                    tenantId, sessionId}
-                            : new Object[] {now.getTime(), wake.backgroundHeld(), false,
-                                    tenantId, sessionId});
+                    parameters.toArray());
         }
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
     }
@@ -459,8 +494,8 @@ final class JournalWriterLifecycle {
             ManagedSessionStoreModels.ReleaseOwnershipRequest request) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId, writerToken);
-        JournalStoreRows.validateStableId(request.operationId(), "operationId");
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.operationId(), "operationId", 128);
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         JournalStoreRows.validateCounter(request.journalRevision(), "journalRevision", 1);
         JournalStoreRows.validateCounter(request.placementEpoch(), "placementEpoch", 1);
@@ -474,8 +509,6 @@ final class JournalWriterLifecycle {
         JournalFencing.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId, JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         String recordId = JdbcHarnessPlacementStore.releaseId(request.placementEpoch());
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        String recordKey = ManagedExtensionProjection.recordKey(sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN, recordId);
         ObjectNode receipt = JournalStoreRows.JSON.createObjectNode();
         receipt.put("format", "qwen-hosted-harness-release/1");
         receipt.put("tenantId", tenantId);
@@ -493,10 +526,10 @@ final class JournalWriterLifecycle {
         // Normalize integer nodes to the representation read back from the stored JSON.
         receipt = (ObjectNode) ManagedExtensionRecordStore.parse(receipt.toString());
         var saved = jdbc.query("SELECT record_resource_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
-                + " AND record_key = ? AND domain = ? AND record_kind = 'DOMAIN'",
-                (row, index) -> row.getString(1), tenantId, sessionId, recordKey, JdbcHarnessPlacementStore.RELEASE_DOMAIN);
+                + " AND domain = ? AND record_id = ? AND record_kind = 'DOMAIN'",
+                (row, index) -> row.getString(1), tenantId, sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN, recordId);
         if (!saved.isEmpty()) {
-            var resource = storeRows.findResource(scope, saved.getFirst());
+            var resource = storeRows.findResource(tenantId, sessionId, saved.getFirst());
             if (resource == null) {
                 throw JdbcHarnessPlacementStore.blocked("harness_release_receipt_missing");
             }
@@ -531,20 +564,21 @@ final class JournalWriterLifecycle {
             throw new IllegalStateException("Ownership release receipt cannot be encoded.", failure);
         }
         ManagedHarnessReleaseRecords.require(receipt);
-        String resourceKey = ManagedSessionStore.resourceKey(scope, resourceId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at)"
-                + " VALUES (?, ?, ?, ?, ?, 'managed-hosted_harness_release', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', ?, ?)",
-                resourceKey, tenantId, request.workspaceId(), sessionId, resourceId,
+                + " VALUES (?, ?, ?, ?, 'managed-hosted_harness_release', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', ?, ?)",
+                tenantId, request.workspaceId(), sessionId, resourceId,
                 bytes.length, JournalStoreRows.sha256(bytes), bytes, now.getTime(), now.getTime());
-        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id,"
-                + " domain, record_id, operation_hash, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", recordKey, tenantId,
-                request.workspaceId(), sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN, recordId, JournalStoreRows.sha256(request.operationId().getBytes(StandardCharsets.UTF_8)),
+        jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id,"
+                + " domain, record_id, operation_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
+                + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", tenantId,
+                request.workspaceId(), sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN, recordId, request.operationId(),
                 resourceId, now.getTime(), now.getTime(), head.committedSequence());
-        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key,"
-                + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES ('SESSION_RECORD', ?, 1, ?, ?, ?, ?, ?, ?)",
-                recordKey, resourceKey, tenantId, request.workspaceId(), sessionId, resourceId, now.getTime());
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision,"
+                + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES ('SESSION_RECORD', ?, 1, ?, ?, ?, ?, ?)",
+                ManagedSchemaKeys.identity(ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES,
+                        sessionId, JdbcHarnessPlacementStore.RELEASE_DOMAIN, recordId)),
+                tenantId, request.workspaceId(), sessionId, resourceId, now.getTime());
         jdbc.update("UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_id = ? AND"
                 + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION'", now.getTime(),
                 tenantId, sessionId);
@@ -559,7 +593,7 @@ final class JournalWriterLifecycle {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
         if (!JournalStoreRows.RECOVERY_STATES.contains(request.recoveryStatus())
                 || "READY".equals(request.recoveryStatus())) {

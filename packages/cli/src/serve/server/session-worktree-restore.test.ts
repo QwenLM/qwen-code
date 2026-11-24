@@ -734,4 +734,95 @@ describe('session worktree snapshot restore', () => {
       },
     );
   });
+
+  it('restores consistently and hands off a matching lock key through a symlinked worktrees parent', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const externalWorktrees = path.join(root, 'real-worktrees-dir');
+    fs.mkdirSync(externalWorktrees, { recursive: true });
+    fs.mkdirSync(path.join(target.repo, '.qwen'), { recursive: true });
+    fs.symlinkSync(
+      externalWorktrees,
+      path.join(target.repo, '.qwen', 'worktrees'),
+      'dir',
+    );
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'symlink-parent-restore',
+        dirty: true,
+      }),
+    );
+
+    let handedOff: { worktreeKey: string; release: () => void } | undefined;
+    try {
+      const restored = await restoreWorktreeFromSessionSnapshot({
+        runtime: target.runtime,
+        sessionId: state.id,
+        archiveCoordinator: new SessionArchiveCoordinator(),
+        handoffWorktreeOwnership: (handoff) => {
+          handedOff = handoff;
+        },
+      });
+      expect(restored.reconstructed).toBe(true);
+      expect(handedOff?.worktreeKey).toBe(fs.realpathSync(state.worktreePath));
+      expect(
+        fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+      ).toBe('dirty-symlink-parent-restore\n');
+    } finally {
+      handedOff?.release();
+    }
+  });
+
+  it('refuses restoration when the session has an active/archived conflict', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'conflict-state',
+        dirty: true,
+      }),
+    );
+    const archivedTranscript = path.join(
+      path.dirname(
+        target.service.getWorktreeSessionPathForArchiveState(
+          state.id,
+          'archived',
+        ),
+      ),
+      `${state.id}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(archivedTranscript), { recursive: true });
+    fs.copyFileSync(state.transcriptPath, archivedTranscript);
+
+    await expect(restore(target, state.id, true)).rejects.toThrow(/conflicts/i);
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+  });
+
+  it('refuses restoration when an active transcript only has a stranded archived sidecar', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'stranded-archived-sidecar',
+        dirty: true,
+      }),
+    );
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    fs.mkdirSync(path.dirname(archivedSidecar), { recursive: true });
+    fs.renameSync(state.sidecarPath, archivedSidecar);
+    const beforeArchived = fs.readFileSync(archivedSidecar, 'utf8');
+
+    await expect(restore(target, state.id, true)).rejects.toBeInstanceOf(
+      WorktreeRestoreUnavailableError,
+    );
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+    expect(fs.readFileSync(archivedSidecar, 'utf8')).toBe(beforeArchived);
+  });
 });

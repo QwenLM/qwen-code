@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.UserMessagePolicy;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
@@ -15,11 +14,9 @@ import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.Occur
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleCursor;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.PendingChild;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -67,17 +64,17 @@ class ManagedSqlPerformanceMySqlIT {
             + " outcome, reason, definition_revision, fence, attempts, next_retry_at, last_error, gmt_create, gmt_modified)"
             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     private static final String MIRROR_INSERT = "INSERT INTO ma_session_record"
-            + " (record_key, tenant_id, workspace_id, session_id, domain, record_id,"
+            + " (tenant_id, workspace_id, session_id, domain, record_id,"
             + " revision, record_resource_id, task_kind, task_state, gmt_create)"
-            + " VALUES (?, ?, 'workspace', 'ledger', 'automation_run', ?, 1, ?, 'automation_run', ?, ?)";
+            + " VALUES (?, 'workspace', 'ledger', 'automation_run', ?, 1, ?, 'automation_run', ?, ?)";
     private static final String EVENT_INSERT = "INSERT INTO ma_public_event"
             + " (tenant_id, session_id, sequence_id, event_id, turn_id, event_type, data_json,"
-            + " is_terminal, gmt_create, stream_kind, stream_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'SESSION', X'')";
+            + " is_terminal, gmt_create, stream_kind, stream_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'SESSION', '')";
     private static final String OPERATION_INSERT = "INSERT INTO ma_operation"
-            + " (operation_key, scope_key, tenant_id, session_id, operation_id,"
-            + " operation_kind, target_kind, target_key, request_digest, request_json, state, phase,"
+            + " (operation_ref, scope_kind, scope_id, tenant_id, session_id, operation_id,"
+            + " operation_kind, target_kind, target_id, request_digest, request_json, state, phase,"
             + " failure_code, gmt_create, gmt_modified)"
-            + " VALUES (?, ?, ?, ?, ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, ?, ?, ?)";
+            + " VALUES (?, ?, ?, ?, ?, ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, ?, ?, ?)";
 
     private final ObjectMapper json = new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private JdbcTemplate admin;
@@ -243,9 +240,9 @@ class ManagedSqlPerformanceMySqlIT {
                         + " AND operation_kind = 'CHILD_SESSION_START' AND operation_id LIKE 'relay-start-%'", NOW + 10_000, TENANT);
                 var sparseNormal = normal.subList(normal.size() - 3, normal.size());
                 for (var candidate : sparseNormal) {
-                    jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE scope_key = ?"
+                    jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE scope_kind = 'SESSION' AND scope_id = ?"
                             + " AND operation_kind = 'CHILD_SESSION_START' AND operation_id = ?",
-                            ManagedSessionStore.sessionScopeKey(TENANT, "ledger"), candidate.childRunId());
+                            "ledger", candidate.childRunId());
                 }
                 List<PendingChild> mixed = new ArrayList<>(sparseNormal);
                 mixed.addAll(debts.subList(0, 29));
@@ -465,8 +462,8 @@ class ManagedSqlPerformanceMySqlIT {
         }
         sessions.add(session(OTHER, "close", "CLOSING", "CONTROL"));
         jdbc.batchUpdate("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, session_kind,"
-                + " tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'qwen-code', ?, ?, ?, ?, ?, ?, ?)", sessions);
+                + " gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'qwen-code', ?, ?, ?, ?)", sessions);
         jdbc.batchUpdate("INSERT INTO ma_schedule (tenant_id, schedule_id, session_id, workspace_id, actor_id,"
                 + " record_revision, definition_revision, definition_digest, goal, cron, timezone, session_mode,"
                 + " overlap, catch_up, is_enabled, state, armed_at, gmt_create, gmt_modified)"
@@ -496,7 +493,7 @@ class ManagedSqlPerformanceMySqlIT {
                 + " status, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, '[]', 'digest', 'RUNNING', ?, ?)", turns);
         jdbc.batchUpdate(EVENT_INSERT, events);
         jdbc.batchUpdate("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, gmt_modified)"
-                + " VALUES (?, ?, 'SESSION', X'', ?, ?)", List.of(
+                + " VALUES (?, ?, 'SESSION', '', ?, ?)", List.of(
                         new Object[] {TENANT, "turn-a", size + 7, NOW}, new Object[] {TENANT, "turn-b", size + 7, NOW},
                         new Object[] {TENANT, "turn-dry", 1, NOW}, new Object[] {TENANT, "turn-none", 0, NOW}));
         for (int from = 0; from < size; from += BATCH) {
@@ -563,8 +560,8 @@ class ManagedSqlPerformanceMySqlIT {
                 String workspace = fixtureId("discovery-ws-", i);
                 int mode = i % 10;
                 sessions.add(session(TENANT, session, mode == 4 ? "CLOSING" : "ACTIVE", "PUBLIC"));
-                bindings.add(new Object[] {workspace, creator, i % 8 == 3 || i % 8 == 4,
-                        i % 8 == 4 ? reader : creator, TENANT, session});
+                bindings.add(new Object[] {workspace, "sqlperf-creator", i % 8 == 3 || i % 8 == 4,
+                        i % 8 == 4 ? "sqlperf-reader" : "sqlperf-creator", TENANT, session});
                 queues.add(new Object[] {TENANT, session, mode == 0, NOW + i});
                 for (int sequence = 1; sequence <= 4; sequence++) {
                     String state = sequence < 4 ? "queued" : switch (mode) {
@@ -591,8 +588,8 @@ class ManagedSqlPerformanceMySqlIT {
                 }
             }
             jdbc.batchUpdate("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, session_kind,"
-                    + " tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, 'qwen-code', ?, ?, ?, ?, ?, ?, ?)", sessions);
+                    + " gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, 'qwen-code', ?, ?, ?, ?)", sessions);
             jdbc.batchUpdate("UPDATE ma_session SET workspace_id = ?, workspace_generation = 1,"
                     + " workspace_storage_id = 'sqlperf-storage', cwd_relative = '', context_config_ref = 'config',"
                     + " context_revision = 1, workspace_config_ref = 'config', workspace_policy_ref = 'policy',"
@@ -623,14 +620,13 @@ class ManagedSqlPerformanceMySqlIT {
     }
 
     private void seedRelayDiscovery(JdbcTemplate jdbc, int size) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, "ledger");
         for (int from = 0; from < size / 4; from += BATCH) {
             var records = new ArrayList<Object[]>();
             var operations = new ArrayList<Object[]>();
             for (int i = from; i < Math.min(size / 4, from + BATCH); i++) {
                 int mode = i % 10;
                 String run = fixtureId("relay-start-", i);
-                records.add(new Object[] {ManagedExtensionProjection.recordKey("ledger", "child_run", run), TENANT,
+                records.add(new Object[] {TENANT,
                         run, run + "-resource", mode == 3 ? "shell" : i % 2 == 0 ? "child_agent" : "workflow",
                         List.of("planned", "accepting", "unknown", "accepted", "consumed", "cancelled").get(i % 6), NOW + i});
                 String terminal = List.of("done", "orphaned", "unknown").get((i / 10) % 3);
@@ -642,25 +638,23 @@ class ManagedSqlPerformanceMySqlIT {
                 operations.add(relayOperation("CHILD_SESSION_CLOSE", debt,
                         mode == 0 || mode == 3 ? terminal : "close_debt", mode, NOW - size + i));
                 if (i % 2 == 0) {
-                    records.add(new Object[] {ManagedExtensionProjection.recordKey("ledger", "child_run", debt), TENANT,
+                    records.add(new Object[] {TENANT,
                             debt, debt + "-resource", "workflow", i % 4 == 0 ? "consumed" : null, NOW + i});
                 }
             }
-            jdbc.batchUpdate("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id,"
+            jdbc.batchUpdate("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id,"
                     + " domain, record_id, revision, record_resource_id, task_kind, task_state, delivery_state, gmt_create)"
-                    + " VALUES (?, ?, 'workspace', 'ledger', 'child_run', ?, 1, ?, ?, 'pending', ?, ?)", records);
-            jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, tenant_id, session_id, operation_id,"
-                    + " operation_kind, target_kind, target_key, request_digest, request_json, state, phase, claim_owner, claim_until,"
-                    + " available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, 'ledger', ?, ?, 'CHILD_RUN', ?, 'digest', '{}', ?, ?, ?, ?, ?, ?, ?)", operations);
+                    + " VALUES (?, 'workspace', 'ledger', 'child_run', ?, 1, ?, ?, 'pending', ?, ?)", records);
+            jdbc.batchUpdate("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, tenant_id, session_id, operation_id,"
+                    + " operation_kind, target_kind, target_id, request_digest, request_json, state, phase, claim_owner, claim_until,"
+                    + " available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'ledger', ?, ?, 'CHILD_RUN', ?, 'digest', '{}', ?, ?, ?, ?, ?, ?, ?)", operations);
         }
     }
 
     private static Object[] relayOperation(String kind, String run, String state, int mode, long created) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, "ledger");
-        String target = ManagedSchemaKeys.key(run);
         Long until = mode == 6 ? null : mode == 2 || mode % 2 == 1 ? NOW + 30_000 : NOW - 1;
-        return new Object[] {ManagedSchemaKeys.operationKey(OperationKind.valueOf(kind), scope, target, run), scope,
-                TENANT, run, kind, target, state, "CHILD_SESSION_CLOSE".equals(kind) ? "CLOSING" : "BINDING",
+        return new Object[] {ManagedIdentityRefs.operationRef(kind, TENANT, "SESSION", "ledger", run, run), "SESSION", "ledger",
+                TENANT, run, kind, run, state, "CHILD_SESSION_CLOSE".equals(kind) ? "CLOSING" : "BINDING",
                 mode == 2 ? "sqlperf-other-worker" : "sqlperf-worker", until, mode == 1 ? NOW + 10_000 : 0, created, created};
     }
 
@@ -694,8 +688,7 @@ class ManagedSqlPerformanceMySqlIT {
     }
 
     private static Object[] session(String tenant, String session, String status, String kind) {
-        return new Object[] {tenant, session, status, kind, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session),
-                ManagedSessionStore.sessionScopeKey(tenant, session), NOW, NOW};
+        return new Object[] {tenant, session, status, kind, NOW, NOW};
     }
 
     private static OccurrenceRow occurrence(String schedule, String key, String outcome, long created) {
@@ -711,8 +704,7 @@ class ManagedSqlPerformanceMySqlIT {
 
     private static Object[] mirror(OccurrenceRow row, String state) {
         return new Object[] {
-                ManagedExtensionProjection.recordKey("ledger", "automation_run", row.runId()), TENANT,
-                row.runId(), row.runId() + "-resource", state, row.createdAt()};
+                TENANT, row.runId(), row.runId() + "-resource", state, row.createdAt()};
     }
 
     private static Object[] event(String session, long sequence, String turn, String type, String data) {
@@ -720,10 +712,8 @@ class ManagedSqlPerformanceMySqlIT {
     }
 
     private static Object[] operation(String tenant, String session, String id, String kind, String state, long created, long modified) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String target = ManagedSchemaKeys.key(session);
-        return new Object[] {ManagedSchemaKeys.operationKey(OperationKind.valueOf(kind), scope, target, id), scope,
-                tenant, session, id, kind, target, state, state, "FAILED".equals(state) ? "fixture" : null, created, modified};
+        return new Object[] {ManagedIdentityRefs.operationRef(kind, tenant, "SESSION", session, session, id), "SESSION", session,
+                tenant, session, id, kind, session, state, state, "FAILED".equals(state) ? "fixture" : null, created, modified};
     }
 
     private static List<OccurrenceView> expectedBlockers() {

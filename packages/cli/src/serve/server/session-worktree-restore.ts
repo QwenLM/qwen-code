@@ -127,11 +127,15 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
   let handedOff = false;
   try {
     const task = archiveCoordinator.runExclusiveMany([sessionId], async () => {
-      if (
-        (await service.getMaintainableSessionLocation(sessionId)) === 'archived'
-      ) {
+      const location = await service.getMaintainableSessionLocation(sessionId);
+      if (location === 'archived') {
         throw new WorktreeRestoreUnavailableError(
           'Unarchive this session before restoring its worktree',
+        );
+      }
+      if (location !== 'active') {
+        throw new WorktreeRestoreUnavailableError(
+          'Resolve active/archived session conflicts before restoring its worktree',
         );
       }
       const latest = await preclassifyWorktreeCleanup(
@@ -139,10 +143,14 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
         sessionId,
         runtime.workspaceCwd,
       );
-      if (!latest)
+      if (
+        !latest ||
+        latest.sidecarPath !== service.getWorktreeSessionPath(sessionId)
+      ) {
         throw new WorktreeRestoreUnavailableError(
           'Snapshot restoration state changed',
         );
+      }
       await assertRestoreCoordinates(latest);
       await assertNoConflictingWorktreeOwners(
         service,

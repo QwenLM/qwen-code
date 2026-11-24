@@ -553,6 +553,13 @@ export async function clearWorktreeSession(filePath: string): Promise<void> {
       await fs.unlink(filePath);
       return;
     }
+    const existing = await readWorktreeSession(filePath);
+    if (existing?.worktreeRemoved !== undefined) {
+      throw new WorktreeRestoreRefusedError(
+        'This worktree has a retained-removal binding. ' +
+          'Ordinary clearing is refused; restore it through the snapshot restore flow.',
+      );
+    }
     stagingDirectory = await fs.mkdtemp(`${filePath}.clear-`);
     const stagedPath = path.join(stagingDirectory, path.basename(filePath));
     await fs.rename(filePath, stagedPath);
@@ -563,6 +570,7 @@ export async function clearWorktreeSession(filePath: string): Promise<void> {
       // was in progress. A failed restore leaves the staging copy intact.
       await fs.link(stagedPath, filePath);
       await fs.unlink(stagedPath);
+      moved = false;
       throw new WorktreeRestoreRefusedError(
         'This worktree has a retained-removal binding. ' +
           'Ordinary clearing is refused; restore it through the snapshot restore flow.',
@@ -571,6 +579,7 @@ export async function clearWorktreeSession(filePath: string): Promise<void> {
     // A binding published at filePath after the rename is not this stale
     // staging entry. Only the record that this operation moved may be unlinked.
     await fs.unlink(stagedPath);
+    moved = false;
   } catch (error) {
     if (!moved && isNodeError(error) && error.code === 'ENOENT') {
       return;
@@ -578,10 +587,17 @@ export async function clearWorktreeSession(filePath: string): Promise<void> {
     const stagedPath = stagingDirectory
       ? path.join(stagingDirectory, path.basename(filePath))
       : undefined;
-    if (stagedPath) {
+    if (stagedPath && moved) {
       // Best-effort recovery must not overwrite a replacement published by
-      // another writer. Preserve both records if that link cannot be created.
-      await fs.link(stagedPath, filePath).catch(() => undefined);
+      // another writer. Only unlink the staging copy once the restore link
+      // succeeds so the surviving record keeps nlink === 1.
+      const restored = await fs.link(stagedPath, filePath).then(
+        () => true,
+        () => false,
+      );
+      if (restored) {
+        await fs.unlink(stagedPath).catch(() => undefined);
+      }
     }
     throw error;
   } finally {

@@ -779,6 +779,38 @@ describe('clearWorktreeSessionDurable', () => {
       },
     });
   });
+
+  it('restores nlink === 1 and removes the staging directory after a transient read failure', async () => {
+    await createWorktreeSession(filePath, sample);
+    const realOpen = fs.open.bind(fs);
+    let injected = false;
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (!injected && String(args[0]).includes('.clear-')) {
+        injected = true;
+        throw Object.assign(new Error('injected transient EIO'), {
+          code: 'EIO',
+        });
+      }
+      return realOpen(...args);
+    });
+    try {
+      await expect(clearWorktreeSessionDurable(filePath)).rejects.toThrow(
+        'injected transient EIO',
+      );
+      expect(injected).toBe(true);
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    const stat = await fs.lstat(filePath);
+    expect(stat.nlink).toBe(1);
+    await expect(readWorktreeSessionStrict(filePath)).resolves.toMatchObject({
+      state: 'valid',
+      session: sample,
+    });
+    const siblings = await fs.readdir(path.dirname(filePath));
+    expect(siblings.some((entry) => entry.includes('.clear-'))).toBe(false);
+  });
 });
 
 describe('isSessionRuntimeActive', () => {

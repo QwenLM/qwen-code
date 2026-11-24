@@ -121,20 +121,12 @@ export async function reconcileUnrecordedRemovedWorktree(
   ) {
     return false;
   }
-  await assertRestoreCoordinates(latest);
   try {
     await fs.lstat(latest.lockKey);
     return false;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  await assertNoConflictingWorktreeOwners(
-    service,
-    sessionId,
-    latest.sidecarPath,
-    latest.lockKey,
-    isSessionLive,
-  );
   const directories = new Set([path.dirname(latest.sidecarPath)]);
   if (latest.otherStateSidecarDir !== undefined) {
     directories.add(latest.otherStateSidecarDir);
@@ -164,6 +156,14 @@ export async function reconcileUnrecordedRemovedWorktree(
       'Historical retained snapshot pairs are ambiguous across archive states',
     );
   }
+  await assertRestoreCoordinates(latest);
+  await assertNoConflictingWorktreeOwners(
+    service,
+    sessionId,
+    latest.sidecarPath,
+    latest.lockKey,
+    isSessionLive,
+  );
   // Re-check after the ownership/pair scans: an appearing directory is not
   // the already-removed checkout this historical repair is allowed to bind.
   try {

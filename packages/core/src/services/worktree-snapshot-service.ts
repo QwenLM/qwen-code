@@ -416,17 +416,26 @@ async function readSnapshotPathKinds(
       directories.add(parent);
     }
   };
+  let unsafeEntryError: Error | undefined;
   await tar.t({
     file: snapshotPath,
     strict: true,
     onReadEntry: (entry) => {
-      const raw = normalizeRel(entry.path);
-      if (!raw || raw === '.') return;
+      if (unsafeEntryError) return;
+      if (entry.path === '.' || /^\.\/+$/.test(entry.path)) {
+        if (entry.type !== 'Directory') {
+          unsafeEntryError = new Error(
+            'Worktree snapshot: archive member has an empty or root path',
+          );
+        }
+        return;
+      }
       const rel = canonicalArchiveMemberName(entry.path);
       if (!rel) {
-        throw new Error(
+        unsafeEntryError = new Error(
           'Worktree snapshot: archive member has an empty or root path',
         );
+        return;
       }
       if (entry.type === 'Directory') {
         directories.add(`${rel}/`);
@@ -436,6 +445,7 @@ async function readSnapshotPathKinds(
       includeParents(rel);
     },
   });
+  if (unsafeEntryError) throw unsafeEntryError;
   return { files, directories };
 }
 
@@ -992,22 +1002,45 @@ export async function restoreWorktreeSnapshot(
   const archived = new Map<string, string>();
   const hardlinks: Array<[string, string]> = [];
   const archivedSymlinks = new Map<string, string>();
+  let unsafeEntryError: Error | undefined;
   await tar.t({
     file: snapshotPath,
+    strict: true,
     onReadEntry: (entry) => {
-      const norm = normalizeRel(entry.path).replace(/\/$/, '');
-      if (norm.length === 0) return;
+      if (unsafeEntryError) return;
+      if (entry.path === '.' || /^\.\/+$/.test(entry.path)) {
+        if (entry.type !== 'Directory') {
+          unsafeEntryError = new Error(
+            `Unsafe path in snapshot archive: ${entry.path}`,
+          );
+        }
+        return;
+      }
+      const norm = canonicalArchiveMemberName(entry.path);
+      if (!norm) {
+        unsafeEntryError = new Error(
+          `Unsafe path in snapshot archive: ${entry.path}`,
+        );
+        return;
+      }
       archived.set(norm, entry.type);
       if (entry.type === 'Link') {
         hardlinks.push([norm, entry.linkpath ?? '']);
       }
       if (entry.type === 'SymbolicLink') {
         const target = entry.linkpath ?? '';
-        assertSnapshotSymlinkTargetBytes(target, norm);
+        try {
+          assertSnapshotSymlinkTargetBytes(target, norm);
+        } catch (error) {
+          unsafeEntryError =
+            error instanceof Error ? error : new Error(String(error));
+          return;
+        }
         archivedSymlinks.set(norm, target);
       }
     },
   });
+  if (unsafeEntryError) throw unsafeEntryError;
   const confine = (rel: string): string => {
     const norm = normalizeRel(rel);
     if (!isSafeRelativePath(norm)) {
@@ -1033,15 +1066,16 @@ export async function restoreWorktreeSnapshot(
         realParent = await fs.realpath(parent);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        const replacesTrackedFile =
+        const replacesTrackedEntry =
           code === 'ENOTDIR' &&
           archived.get(
             normalizeRel(path.relative(root, parent).split(path.sep).join('/')),
           ) === 'Directory';
-        if (code !== 'ENOENT' && !replacesTrackedFile) throw error;
-        // Missing descendants are created later. A tracked regular file can
-        // also stand where an archived Directory belongs, making a deeper
-        // realpath throw ENOTDIR; that file is removed only after all checks.
+        if (code !== 'ENOENT' && !replacesTrackedEntry) throw error;
+        // Missing descendants are created later. A tracked regular file (or a
+        // symlink to a file) can also stand where an archived Directory
+        // belongs, making a deeper realpath throw ENOTDIR; that entry is
+        // removed only after all containment and protected-path checks pass.
         // At least one real ancestor must still prove containment.
         if (parent === root) throw error;
         continue;
@@ -1052,6 +1086,16 @@ export async function restoreWorktreeSnapshot(
       ) {
         throw new Error(
           `Snapshot path resolves outside worktree root via symlink: ${rel}`,
+        );
+      }
+      const resolved = path.join(realParent, path.relative(parent, target));
+      const resolvedRel = path
+        .relative(realRoot, resolved)
+        .split(path.sep)
+        .join('/');
+      if (resolvedRel && isProtectedRel(resolvedRel)) {
+        throw new Error(
+          `Snapshot path resolves to a protected path via symlink: ${rel}`,
         );
       }
       return;
@@ -1067,19 +1111,31 @@ export async function restoreWorktreeSnapshot(
     const target = confine(targetRel);
     await assertRealContained(target, targetRel);
     const realTarget = await fs.realpath(target).catch(() => null);
-    if (
-      realTarget !== null &&
-      realTarget !== realRoot &&
-      !realTarget.startsWith(realRoot + path.sep)
-    ) {
-      throw new Error(
-        `Snapshot hardlink resolves outside worktree root: ${targetRel}`,
-      );
+    if (realTarget !== null) {
+      if (
+        realTarget !== realRoot &&
+        !realTarget.startsWith(realRoot + path.sep)
+      ) {
+        throw new Error(
+          `Snapshot hardlink resolves outside worktree root: ${targetRel}`,
+        );
+      }
+      const realTargetRel = path
+        .relative(realRoot, realTarget)
+        .split(path.sep)
+        .join('/');
+      if (realTargetRel && isProtectedRel(realTargetRel)) {
+        throw new Error(
+          `Snapshot hardlink resolves to a protected path: ${targetRel}`,
+        );
+      }
     }
   }
   // All containment checks have completed before removing anything. Clear a
-  // tracked regular file only where a Directory member explicitly replaces
-  // it, so nested descendants can be restored without following a link.
+  // tracked regular file or in-root non-protected symlink only where a
+  // Directory member explicitly replaces it, after every nested protected-path
+  // check passes, so nested descendants restore into a real directory without
+  // hitting ENOTDIR or traversing a committed symlink into another directory.
   const filesToClear: string[] = [];
   for (const [rel, type] of archived) {
     if (type !== 'Directory') continue;
@@ -1110,6 +1166,32 @@ export async function restoreWorktreeSnapshot(
         );
       }
       filesToClear.push(target);
+    } else if (stat?.isSymbolicLink()) {
+      await assertRealContained(target, rel);
+      const realTarget = await fs.realpath(target).catch(() => null);
+      if (realTarget === null) {
+        throw new Error(
+          `Snapshot path resolves outside worktree root via symlink: ${rel}`,
+        );
+      }
+      if (
+        realTarget !== realRoot &&
+        !realTarget.startsWith(realRoot + path.sep)
+      ) {
+        throw new Error(
+          `Snapshot path resolves outside worktree root via symlink: ${rel}`,
+        );
+      }
+      const realRel = path
+        .relative(realRoot, realTarget)
+        .split(path.sep)
+        .join('/');
+      if (realRel && isProtectedRel(realRel)) {
+        throw new Error(
+          `Snapshot directory replacement targets a protected path: ${rel}`,
+        );
+      }
+      filesToClear.push(target);
     }
   }
   for (const target of filesToClear) {
@@ -1133,6 +1215,50 @@ export async function restoreWorktreeSnapshot(
     await assertRealContained(target, rel);
     await fs.rm(target, { force: true, recursive: true });
   }
+
+  // Git does not track directories. Prune empty unarchived HEAD parent
+  // directories along deleted paths BEFORE tar.extract and archivedSymlinks
+  // so archived dir->file and dir->symlink replacements never hit ENOTDIR or
+  // traverse a newly materialized symlink to delete another directory.
+  const parents = new Set<string>();
+  for (const rel of meta.dirty.deleted) {
+    let parent = path.posix.dirname(normalizeRel(rel).replace(/\/+$/, ''));
+    while (parent !== '.' && parent !== '..') {
+      parents.add(parent);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  const hasSymlinkComponent = async (rel: string): Promise<boolean> => {
+    let cursor = '';
+    for (const part of rel.split('/')) {
+      cursor = cursor ? `${cursor}/${part}` : part;
+      const stat = await fs.lstat(confine(cursor)).catch((error) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw error;
+      });
+      if (stat === null) return false;
+      if (stat.isSymbolicLink()) return true;
+    }
+    return false;
+  };
+  for (const rel of [...parents].sort(
+    (left, right) => right.split('/').length - left.split('/').length,
+  )) {
+    if (archived.has(rel)) continue;
+    if (await hasSymlinkComponent(rel)) continue;
+    const target = confine(rel);
+    const stat = await fs.lstat(target).catch((error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw error;
+    });
+    if (!stat?.isDirectory()) continue;
+    await assertRealContained(target, rel);
+    const entries = await fs.readdir(target);
+    if (entries.length === 0) await fs.rmdir(target);
+  }
+
   await tar.extract({
     file: snapshotPath,
     cwd: targetWorktreePath,
@@ -1160,32 +1286,5 @@ export async function restoreWorktreeSnapshot(
     }
     if (stat !== null) await fs.unlink(target);
     await fs.symlink(linkTarget, target);
-  }
-
-  // Git does not track directories. A recreated checkout can therefore
-  // retain parent directories that were absent at capture. Prune only empty,
-  // unarchived ones along deleted paths, deepest first, so captured empty
-  // directories and every non-empty parent survive unchanged.
-  const parents = new Set<string>();
-  for (const rel of meta.dirty.deleted) {
-    let parent = path.posix.dirname(normalizeRel(rel).replace(/\/+$/, ''));
-    while (parent !== '.' && parent !== '..') {
-      parents.add(parent);
-      parent = path.posix.dirname(parent);
-    }
-  }
-  for (const rel of [...parents].sort(
-    (left, right) => right.split('/').length - left.split('/').length,
-  )) {
-    if (archived.has(rel)) continue;
-    const target = confine(rel);
-    const stat = await fs.lstat(target).catch((error) => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
-    });
-    if (!stat?.isDirectory()) continue;
-    await assertRealContained(target, rel);
-    const entries = await fs.readdir(target);
-    if (entries.length === 0) await fs.rmdir(target);
   }
 }

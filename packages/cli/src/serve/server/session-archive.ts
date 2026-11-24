@@ -37,6 +37,7 @@ import {
   logWorktreeCleanupPreserve,
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
+  withWorktreeArchiveMove,
 } from './worktree-orphan-cleanup.js';
 import { moveWorktreeSnapshotsWithSession } from './worktree-snapshot-pairs.js';
 
@@ -410,14 +411,17 @@ async function reconcileSessionArchiveState(params: {
   sessionId: string;
   action: 'archive' | 'unarchive';
   assertCanMutate?: () => void;
+  isSessionLive?: (sessionId: string) => boolean;
 }): Promise<void> {
-  const { service, sessionId, action, assertCanMutate } = params;
+  const { service, sessionId, action, assertCanMutate, isSessionLive } = params;
   const errors: unknown[] = [];
   try {
+    assertCanMutate?.();
     await moveWorktreeSnapshotsWithSession(
       service,
       sessionId,
       action === 'archive' ? 'archived' : 'active',
+      isSessionLive,
     );
   } catch (error) {
     errors.push(error);
@@ -728,7 +732,9 @@ export async function deleteDaemonSessions(params: {
             }
           };
           try {
-            await bridge.closeSession(sessionId);
+            await bridge.closeSession(sessionId, undefined, {
+              forDeletion: true,
+            });
           } catch (error) {
             // A 'session_closing' refusal means a bridge-internal
             // auto-close (last-detach, idle reaper) is in flight — the
@@ -1002,7 +1008,8 @@ function sanitizeLogLine(message: string): string {
 export async function archiveDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession'>;
+  bridge: Pick<AcpSessionBridge, 'closeSession'> &
+    Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
@@ -1115,6 +1122,10 @@ export async function archiveDaemonSessions(params: {
                 sessionId,
                 action: 'archive',
                 assertCanMutate,
+                isSessionLive:
+                  bridge.getSessionSummary !== undefined
+                    ? (id) => sessionLiveOnBridge(bridge, id)
+                    : undefined,
               }),
             reconcileValues: ['alreadyArchived'],
           });
@@ -1134,7 +1145,9 @@ export async function archiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'active', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -1299,7 +1312,9 @@ export async function unarchiveDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'archived', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;

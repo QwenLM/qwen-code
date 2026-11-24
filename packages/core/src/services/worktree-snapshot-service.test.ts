@@ -21,6 +21,7 @@ import {
   verifyRestoredWorktreeSnapshot,
   buildWorktreeSnapshotMeta,
   WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+  type WorktreeSnapshotMeta,
 } from './worktree-snapshot-service.js';
 import {
   WORKTREE_SESSION_FILE,
@@ -1658,6 +1659,173 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     );
   });
 
+  it('restores a file that replaced a nested tracked directory (deep dir→file)', async () => {
+    await fs.mkdir(path.join(worktree, 'deep', 'nested'), { recursive: true });
+    await fs.writeFile(
+      path.join(worktree, 'deep', 'nested', 'leaf.txt'),
+      'base\n',
+    );
+    git(worktree, 'add', 'deep/nested/leaf.txt');
+    git(worktree, 'commit', '-qm', 'add nested dir', '--no-verify');
+    await fs.rm(path.join(worktree, 'deep'), { recursive: true, force: true });
+    await fs.writeFile(path.join(worktree, 'deep'), 'replaced-with-file\n');
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-deep-dirfile',
+      slug: 'deep-dirfile',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(m.dirty.deleted).toEqual(['deep/nested/leaf.txt']);
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-deep-dirfile',
+    );
+    await expect(
+      fs.readFile(path.join(restored, 'deep'), 'utf8'),
+    ).resolves.toBe('replaced-with-file\n');
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: {
+          ...(await readWorktreeSnapshotMeta(metaPath)),
+          branch: git(restored, 'branch', '--show-current'),
+        },
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'restores a symlink replacing a nested tracked directory without pruning target subdirectories',
+    async () => {
+      await fs.mkdir(path.join(worktree, 'deep', 'nested'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(worktree, 'deep', 'nested', 'leaf.txt'),
+        'base\n',
+      );
+      git(worktree, 'add', 'deep/nested/leaf.txt');
+      git(worktree, 'commit', '-qm', 'add nested dir for link', '--no-verify');
+      await fs.rm(path.join(worktree, 'deep'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.mkdir(path.join(worktree, 'other', 'nested'), {
+        recursive: true,
+      });
+      await fs.symlink('other', path.join(worktree, 'deep'));
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-deep-dirlink',
+        slug: 'deep-dirlink',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      });
+      expect(m.dirty.deleted).toEqual(['deep/nested/leaf.txt']);
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-deep-dirlink',
+      );
+      await expect(fs.readlink(path.join(restored, 'deep'))).resolves.toBe(
+        'other',
+      );
+      expect(
+        (await fs.lstat(path.join(restored, 'other', 'nested'))).isDirectory(),
+      ).toBe(true);
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: {
+            ...(await readWorktreeSnapshotMeta(metaPath)),
+            branch: git(restored, 'branch', '--show-current'),
+          },
+        }),
+      ).resolves.toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'restores a directory that replaced an in-root committed symlink (file target and directory target)',
+    async () => {
+      await fs.mkdir(path.join(worktree, 'target-dir', 'sub'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(worktree, 'target-dir', 'sub', 'keep.txt'),
+        'inside-target-intact\n',
+      );
+      await fs.symlink('committed.txt', path.join(worktree, 'link-file'));
+      await fs.symlink('target-dir', path.join(worktree, 'link-dir'));
+      git(worktree, 'add', 'target-dir/sub/keep.txt', 'link-file', 'link-dir');
+      git(worktree, 'commit', '-qm', 'add committed symlinks', '--no-verify');
+
+      for (const name of ['link-file', 'link-dir']) {
+        await fs.unlink(path.join(worktree, name));
+        await fs.mkdir(path.join(worktree, name, 'sub'), { recursive: true });
+        await fs.writeFile(
+          path.join(worktree, name, 'sub', 'note.txt'),
+          `replaced-${name}\n`,
+        );
+      }
+
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-symlink-to-dir',
+        slug: 'symlink-to-dir',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      });
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-symlink-to-dir',
+      );
+
+      for (const name of ['link-file', 'link-dir']) {
+        expect((await fs.lstat(path.join(restored, name))).isDirectory()).toBe(
+          true,
+        );
+        await expect(
+          fs.readFile(path.join(restored, name, 'sub', 'note.txt'), 'utf8'),
+        ).resolves.toBe(`replaced-${name}\n`);
+      }
+      // The in-repo target directory was not traversed or modified.
+      await expect(
+        fs.readFile(
+          path.join(restored, 'target-dir', 'sub', 'keep.txt'),
+          'utf8',
+        ),
+      ).resolves.toBe('inside-target-intact\n');
+      await expect(
+        fs.access(path.join(restored, 'target-dir', 'sub', 'note.txt')),
+      ).rejects.toThrow();
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: {
+            ...(await readWorktreeSnapshotMeta(metaPath)),
+            branch: git(restored, 'branch', '--show-current'),
+          },
+        }),
+      ).resolves.toBe(true);
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'restores a directory that replaced a recursive symlink alias',
     async () => {
@@ -1757,6 +1925,88 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       ).toBe(true);
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a file archive member or tracked deletion that targets .git through a committed symlink',
+    async () => {
+      await fs.symlink('.', path.join(worktree, 'link'));
+      git(worktree, 'add', 'link');
+      git(worktree, 'commit', '-qm', 'add root alias symlink', '--no-verify');
+      const restored = path.join(root, 'restored-symlink-git-bypass');
+      git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+      const originalGitfile = await fs.readFile(
+        path.join(restored, '.git'),
+        'utf8',
+      );
+      const headCommit = git(restored, 'rev-parse', 'HEAD');
+      const baseMeta: WorktreeSnapshotMeta = {
+        version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+        createdAt: Date.now(),
+        sessionId: 'session-symlink-git-bypass',
+        slug: 'symlink-git-bypass',
+        baseCommit: headCommit,
+        branch: '',
+        headCommit,
+        dirty: { tracked: 0, untracked: 0, deleted: [] },
+      };
+
+      // 1) A crafted archive containing a regular File member at link/.git.
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const staging = path.join(root, 'staging-symlink-git-bypass');
+      await fs.mkdir(path.join(staging, 'link'), { recursive: true });
+      await fs.writeFile(path.join(staging, 'link', '.git'), 'pwned-gitfile\n');
+      const fileTar = path.join(snapshotDir, 'crafted-link-git-file.tar.gz');
+      await tar.c({ file: fileTar, cwd: staging, gzip: true }, ['link/.git']);
+      await expect(
+        restoreWorktreeSnapshot(fileTar, restored, baseMeta),
+      ).rejects.toThrow(/protected path/);
+      await expect(
+        fs.readFile(path.join(restored, '.git'), 'utf8'),
+      ).resolves.toBe(originalGitfile);
+
+      // 2) A clean archive whose meta.dirty.deleted names link/.git.
+      const emptyStaging = path.join(root, 'staging-empty-bypass');
+      await fs.mkdir(emptyStaging, { recursive: true });
+      const emptyTar = path.join(snapshotDir, 'crafted-link-git-delete.tar.gz');
+      await tar.c({ file: emptyTar, cwd: emptyStaging, gzip: true }, ['.']);
+      await expect(
+        restoreWorktreeSnapshot(emptyTar, restored, {
+          ...baseMeta,
+          dirty: { tracked: 0, untracked: 0, deleted: ['link/.git'] },
+        }),
+      ).rejects.toThrow(/protected path/);
+      await expect(
+        fs.readFile(path.join(restored, '.git'), 'utf8'),
+      ).resolves.toBe(originalGitfile);
+    },
+  );
+
+  it('refuses a crafted archive with an absolute root "/" directory entry before extraction', async () => {
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const restored = path.join(root, 'restored-root-slash-entry');
+    git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const craftedTar = path.join(snapshotDir, 'crafted-root-slash.tar.gz');
+    const payload = Buffer.concat([
+      ...rawTarMember('/', '5'),
+      Buffer.alloc(1024),
+    ]);
+    await fs.writeFile(craftedTar, gzipSync(payload));
+    const headCommit = git(restored, 'rev-parse', 'HEAD');
+    const baseMeta: WorktreeSnapshotMeta = {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      sessionId: 'session-root-slash',
+      slug: 'root-slash',
+      baseCommit: headCommit,
+      branch: '',
+      headCommit,
+      dirty: { tracked: 0, untracked: 0, deleted: [] },
+    };
+
+    await expect(
+      restoreWorktreeSnapshot(craftedTar, restored, baseMeta),
+    ).rejects.toThrow(/Unsafe path in snapshot archive/);
+  });
 
   it.skipIf(process.platform === 'win32')(
     'refuses capture when a deleted path is not valid UTF-8',

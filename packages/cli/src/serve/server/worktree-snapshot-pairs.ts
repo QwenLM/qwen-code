@@ -70,6 +70,7 @@ export async function moveWorktreeSnapshotsWithSession(
   service: SessionService,
   sessionId: string,
   destination: SessionArchiveState,
+  isSessionLive?: (sessionId: string) => boolean,
 ): Promise<void> {
   const destinationSidecar = service.getWorktreeSessionPathForArchiveState(
     sessionId,
@@ -91,6 +92,7 @@ export async function moveWorktreeSnapshotsWithSession(
           record.session.originalCwd,
         ).getUserWorktreesDir(),
       ),
+      isSessionLive,
     );
     record = await readWorktreeSessionStrict(destinationSidecar);
     if (record.state !== 'valid') return;
