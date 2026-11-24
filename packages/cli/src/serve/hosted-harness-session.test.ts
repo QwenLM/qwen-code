@@ -48625,7 +48625,7 @@ describe('idle suspension', () => {
   async function allowParkedApproval(
     server: Server,
     clientId: string,
-    loadFlags: Record<string, true>,
+    loadFlags: Record<string, unknown>,
   ): Promise<void> {
     await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
       timeout: 5000,
@@ -49655,6 +49655,216 @@ describe('idle suspension', () => {
       expect(stats.parkRefusals).toEqual({ shell_profile: 1 });
       await endResidentApproval(server, clientId);
     } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // Stage 5 pre-start check (#18149): a public-children Shell Session saves a
+  // Shell-before-dispatch continuation, so its Shell approval parks, and the
+  // cold-recovered Allow re-prepares the saved reservation and runs it once.
+  it('parks a public-children Shell approval and resumes its saved reservation', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    const prepareV3 = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'prepareV3')
+      .mockResolvedValue({
+        executionCallId: 'shell-execution',
+        runtimeBindingId: 'binding',
+        bindingGeneration: '1',
+      });
+    const manifest = await LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    }).publish(
+      'managed-tool-result-manifest',
+      Buffer.from(
+        JSON.stringify({
+          toolResult: 'managed-tool-result/1',
+          type: 'manifest',
+          tenantId: 'tenant',
+          sessionId: SESSION_ID,
+          turnId: PROMPT_ID,
+          executionCallId: 'shell-execution',
+          callId: 'park-shell-call',
+          invocationDigest: 'digest',
+          bindingGeneration: '1',
+          captureId: randomUUID(),
+          revision: 1,
+          executionStatus: 'success',
+          exitCode: 0,
+          signal: null,
+          captureScope: 'process_pipes',
+          capturePolicy: 'complete_required',
+          captureStatus: 'complete',
+          captureReason: null,
+          upstreamTruncated: false,
+          contents: ['stdout', 'stderr'].map((streamId) => ({
+            streamId,
+            role: streamId,
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 0,
+            digest: createHash('sha256').update('').digest('hex'),
+            missingRanges: [],
+            body: { pages: [] },
+          })),
+        }),
+      ),
+    );
+    const envelope = {
+      executionStatus: 'success' as const,
+      responseParts: [{ text: 'touched' }],
+      capture: {
+        manifest,
+        captureStatus: 'complete' as const,
+        captureReason: null,
+        previewTruncated: false,
+        deliveryStatus: 'pending' as const,
+      },
+    };
+    const executeV3 = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'executeV3')
+      .mockResolvedValue(envelope);
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'acknowledgeV3',
+    ).mockResolvedValue();
+    state.publicationRequest.mockImplementation(
+      async (
+        resourceStore: LocalManagedSessionResourceStore,
+        route: string,
+        body: unknown,
+      ) => {
+        if (route === '/grants') return { state: 'OPEN' };
+        if (route.endsWith('/finished')) return { result: envelope };
+        if (route.endsWith('/admissions/prepare'))
+          return resourceStore.publish(
+            'managed-tool-outcome',
+            Buffer.from(JSON.stringify(body)),
+          );
+        throw new Error('Unexpected publication route ' + route);
+      },
+    );
+    state.model.mockImplementation(
+      async ({ toolTurn, resumeFromToolResults, signal }) => {
+        if (resumeFromToolResults)
+          return { text: 'resumed', model: 'test-model' };
+        const call = {
+          name: 'run_shell_command',
+          callId: 'park-shell-call',
+          args: { command: 'touch notes.txt' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        // The production model pins this route before every public-children
+        // request; the saved plan is readable as public Shell only with it.
+        toolTurn!.setChildModelRoute!('test-model', {
+          authType: 'openai',
+          endpointDigest: 'a'.repeat(64),
+          providerPin: 'b'.repeat(64),
+        });
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        throw new Error('The waiting Turn unexpectedly continued.');
+      },
+    );
+    const saved = vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+    );
+    const shellSession = {
+      toolProfile: 'hosted-workspace-shell/1',
+      captureBytes: 1024 * 1024,
+      publicChildAgentsVersion: 1,
+    };
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          ...shellSession,
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const prompt = [{ type: 'text', text: 'touch notes' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await allowParkedApproval(server, created.body.clientId as string, {
+        ...shellSession,
+        driveRuntimeRecovery: true,
+      });
+      expect(state.wakeStamps[0]).toMatchObject({
+        parkedTurn: { promptId: PROMPT_ID },
+      });
+      expect(statsOf(server).parkRefusals).toEqual({});
+      const continuation = (await saved.mock.results[0]!.value) as Awaited<
+        ReturnType<typeof approvalContinuation.findHostedApprovalContinuation>
+      >;
+      const call = continuation!.plan.calls[0]!;
+      expect(call.call.name).toBe('run_shell_command');
+      expect(call.publicationId).toEqual(expect.any(String));
+      expect(prepareV3).toHaveBeenCalledOnce();
+      expect(prepareV3).toHaveBeenCalledWith(
+        call.runtimeCallId,
+        call.argsDigest,
+        call.requestDigest,
+        call.publicationId,
+        PROMPT_ID,
+      );
+      expect(executeV3).toHaveBeenCalledOnce();
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      expect(
+        journal.events.filter(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'requested',
+        ),
+      ).toHaveLength(1);
+      expect(
+        journal.events.find((event) => event.kind === 'turn.settled')?.payload[
+          'outcome'
+        ],
+      ).toBe('completed');
+    } finally {
+      saved.mockRestore();
       state.wakeDispatch = false;
       state.actionParking = false;
       state.approvalSelections.clear();
