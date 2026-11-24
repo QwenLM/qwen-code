@@ -90,6 +90,7 @@ type Options = Omit<
     >,
   ) => Promise<void>;
   onToolCallsUpdate?: (calls: InteractiveToolCall[]) => void;
+  onNestedToolsAbandoned?: (callIds: ReadonlySet<string>) => void;
   onNativeAttempt?: (call: CompletedToolCall) => Promise<void>;
 };
 
@@ -137,7 +138,10 @@ export class InteractiveModToolScheduler {
       abandoned?.addEventListener(
         'abort',
         () => {
-          this.native.handoffAfterAbandonment(request, () => {
+          this.native.handoffAfterAbandonment(request, (nestedCallIds) => {
+            if (nestedCallIds.size > 0) {
+              this.options.onNestedToolsAbandoned?.(nestedCallIds);
+            }
             this.native = this.createNativeScheduler();
             return this.native;
           });

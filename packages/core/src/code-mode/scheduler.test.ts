@@ -45,6 +45,7 @@ function setup(
     params?: Partial<ConfigParameters>;
     configure?: (config: Config) => void;
     exec?: boolean;
+    waitForNestedToolSettlement?: boolean;
     onToolCallsUpdate?: (calls: ToolCall[]) => void;
   } = {},
 ) {
@@ -64,6 +65,7 @@ function setup(
   const completed = vi.fn();
   const scheduler = new CoreToolScheduler({
     config,
+    waitForNestedToolSettlement: opts.waitForNestedToolSettlement,
     onAllToolCallsComplete: async (calls) => completed(calls),
     onToolCallsUpdate: opts.onToolCallsUpdate ?? vi.fn(),
     getPreferredEditor: () => undefined,
@@ -524,6 +526,70 @@ describe('CodeModeOnly scheduler dispatch', () => {
     }
     await scheduled;
   }, 40_000);
+
+  it.each([
+    { waitForNestedToolSettlement: true, cancel: true },
+    { waitForNestedToolSettlement: true, cancel: false },
+    { waitForNestedToolSettlement: false, cancel: true },
+  ])(
+    'settles the parent and its nested tools (wait=$waitForNestedToolSettlement, cancel=$cancel)',
+    async ({ waitForNestedToolSettlement, cancel }) => {
+      const turn = new AbortController();
+      const child = new AbortController();
+      let exitGuest!: () => void;
+      const guestExit = new Promise<void>((resolve) => {
+        exitGuest = resolve;
+      });
+      let releaseChild!: () => void;
+      const childExit = new Promise<void>((resolve) => {
+        releaseChild = resolve;
+      });
+      const executeChild = vi.fn(async () => {
+        await childExit;
+        return { llmContent: 'child', returnDisplay: 'child' };
+      });
+      let oldChild: Promise<unknown> | undefined;
+      const onOldChildResult = vi.fn();
+      const { run, completed, call } = setup(
+        [
+          new MockTool({
+            name: ToolNames.EXEC,
+            execute: async () => {
+              oldChild = getToolCallRuntime()!
+                .dispatch('pending_child', {}, child.signal, onOldChildResult)
+                .catch(() => {});
+              await guestExit;
+              child.abort();
+              turn.signal.throwIfAborted();
+              return { llmContent: 'parent', returnDisplay: 'parent' };
+            },
+          }),
+          new MockTool({ name: 'pending_child', execute: executeChild }),
+        ],
+        { exec: false, waitForNestedToolSettlement },
+      );
+      const scheduled = run('parent', 'prompt', '', {}, turn.signal);
+      try {
+        await vi.waitFor(() => expect(executeChild).toHaveBeenCalledOnce());
+        if (cancel) turn.abort();
+        exitGuest();
+        await scheduled;
+        if (cancel && waitForNestedToolSettlement) {
+          expect(completed).not.toHaveBeenCalled();
+        } else {
+          await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+        }
+      } finally {
+        exitGuest();
+        releaseChild();
+        await oldChild;
+      }
+
+      await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+      expect(call().status).toBe(cancel ? 'cancelled' : 'success');
+      if (!cancel) expect(onOldChildResult).toHaveBeenCalledOnce();
+    },
+  );
 
   it('applies nested tool permission denial before execution', async () => {
     const nestedExecute = vi.fn();

@@ -259,15 +259,30 @@ export function useReactToolScheduler(
     [setToolCallsForDisplay],
   );
 
+  const clearToolCallDisplay = useCallback((callIds: ReadonlySet<string>) => {
+    setToolCallsForDisplay((calls) =>
+      calls.filter(
+        ({ request }) =>
+          !callIds.has(request.callId) &&
+          (request.parentCallId === undefined ||
+            !callIds.has(request.parentCallId)),
+      ),
+    );
+  }, []);
+
   const scheduler = useMemo(
     () =>
       new InteractiveModToolScheduler({
         config,
+        waitForNestedToolSettlement:
+          config.isUnifiedAgentLoopEnabled?.('ink') === true &&
+          config.isEventBusAgentLoopEnabled?.('ink') === true,
         onNativeAttempt: (call) =>
           onNativeAttemptRef.current?.(call) ?? Promise.resolve(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
+        onNestedToolsAbandoned: clearToolCallDisplay,
         getPreferredEditor: () => getPreferredEditorRef.current(),
         onEditorClose: () => onEditorCloseRef.current(),
         // Always wrap: Core treats a missing callback as false, and a later
@@ -280,6 +295,7 @@ export function useReactToolScheduler(
       outputUpdateHandler,
       allToolCallsCompleteHandler,
       toolCallsUpdateHandler,
+      clearToolCallDisplay,
     ],
   );
 
@@ -314,16 +330,7 @@ export function useReactToolScheduler(
           }
         }
         if (released.size === 0) return;
-        if (clearDisplay) {
-          setToolCallsForDisplay((calls) =>
-            calls.filter(
-              ({ request }) =>
-                !released.has(request.callId) &&
-                (request.parentCallId === undefined ||
-                  !released.has(request.parentCallId)),
-            ),
-          );
-        }
+        if (clearDisplay) clearToolCallDisplay(released);
         void onBatchComplete([]).catch((error: unknown) => {
           debugLogger.error('Tool batch release failed:', error);
         });
@@ -499,7 +506,7 @@ export function useReactToolScheduler(
         );
       });
     },
-    [allToolCallsCompleteHandler, config, scheduler],
+    [allToolCallsCompleteHandler, clearToolCallDisplay, config, scheduler],
   );
 
   const markToolsAsSubmitted: MarkToolsAsSubmittedFn = useCallback(

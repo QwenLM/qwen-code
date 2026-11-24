@@ -1652,6 +1652,8 @@ interface CoreToolSchedulerOptions {
   beforeToolLaunch?: (call: ScheduledToolCall) => boolean | Promise<boolean>;
   /** Whether the owning agent loop has already settled. */
   isFinished?: () => boolean;
+  /** Keep cancelled Code Mode batches open for the owning loop's deadline. */
+  waitForNestedToolSettlement?: boolean;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
   /**
@@ -2053,6 +2055,7 @@ export class CoreToolScheduler {
   private nestedToolCalls: ToolCall[] = [];
   private nestedSequence = 0;
   private nestedFlushScheduled = false;
+  private readonly pendingNestedTools = new Set<Promise<CodeModeToolResult>>();
   private nestedQueue: Array<{
     request: ToolCallRequestInfo;
     signal: AbortSignal;
@@ -2175,12 +2178,18 @@ export class CoreToolScheduler {
       source: 'code_mode',
       goalContext: parent.goalContext,
     };
-    return new Promise<CodeModeToolResult>((resolve, reject) => {
+    const settled = new Promise<CodeModeToolResult>((resolve, reject) => {
       this.nestedQueue.push({ request, signal, resolve, reject, onResult });
       if (this.nestedFlushScheduled) return;
       this.nestedFlushScheduled = true;
       setTimeout(() => this.flushNestedQueue(), CODE_MODE_BATCH_WINDOW_MS);
     });
+    if (this.schedulerOptions.waitForNestedToolSettlement) {
+      this.pendingNestedTools.add(settled);
+      const remove = () => this.pendingNestedTools.delete(settled);
+      void settled.then(remove, remove);
+    }
+    return settled;
   }
 
   private flushNestedQueue(): void {
@@ -3243,7 +3252,9 @@ export class CoreToolScheduler {
    */
   handoffAfterAbandonment(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
-    createReplacement: () => CoreToolScheduler,
+    createReplacement: (
+      nestedCallIds: ReadonlySet<string>,
+    ) => CoreToolScheduler,
   ): void {
     if (
       this.retired ||
@@ -3252,7 +3263,9 @@ export class CoreToolScheduler {
     ) {
       return;
     }
-    const replacement = createReplacement();
+    const replacement = createReplacement(
+      new Set(this.nestedToolCalls.map(({ request }) => request.callId)),
+    );
     this.retired = true;
     this.activeRequest = undefined;
     replacement.requestQueue = this.requestQueue;
@@ -8270,6 +8283,11 @@ export class CoreToolScheduler {
         );
       }
       try {
+        // The host can exit before its cancelled children settle. Keep the
+        // parent batch open so the owner's cancellation deadline still runs.
+        if (batchSignal?.aborted && this.pendingNestedTools.size > 0) {
+          await Promise.allSettled(this.pendingNestedTools);
+        }
         const releases = completedCalls.flatMap((call) => {
           const pending = this.invocationReleases.get(call.request.callId);
           this.invocationReleases.delete(call.request.callId);
