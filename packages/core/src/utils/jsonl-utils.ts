@@ -539,7 +539,9 @@ export async function writeLine(
         } else {
           // Inspect and write through the same append-only handle. A read
           // probe is unnecessary here and could consume a FIFO's payload.
-          appendHandle = await fs.promises.open(filePath, 'a');
+          // 0o600 keeps a recreated file owner-only; Node ignores mode when
+          // the file already exists, so this only affects creation.
+          appendHandle = await fs.promises.open(filePath, 'a', 0o600);
           existing = appendHandle;
           const stats = await appendHandle.stat();
           appendHandleReady = true;
@@ -553,7 +555,7 @@ export async function writeLine(
           // Recovery runs inside the catch, so its own descriptor errors would
           // otherwise escape without the file context the rethrow above adds.
           try {
-            appendHandle = await fs.promises.open(filePath, 'a');
+            appendHandle = await fs.promises.open(filePath, 'a', 0o600);
             existing = appendHandle;
             const stats = await appendHandle.stat();
             appendHandleReady = true;
@@ -645,7 +647,9 @@ export function writeLineSync(filePath: string, data: unknown): void {
     } else {
       // Inspect and write through the same append-only handle. A read probe
       // is unnecessary here and could consume a FIFO's payload.
-      appendDescriptor = fs.openSync(filePath, 'a');
+      // 0o600 keeps a recreated file owner-only; Node ignores mode when
+      // the file already exists, so this only affects creation.
+      appendDescriptor = fs.openSync(filePath, 'a', 0o600);
       descriptor = appendDescriptor;
       const stats = fs.fstatSync(appendDescriptor);
       appendDescriptorReady = true;
@@ -659,7 +663,7 @@ export function writeLineSync(filePath: string, data: unknown): void {
       // Recovery runs inside the catch, so its own descriptor errors would
       // otherwise escape without the file context the rethrow above adds.
       try {
-        appendDescriptor = fs.openSync(filePath, 'a');
+        appendDescriptor = fs.openSync(filePath, 'a', 0o600);
         descriptor = appendDescriptor;
         const stats = fs.fstatSync(appendDescriptor);
         appendDescriptorReady = true;
