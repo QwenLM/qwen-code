@@ -95,8 +95,8 @@ async function settleActionResponse(
     }
     if (
       (read.sessionId !== undefined && read.sessionId !== sessionId) ||
-      (read.operationId !== undefined &&
-        read.operationId !== current.operationId)
+      !read.operationId ||
+      read.operationId !== current.operationId
     ) {
       throw new Error('Managed Agent action response identity mismatch');
     }

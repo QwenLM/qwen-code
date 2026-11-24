@@ -3,7 +3,7 @@
 [English](2026-11-24-managed-chat-controller-binding.md) |
 [简体中文](2026-11-24-managed-chat-controller-binding.zh-CN.md)
 
-Status: proposed (slice 3b). Date: 2026-11-24.
+Status: implemented (slice 3b). Date: 2026-11-24.
 Base: `9192034e9404f5de75951f27ae5fa595ef1f529e`, the squash merge of
 #18117 into main. Part of the
 [unified chat surface](2026-11-16-unified-chat-surface.md), building on the
@@ -197,29 +197,31 @@ user input without extending an expired Action's life.
 
 The four previously noted defensive conditions are resolved explicitly:
 
-- Operation terminal matching must not turn a settled operation into a new
-  unmatched buffering candidate. Buffer eligibility and terminal application
-  are separate decisions.
-- Action terminal-skip duplicates `applyState`'s terminal guard. Keep it as
-  low-cost direct protection and document that redundancy, not as proof that a
-  different outcome is pinned. Avoid fictitious scenarios or deletion-mutant
-  theatrics intended to prove a difference that legitimately does not exist.
-- Buffer action evidence only for the matching action currently in flight. A
-  different action, or an event predating this attempt, must not be rescued by
-  an unrelated global dispatch drain.
+- Operation terminal matching marks `matched = true` before calling
+  `applyState`, so a replayed settlement for an already-terminal operation does
+  not fall through to unmatched early buffering while another dispatch is in
+  flight. Unmatched buffering still requires an active dispatch.
+- The redundant `isTerminalOperation` skip checks in `settleByTurnId` and
+  `settleByActionId` duplicated `applyState`'s single terminal guard with no
+  extra side effect and are removed rather than keeping untested duplicates.
+- Buffer action evidence only while that matching action itself is in flight
+  (`inFlightActionIds.has(event.actionId)`), preventing stray buffer retention
+  for unrelated actions while `dispatchSequence` independently enforces
+  cross-attempt isolation.
 - Retain the dispatch-sequence gate and the no-weakening terminal transitions.
-  Regression witnesses must exercise real provider/hook observation points and
-  at least one early/local replay whose arrival order would distinguish the
-  guard, not only green positive cases.
+  Regression witnesses exercise real provider/hook observation points and
+  early/replayed settlement ordering, not only green positive cases.
 
 ### Lifecycle, errors and delivery
 
-The hook releases owner-scoped registrations on owner change and unmount. Late
-transport or event results never enter a new owner's listeners. The cursor for
-initial events is established before turn-event delivery begins; subsequent
-snapshots are deduplicated through existing event identity/epoch semantics, not
-replayed as fresh events. Stopping observations does not purport to cancel a
-backend operation already accepted by the server.
+The hook releases owner-scoped abort signals on owner change and unmount, while
+re-arming the owner's `AbortController` on effect setup so React `<StrictMode>`
+remounts keep the owner live without detaching settlement listeners. Late
+transport or event results never enter a new owner's listeners. Once the initial
+summary and transcript finish loading, the hook latches an event high-water mark
+so initial history snapshots and later `loadOlder()` pages never replay as fresh
+turn settlements. Stopping observations does not purport to cancel a backend
+operation already accepted by the server.
 
 `detail.stoppedReason`/`stoppedLeg` and the real loading states govern transcript
 status; transient older-page errors do not silently become terminal session

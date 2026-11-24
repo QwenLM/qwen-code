@@ -2626,6 +2626,42 @@ describe('createJavaManagedAgentProvider', () => {
       expect(onSettlement).not.toHaveBeenCalled();
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
+
+    it('rejects a polled operation with mismatched identity without reporting settlement', async () => {
+      const onAccepted = vi.fn();
+      const onSettlement = vi.fn();
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(operation('pending'))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            operationId: 'op-other',
+            sessionId: 'session-1',
+            type: 'action_response',
+            status: 'completed',
+            admissionStage: 'java_durable',
+            deliveryState: 'confirmed',
+            replayed: false,
+          }),
+        );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      // eslint-disable-next-line vitest/valid-expect -- attached before advancing timers, then awaited after the poll rejects
+      const answer = expect(
+        provider.actions!.respond(action, 'allow', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:allow',
+          onAccepted,
+          onSettlement,
+        }),
+      ).rejects.toThrow('Managed Agent action response identity mismatch');
+      await vi.advanceTimersByTimeAsync(250);
+      await answer;
+      expect(onAccepted).toHaveBeenCalledTimes(1);
+      expect(onSettlement).not.toHaveBeenCalled();
+    });
   });
 
   it('reports the actions capability only when the Session has it', async () => {

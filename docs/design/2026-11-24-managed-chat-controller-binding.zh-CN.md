@@ -3,7 +3,7 @@
 [English](2026-11-24-managed-chat-controller-binding.md) |
 [简体中文](2026-11-24-managed-chat-controller-binding.zh-CN.md)
 
-状态：提议（slice 3b）。日期：2026-11-24。
+状态：已实现（slice 3b）。日期：2026-11-24。
 基准：`9192034e9404f5de75951f27ae5fa595ef1f529e`，即 #18117 squash 合入 main
 的提交。属于[统一聊天界面](2026-11-16-unified-chat-surface.zh-CN.md)，基于
 [切片 3a 适配器核心](2026-11-22-managed-chat-controller.zh-CN.md)。
@@ -169,23 +169,26 @@ provider 若没有观察能力，约束结果是 `unknown`，不能仅因 `Promi
 
 此前指出的四项防御条件明确收口：
 
-- 已终态的 operation 不能再次作为“未匹配”进入缓冲候选；缓冲资格与实际终态
-  应用是两个决策。未匹配 operation 的缓冲仍要求有 dispatch 在飞。
-- action 的 terminal-skip 与 `applyState` 的终态守卫重复。保留这份低成本直接
-  防护，但明确指出它的冗余性，不把“已有覆盖”伪称为新见证。不得为了证明
-  并不存在的差别而编造场景或制作删除变异表演。
-- 只有在飞的那个 action 本身才允许写入 action 缓冲。其他 action 的事件或早于
-  当前 attempt 的事件，不能因为另一个全局 dispatch 尚未排空而被救回。
-- 保留 dispatch-sequence 门与终态不得削弱规则。回归见证必须覆盖真实
-  provider/hook 观察点，至少包含一条早到或本地重放的实际顺序，不只是正向
-  绿测。
+- operation 终态匹配在调用 `applyState` 之前先标记 `matched = true`，使已终态
+  operation 的重放结算在存在并发派发时不会落入未匹配早到缓冲。未匹配缓冲仍
+  要求当前有在飞派发。
+- `settleByTurnId` 与 `settleByActionId` 中与 `applyState` 终态守卫完全等价且
+  无额外副作用的重复 `isTerminalOperation` skip 已移除，交由 `applyState`
+  单点守卫，不再保留无差异的重复代码。
+- 仅在匹配动作本身处于在飞状态（`inFlightActionIds.has(event.actionId)`）时
+  写入 action 早到缓冲，避免无关动作残留缓冲条目；跨尝试隔离由
+  `dispatchSequence` 独立保证。
+- 保留 dispatch-sequence 门与终态不得削弱规则。回归见证覆盖真实
+  provider/hook 观察点以及早到／重放的实际到达顺序，不只是正向绿测。
 
 ### 生命周期、错误与投递
 
-owner 改变或 unmount 时释放其注册。迟到的 transport 或事件结果不会进入新
-owner 的 listeners。在 turn 事件投递开始前先建立初始事件 cursor，后续快照按
-既有事件 identity/epoch 语义去重，不把快照当成新事件重播。停止观察并不等于
-取消服务端已经接受的 operation。
+owner 改变或 unmount 时中止该 owner 的请求信号；effect 重建时重新装配
+`AbortController`，使 React `<StrictMode>` 的假卸载与重挂载不会把同一 owner
+永久中止或拆断结算监听。迟到的 transport 或事件结果不会进入新 owner 的
+listeners。待初始 summary 与初始 transcript 加载完成后，hook 锁定事件高水位
+线，确保初始历史快照与后续 `loadOlder()` 拉回的旧历史页都不会重放为新的
+turn 结算。停止观察并不等于取消服务端已经接受的 operation。
 
 `detail.stoppedReason`／`stoppedLeg` 与真实 loading 状态决定转录状态；一次
 older-page 临时失败不得偷偷成为整个 session 的终态错误。queue 与 goal 字段继续

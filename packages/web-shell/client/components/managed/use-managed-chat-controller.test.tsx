@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
@@ -182,9 +182,11 @@ describe('useManagedChatController', () => {
       props = { ...props, ...next };
       return act(async () => {
         root!.render(
-          <I18nProvider language="en">
-            <Probe {...props} />
-          </I18nProvider>,
+          <StrictMode>
+            <I18nProvider language="en">
+              <Probe {...props} />
+            </I18nProvider>
+          </StrictMode>,
         );
         await Promise.resolve();
       });
@@ -236,9 +238,6 @@ describe('useManagedChatController', () => {
     }>();
     vi.mocked(h.provider.submitPrompt).mockReturnValue(submission.promise);
     const png = btoa('\x89PNG\r\n\x1a\n');
-    const arrayBuffer = vi.fn(
-      async () => new TextEncoder().encode('notes').buffer,
-    );
     const promise = controller.submit({
       text: 'Review',
       images: [{ data: png, media_type: 'image/png' }],
@@ -246,7 +245,9 @@ describe('useManagedChatController', () => {
         {
           name: 'notes.md',
           media_type: 'text/markdown',
-          data: { size: 16, arrayBuffer } as Blob,
+          data: Object.assign(new Blob(['notes'], { type: 'text/markdown' }), {
+            arrayBuffer: async () => new TextEncoder().encode('notes').buffer,
+          }),
         },
       ],
     });
@@ -283,6 +284,9 @@ describe('useManagedChatController', () => {
       outcome: 'established',
       target: { sessionId: 'session-1' },
     });
+    expect(
+      vi.mocked(h.provider.getSession).mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it.each([409, 503])(
@@ -492,6 +496,199 @@ describe('useManagedChatController', () => {
     expect(h.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('responds to pending approvals with the existing idempotency key and refreshes pending actions on completion', async () => {
+    const approval: ManagedAgentPendingAction = {
+      actionId: 'perm-1',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      functionCallId: 'call-1',
+      toolName: 'write_file',
+      inputRevision: 2,
+      policyRevision: 'hosted-tool-approval/1',
+      expiresAt: Date.now() + 600_000,
+      options: [
+        { id: 'allow', label: 'Allow' },
+        { id: 'deny', label: 'Deny' },
+      ],
+    };
+    const h = mount({ pending: [approval] });
+    await h.render();
+    await flushReact();
+    const initialReads = vi.mocked(h.provider.actions!.listPending).mock.calls
+      .length;
+    const finish = deferred<void>();
+    let observedCommand:
+      | Parameters<NonNullable<ManagedAgentProvider['actions']>['respond']>[2]
+      | undefined;
+    vi.mocked(h.provider.actions!.respond).mockImplementation(
+      async (_action, _response, command) => {
+        observedCommand = command;
+        command.onAccepted?.({
+          operationId: 'op-approval-1',
+          sessionId: approval.sessionId,
+        });
+        await finish.promise;
+      },
+    );
+    const admitted = await h.controller!.respondApproval('perm-1', 'deny');
+    expect(admitted).toEqual({
+      admission: 'accepted',
+      outcome: 'unsettled',
+      target: { sessionId: 'session-1', requestId: 'perm-1' },
+    });
+    expect(h.provider.actions!.respond).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actionId: 'perm-1',
+        inputRevision: 2,
+        policyRevision: 'hosted-tool-approval/1',
+      }),
+      'deny',
+      expect.objectContaining({
+        clientId: 'client-1',
+        idempotencyKey: 'perm-1:deny',
+      }),
+    );
+    h.setPending([]);
+    await act(async () => {
+      observedCommand!.onSettlement?.({
+        operationId: 'op-approval-1',
+        sessionId: approval.sessionId,
+        status: 'completed',
+      });
+      finish.resolve();
+    });
+    await flushReact();
+    expect(h.controller!.operations[0]?.state).toBe('established');
+    expect(
+      vi.mocked(h.provider.actions!.listPending).mock.calls.length,
+    ).toBeGreaterThan(initialReads);
+  });
+
+  it('does not forge accepted admission for a new turn cancel from a prior turn cancel poll settlement', async () => {
+    const h = mount();
+    vi.mocked(h.provider.cancel).mockResolvedValueOnce({
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      operationId: 'cancel-turn-1',
+    });
+    vi.mocked(h.provider.queryCancelOperation)
+      .mockResolvedValueOnce({
+        sessionId: 'session-1',
+        operationId: 'cancel-turn-1',
+        type: 'cancel',
+        status: 'running',
+        admissionStage: 'java_durable',
+        deliveryState: 'leased',
+        replayed: false,
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'session-1',
+        operationId: 'cancel-turn-1',
+        type: 'cancel',
+        status: 'completed',
+        admissionStage: 'java_durable',
+        deliveryState: 'confirmed',
+        replayed: false,
+      });
+    await h.render();
+    await flushReact();
+
+    const first = await act(async () => h.controller!.cancel());
+    expect(first.admission).toBe('accepted');
+    expect(h.controller!.operations[0]?.state).toBe('pending');
+
+    // Summary moves to turn-2 while turn-1's cancel intent is still stored in
+    // useManagedTurnCancel. Clicking cancel now polls cancel-turn-1 (which has
+    // no turnId) and completes it — this must settle turn-1's operation only,
+    // never forge accepted admission for turn-2.
+    vi.mocked(h.provider.getSession).mockResolvedValue({
+      ...summary('session-1'),
+      activeTurnId: 'turn-2',
+    });
+    await act(async () => h.emit(event(2, 'session-1', 'context_changed')));
+    await flushReact();
+
+    const second = await act(async () => h.controller!.cancel());
+    await flushReact();
+    expect(second.admission).toBe('unknown');
+    expect(h.provider.cancel).toHaveBeenCalledTimes(1);
+    expect(h.controller!.operations[0]?.state).toBe('established');
+  });
+
+  it('ignores initial transcript history and loadOlder pages as fresh turn settlements and reports loading state accurately', async () => {
+    const initialTranscript = deferred<{
+      events: ManagedAgentSessionEvent[];
+      lastEventId: number;
+      olderCursor?: string;
+    }>();
+    const h = mount();
+    vi.mocked(h.provider.getTranscript).mockImplementation(
+      async (_sessionId, options) => {
+        if (options.before === 'cursor-older') {
+          return {
+            events: [
+              {
+                ...event(1, 'session-1', 'completed'),
+                turnId: 'turn-historical',
+              },
+            ],
+            lastEventId: 10,
+          };
+        }
+        return initialTranscript.promise;
+      },
+    );
+    await h.render();
+    await flushReact();
+    // Initial bootstrap settles session and transcript together, so the
+    // controller stays undefined until both arrive.
+    expect(h.controller).toBeUndefined();
+
+    await act(async () => {
+      initialTranscript.resolve({
+        events: [
+          {
+            ...event(10, 'session-1', 'completed'),
+            turnId: 'turn-initial',
+          },
+        ],
+        lastEventId: 10,
+        olderCursor: 'cursor-older',
+      });
+      await Promise.resolve();
+    });
+    await flushReact();
+    expect(h.controller!.transcriptState).toBe('ready');
+    expect(h.controller!.hasOlderHistory).toBe(true);
+
+    // Start a deferred submit whose turnId happens to match an older history
+    // turn id, then loadOlder() before admission resolves. The historical page
+    // (id 1 <= highWaterId 10) must not settle the live submission.
+    const inflight = deferred<{
+      sessionId: string;
+      turnId: string;
+      operationId: string;
+    }>();
+    vi.mocked(h.provider.submitPrompt).mockReturnValueOnce(inflight.promise);
+    const submitPromise = h.controller!.submit({ text: 'new turn' });
+    await act(async () => {
+      await h.controller!.loadOlder!();
+    });
+    await flushReact();
+    inflight.resolve({
+      sessionId: 'session-1',
+      turnId: 'turn-historical',
+      operationId: 'op-live',
+    });
+    const res = await submitPromise;
+    expect(res).toEqual({
+      admission: 'accepted',
+      outcome: 'unsettled',
+      target: { sessionId: 'session-1' },
+    });
+    expect(h.controller!.operations[0]?.state).toBe('running');
+  });
+
   it('returns undefined when no sessionId or matching summary is available', async () => {
     const h = mount({ sessionId: undefined });
     await h.render({ sessionId: undefined });
@@ -614,9 +811,11 @@ describe('useManagedChatController', () => {
       root = createRoot(document.createElement('div'));
       await act(async () => {
         root!.render(
-          <I18nProvider language="en">
-            <RealProbe />
-          </I18nProvider>,
+          <StrictMode>
+            <I18nProvider language="en">
+              <RealProbe />
+            </I18nProvider>
+          </StrictMode>,
         );
         await Promise.resolve();
       });
@@ -677,6 +876,135 @@ describe('useManagedChatController', () => {
       });
       expect(operationPoll).toBeGreaterThanOrEqual(2);
       expect(controller!.operations[0]?.state).toBe('established');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an accepted real provider action unsettled when polling times out without inventing failure or rejection', async () => {
+    vi.useFakeTimers();
+    try {
+      const question = pendingQuestion();
+      const json = (body: unknown) =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      const sessionBody = {
+        ...JSON.parse(javaSessionPayload(0)),
+        capabilities: { actions: true },
+      };
+      const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+        const path = String(input).replace(
+          'https://product.example/api/agent/web-shell/v1',
+          '',
+        );
+        if (path === '/sessions/get') return json(sessionBody);
+        if (path === '/transcript/query' || path === '/transcript/items/query')
+          return json({
+            sessionId: question.sessionId,
+            events: [],
+            items: [],
+            coveredSequence: 0,
+            hasMore: false,
+            lastSequence: 0,
+          });
+        if (path === '/events/stream') {
+          return new Response(
+            new ReadableStream({
+              start(streamController) {
+                init?.signal?.addEventListener('abort', () => {
+                  try {
+                    streamController.close();
+                  } catch {
+                    // already closed
+                  }
+                });
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'text/event-stream' } },
+          );
+        }
+        if (path === '/actions/query') {
+          return json({
+            data: [
+              {
+                ...question,
+                source: { kind: 'tool_call', id: question.functionCallId },
+                state: 'requested',
+                createdAt: 1,
+              },
+            ],
+            hasMore: false,
+          });
+        }
+        if (path === '/actions/respond') {
+          return json({
+            operationId: 'op-timeout-1',
+            sessionId: question.sessionId,
+            type: 'action_response',
+            status: 'pending',
+            admissionStage: 'java_durable',
+            deliveryState: 'leased',
+            replayed: false,
+          });
+        }
+        if (path === '/operations/query') {
+          return json({
+            operationId: 'op-timeout-1',
+            sessionId: question.sessionId,
+            type: 'action_response',
+            status: 'running',
+            admissionStage: 'java_durable',
+            deliveryState: 'leased',
+            replayed: false,
+          });
+        }
+        throw new Error(`Unexpected mocked HTTP route: ${path}`);
+      });
+      const realProvider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      let controller: SessionChatController | undefined;
+      function RealProbe() {
+        controller = useManagedChatController({
+          provider: realProvider,
+          clientId: 'client-timeout',
+          sessionId: question.sessionId,
+        });
+        return null;
+      }
+      root = createRoot(document.createElement('div'));
+      await act(async () => {
+        root!.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <RealProbe />
+            </I18nProvider>
+          </StrictMode>,
+        );
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      const admitted = await controller!.respondQuestion(question.actionId, [
+        { questionId: 'q1', value: '', optionIds: ['q1o1'] },
+        { questionId: 'q2', value: '', optionIds: ['q2o2'] },
+      ]);
+      expect(admitted.admission).toBe('accepted');
+      expect(admitted.outcome).toBe('unsettled');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(controller!.operations).toEqual([
+        expect.objectContaining({
+          kind: 'question',
+          state: 'pending',
+        }),
+      ]);
     } finally {
       vi.useRealTimers();
     }
