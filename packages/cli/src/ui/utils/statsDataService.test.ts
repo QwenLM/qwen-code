@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type {
   UsageSummaryRecord,
   AggregatedReport,
@@ -967,40 +970,97 @@ describe('loadStatsData — per-request ledger accounting', () => {
   });
 
   it('sees tokens added between opens without waiting for a TTL', async () => {
-    const now = Date.now();
-    const recordWithTokens = (tokens: number) =>
-      makeRecord({
-        timestamp: now,
-        startTime: now - 1000,
-        models: {
-          'qwen-max': {
-            requests: 1,
-            inputTokens: tokens,
+    // Exact replacement needs the real per-response evidence, not just totals.
+    const fixtureHome = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-stats-refresh-'),
+    );
+    const previousHome = process.env['QWEN_HOME'];
+    const previousRuntime = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_HOME'] = fixtureHome;
+    process.env['QWEN_RUNTIME_DIR'] = fixtureHome;
+    try {
+      const core = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      vi.mocked(loadLedgerOrEmpty).mockImplementation(core.loadLedgerOrEmpty);
+      const now = Date.now();
+      const localDate = dayKey(now);
+      const responseRecord = (sessionId: string, ids: string[]) =>
+        makeRecord({
+          sessionId,
+          timestamp: now,
+          startTime: now - 1000,
+          runScoped: true,
+          requestExecutionIds: ids,
+          successfulRequestExecutionIds: ids,
+          totalLatencyMs: 0,
+          models: {
+            'qwen-max': {
+              requests: ids.length,
+              inputTokens: ids.length * 100,
+              outputTokens: 0,
+              cachedTokens: 0,
+              thoughtsTokens: 0,
+              totalTokens: ids.length * 100,
+            },
+          },
+        });
+      const writeLedger = (records: UsageSummaryRecord[]) => {
+        const rows = records.flatMap((record) =>
+          record.requestExecutionIds!.map((executionId) => ({
+            schemaVersion: 1,
+            id: `ledger-${executionId}`,
+            timestamp: new Date(now).toISOString(),
+            localDate,
+            localMonth: localDate.slice(0, 7),
+            sessionId: record.sessionId,
+            model: 'qwen-max',
+            authType: 'openai',
+            source: 'main',
+            executionId,
+            inputTokens: 100,
             outputTokens: 0,
             cachedTokens: 0,
             thoughtsTokens: 0,
-            totalTokens: tokens,
-          },
-        },
-      });
-    mockedLoadUsageHistory.mockResolvedValue([]);
-    vi.mocked(loadLedgerOrEmpty).mockResolvedValueOnce(
-      new Map([[dayKey(now), ledgerDay({ requests: 1, inputTokens: 100 })]]),
-    );
-    expect(
-      reportTokens(
-        (await loadStatsData('today', recordWithTokens(100))).report,
-      ),
-    ).toBe(100);
+            totalTokens: 100,
+            apiDurationMs: 0,
+          })),
+        );
+        const file = core.getTokenUsageFilePath(localDate.slice(0, 7));
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(
+          file,
+          rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+        );
+      };
+      const firstLive = responseRecord('sess-1', ['current-request-1']);
+      mockedLoadUsageHistory.mockResolvedValue([]);
+      writeLedger([firstLive]);
+      expect(
+        reportTokens((await loadStatsData('today', firstLive)).report),
+      ).toBe(100);
 
-    vi.mocked(loadLedgerOrEmpty).mockResolvedValueOnce(
-      new Map([[dayKey(now), ledgerDay({ requests: 4, inputTokens: 400 })]]),
-    );
-    expect(
-      reportTokens(
-        (await loadStatsData('today', recordWithTokens(300))).report,
-      ),
-    ).toBe(400);
+      const nextLive = responseRecord('sess-1', [
+        'current-request-1',
+        'current-request-2',
+        'current-request-3',
+      ]);
+      // A response persisted before an unclean exit can exist without history.
+      const older = responseRecord('ledger-only-session', [
+        'ledger-only-request',
+      ]);
+      writeLedger([nextLive, older]);
+      expect(
+        reportTokens((await loadStatsData('today', nextLive)).report),
+      ).toBe(400);
+      expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(2);
+    } finally {
+      if (previousHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousHome;
+      if (previousRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = previousRuntime;
+      fs.rmSync(fixtureHome, { recursive: true, force: true });
+    }
   });
 
   it.each([
