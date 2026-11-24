@@ -39,7 +39,6 @@ export type HostedActionParkRefusal =
   | HostedCommandStepResumeShapeRefusal
   | 'turn_mismatch'
   | 'recovered_turn'
-  | 'lineage'
   | 'capability_not_advertised'
   | 'input_missing'
   | 'wake_owned'

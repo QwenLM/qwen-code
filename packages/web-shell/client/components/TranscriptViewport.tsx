@@ -589,6 +589,7 @@ export const TranscriptViewport = forwardRef<
                       onRetryFailedPrompt: undefined,
                       showRetryHint: false,
                       failedPromptMessageId: undefined,
+                      failedPromptStatus: undefined,
                       tailContent: undefined,
                       welcomeHeader: undefined,
                       activeTurnStartedAt: undefined,

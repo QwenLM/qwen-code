@@ -2867,11 +2867,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.restoreUnknown': 'Restore local copy',
-  'queue.discardUnknown': 'Discard local copy',
-  'queue.continueEditing': 'Continue editing',
-  'queue.continueEditingConfirm':
-    'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.commandGoalBlocked':
@@ -4429,8 +4424,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
   'userMessage.automatic.title': 'Automatic trigger',
-  'userMessage.sendFailed': 'Failed to send',
-  'userMessage.retrySend': 'Retry sending message',
+  'userMessage.retrySend': 'Resend',
+  'userMessage.retryUncertain': 'May not have sent — click to resend',
+  'userMessage.deliveryUncertain':
+    'Message may not have sent. Click ! to resend.',
   'userMessage.edit': 'Edit message',
   'message.moreActions': 'More message actions',
   ...MESSAGE_DELETION_MESSAGES_EN,
