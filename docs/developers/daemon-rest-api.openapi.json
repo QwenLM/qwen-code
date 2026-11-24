@@ -3822,6 +3822,11 @@
             "x-qwen-capability": "turn_skill_file_snapshot",
             "description": "Retain the admitted turn's managed Skill files."
           },
+          "requireSessionSkillEffects": {
+            "type": "boolean",
+            "x-qwen-capability": "turn_skill_session_effects_check",
+            "description": "With pinSkills, reject before admission if a captured managed Skill requires unsupported session-scoped effects."
+          },
           "pinExtensions": {
             "type": "boolean",
             "x-qwen-capability": "turn_extension_store_lease",
@@ -3908,6 +3913,10 @@
           },
           "eventEpoch": {
             "type": "string"
+          },
+          "sessionSkillEffectsChecked": {
+            "const": true,
+            "description": "The runtime checked the admitted Skill snapshot for unsupported session-scoped effects."
           },
           "extensionGeneration": {
             "type": "integer",
