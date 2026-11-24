@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
@@ -694,32 +695,48 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
+    // A pool wait spends no admission budget — 10 charged failures outlive
+    // both budgets (pre 5, post 10) — but it ages out at the churn cap
+    // (4 × the phase budget) like a generation wait: an ownership handoff
+    // that never resolves must not keep the Turn retrying forever.
     @ParameterizedTest
     @CsvSource({"503,harness_pool_unavailable", "409,harness_owner_still_live",
             "409,harness_placement_changed", "409,harness_placement_quiescing", "409,harness_placement_released"})
-    void poolCapacityAndOwnershipWaitsOutliveBothAdmissionBudgets(int status, String code) {
+    void poolCapacityAndOwnershipWaitsOutliveTheChargedBudgetsButAgeOut(int status, String code) {
         for (boolean submitted : List.of(false, true)) {
             var failure = new ManagedAgentException(status, code, "Waiting for a Harness owner");
-            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 10, unboundSessionRecord());
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                     anyString(), anyLong(), eq(true));
             verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
             verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+            AgentStateStore aged = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(aged).failTurn(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq(submitted ? "hosted_harness_unavailable_after_admission" : "hosted_harness_unavailable"),
+                    anyString());
+            verify(aged, never()).scheduleTurnRetry(anyString(), anyString(), anyString(), anyString(), anyLong(), anyBoolean());
         }
     }
 
+    // The drain cutoff and a closing Session wait the same way: exempt
+    // below the churn cap, terminal with the phase's unavailable code at it.
     @ParameterizedTest
     @ValueSource(strings = {"hosted_harness_quiescing", "hosted_session_closing"})
-    void hostedDrainCutoffOutlivesBothAdmissionBudgets(String code) {
+    void hostedDrainCutoffOutlivesTheChargedBudgetsButAgesOut(String code) {
         for (boolean submitted : List.of(false, true)) {
             var failure = mock(HarnessHttpFailure.class);
             when(failure.getStatusCode()).thenReturn(409);
             when(failure.getErrorCode()).thenReturn(code);
-            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 10, unboundSessionRecord());
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                     anyString(), anyLong(), eq(true));
             verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
             verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+            AgentStateStore aged = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(aged).failTurn(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq(submitted ? "hosted_harness_unavailable_after_admission" : "hosted_harness_unavailable"),
+                    anyString());
+            verify(aged, never()).scheduleTurnRetry(anyString(), anyString(), anyString(), anyString(), anyLong(), anyBoolean());
         }
     }
 
@@ -2690,6 +2707,87 @@ class HarnessCoordinatorTest {
         }
     }
 
+    // Pool waits age out like generation waits: a closing Session, a full
+    // cold-open slot or a drain cutoff that never resolves must not keep a
+    // Turn retrying forever — a caller can fill an instance's cold-open
+    // slots with its own suspended Sessions. The cap is 4 × the phase's
+    // budget (pre 5, post 10): the last run below it still retries exempt,
+    // and at it the Turn fails with its phase's unavailable code.
+    @ParameterizedTest(name = "{0} submitted={1} consecutive={2} terminal={3}")
+    @CsvSource({
+            "hosted_session_closing, false, 19, false",
+            "hosted_session_closing, false, 20, true",
+            "hosted_session_open_busy, false, 19, false",
+            "hosted_session_open_busy, false, 20, true",
+            "hosted_harness_quiescing, false, 20, true",
+            "hosted_session_closing, true, 39, false",
+            "hosted_session_closing, true, 40, true",
+            "hosted_session_open_busy, true, 40, true"})
+    void boundsPoolWaitsAtTheChurnCap(String code, boolean submitted,
+            int consecutiveFailures, boolean terminal) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt", List.of(Map.of("type", "text", "text", "wait")),
+                "sha256:" + "a".repeat(64), "RUNNING", submitted, null, 0L,
+                "previous-owner", Long.MAX_VALUE, consecutiveFailures,
+                consecutiveFailures, consecutiveFailures, null, null, null,
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session"))
+                .thenReturn(unboundSessionRecord());
+        HarnessHttpFailure wait = new HarnessHttpFailure("wait", null, 409,
+                "{\"code\":\"" + code + "\"}", Map.of("code", code));
+        when(harness.createOrLoad("tenant", "session", false))
+                .thenThrow(wait);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        if (terminal) {
+            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq(submitted
+                            ? "hosted_harness_unavailable_after_admission"
+                            : "hosted_harness_unavailable"), anyString());
+            verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyBoolean());
+        } else {
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(),
+                    anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    // A wedged teardown is a refusal, not a wait: the Turn fails at once
+    // under the code that names the operator recovery it needs, before
+    // and after admission alike, without spending a retry.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void teardownBlockedFailsImmediatelyWithItsOwnCode(boolean submitted) {
+        HarnessHttpFailure wedged = new HarnessHttpFailure("wedged", null, 409,
+                "{\"code\":\"hosted_session_teardown_blocked\"}",
+                Map.of("code", "hosted_session_teardown_blocked"));
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(wedged,
+                submitted, 0, unboundSessionRecord());
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_session_teardown_blocked"),
+                anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+    }
+
     // Missing admission acknowledgement does not prove this prompt never ran.
     // Retain its cancellation entry rather than orphaning native input.
     @Test
@@ -3651,6 +3749,44 @@ class HarnessCoordinatorTest {
         });
     }
 
+    @Test
+    void aCertifiedActionParkEndsTheDriveWithoutATransientRetry() {
+        AgentStateStore store = boundCancellingStore();
+        TurnRecord running = turn("tenant", "session", "turn", "prompt", "epoch", 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(running));
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(running));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        when(store.parkTurnForAction(eq("tenant"), eq("session"), eq("turn"), anyString()))
+                .thenReturn(true);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot"));
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch");
+        when(stream.next()).thenReturn(null);
+        when(harness.stream("tenant", "session", 1, "epoch")).thenReturn(stream);
+        HarnessCoordinator coordinator = coordinator(store, harness);
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+
+        // The park presents the lease this drive claimed, never the stale row's owner.
+        ArgumentCaptor<String> owner = ArgumentCaptor.forClass(String.class);
+        verify(store).claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                owner.capture(), any(Duration.class));
+        verify(store).parkTurnForAction("tenant", "session", "turn", owner.getValue());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(stream).close();
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"idle", "controls", "terminal", "transport-error"})
     void anInactiveRecoveryBlockedStreamParksWithoutSettlingOrReplaying(String mode) throws Exception {
@@ -4114,8 +4250,9 @@ class HarnessCoordinatorTest {
         when(stream.eventEpoch()).thenReturn("epoch-new");
         when(stream.next()).thenReturn(new SourceEvent(10L, "turn_complete", Map.of("stopReason", "end_turn"),
                 "prompt", Map.of())).thenReturn(null);
-        long consumedWatermark = continuing ? 9 : 0;
-        when(harness.stream("tenant", "session", consumedWatermark, "epoch-new")).thenReturn(stream);
+        // F1: both arms consume from the continuation's admission — the
+        // epoch-less arm drives the continuation-ready park itself.
+        when(harness.stream("tenant", "session", 9L, "epoch-new")).thenReturn(stream);
         var coordinator = new HarnessCoordinator(store, harness, new HarnessEventProjector(), runtime,
                 directExecutor(), Clock.systemUTC(), new ManagedAgentProperties());
         try {
@@ -4133,7 +4270,10 @@ class HarnessCoordinatorTest {
                     eq("epoch-old"), eq("epoch-old"), eq("epoch-new"), eq(0L));
             order.verify(harness).continueManagedRuntime("tenant", "session", "prompt", "checkpoint-new", "activation-new");
         } else {
-            verify(harness, never()).continueManagedRuntime(anyString(), anyString(), anyString(), anyString(), anyString());
+            // The recovery arm still never takes an epoch-less Turn; the
+            // coded-409 arm drives the continuation-ready park itself (F1).
+            verify(harness, times(vanishesAgain ? 0 : 1)).continueManagedRuntime(
+                    "tenant", "session", "prompt", "checkpoint-new", "activation-new");
             verify(store, never()).bindRecoveredHarness(anyString(), anyString(), anyString(), anyString(),
                     anyString(), anyString());
         }
@@ -4144,10 +4284,160 @@ class HarnessCoordinatorTest {
         } else {
             order.verify(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
                     eq(continuing ? "epoch-new" : null), eq(continuing ? "epoch-new" : "epoch-old"),
-                    eq("epoch-new"), eq(consumedWatermark));
-            order.verify(harness).stream("tenant", "session", consumedWatermark, "epoch-new");
+                    eq("epoch-new"), eq(continuing ? 9L : 0L));
+            if (!continuing) {
+                order.verify(harness).continueManagedRuntime("tenant", "session", "prompt",
+                        "checkpoint-new", "activation-new");
+                order.verify(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                        eq("epoch-new"), eq("epoch-new"), eq("epoch-new"), eq(9L));
+            }
+            order.verify(harness).stream("tenant", "session", 9L, "epoch-new");
         }
         verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    // #17521 F1: an epoch-less resubmission whose attach surfaces a
+    // continuation-ready park must drive the continue route — opening the
+    // stream alone never settles such a park. A park that is not
+    // continuation-ready keeps the stream semantics.
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void epochlessResubmissionDrivesOnlyAContinuationReadyPark(boolean ready) {
+        var claimed = turn("tenant", "session", "turn", "prompt", null, 0, true, 0);
+        var current = new AtomicReference<>(claimed);
+        var sessionBoot = new AtomicReference<String>(null);
+        var sessionEpoch = new AtomicReference<String>(null);
+        var store = mock(AgentStateStore.class);
+        var harness = mock(HarnessConnector.class);
+        var runtime = mock(RuntimeWarmer.class);
+        when(runtime.isEnabled()).thenReturn(false);
+        var recovered = mock(HarnessRuntimeRecovery.class);
+        when(recovered.hasUnknownOutcome()).thenReturn(false);
+        when(recovered.isContinuationReady()).thenReturn(ready);
+        when(recovered.getCheckpointId()).thenReturn("checkpoint-new");
+        when(recovered.getActivationId()).thenReturn("activation-new");
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenAnswer(call -> new SessionRecord("tenant", "session",
+                "qwen-code", null, "ACTIVE", sessionBoot.get(), sessionEpoch.get(), 0, 0, 1, 1, null, 1));
+        when(store.findTurn("tenant", "session", "turn")).thenAnswer(call -> Optional.of(current.get()));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"), anyString(), anyString()))
+                .thenAnswer(call -> {
+                    sessionBoot.set(call.getArgument(4));
+                    return true;
+                });
+        doAnswer(call -> {
+            current.set(turn("tenant", "session", "turn", "prompt", null, 0, true, 0));
+            return null;
+        }).when(store).markSubmissionAttempted(eq("tenant"), eq("session"), eq("turn"), anyString());
+        doAnswer(call -> {
+            TurnRecord row = current.get();
+            assertThat(row.submissionAttempted()).isTrue();
+            assertThat((String) call.getArgument(4)).isEqualTo(row.harnessEventEpoch());
+            assertThat((String) call.getArgument(5)).isEqualTo(sessionEpoch.get());
+            current.set(turn("tenant", "session", "turn", "prompt", call.getArgument(6), call.getArgument(7),
+                    row.status(), row.submissionAttempted(), row.retryCount()));
+            sessionEpoch.set(call.getArgument(6));
+            return null;
+        }).when(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                any(), any(), anyString(), anyLong());
+        when(harness.createOrLoad("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", recovered, 9L, "epoch-new"));
+        when(harness.submit(eq("tenant"), eq("session"), eq("prompt"), any(), anyString()))
+                .thenThrow(new HarnessHttpFailure("already admitted", null, 409,
+                        "{\"code\":\"hosted_prompt_recovery_required\"}",
+                        Map.of("code", "hosted_prompt_recovery_required")));
+        when(harness.continueManagedRuntime("tenant", "session", "prompt", "checkpoint-new", "activation-new"))
+                .thenReturn(new Admission(9, "epoch-new"));
+        var stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch-new");
+        when(stream.next()).thenReturn(new SourceEvent(10L, "turn_complete", Map.of("stopReason", "end_turn"),
+                "prompt", Map.of())).thenReturn(null);
+        when(harness.stream("tenant", "session", ready ? 9L : 0L, "epoch-new")).thenReturn(stream);
+        var coordinator = new HarnessCoordinator(store, harness, new HarnessEventProjector(), runtime,
+                directExecutor(), Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        if (ready) {
+            verify(harness).continueManagedRuntime("tenant", "session", "prompt", "checkpoint-new", "activation-new");
+            verify(store, times(2)).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    any(), any(), anyString(), anyLong());
+            verify(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq("epoch-new"), eq("epoch-new"), eq("epoch-new"), eq(9L));
+            verify(harness).stream("tenant", "session", 9L, "epoch-new");
+        } else {
+            verify(harness, never()).continueManagedRuntime(anyString(), anyString(), anyString(), anyString(),
+                    anyString());
+            verify(store, times(1)).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    any(), any(), anyString(), anyLong());
+            verify(harness).stream("tenant", "session", 0L, "epoch-new");
+        }
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    // #14387 consistency: the epoch-less continuation drive must refuse a
+    // workflow Turn the same way the bound recovery arm does — continuing
+    // re-runs the deterministic script while the first run stays
+    // unwitnessed. Same-boot attach so the pre-submit generation check
+    // passes and the resubmission reaches the coded-409 arm.
+    @Test
+    void epochlessWorkflowResubmissionBlocksInsteadOfContinuing() {
+        var claimed = new TurnRecord("tenant", "session", "turn", "prompt",
+                List.of(Map.of("type", "workflow_launch", "script", "run")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, null, 0L,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null, null,
+                1, 1, null, 1);
+        var current = new AtomicReference<>(claimed);
+        var sessionEpoch = new AtomicReference<String>(null);
+        var store = mock(AgentStateStore.class);
+        var harness = mock(HarnessConnector.class);
+        var runtime = mock(RuntimeWarmer.class);
+        when(runtime.isEnabled()).thenReturn(false);
+        var recovered = mock(HarnessRuntimeRecovery.class);
+        when(recovered.hasUnknownOutcome()).thenReturn(false);
+        when(recovered.isContinuationReady()).thenReturn(true);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenAnswer(call -> new SessionRecord("tenant", "session",
+                "qwen-code", null, "ACTIVE", "boot-new", sessionEpoch.get(), 0, 0, 1, 1, null, 1));
+        when(store.findTurn("tenant", "session", "turn")).thenAnswer(call -> Optional.of(current.get()));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"), anyString(), anyString()))
+                .thenReturn(true);
+        when(store.markTurnRecoveryBlocked(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                eq(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED), anyString())).thenReturn(true);
+        doAnswer(call -> {
+            current.set(turn("tenant", "session", "turn", "prompt", null, 0, true, 0));
+            return null;
+        }).when(store).markSubmissionAttempted(eq("tenant"), eq("session"), eq("turn"), anyString());
+        doAnswer(call -> {
+            TurnRecord row = current.get();
+            current.set(turn("tenant", "session", "turn", "prompt", call.getArgument(6), call.getArgument(7),
+                    row.status(), row.submissionAttempted(), row.retryCount()));
+            sessionEpoch.set(call.getArgument(6));
+            return null;
+        }).when(store).recordRecoveryAdmission(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                any(), any(), anyString(), anyLong());
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", recovered, 9L, "epoch-new"));
+        when(harness.submit(eq("tenant"), eq("session"), eq("prompt"), any(), anyString()))
+                .thenThrow(new HarnessHttpFailure("already admitted", null, 409,
+                        "{\"code\":\"hosted_prompt_recovery_required\"}",
+                        Map.of("code", "hosted_prompt_recovery_required")));
+        var coordinator = new HarnessCoordinator(store, harness, new HarnessEventProjector(), runtime,
+                directExecutor(), Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).markTurnRecoveryBlocked(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                eq(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED), anyString());
+        verify(harness, never()).continueManagedRuntime(anyString(), anyString(), anyString(), anyString(),
+                anyString());
+        verify(harness, never()).stream(anyString(), anyString(), anyLong(), anyString());
     }
 
     @Test

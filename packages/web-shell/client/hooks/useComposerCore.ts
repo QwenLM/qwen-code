@@ -52,10 +52,8 @@ import {
 } from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
-import {
-  useOptionalWorkspace,
-  type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from './useComposerWorkspace.js';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
@@ -84,6 +82,18 @@ import {
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
+import {
+  caretGraphemeColumn,
+  discardMirror,
+  logicalLineStarts,
+  lineContentEnd,
+  visualLineStartsAround,
+  nextGraphemeBoundary,
+  offsetAtGraphemeColumn,
+  lineIndexAt,
+  revealCaret,
+  touchLayoutFingerprint,
+} from '../utils/touchCaret';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
@@ -1054,6 +1064,38 @@ function getFollowupRemainder(
   return remainder.length > 0 ? remainder : null;
 }
 
+/**
+ * Line-aware caret target for the touch editing-row direction keys. Right
+ * steps a whole grapheme (never inside a surrogate pair); Up/Down move between
+ * the given displayed lines (visual wrap included when measured), holding the
+ * preferred grapheme column across a vertical run and clamping it to shorter
+ * lines; leaving the first/last line clamps to the document start/end, matching
+ * native textarea behavior.
+ */
+export function computeCaretTarget(
+  text: string,
+  start: number,
+  end: number,
+  direction: 'up' | 'down' | 'right',
+  lineStarts: number[] = logicalLineStarts(text),
+  preferredColumn?: number,
+  selectionDirection?: HTMLTextAreaElement['selectionDirection'],
+): number {
+  if (direction === 'right') {
+    return start === end ? nextGraphemeBoundary(text, end) : end;
+  }
+  const caret = selectionDirection === 'backward' ? start : end;
+  const index = lineIndexAt(lineStarts, caret);
+  const column =
+    preferredColumn ?? caretGraphemeColumn(text, caret, lineStarts);
+  const target = index + (direction === 'up' ? -1 : 1);
+  if (target < 0) return 0;
+  if (target >= lineStarts.length) return text.length;
+  const targetStart = lineStarts[target];
+  const targetEnd = lineContentEnd(text, lineStarts, target);
+  return offsetAtGraphemeColumn(text, targetStart, targetEnd, column);
+}
+
 export function mapRestoredInputAnnotationsAfterTextChange(
   annotations: readonly DaemonInputAnnotation[],
   previousText: string,
@@ -1562,6 +1604,26 @@ function createImageIngestionLane(generation: number): ImageIngestionLane {
   };
 }
 
+function createComposerMirrorRef(
+  textareaRef: React.MutableRefObject<HTMLTextAreaElement | null>,
+  hosts: React.MutableRefObject<Set<HTMLTextAreaElement>>,
+): React.RefCallback<HTMLTextAreaElement> &
+  React.RefObject<HTMLTextAreaElement | null> {
+  const callback = (el: HTMLTextAreaElement | null) => {
+    const previous = textareaRef.current;
+    if (previous === el) return;
+    if (previous) {
+      discardMirror(previous);
+      hosts.current.delete(previous);
+    }
+    textareaRef.current = el;
+  };
+  // Expose the live node for imperative focus/blur/selection consumers.
+  return Object.defineProperty(callback, 'current', {
+    get: () => textareaRef.current,
+  }) as typeof callback & React.RefObject<HTMLTextAreaElement | null>;
+}
+
 export interface UseComposerCoreReturn {
   containerRef: React.RefObject<HTMLDivElement | null>;
   viewRef: React.RefObject<EditorView | null>;
@@ -1603,6 +1665,9 @@ export interface UseComposerCoreReturn {
   ) => void;
   removeInlineTags: (predicate?: (tag: WebShellComposerTag) => boolean) => void;
   insertText: (text: string, options?: WebShellComposerTextOptions) => void;
+  pressEditingKey: (key: 'up' | 'down' | 'right' | 'slash') => void;
+  resetVerticalColumn: () => void;
+  setComposing: (active: boolean) => void;
   setText: (text: string) => void;
   submit: (input?: WebShellComposerInput) => void;
   clear: (options?: { text?: boolean; tags?: boolean }) => void;
@@ -1690,7 +1755,7 @@ export function useComposerCore(
 
   const persistFileReferencesRef = useRef(persistFileReferences);
   persistFileReferencesRef.current = persistFileReferences;
-  const workspace = useOptionalWorkspace();
+  const workspace = useOptionalComposerWorkspace();
   const { language, t } = useI18n();
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
@@ -1758,6 +1823,30 @@ export function useComposerCore(
   // Mirrors the CodeMirror updateListener contract: every draft change —
   // typing or programmatic (setText, clear, history restore, post-submit
   // clear) — notifies onInputTextChange, so parent trackers never go stale.
+  // Native textareas hold the desired column for a whole vertical run; keep it
+  // across consecutive up/down presses until a horizontal move, edit or
+  // selection jump resets it.
+  const verticalColumnRef = useRef<number | null>(null);
+  // The displayed line the last vertical move actually landed on. At a
+  // wrap boundary the next press must use this line, not the line of the
+  // character after the caret — otherwise Up re-selects the same offset.
+  const verticalLineStartRef = useRef<number | null>(null);
+  // Cache the layout that packed the anchor: reflow can change visual lines
+  // without a selection event, so an offset alone is not a stable identity.
+  const verticalLayoutKeyRef = useRef<string | null>(null);
+  const mirrorHostsRef = useRef<Set<HTMLTextAreaElement>>(new Set());
+  const mobileTextareaCallbackRef = useMemo(
+    () => createComposerMirrorRef(mobileTextareaRef, mirrorHostsRef),
+    [],
+  );
+  const expandedTextareaCallbackRef = useMemo(
+    () => createComposerMirrorRef(expandedTextareaRef, mirrorHostsRef),
+    [],
+  );
+  // selectionchange (React onSelect) also fires for our own setSelectionRange
+  // calls; without this exemption the reset would erase the column we just
+  // remembered and the vertical run would crawl like the pre-fix behavior.
+  const programmaticSelectionRef = useRef<[number, number] | null>(null);
   const setMobileText = useCallback((text: string) => {
     if (!applyingSharedDraftRef.current && mobileTextRef.current !== text) {
       markComposerDraftEdited(draftIdentityRef.current.storageKey);
@@ -1770,6 +1859,13 @@ export function useComposerCore(
       );
     mobileTextVersionRef.current += 1;
     mobileTextRef.current = text;
+    verticalColumnRef.current = null;
+    verticalLineStartRef.current = null;
+    verticalLayoutKeyRef.current = null;
+    programmaticSelectionRef.current = null;
+    if (text === '') {
+      for (const host of mirrorHostsRef.current) discardMirror(host);
+    }
     setMobileTextState(text);
     if (draftIdentityRef.current.storageKey === undefined) {
       unscopedDraftEditedRef.current = true;
@@ -1789,6 +1885,13 @@ export function useComposerCore(
       onInputTextChangeRef.current?.(mobileTextRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    const hosts = mirrorHostsRef.current;
+    return () => {
+      for (const host of hosts) discardMirror(host);
+      hosts.clear();
+    };
   }, []);
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
@@ -2272,6 +2375,7 @@ export function useComposerCore(
               lane.activeReaders.add(reader),
             onReaderSettled: (reader: FileReader) =>
               lane.activeReaders.delete(reader),
+            isCancelled: () => imageIngestionLaneRef.current !== lane,
           };
           const imageResult = await readImageTransfer(
             transfer.imageCandidates,
@@ -3398,6 +3502,19 @@ export function useComposerCore(
         ? getFollowupCompletion(editorText, followup.suggestion)
         : null;
     const sourceText = textOverride ?? followupCompletion ?? editorText;
+    // Slash-command completions stay editable on touch before a deliberate submit.
+    if (
+      view === null &&
+      followupCompletion &&
+      followupCompletion !== editorText &&
+      /^\s*\//.test(followupCompletion)
+    ) {
+      const editor = expandedTextareaRef.current ?? mobileTextareaRef.current;
+      // Accepting a prefix uses the host's insertion semantics.
+      editor?.setSelectionRange(0, editorText.length);
+      onAcceptFollowupRef.current?.('tab');
+      return true;
+    }
     const leadingTrimLength = sourceText.length - sourceText.trimStart().length;
     const rawText = sourceText.trim();
     const normalizedInlineTags =
@@ -4634,13 +4751,15 @@ export function useComposerCore(
   }, [disabled]);
 
   // Computed in the render scope so the mobile textarea backend can share the
-  // exact placeholder the CodeMirror path shows.
+  // placeholder the CodeMirror path shows. Touch diverges on purpose: the
+  // suggestion bar is the single surface for the suggestion there, so the
+  // textarea keeps its ordinary placeholder instead of repeating the text.
   const followupSuggestion =
     !disabled && followupState?.isVisible && followupState.suggestion
       ? followupState.suggestion
       : null;
   const composerPlaceholder =
-    followupSuggestion ??
+    (isTouchComposer ? null : followupSuggestion) ??
     (shellMode ? t('editor.shellPlaceholder') : placeholderText);
 
   useEffect(() => {
@@ -4974,6 +5093,131 @@ export function useComposerCore(
       setMobileText,
     ],
   );
+
+  const composingRef = useRef(false);
+  const setComposing = useCallback((active: boolean) => {
+    composingRef.current = active;
+  }, []);
+
+  // Touch editing-row keys. The direction keys stay live without a
+  // suggestion (caret navigation the soft keyboard lacks); Right doubles as
+  // the desktop ArrowRight follow-up accept, replacing the draft with the
+  // completion exactly like the CodeMirror keymap. Slash inserts literally:
+  // the textarea backend has no slash menu, so the key is a character
+  // convenience and command browsing stays in the add drawer.
+  const pressEditingKey = useCallback(
+    (key: 'up' | 'down' | 'right' | 'slash') => {
+      if (!isTouchComposer || composingRef.current) return;
+      const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
+      if (!el) return;
+      const text = mobileTextRef.current;
+      mirrorHostsRef.current.add(el);
+      if (key === 'right') {
+        verticalColumnRef.current = null;
+        verticalLineStartRef.current = null;
+        const followup = followupStateRef.current;
+        const completion = getFollowupCompletion(
+          text,
+          followup?.isVisible ? followup.suggestion : null,
+        );
+        // Only accept when there is an actual remainder: with the draft already
+        // equal to the suggestion, Right must move the caret, not re-set the
+        // same text and consume the suggestion.
+        if (completion && completion.length > text.length) {
+          historyBrowseActiveRef.current = false;
+          setMobileText(completion);
+          const restoreCaret = () => {
+            programmaticSelectionRef.current = [
+              completion.length,
+              completion.length,
+            ];
+            el.setSelectionRange(completion.length, completion.length);
+            revealCaret(el, completion, completion.length);
+          };
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(restoreCaret);
+          } else {
+            window.setTimeout(restoreCaret, 0);
+          }
+          el.focus();
+          onAcceptFollowupRef.current?.('right', { skipOnAccept: true });
+          return;
+        }
+      }
+      if (key === 'slash') {
+        verticalColumnRef.current = null;
+        insertText('/');
+        return;
+      }
+      const start = el.selectionStart ?? text.length;
+      const end = el.selectionEnd ?? start;
+      if (key === 'right') {
+        // A grapheme step skips visual-line enumeration. Only the bounded
+        // viewport reveal below may measure (and cache) the current layout.
+        const target = computeCaretTarget(text, start, end, 'right');
+        programmaticSelectionRef.current = [target, target];
+        el.focus();
+        el.setSelectionRange(target, target);
+        revealCaret(el, text, target);
+        return;
+      }
+      // Up/down: only the visual lines around the caret are measured, and
+      // the preferred column is written here alone — a horizontal or slash
+      // move clears it above and must not write the pre-move column back.
+      // At a wrap boundary the anchor is the line the last vertical move
+      // landed on, not the line of the character after the caret.
+      const caret = el.selectionDirection === 'backward' ? start : end;
+      const anchor =
+        verticalLayoutKeyRef.current === touchLayoutFingerprint(el)
+          ? (verticalLineStartRef.current ?? caret)
+          : caret;
+      const lineStarts = visualLineStartsAround(el, text, anchor);
+      const column =
+        verticalColumnRef.current ??
+        caretGraphemeColumn(text, anchor, lineStarts);
+      const currentIndex = lineIndexAt(lineStarts, anchor);
+      const targetIndex = Math.max(
+        0,
+        Math.min(lineStarts.length - 1, currentIndex + (key === 'up' ? -1 : 1)),
+      );
+      const target = computeCaretTarget(
+        text,
+        anchor,
+        anchor,
+        key,
+        lineStarts,
+        column,
+        el.selectionDirection,
+      );
+      verticalColumnRef.current = column;
+      // A soft-wrap clamp can equal the next line's start; lineIndexAt(target)
+      // would then remember that next line instead of the actual destination.
+      verticalLineStartRef.current = lineStarts[targetIndex];
+      verticalLayoutKeyRef.current = touchLayoutFingerprint(el);
+      programmaticSelectionRef.current = [target, target];
+      el.focus();
+      el.setSelectionRange(target, target);
+      // Reveal after focus: focus-linked styles can change the layout.
+      revealCaret(el, text, target);
+    },
+    [insertText, isTouchComposer, setMobileText],
+  );
+
+  const resetVerticalColumn = useCallback(() => {
+    const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
+    const programmatic = programmaticSelectionRef.current;
+    if (
+      el &&
+      programmatic &&
+      el.selectionStart === programmatic[0] &&
+      el.selectionEnd === programmatic[1]
+    ) {
+      return;
+    }
+    verticalColumnRef.current = null;
+    verticalLineStartRef.current = null;
+    verticalLayoutKeyRef.current = null;
+  }, []);
 
   const getText = useCallback(() => {
     if (isTouchComposer) return mobileTextRef.current;
@@ -5691,8 +5935,8 @@ export function useComposerCore(
     workspaceActionsRef,
     mobileComposer: isTouchComposer
       ? {
-          textareaRef: mobileTextareaRef,
-          expandedTextareaRef,
+          textareaRef: mobileTextareaCallbackRef,
+          expandedTextareaRef: expandedTextareaCallbackRef,
           value: mobileText,
           onChange: handleMobileChange,
           onBlur: () => saveCurrentDraftRef.current(),
@@ -5754,6 +5998,9 @@ export function useComposerCore(
     addTags,
     removeInlineTags,
     insertText,
+    pressEditingKey,
+    resetVerticalColumn,
+    setComposing,
     setText,
     submit,
     clear,

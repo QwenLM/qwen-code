@@ -37,7 +37,10 @@ import {
   hostOffersProgram,
   isAgentProgram,
 } from './types.js';
-import type { HostProgramProbe } from '../session-agents/contract.js';
+import {
+  HOST_PROTOCOL_VERSION,
+  type HostProgramProbe,
+} from '../session-agents/contract.js';
 
 const debug = createDebugLogger('WORKSPACE_AGENTS_STORE');
 
@@ -637,6 +640,18 @@ export function isAgentHostEnrollmentRefusal(error: unknown): boolean {
   );
 }
 
+export class AgentHostReplacementProgramError extends Error {
+  constructor(
+    agentIds: readonly string[],
+    readonly enrollmentRefused: boolean,
+  ) {
+    super(
+      `Agent Host replacement would leave pinned programs unavailable for agents: ${agentIds.join(', ')}. Install the pinned programs or update their bindings before retrying.`,
+    );
+    this.name = 'AgentHostReplacementProgramError';
+  }
+}
+
 /**
  * Enrolls a Host with a token from {@link issueAgentHostEnrollment}.
  *
@@ -725,6 +740,12 @@ export async function enrollAgentHost(
       createdAt: Date.now(),
     };
     if (supersedesHostId !== undefined) {
+      const agents = await prepareAgentHostReplacement(
+        transaction,
+        supersedesHostId,
+        host,
+        registry.hosts,
+      );
       // Files commit independently. Persist the new identity before moving
       // bindings, and retain its id in the token so an I/O failure is retryable.
       await writeAgentHostsUnlocked(projectRoot, {
@@ -735,11 +756,7 @@ export async function enrollAgentHost(
         ],
         enrollment: { ...enrollment, replacementHostId: host.id },
       });
-      await replaceAgentHostInTransaction(
-        transaction,
-        supersedesHostId,
-        host.id,
-      );
+      if (agents) await transaction.writeAgents(agents);
     }
     const { enrollment: _used, ...rest } = registry;
     await writeAgentHostsUnlocked(projectRoot, {
@@ -921,39 +938,63 @@ export async function removeAgentHost(
   });
 }
 
-/** Moves every agent bound to `oldHostId` onto `newHostId`. */
-async function replaceAgentHostInTransaction(
+/** Checks the resulting topology before either independent file commits. */
+async function prepareAgentHostReplacement(
   transaction: AgentStoreTransaction,
   oldHostId: string,
-  newHostId: string,
-): Promise<void> {
+  replacement: AgentHost,
+  hosts: readonly AgentHost[],
+): Promise<WorkspaceAgent[] | undefined> {
   const agents = await transaction.readAgents();
-  if (
-    !agents.some(
-      (agent) =>
-        agent.execution?.mode === 'managed-host' &&
-        agent.execution.hostIds.includes(oldHostId),
-    )
-  ) {
-    return;
+  const finalHosts = [
+    ...hosts.filter(
+      (host) => host.id !== oldHostId && host.id !== replacement.id,
+    ),
+    replacement,
+  ];
+  const unavailable: string[] = [];
+  let changed = false;
+  const next = agents.map((agent): WorkspaceAgent => {
+    const execution = agent.execution;
+    if (
+      execution?.mode !== 'managed-host' ||
+      (!execution.hostIds.includes(oldHostId) &&
+        !execution.hostIds.includes(replacement.id))
+    ) {
+      return agent;
+    }
+    const hostIds = [
+      ...new Set(
+        execution.hostIds.map((id) => (id === oldHostId ? replacement.id : id)),
+      ),
+    ];
+    const { provider } = execution;
+    if (
+      agent.retiredAt === undefined &&
+      provider &&
+      !finalHosts.some(
+        (host) =>
+          hostIds.includes(host.id) &&
+          (host.id === replacement.id ||
+            host.protocol === HOST_PROTOCOL_VERSION) &&
+          hostOffersProgram(host, provider),
+      )
+    ) {
+      unavailable.push(agent.id);
+    }
+    if (!execution.hostIds.includes(oldHostId)) return agent;
+    changed = true;
+    return { ...agent, execution: { ...execution, hostIds } };
+  });
+  if (unavailable.length > 0) {
+    const enrolled = hosts.some(
+      (host) =>
+        host.id === replacement.id &&
+        host.secretHash === replacement.secretHash,
+    );
+    throw new AgentHostReplacementProgramError(unavailable, !enrolled);
   }
-  await transaction.writeAgents(
-    agents.map((agent): WorkspaceAgent => {
-      const execution = agent.execution;
-      if (
-        execution?.mode !== 'managed-host' ||
-        !execution.hostIds.includes(oldHostId)
-      ) {
-        return agent;
-      }
-      const hostIds = [
-        ...new Set(
-          execution.hostIds.map((id) => (id === oldHostId ? newHostId : id)),
-        ),
-      ];
-      return { ...agent, execution: { ...execution, hostIds } };
-    }),
-  );
+  return changed ? next : undefined;
 }
 
 /**

@@ -5,8 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -212,9 +212,9 @@ final class JournalHistoryQueries {
         }
         String key = JournalStoreRows.commandKeyHash(operation, commandId);
         var sizes = jdbc.query("SELECT journal_revision, byte_length FROM ma_session_journal_tx"
-                        + " WHERE tenant_id = ? AND session_id = ? AND command_key_hash = ? AND journal_revision <= ?",
+                        + " WHERE tenant_id = ? AND session_id = ? AND command_ref = ? AND journal_revision <= ?",
                 (row, index) -> new TransactionSize(row.getLong("journal_revision"), row.getLong("byte_length")),
-                tenantId, sessionId, key, through);
+                tenantId, sessionId, ManagedSchemaKeys.identity(key), through);
         StoredTransaction transaction = null;
         if (!sizes.isEmpty()) {
             TransactionSize size = sizes.getFirst();
@@ -265,7 +265,7 @@ final class JournalHistoryQueries {
         try {
             JournalStoreRows.HeadRow head = storeRows.requireHead(tenantId, sessionId);
             if (!Set.of("ACTIVE", "SEALED").contains(head.state())
-                    || !"READY".equals(head.recoveryStatus()) || head.storageVersion() != JournalStoreRows.STORAGE_VERSION
+                    || !"READY".equals(head.recoveryStatus())
                     || head.compactedThroughRevision() != 0 || head.latestCheckpointResourceId() != null
                     || head.journalRevision() < 1 || head.committedSequence() < 0
                     || workspaceId != null && !workspaceId.equals(head.workspaceId())) {
@@ -284,11 +284,16 @@ final class JournalHistoryQueries {
                         || !Objects.equals(digest, row.previousCommitDigest())) {
                     return false;
                 }
-                if (row.recordBytes() == null) {
+                byte[] bytes = row.recordBytes();
+                if (bytes == null && packs != null) {
+                    bytes = packs.resolveBytes(tenantId, sessionId, row.journalRevision(),
+                            row.recordDigest(), row.byteLength());
+                }
+                if (bytes == null) {
                     return false;
                 }
-                JournalStoreRows.validateUtf8JsonLines(row.recordBytes(), revision == 1 ? 2 : row.eventCount() + 1);
-                String[] lines = new String(row.recordBytes(), StandardCharsets.UTF_8).split("\n");
+                JournalStoreRows.validateUtf8JsonLines(bytes, revision == 1 ? 2 : row.eventCount() + 1);
+                String[] lines = new String(bytes, StandardCharsets.UTF_8).split("\n");
                 if (revision == 1) {
                     if (!"session.create".equals(row.operation()) || row.eventCount() != 0
                             || row.firstSequence() != 0 || row.lastSequence() != 0 || lines.length != 2
@@ -308,8 +313,7 @@ final class JournalHistoryQueries {
                             || !sessionId.equals(engine.path("sessionId").asText())
                             || !"managed_session_header_v1".equals(header.path("subtype").asText())
                             || !sessionId.equals(header.path("sessionId").asText())
-                            || value.size() != 7 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
-                            || !"managed-session/1".equals(value.path("minimumReader").asText())
+                            || value.size() != 6 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
                             || !"managed".equals(value.path("engine").asText())
                             || !"hosted-harness".equals(value.path("createdBy").asText())
                             || value.has("baseTranscriptProof") || !initialScope(value, head)) {
@@ -401,10 +405,9 @@ final class JournalHistoryQueries {
 
     void requireInitialResource(JsonNode ref, JournalStoreRows.HeadRow head, String kind) throws IOException {
         WorkspaceRecoveryReader.validateRef(ref);
-        String scope = ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId());
         var resources = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
-                        + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ?",
-                storeRows.resourceMapper, ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
+                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                storeRows.resourceMapper, head.tenantId(), head.sessionId(), ref.path("resourceId").asText());
         if (resources.size() != 1) {
             throw JournalStoreRows.journalCorrupt();
         }

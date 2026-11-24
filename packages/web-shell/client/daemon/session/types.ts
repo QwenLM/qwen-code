@@ -193,6 +193,19 @@ export interface DaemonConnectionState {
    * the previous session's artifacts leak under the new one.
    */
   restoredArtifactsSessionId?: string;
+  /**
+   * Artifact count captured from the session-list summary at click time, so
+   * the header artifact entry can show it before the load response lands.
+   * A hint only: the load-embedded snapshot and the gated fetch supersede it,
+   * and the provider clears it once authoritative data commits.
+   */
+  artifactCountHint?: number;
+  /**
+   * Session the artifactCountHint belongs to. Same keying contract as
+   * restoredArtifactsSessionId: consumers must only use the hint when this
+   * matches the current sessionId.
+   */
+  artifactCountHintSessionId?: string;
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;
@@ -474,6 +487,8 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Caller-generated key used to deduplicate retried prompt admissions. */
+  idempotencyKey?: string;
   /** Revalidates the caller before every HTTP attempt, including client recovery. */
   beforeDispatch?: (clientId: string | undefined) => void;
   /**
@@ -601,6 +616,7 @@ export interface DaemonSessionActions {
       | 'files'
       | 'inputAnnotations'
       | 'retry'
+      | 'idempotencyKey'
       | 'onAdmissionStarted'
       | 'onAdmitted'
     >,
@@ -646,6 +662,9 @@ export interface DaemonSessionActions {
     options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      /** Artifact count from the clicked session's list summary, shown in
+       * the header entry before the load response lands. Omit when unknown. */
+      artifactCountHint?: number;
     },
   ): Promise<void>;
   /** `memory` replay is reserved for the provider's live-journal repair. */
@@ -729,6 +748,13 @@ export interface DaemonSessionActions {
     pr: Omit<DaemonSessionPrInfo, 'issues'>,
   ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Best-effort: with no live session this is a no-op, and failures are
+   * logged, never surfaced as notices — the local mark never depends on
+   * the outcome.
+   */
+  rateAssistantTurn(promptId: string, rating: 'up' | 'down'): Promise<void>;
   generateSessionContent(
     prompt: string,
     opts?: { signal?: AbortSignal },

@@ -101,6 +101,7 @@ export const createMockCommandContext = (
           },
         },
         promptCount: 0,
+        userPromptCount: 0,
       } as SessionStatsState,
     },
   };

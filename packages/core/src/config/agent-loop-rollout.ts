@@ -39,16 +39,16 @@ export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
 // otherwise.
 export const UNIFIED_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
   headless: true,
-  acp: false,
+  acp: true,
   ink: true,
-  opentui: false,
+  opentui: true,
   'agent-core': true,
   speculation: false,
   hosted: false,
 };
 
 export const EVENT_BUS_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
-  headless: false,
+  headless: true,
   acp: false,
   ink: false,
   opentui: false,

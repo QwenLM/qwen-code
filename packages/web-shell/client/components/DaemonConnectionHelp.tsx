@@ -1,4 +1,4 @@
-import { getTranslator, type WebShellLanguage } from '../i18n';
+import { useTranslator, type WebShellLanguage } from '../i18n';
 
 export function DaemonConnectionHelp({
   language,
@@ -7,7 +7,7 @@ export function DaemonConnectionHelp({
   language: WebShellLanguage;
   expanded?: boolean;
 }) {
-  const t = getTranslator(language);
+  const t = useTranslator(language);
   const pageOrigin = window.location.origin;
 
   return (

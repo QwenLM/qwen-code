@@ -17,6 +17,7 @@ import { useI18n } from '../../i18n';
 import { useManagedRecoveryText } from './managed-recovery-messages';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
+import type { Message } from '../../adapters/types';
 import {
   ToolDetailsContext,
   type ToolDetailsLoader,
@@ -62,11 +63,6 @@ import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type { ManagedLifecycleAction } from './managed-agent-provider';
 import { useManagedRecovery } from './use-managed-recovery';
 import { useManagedTurnCancel } from './use-managed-turn-cancel';
-import { ManagedRecoveryPanel } from './ManagedRecoveryPanel';
-import {
-  buildManagedRecoveryHandoff,
-  type ManagedRecoveryHandoff,
-} from './managed-recovery-handoff';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { managedActionKey, useManagedActions } from './use-managed-actions';
 import { ManagedQuestionForm } from './ManagedQuestionForm';
@@ -90,6 +86,8 @@ import {
 } from './ManagedArchivedSessions';
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
+import { ManagedArtifactLibraryPage } from './ManagedArtifactLibraryPage';
+import { ManagedSurfaceDecisionsDialog } from './ManagedSurfaceDecisionsDialog';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
@@ -295,50 +293,62 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
+const FAILURE_MESSAGES: Record<
+  string,
+  readonly [string, string, string, string]
+> = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
+    '模型介面要求支付（HTTP 402），可能是餘額不足或計費受限。請檢查供應商帳戶餘額與計費狀態後重試。',
     'Требуется оплата API модели (HTTP 402). Перед повтором проверьте баланс и биллинг аккаунта поставщика.',
   ],
   model_authentication_failed: [
     'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
     '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
+    '模型介面鑑權失敗（HTTP 401）。請檢查供應商憑證配置。',
     'Ошибка аутентификации API модели (HTTP 401). Проверьте настроенные учётные данные поставщика.',
   ],
   model_access_denied: [
     'Model API access denied (HTTP 403). Check the provider account and model permissions.',
     '模型接口拒绝访问（HTTP 403）。请检查供应商账户与模型访问权限。',
+    '模型介面拒絕訪問（HTTP 403）。請檢查供應商帳戶與模型訪問權限。',
     'Доступ к API модели запрещён (HTTP 403). Проверьте аккаунт поставщика и права на модель.',
   ],
   model_request_timeout: [
     'The model API request timed out. Try again later.',
     '模型接口请求超时，请稍后重试。',
+    '模型介面請求超時，請稍後重試。',
     'Запрос к API модели превысил время ожидания. Попробуйте позже.',
   ],
   model_rate_limited: [
     'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
     '模型接口触发限流（HTTP 429），请稍后重试。',
+    '模型介面觸發限流（HTTP 429），請稍後重試。',
     'Превышен лимит запросов API модели (HTTP 429). Подождите и попробуйте позже.',
   ],
   model_request_rejected: [
     'The model API rejected the request. Check the model configuration and input.',
     '模型接口拒绝了请求，请检查模型配置与输入内容。',
+    '模型介面拒絕了請求，請檢查模型配置與輸入內容。',
     'API модели отклонил запрос. Проверьте конфигурацию модели и входные данные.',
   ],
   model_service_unavailable: [
     'The model API service is unavailable. Try again later.',
     '模型接口服务暂不可用，请稍后重试。',
+    '模型介面服務暫不可用，請稍後重試。',
     'Сервис API модели недоступен. Попробуйте позже.',
   ],
   model_request_failed: [
     'Model API request failed. Check the server logs for this session before retrying.',
     '模型接口请求失败，请根据当前会话检查服务日志后再重试。',
+    '模型介面請求失敗，請根據當前會話檢查服務日誌後再重試。',
     'Запрос к API модели не удался. Перед повтором проверьте журналы сервера для этой сессии.',
   ],
   hosted_turn_failed: [
     'The turn failed. Check the server logs for this session to identify the cause.',
     '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
+    '本輪執行失敗，請根據當前會話檢查服務日誌以定位具體原因。',
     'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
 };
@@ -433,6 +443,10 @@ function ManagedSessionsContent({
     interactive,
     detail.refreshSummary,
   );
+  // The recovery hold can disagree with the raw summary while the hook keeps a
+  // confirmed verdict through one replica miss, so send gates follow the hook.
+  const recoveryCanSend = recovery.canSend ?? summary?.capabilities.canSend;
+  const sessionEnded = recovery.value?.reasonCode === 'session_not_active';
   const turnCancel = useManagedTurnCancel(
     provider,
     clientId,
@@ -441,7 +455,6 @@ function ManagedSessionsContent({
     interactive && (!hostSessionOnly || cancellationEnabled),
     detail.refreshSummary,
   );
-  const [handoff, setHandoff] = useState<ManagedRecoveryHandoff>();
   const sessionWorkspaceId =
     sessionId && detail.summary?.sessionId === sessionId
       ? (detail.summary.workspace?.workspaceId ?? null)
@@ -501,11 +514,13 @@ function ManagedSessionsContent({
   const terminalIds = useRef(new Map<string, string>());
   const terminalOpen = !!sessionId && terminalSession === sessionId;
   const publicChildren = detail.summary?.capabilities.childAgents === true;
+  // 面板关闭时不再 3s 轮询任务列表；未结算的取消意图仍需后台对账
+  const [cancelPending, setCancelPending] = useState(false);
   const tasks = useManagedTasks(
     provider,
     clientId,
     sessionId,
-    taskPanelOpen || publicChildren,
+    taskPanelOpen || cancelPending,
   );
   const [childView, setChildView] = useState<{
     provider: ManagedAgentProvider;
@@ -527,6 +542,8 @@ function ManagedSessionsContent({
     tasks.refresh,
     tasks.apply,
   );
+  const cancelOutstanding = taskCancel.pendingTaskIds.length > 0;
+  useEffect(() => setCancelPending(cancelOutstanding), [cancelOutstanding]);
   useEffect(() => {
     const element = pageRef.current;
     if (!element) return;
@@ -599,7 +616,37 @@ function ManagedSessionsContent({
     },
   );
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
-  const [error, setError] = useState<string>();
+  // A failure is raised on one conversation (or the new-task page). Only its
+  // owner shows it, and only a request failure reads as a conversation turn —
+  // an export or side-command refusal is not a failed turn in this Session.
+  const [raisedError, setRaisedError] = useState<{
+    sessionId?: string;
+    message: string;
+    pageLevel?: boolean;
+  }>();
+  const setError = useCallback(
+    (
+      message?: string,
+      pageLevel = false,
+      owner: string | undefined = sessionId,
+    ) =>
+      setRaisedError(
+        message === undefined
+          ? undefined
+          : { sessionId: owner, message, pageLevel },
+      ),
+    [sessionId],
+  );
+  const error =
+    raisedError && raisedError.sessionId === sessionId
+      ? raisedError.message
+      : undefined;
+  const requestError = raisedError?.pageLevel ? undefined : error;
+  // A request failure is a conversation message; anything else keeps the
+  // page-level alert instead of posing as a failed turn in this Session. A
+  // page failure has no owning conversation — exporting another Session from
+  // the sidebar must still report it here.
+  const pageError = raisedError?.pageLevel ? raisedError.message : undefined;
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -607,6 +654,13 @@ function ManagedSessionsContent({
   const userMessages = useManagedUserMessages(
     provider,
     interactive ? sessionId : undefined,
+  );
+  // The composer, the footer and the submit guard share this send gate.
+  const sendsBlocked = Boolean(
+    sessionId &&
+      (sessionEnded ||
+        ((!recoveryCanSend || recovery.value?.nextTurnAllowed === false) &&
+          !userMessages.supported)),
   );
   const sideQueries = useManagedSideQueries(provider, clientId, sessionId, {
     idle:
@@ -630,6 +684,13 @@ function ManagedSessionsContent({
     if (detail.summary && !detail.summary.capabilities.artifacts)
       setOutputTarget(undefined);
   }, [detail.summary]);
+  // The library belongs to the workspace, not the open session: it survives
+  // session selection and clears only when the provider identity changes.
+  const [artifactLibraryWorkspace, setArtifactLibraryWorkspace] = useState<{
+    workspaceId: string;
+    label: string;
+  }>();
+  useEffect(() => setArtifactLibraryWorkspace(undefined), [provider]);
   const loadToolDetails = useMemo<ToolDetailsLoader | undefined>(() => {
     const reader = provider.toolDetails;
     if (!sessionId || !reader) return undefined;
@@ -762,6 +823,8 @@ function ManagedSessionsContent({
                   ? 'managed.exportChanged'
                   : 'managed.exportFailed',
           ),
+          true,
+          id,
         );
     } finally {
       if (!abort.signal.aborted) {
@@ -803,10 +866,100 @@ function ManagedSessionsContent({
     [provider, sessionId],
   );
   const truncatedLabel = t('managed.truncated');
-  const messages = useMemo(
+  const transcriptMessages = useMemo(
     () => messageProjector(detail.events, truncatedLabel),
     [messageProjector, detail.events, truncatedLabel],
   );
+  const failureMessage = summary?.failure
+    ? (FAILURE_MESSAGES[summary.failure.code]?.[
+        language === 'zh-TW'
+          ? 2
+          : language === 'zh-CN'
+            ? 1
+            : language === 'ru'
+              ? 3
+              : 0
+      ] ?? summary.failure.message)
+    : undefined;
+  const recoveryError =
+    recovery.value &&
+    recovery.value.state !== 'ready' &&
+    recovery.value.reasonCode !== 'turn_active'
+      ? recoveryText(
+          recovery.value.reasonCode === 'session_not_active'
+            ? 'managed.recovery.explanation.ended'
+            : `managed.recovery.explanation.${recovery.value.state}`,
+        )
+      : undefined;
+  // A failed recovery read leaves the last verdict standing, so say that it
+  // could not be confirmed rather than letting it read as current. A held
+  // first miss has no published verdict at all: without this the composer is
+  // disabled with nothing on the page explaining why.
+  const recoveryNotice = recovery.error
+    ? recoveryText('managed.recovery.requestFailed')
+    : interactive &&
+        sendsBlocked &&
+        // Only a recovery-driven restriction may claim reconciliation. A
+        // Session the server simply refuses to send to is not recovering,
+        // and saying so would promise an outcome that never arrives.
+        summary?.recovery !== undefined &&
+        recovery.value === undefined
+      ? recoveryText('managed.recovery.explanation.recovering')
+      : undefined;
+  const messages = useMemo<Message[]>(() => {
+    // Only the unconfirmed request itself can be retried. A transcript read
+    // failure or a recovery verdict describes a different condition, and
+    // resubmitting would not resolve either.
+    const requestFailure =
+      requestError ??
+      (pendingHere && !busy ? t('managed.uncertain') : undefined);
+    const failures = [
+      ...new Set(
+        [
+          detail.stoppedReason,
+          detail.error,
+          requestFailure,
+          failureMessage,
+          recoveryError,
+          recoveryNotice,
+        ].filter((message): message is string => Boolean(message)),
+      ),
+    ];
+    const existingErrors = new Set(
+      transcriptMessages.flatMap((message) =>
+        message.role === 'system' && message.variant === 'error'
+          ? [message.content]
+          : [],
+      ),
+    );
+    return [
+      ...transcriptMessages,
+      ...failures
+        .filter((message) => !existingErrors.has(message))
+        .map(
+          (content): Message => ({
+            id: `managed-error:${sessionId ?? 'new'}:${content}`,
+            role: 'system',
+            variant: 'error',
+            retryable: content === requestFailure,
+            content,
+            timestamp: Date.now(),
+          }),
+        ),
+    ];
+  }, [
+    transcriptMessages,
+    detail.stoppedReason,
+    detail.error,
+    requestError,
+    failureMessage,
+    recoveryError,
+    recoveryNotice,
+    sessionId,
+    pendingHere,
+    busy,
+    t,
+  ]);
   const latestSuccessfulTodos = useMemo(
     () => getLatestSuccessfulTodos(messages),
     [messages],
@@ -922,14 +1075,74 @@ function ManagedSessionsContent({
     // does not depend on sessionId.
     setError(undefined);
     setDiscarded(false);
-  }, [provider, sessionId, hostSessionOnly]);
+  }, [provider, sessionId, hostSessionOnly, setError]);
 
   // submit and discardPending are recreated on every render, so the intent
   // effect below reads them through refs: depending on them directly would
   // re-run a guard that can only early-return, and wrapping either in
   // useCallback would change when their large closures are captured.
   const submitRef = useRef<() => void>(() => {});
-  const discardPendingRef = useRef<() => void>(() => {});
+  const discardPendingRef = useRef<() => Promise<boolean>>(async () => false);
+  // MessageItem compares this prop by identity, so an inline arrow would
+  // re-render every visible message row on each page render.
+  const retryMessage = useCallback(() => void submitRef.current(), []);
+  // An unconfirmed send disables the composer, so retry alone would strand the
+  // only copy of the draft. Discard sits with the failure it resolves. The ref
+  // keeps this identity stable for the message-list memo.
+  const discardMessage = useCallback(() => discardPendingRef.current(), []);
+  const discardPendingHere = !sessionId && pendingHere && !busy;
+  const discardAction =
+    pendingHere && !busy ? (
+      <Button variant="ghost" size="sm" onClick={() => void discardMessage()}>
+        {t('managed.discard')}
+      </Button>
+    ) : undefined;
+
+  useEffect(() => {
+    if (
+      !interactive ||
+      !pendingHere ||
+      busy ||
+      compression.blocked ||
+      pendingApproval
+    )
+      return;
+    const retry = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'y' ||
+        !event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.defaultPrevented ||
+        event.isComposing
+      )
+        return;
+      const target = event.composedPath()[0];
+      // Ctrl+Y is redo in the page's other editable controls (session search,
+      // workspace-creation fields) and yank in shell keymaps. Only the
+      // composer's own retry is intended, so an editable target outside it
+      // keeps its native binding.
+      const editableElsewhere =
+        target instanceof Element &&
+        target.closest(
+          'input, textarea, [contenteditable="true"], [data-web-terminal]',
+        ) !== null &&
+        !composerContainerRef.current?.contains(target);
+      if (
+        !(target instanceof Node) ||
+        (target !== document.body && !pageRef.current?.contains(target)) ||
+        editableElsewhere ||
+        (target instanceof Element &&
+          target.closest('[role="dialog"], [role="alertdialog"]'))
+      )
+        return;
+      event.preventDefault();
+      submitRef.current();
+    };
+    window.addEventListener('keydown', retry);
+    return () => window.removeEventListener('keydown', retry);
+  }, [interactive, pendingHere, busy, compression.blocked, pendingApproval]);
 
   useEffect(() => {
     const intent = pendingElsewhereIntent.current;
@@ -942,7 +1155,7 @@ function ManagedSessionsContent({
       return;
     pendingElsewhereIntent.current = undefined;
     if (intent.action === 'retry') void submitRef.current();
-    else discardPendingRef.current();
+    else void discardPendingRef.current();
   }, [busy, pendingHere, sessionId]);
 
   // The Discard button unmounts itself, dropping focus to <body>: land it on
@@ -1123,7 +1336,7 @@ function ManagedSessionsContent({
     setListRevision((current) => current + 1);
     setWorkspaceRevision((current) => current + 1);
     reloadSession();
-  }, [reloadSession]);
+  }, [reloadSession, setError]);
 
   async function loadMore() {
     const abort = listLifetime.current;
@@ -1182,11 +1395,14 @@ function ManagedSessionsContent({
         !sideQueries.context
       ) {
         setError(
-          language === 'zh-CN'
-            ? '此会话暂不支持 BTW/回顾。'
-            : language === 'ru'
-              ? 'BTW/обзор недоступны для этой сессии.'
-              : 'BTW/recap is unavailable for this session.',
+          language === 'zh-TW'
+            ? '此會話暫不支援 BTW/回顧。'
+            : language === 'zh-CN'
+              ? '此会话暂不支持 BTW/回顾。'
+              : language === 'ru'
+                ? 'BTW/обзор недоступны для этой сессии.'
+                : 'BTW/recap is unavailable for this session.',
+          true,
         );
         return;
       }
@@ -1196,11 +1412,14 @@ function ManagedSessionsContent({
         (sideCommand.kind === 'recap' && sideCommand.argument)
       ) {
         setError(
-          language === 'zh-CN'
-            ? 'BTW 仅支持文本问题，/recap 不接受参数。'
-            : language === 'ru'
-              ? 'BTW принимает только текст; /recap не принимает аргументы.'
-              : 'BTW accepts text only; /recap accepts no arguments.',
+          language === 'zh-TW'
+            ? 'BTW 僅支援文字問題，/recap 不接受參數。'
+            : language === 'zh-CN'
+              ? 'BTW 仅支持文本问题，/recap 不接受参数。'
+              : language === 'ru'
+                ? 'BTW принимает только текст; /recap не принимает аргументы.'
+                : 'BTW accepts text only; /recap accepts no arguments.',
+          true,
         );
         return;
       }
@@ -1211,11 +1430,14 @@ function ManagedSessionsContent({
       }
       if (!sideQueries.available(sideCommand.kind)) {
         setError(
-          language === 'zh-CN'
-            ? '此会话暂不支持 BTW/回顾生成。'
-            : language === 'ru'
-              ? 'Генерация BTW/обзора недоступна для этой сессии.'
-              : 'BTW/recap generation is unavailable for this session.',
+          language === 'zh-TW'
+            ? '此會話暫不支援 BTW/回顧生成。'
+            : language === 'zh-CN'
+              ? '此会话暂不支持 BTW/回顾生成。'
+              : language === 'ru'
+                ? 'Генерация BTW/обзора недоступна для этой сессии.'
+                : 'BTW/recap generation is unavailable for this session.',
+          true,
         );
         return;
       }
@@ -1255,10 +1477,7 @@ function ManagedSessionsContent({
     if (!attempt) {
       if (
         (!submittedText.trim() && !images?.length && !files?.length) ||
-        (sessionId &&
-          (!detail.summary?.capabilities.canSend ||
-            recovery.value?.nextTurnAllowed === false) &&
-          !userMessages.supported)
+        sendsBlocked
       )
         return;
       let input: ManagedInputBlock[];
@@ -1281,7 +1500,11 @@ function ManagedSessionsContent({
         input = await encodeManagedInput(prepared.text, images, prepared.files);
         fileReferences.assertCurrent();
       } catch (failure) {
-        setError(failure instanceof Error ? failure.message : String(failure));
+        setError(
+          failure instanceof Error ? failure.message : String(failure),
+          false,
+          ownerSession,
+        );
         return;
       } finally {
         encoding.current = false;
@@ -1313,7 +1536,7 @@ function ManagedSessionsContent({
       encoding.current = false;
       if (abort.signal.aborted) return;
       if (!persisted) {
-        setError(t('managed.workspaceStorageUnavailable'));
+        setError(t('managed.workspaceStorageUnavailable'), false, ownerSession);
         setBusy(false);
         return;
       }
@@ -1412,7 +1635,11 @@ function ManagedSessionsContent({
           restoreManagedAttachments(composerRef.current, attempt.input);
       }
       if (selection.current === selectedAtSubmit)
-        setError(failure instanceof Error ? failure.message : String(failure));
+        setError(
+          failure instanceof Error ? failure.message : String(failure),
+          false,
+          attempt.sessionId,
+        );
     } finally {
       if (!abort.signal.aborted) setBusy(false);
     }
@@ -1428,11 +1655,6 @@ function ManagedSessionsContent({
     attachmentCapability.current.enabled =
       summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
-  const failureMessage = summary?.failure
-    ? (FAILURE_MESSAGES[summary.failure.code]?.[
-        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
-      ] ?? summary.failure.message)
-    : undefined;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
     if (
@@ -1470,11 +1692,13 @@ function ManagedSessionsContent({
             size="sm"
             onClick={() => sideQueries.show('recap')}
           >
-            {language === 'zh-CN'
-              ? '回顾'
-              : language === 'ru'
-                ? 'Обзор'
-                : 'Recap'}
+            {language === 'zh-TW'
+              ? '回顧'
+              : language === 'zh-CN'
+                ? '回顾'
+                : language === 'ru'
+                  ? 'Обзор'
+                  : 'Recap'}
           </Button>
         )}
       </>
@@ -1551,31 +1775,6 @@ function ManagedSessionsContent({
         triggerClassName="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       />
     ) : null;
-  function prepareHandoff() {
-    if (
-      !currentSummary ||
-      !recovery.value?.actions.continueInNewSession ||
-      !provider.workspaceBinding?.createSession
-    )
-      return;
-    const draft = buildManagedRecoveryHandoff(
-      { ...currentSummary, recovery: recovery.value },
-      detail.events,
-      {
-        introduction: recoveryText('managed.recovery.handoff.introduction'),
-        source: recoveryText('managed.recovery.handoff.source'),
-        task: recoveryText('managed.recovery.handoff.task'),
-        confirmed: recoveryText('managed.recovery.handoff.confirmed'),
-        uncertain: recoveryText('managed.recovery.handoff.uncertain'),
-        truncated: recoveryText('managed.recovery.handoff.truncated'),
-      },
-      Boolean(detail.olderCursor) ||
-        detail.loading ||
-        detail.events.length === 0,
-    );
-    setHandoff(draft);
-    onSelectSession(undefined, draft.workspaceId);
-  }
   const modelContext = currentSummary?.modelContext;
   const selectedModel = modelChange.selection?.modelId;
   const displayedModel =
@@ -1684,14 +1883,21 @@ function ManagedSessionsContent({
     };
     openPendingOwner(current);
   }
-  function discardPending() {
+  // 放弃的是一条无法确认的发送意图，不是已经落库的消息；恢复到原会话
+  // 输入框后继续编辑，避免用户丢失唯一一份草稿。持久记录先清除成功才放手：
+  // 清除失败时它是唯一一份持久副本，不能只清掉内存里的状态。
+  async function discardPending(): Promise<boolean> {
     const current = pendingRef.current;
-    if (!current || current.sessionId !== sessionId) return;
-    // 放弃的是一条无法确认的发送意图，不是已经落库的消息；恢复到原会话
-    // 输入框后继续编辑，避免用户丢失唯一一份草稿。
+    if (!current || current.sessionId !== sessionId) return false;
+    const abort = lifetime.current;
+    if (!(await persistPending(pendingKey, undefined))) {
+      if (!abort?.signal.aborted)
+        setError(t('managed.pendingDiscardFailed'), true);
+      return false;
+    }
+    if (abort?.signal.aborted) return false;
     pendingRef.current = undefined;
     setPending(undefined);
-    void persistPending(pendingKey, undefined);
     setText(current.text);
     composerRef.current?.setText(current.text);
     restoreManagedAttachments(composerRef.current, current.input);
@@ -1702,6 +1908,7 @@ function ManagedSessionsContent({
     if (current.sessionId === undefined) setListRevision((value) => value + 1);
     focusComposer.current = { sessionId };
     setDiscarded(true);
+    return true;
   }
 
   discardPendingRef.current = discardPending;
@@ -1876,6 +2083,12 @@ function ManagedSessionsContent({
           onSelectWorkspace={onSelectWorkspace}
           onSelectSession={openSession}
           onWorkspacesChange={onWorkspacesChange}
+          onOpenArtifactLibrary={
+            interactive
+              ? (workspaceId, label) =>
+                  setArtifactLibraryWorkspace({ workspaceId, label })
+              : undefined
+          }
         />
       ) : (
         sessions
@@ -1992,12 +2205,7 @@ function ManagedSessionsContent({
     modelChange.blocked ||
     compression.blocked ||
     approvalChange.blocked ||
-    Boolean(
-      sessionId &&
-        (!summary?.capabilities.canSend ||
-          recovery.value?.nextTurnAllowed === false) &&
-        !userMessages.supported,
-    );
+    sendsBlocked;
   return (
     <div
       ref={pageRef}
@@ -2008,11 +2216,16 @@ function ManagedSessionsContent({
       data-web-shell-focus-region
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
-      {/* The uncertain-request row unmounts on the Discard click itself, so
+      {/* The uncertain-request action unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
+      {pageError && (
+        <p role="alert" className="text-sm text-destructive">
+          {pageError}
+        </p>
+      )}
       {!hostSessionOnly &&
         home &&
         provider.lifecycle &&
@@ -2055,8 +2268,13 @@ function ManagedSessionsContent({
           onClose={rename.close}
         />
       )}
+      {home && (
+        <div className="flex justify-end">
+          <ManagedSurfaceDecisionsDialog />
+        </div>
+      )}
       {!home && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <Button
             variant="outline"
             onClick={() => {
@@ -2068,29 +2286,14 @@ function ManagedSessionsContent({
           >
             {t('managed.new')}
           </Button>
-          <Button variant="ghost" onClick={refresh}>
-            {t('managed.refresh')}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <ManagedSurfaceDecisionsDialog />
+            <Button variant="ghost" onClick={refresh}>
+              {t('managed.refresh')}
+            </Button>
+          </div>
         </div>
       )}
-      {/* One server condition can surface through both channels; announce
-          each distinct message once, keyed by the message so a standing
-          alert keeps its node when a duplicate of it stops rendering. */}
-      {[
-        ...new Set(
-          [detail.stoppedReason, detail.error, error].filter(
-            (message): message is string =>
-              Boolean(message) &&
-              (interactive || message !== error) &&
-              // summary.failure 已在 composer 上方的失败区块渲染，告警通道不再重复。
-              message !== failureMessage,
-          ),
-        ),
-      ].map((message) => (
-        <p key={message} role="alert" className="text-sm text-destructive">
-          {message}
-        </p>
-      ))}
       {pendingRestoreFailed && (
         <div>
           <p role="alert" className="text-sm text-destructive">
@@ -2104,7 +2307,7 @@ function ManagedSessionsContent({
               const discarded = await persistPending(pendingKey, undefined);
               if (abort.signal.aborted) return;
               if (!discarded) {
-                setError(t('managed.pendingDiscardFailed'));
+                setError(t('managed.pendingDiscardFailed'), true);
                 return;
               }
               pendingRef.current = undefined;
@@ -2316,24 +2519,6 @@ function ManagedSessionsContent({
               />
             )}
 
-          {recovery.value && (
-            <ManagedRecoveryPanel
-              recovery={recovery.value}
-              busy={!interactive || recovery.busy || turnCancel.busy}
-              error={recovery.error}
-              onRecheck={() => void recovery.recheck()}
-              onCancel={
-                cancellationEnabled && summary?.capabilities.canCancel
-                  ? () => void cancel()
-                  : undefined
-              }
-              onHandoff={
-                provider.workspaceBinding?.createSession
-                  ? prepareHandoff
-                  : undefined
-              }
-            />
-          )}
           {turnCancel.status && (
             <div role="status" className="flex items-center gap-2 text-sm">
               <span>
@@ -2353,20 +2538,8 @@ function ManagedSessionsContent({
           {provider.workspaceBinding &&
             (!sessionId || workspaceCreationOpen) && (
               <WorkspaceBindingCreator
-                key={
-                  !sessionId ? (handoff?.sourceSessionId ?? 'new') : 'workspace'
-                }
+                key={!sessionId ? 'new' : 'workspace'}
                 provider={provider}
-                handoff={!sessionId ? handoff : undefined}
-                onOpenHandoffSource={
-                  handoff
-                    ? () =>
-                        onSelectSession(
-                          handoff.sourceSessionId,
-                          handoff.workspaceId,
-                        )
-                    : undefined
-                }
                 workspaceCreationOpen={workspaceCreationOpen}
                 onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
                 onOpenLocalWorkspace={onOpenLocalWorkspace}
@@ -2387,11 +2560,21 @@ function ManagedSessionsContent({
                   onWorkspaceCreated?.(id);
                 }}
                 onCreated={(createdId, createdWorkspaceId) => {
-                  setHandoff(undefined);
                   setListRevision((current) => current + 1);
                   onSelectSession(createdId, createdWorkspaceId);
                 }}
                 onAbandoned={() => setListRevision((current) => current + 1)}
+                unconfirmed={
+                  discardPendingHere
+                    ? { text: pendingHere.text, input: pendingHere.input }
+                    : undefined
+                }
+                onUnconfirmedRetry={
+                  discardPendingHere ? retryMessage : undefined
+                }
+                onUnconfirmedDiscard={
+                  discardPendingHere ? discardMessage : undefined
+                }
                 renderWelcomeHeader={renderWelcomeHeader}
                 renderWelcomeFooter={renderWelcomeFooter}
                 renderComposerFooter={CustomComposerFooter}
@@ -2421,6 +2604,12 @@ function ManagedSessionsContent({
               <ToolDetailsContext.Provider value={loadToolDetails}>
                 <MessageList
                   messages={messages}
+                  showRetryHint={
+                    Boolean(pendingHere) && !busy && !compression.blocked
+                  }
+                  onRetryClick={retryMessage}
+                  tailContent={discardAction}
+                  tailKey="managed-pending-discard"
                   onToolResultOpen={
                     summary?.capabilities.artifacts && provider.toolResults
                       ? openResult
@@ -2435,8 +2624,6 @@ function ManagedSessionsContent({
                   loadingOlderHistory={detail.loadingOlder}
                   onLoadOlderHistory={detail.loadOlder}
                   hideSessionTimeline
-                  // 空转录仍显示欢迎头；但当会话已有失败态（如服务端已删除）时，
-                  // 由 failure 横幅说明状态，不再叠欢迎文案。
                   welcomeHeader={
                     messages.length === 0 &&
                     !detail.loading &&
@@ -2472,19 +2659,6 @@ function ManagedSessionsContent({
               </ToolDetailsContext.Provider>
             </div>
           )}
-          {/* 会话级状态统一在 composer 上方透出（与 renderComposerHeader 的位置一致），
-              失败与未决提交同区相邻，不再散落在会话信息区。 */}
-          {summary?.failure && (
-            <div
-              role="alert"
-              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-[10px] text-xs leading-relaxed text-destructive"
-            >
-              <span aria-hidden="true" className="mt-0.5 shrink-0">
-                ⚠
-              </span>
-              <p className="min-w-0 flex-1">{failureMessage}</p>
-            </div>
-          )}
           {pendingElsewhere && !busy && (
             <div
               role="status"
@@ -2517,24 +2691,6 @@ function ManagedSessionsContent({
                   {t('managed.openPendingOwner')}
                 </Button>
               </div>
-            </div>
-          )}
-          {pendingHere && !busy && (
-            <div
-              role="status"
-              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-[10px] text-xs leading-relaxed text-muted-foreground"
-            >
-              <p className="min-w-0 flex-1">{t('managed.uncertain')}</p>
-              <Button
-                size="sm"
-                disabled={busy || compression.blocked}
-                onClick={() => void submit()}
-              >
-                {t('managed.retry')}
-              </Button>
-              <Button variant="ghost" size="sm" onClick={discardPending}>
-                {t('managed.discard')}
-              </Button>
             </div>
           )}
           {pendingApproval && (
@@ -2777,11 +2933,13 @@ function ManagedSessionsContent({
                         {
                           name: 'btw',
                           description:
-                            language === 'zh-CN'
-                              ? '私下继续追问当前会话'
-                              : language === 'ru'
-                                ? 'Задать частный уточняющий вопрос'
-                                : 'Ask a private follow-up',
+                            language === 'zh-TW'
+                              ? '私下繼續追問當前會話'
+                              : language === 'zh-CN'
+                                ? '私下继续追问当前会话'
+                                : language === 'ru'
+                                  ? 'Задать частный уточняющий вопрос'
+                                  : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2792,11 +2950,13 @@ function ManagedSessionsContent({
                         {
                           name: 'recap',
                           description:
-                            language === 'zh-CN'
-                              ? '回顾已完成的对话'
-                              : language === 'ru'
-                                ? 'Обзор завершённого разговора'
-                                : 'Recap the completed conversation',
+                            language === 'zh-TW'
+                              ? '回顧已完成的對話'
+                              : language === 'zh-CN'
+                                ? '回顾已完成的对话'
+                                : language === 'ru'
+                                  ? 'Обзор завершённого разговора'
+                                  : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -3242,22 +3402,8 @@ function ManagedSessionsContent({
                     {t('managed.approvalFixed')}
                   </p>
                 )}
-              {((sessionId &&
-                !active &&
-                summary &&
-                !summary.capabilities.canSend) ||
-                (!home && cancelButton) ||
-                Boolean(text.trim())) && (
+              {((!home && cancelButton) || Boolean(text.trim())) && (
                 <div className="flex items-center justify-end gap-2">
-                  {sessionId &&
-                    !active &&
-                    summary &&
-                    !summary.capabilities.canSend &&
-                    !alignManagedChatWithHost && (
-                      <span className="mr-auto text-sm text-muted-foreground">
-                        {t('managed.newRequired')}
-                      </span>
-                    )}
                   {(!home || Boolean(text.trim())) && cancelButton}
                 </div>
               )}
@@ -3280,6 +3426,21 @@ function ManagedSessionsContent({
                 clientId={clientId}
                 itemId={outputTarget.itemId}
                 onClose={() => setOutputTarget(undefined)}
+              />
+            )}
+          {interactive &&
+            artifactLibraryWorkspace &&
+            provider.workspaceArtifacts &&
+            provider.toolResults && (
+              <ManagedArtifactLibraryPage
+                key={`${provider.storageKey}:${artifactLibraryWorkspace.workspaceId}`}
+                library={provider.workspaceArtifacts}
+                reader={provider.toolResults}
+                workspaceId={artifactLibraryWorkspace.workspaceId}
+                workspaceLabel={artifactLibraryWorkspace.label}
+                clientId={clientId}
+                sessions={lifecycleSummaries}
+                onClose={() => setArtifactLibraryWorkspace(undefined)}
               />
             )}
         </section>

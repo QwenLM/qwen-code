@@ -47,7 +47,6 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     public RegisterOutcome registerCapturingPrevious(String tenantId, String sessionId,
             String actorId, String serverId, String tokenHash, long expiresAt, long now,
             String connectionId) {
-        String scope = ManagedSchemaKeys.key(tenantId, sessionId);
         // Lock the Session root first so concurrent first registrations queue
         // on a record lock. Without it both readers take non-conflicting gap
         // locks on the absent binding row and their INSERTs deadlock on InnoDB
@@ -61,13 +60,13 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         // here is returned as the compensation target: a caller that read the
         // binding earlier, outside this lock, may hold a snapshot a concurrent
         // registration has already replaced.
-        Binding previous = findByScopeForUpdate(scope);
+        Binding previous = findForUpdate(tenantId, sessionId);
         if (previous == null) {
             try {
-                jdbc.update("INSERT INTO ma_client_files_binding (session_scope_key,"
-                                + BINDING_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        scope, ManagedSchemaKeys.identity(tenantId),
-                        ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(actorId),
+                jdbc.update("INSERT INTO ma_client_files_binding ("
+                                + BINDING_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        ManagedSchemaKeys.identity(tenantId),
+                        ManagedSchemaKeys.identity(sessionId), actorId,
                         1L, ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, connectionId,
                         expiresAt, now, now);
                 return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, 1L,
@@ -75,15 +74,15 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                         connectionId), null);
             } catch (org.springframework.dao.DuplicateKeyException raced) {
                 // A concurrent first registration won the insert; advance it.
-                previous = findByScopeForUpdate(scope);
+                previous = findForUpdate(tenantId, sessionId);
             }
         }
         long generation = previous.generation() + 1;
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
                         + "server_id=?,token_hash=?,connection_id=?,expires_at=?,gmt_modified=?"
-                        + " WHERE session_scope_key=?",
-                ManagedSchemaKeys.identity(actorId), generation, ClientFilesModels.STATE_ACTIVE,
-                serverId, tokenHash, connectionId, expiresAt, now, scope);
+                        + " WHERE tenant_id=? AND session_id=?",
+                actorId, generation, ClientFilesModels.STATE_ACTIVE,
+                serverId, tokenHash, connectionId, expiresAt, now, tenantId, sessionId);
         return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, generation,
                 ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, previous.createdAt(),
                 now, connectionId), previous);
@@ -92,11 +91,10 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     @Override
     public boolean restore(String tenantId, String sessionId, long failedGeneration,
             Binding previous, long now) {
-        String scope = ManagedSchemaKeys.key(tenantId, sessionId);
         // Locked, and fenced on the failed attempt still owning the active
         // binding: a newer registration or an unregister that already committed
         // must not be clobbered or reopened by a late compensation.
-        Binding current = findByScopeForUpdate(scope);
+        Binding current = findForUpdate(tenantId, sessionId);
         if (current == null || current.generation() != failedGeneration || !current.active()) {
             return false;
         }
@@ -105,20 +103,23 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         // The next registration re-allocates the failed attempt's generation,
         // so drop the failed attempt's retained request rows first — otherwise
         // a fresh client's restarted JSON-RPC ids would attach to them.
-        jdbc.update("DELETE FROM ma_client_files_request WHERE session_scope_key=?"
-                + " AND binding_generation=?", scope, failedGeneration);
+        jdbc.update("DELETE FROM ma_client_files_request WHERE tenant_id=? AND session_id=?"
+                + " AND binding_generation=?", tenantId, sessionId, failedGeneration);
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
                         + "server_id=?,token_hash=?,connection_id=?,expires_at=?,gmt_modified=?"
-                        + " WHERE session_scope_key=?",
-                ManagedSchemaKeys.identity(previous.actorId()), previous.generation(),
+                        + " WHERE tenant_id=? AND session_id=?",
+                previous.actorId(), previous.generation(),
                 ClientFilesModels.STATE_ACTIVE, previous.serverId(), previous.tokenHash(),
-                previous.connectionId(), previous.expiresAt(), now, scope);
+                previous.connectionId(), previous.expiresAt(), now, tenantId, sessionId);
         return true;
     }
 
     @Override
     public Binding find(String tenantId, String sessionId) {
-        return findByScope(ManagedSchemaKeys.key(tenantId, sessionId));
+        List<Binding> rows = jdbc.query("SELECT " + BINDING_COLUMNS
+                + " FROM ma_client_files_binding WHERE tenant_id=? AND session_id=?", BINDING_MAPPER,
+                tenantId, sessionId);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     @Override
@@ -132,22 +133,20 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     @Override
     public boolean close(String tenantId, String sessionId, long expectedGeneration, long now) {
         return jdbc.update("UPDATE ma_client_files_binding SET state=?,gmt_modified=?"
-                        + " WHERE session_scope_key=? AND generation=? AND state=?",
-                ClientFilesModels.STATE_CLOSED, now, ManagedSchemaKeys.key(tenantId, sessionId),
+                        + " WHERE tenant_id=? AND session_id=? AND generation=? AND state=?",
+                ClientFilesModels.STATE_CLOSED, now, tenantId, sessionId,
                 expectedGeneration, ClientFilesModels.STATE_ACTIVE) > 0;
     }
 
     @Override
     public void enqueue(String tenantId, String sessionId, long generation, String requestId,
             String payloadJson, long expiresAt, long now) {
-        String scope = ManagedSchemaKeys.key(tenantId, sessionId);
         // The key includes the generation: a re-registered Harness restarts
         // its JSON-RPC ids, which must not attach to the old generation's
         // rows (the poll reads by generation).
-        jdbc.update("INSERT INTO ma_client_files_request (request_key,session_scope_key,"
+        jdbc.update("INSERT INTO ma_client_files_request ("
                         + "tenant_id,session_id,binding_generation,request_id,payload_json,state,"
-                        + "expires_at,gmt_create,gmt_modified) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                ManagedSchemaKeys.key(scope, generation + ":" + requestId), scope,
+                        + "expires_at,gmt_create,gmt_modified) VALUES (?,?,?,?,?,?,?,?,?)",
                 ManagedSchemaKeys.identity(tenantId), ManagedSchemaKeys.identity(sessionId),
                 generation, requestId, payloadJson, ClientFilesModels.REQUEST_QUEUED,
                 expiresAt, now, now);
@@ -160,7 +159,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         // count-then-insert lets every caller read the same count and insert,
         // over-admitting the depth bound. The lock is held to commit (the store
         // is transactional), so the count and the insert are one atomic step.
-        findByScopeForUpdate(ManagedSchemaKeys.key(tenantId, sessionId));
+        findForUpdate(tenantId, sessionId);
         if (queuedCount(tenantId, sessionId, generation, now) >= queueDepth) {
             return false;
         }
@@ -173,9 +172,9 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         // An expired-but-unwalked row must not occupy a queue slot, so the
         // depth check excludes rows past their deadline as well as settled ones.
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND state=?"
+                        + " WHERE tenant_id=? AND session_id=? AND binding_generation=? AND state=?"
                         + " AND expires_at>?",
-                Integer.class, ManagedSchemaKeys.key(tenantId, sessionId), generation,
+                Integer.class, tenantId, sessionId, generation,
                 ClientFilesModels.REQUEST_QUEUED, now);
         return count == null ? 0 : count;
     }
@@ -187,22 +186,20 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         // downlink resuming after a request expired must not execute work the
         // Runtime has already been told failed.
         return jdbc.query("SELECT " + REQUEST_COLUMNS + " FROM ma_client_files_request"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND state=?"
+                        + " WHERE tenant_id=? AND session_id=? AND binding_generation=? AND state=?"
                         + " AND expires_at>? ORDER BY id LIMIT ?",
-                REQUEST_MAPPER, ManagedSchemaKeys.key(tenantId, sessionId), generation,
+                REQUEST_MAPPER, tenantId, sessionId, generation,
                 ClientFilesModels.REQUEST_QUEUED, now, limit);
     }
 
     @Override
     public QueuedRequest request(String tenantId, String sessionId, long generation, String requestId) {
-        // Resolve by the unique request_key (the same derivation enqueue uses)
-        // so the waiter poller hits the business-key index instead of scanning
-        // the Session's whole request history on every tick.
-        String requestKey = ManagedSchemaKeys.key(
-                ManagedSchemaKeys.key(tenantId, sessionId), generation + ":" + requestId);
+        // Resolve by the full business key so the waiter poller hits the unique
+        // index instead of scanning the Session's whole request history on every tick.
         List<QueuedRequest> rows = jdbc.query("SELECT " + REQUEST_COLUMNS
-                        + " FROM ma_client_files_request WHERE request_key=?",
-                REQUEST_MAPPER, requestKey);
+                        + " FROM ma_client_files_request WHERE tenant_id=? AND session_id=?"
+                        + " AND binding_generation=? AND request_id=?",
+                REQUEST_MAPPER, tenantId, sessionId, generation, requestId);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -215,13 +212,14 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         // the generation and a new connection may reuse it, so an old connection's
         // in-flight response must not settle the new connection's request.
         return jdbc.update("UPDATE ma_client_files_request SET state=?,response_json=?,gmt_modified=?"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND request_id=?"
+                        + " WHERE tenant_id=? AND session_id=? AND binding_generation=? AND request_id=?"
                         + " AND state=? AND expires_at>?"
                         + " AND EXISTS (SELECT 1 FROM ma_client_files_binding b"
-                        + " WHERE b.session_scope_key=ma_client_files_request.session_scope_key"
+                        + " WHERE b.tenant_id=ma_client_files_request.tenant_id"
+                        + " AND b.session_id=ma_client_files_request.session_id"
                         + " AND b.connection_id=? AND b.state=?)",
                 ClientFilesModels.REQUEST_ANSWERED, responseJson, now,
-                ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId,
+                tenantId, sessionId, generation, requestId,
                 ClientFilesModels.REQUEST_QUEUED, now, connectionId, ClientFilesModels.STATE_ACTIVE) > 0;
     }
 
@@ -229,22 +227,23 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     public boolean fail(String tenantId, String sessionId, long generation, String connectionId,
             String requestId, String errorCode, long now) {
         return jdbc.update("UPDATE ma_client_files_request SET state=?,error_code=?,gmt_modified=?"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND request_id=?"
+                        + " WHERE tenant_id=? AND session_id=? AND binding_generation=? AND request_id=?"
                         + " AND state=? AND expires_at>?"
                         + " AND EXISTS (SELECT 1 FROM ma_client_files_binding b"
-                        + " WHERE b.session_scope_key=ma_client_files_request.session_scope_key"
+                        + " WHERE b.tenant_id=ma_client_files_request.tenant_id"
+                        + " AND b.session_id=ma_client_files_request.session_id"
                         + " AND b.connection_id=? AND b.state=?)",
                 ClientFilesModels.REQUEST_FAILED, errorCode, now,
-                ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId,
+                tenantId, sessionId, generation, requestId,
                 ClientFilesModels.REQUEST_QUEUED, now, connectionId, ClientFilesModels.STATE_ACTIVE) > 0;
     }
 
     @Override
     public int failQueued(String tenantId, String sessionId, long generation, String errorCode, long now) {
         return jdbc.update("UPDATE ma_client_files_request SET state=?,error_code=?,gmt_modified=?"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND state=?",
+                        + " WHERE tenant_id=? AND session_id=? AND binding_generation=? AND state=?",
                 ClientFilesModels.REQUEST_FAILED, errorCode, now,
-                ManagedSchemaKeys.key(tenantId, sessionId), generation,
+                tenantId, sessionId, generation,
                 ClientFilesModels.REQUEST_QUEUED);
     }
 
@@ -279,16 +278,10 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                 ClientFilesModels.REQUEST_EXPIRED, cutoff, limit);
     }
 
-    private Binding findByScope(String scope) {
+    private Binding findForUpdate(String tenantId, String sessionId) {
         List<Binding> rows = jdbc.query("SELECT " + BINDING_COLUMNS
-                + " FROM ma_client_files_binding WHERE session_scope_key=?", BINDING_MAPPER, scope);
-        return rows.isEmpty() ? null : rows.get(0);
-    }
-
-    private Binding findByScopeForUpdate(String scope) {
-        List<Binding> rows = jdbc.query("SELECT " + BINDING_COLUMNS
-                + " FROM ma_client_files_binding WHERE session_scope_key=? FOR UPDATE",
-                BINDING_MAPPER, scope);
+                + " FROM ma_client_files_binding WHERE tenant_id=? AND session_id=? FOR UPDATE",
+                BINDING_MAPPER, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.get(0);
     }
 

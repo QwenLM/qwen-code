@@ -56,7 +56,7 @@ class HostedExtensionsIT {
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "extensions-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
@@ -480,7 +480,7 @@ class HostedExtensionsIT {
                 String.class, binding)).isNotBlank();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                 + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_id IS NOT NULL",
                 Integer.class, binding)).isZero();
         assertThat(canary.isAlive()).isTrue();
     }

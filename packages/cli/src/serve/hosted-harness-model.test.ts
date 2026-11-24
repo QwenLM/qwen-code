@@ -891,6 +891,12 @@ describe('Hosted Harness model boundary', () => {
       expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
         modelConfiguration: generation,
       });
+      expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+        acp: true,
+      });
+      expect(
+        vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1],
+      ).not.toHaveProperty('channel');
       expect(switchModel).not.toHaveBeenCalled();
     },
   );
@@ -2151,6 +2157,104 @@ describe('Hosted Harness model boundary', () => {
       ),
     ).toBe(false);
     expect(model.requests[0]).toEqual([{ text: input.prompt }]);
+  });
+
+  // Stage 4 S5 pre-check (#18149): a resumed native batch must not reapply
+  // startup Hooks. Their rewrite reached only the live request; the resumed
+  // rounds see the Prompt the Harness committed, which is the accepted text.
+  it('resumes tool results without refiring startup Hooks or reapplying their rewrite', async () => {
+    const hooks = hostedHooks([
+      HookEventName.SessionStart,
+      HookEventName.UserPromptSubmit,
+    ]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedPrompt: 'rewritten prompt',
+              additionalContext: 'submit context',
+            },
+          }
+        : event === HookEventName.SessionStart
+          ? {
+              hookSpecificOutput: {
+                hookEventName: event,
+                additionalContext: 'start context',
+              },
+            }
+          : undefined,
+    );
+    const live = config([{ type: LlmEventType.Finished }]);
+    await runHostedHarnessTextTurn({ ...input, hooks: hooks.session });
+    expect(live.requests[0]).toEqual([
+      { text: 'rewritten prompt\nstart context\nsubmit context' },
+    ]);
+
+    hooks.fire.mockClear();
+    const resumed = config([{ type: LlmEventType.Finished }]);
+    const envelope = {
+      parentUuid: null,
+      sessionId: input.sessionId,
+      timestamp: '2026-11-24T00:00:00.000Z',
+      cwd: input.cwd,
+      version: 'test',
+      daemonPromptId: input.promptId,
+    };
+    const response: Part = {
+      functionResponse: {
+        id: 'saved-call',
+        name: 'write_file',
+        response: { output: 'written' },
+      },
+    };
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hooks.session,
+      history: [
+        {
+          ...envelope,
+          uuid: 'prompt',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: input.prompt }] },
+        },
+        {
+          ...envelope,
+          uuid: 'call',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'saved-call',
+                  name: 'write_file',
+                  args: {},
+                },
+              },
+            ],
+          },
+        },
+      ],
+      resumeFromToolResults: [response],
+      toolTurn: {
+        execute: vi.fn(),
+        consumeResults: vi.fn(),
+        declarations: vi.fn().mockResolvedValue([]),
+      },
+    });
+    expect(
+      hooks.fire.mock.calls.filter(
+        ([event]) =>
+          event === HookEventName.SessionStart ||
+          event === HookEventName.UserPromptSubmit,
+      ),
+    ).toEqual([]);
+    expect(resumed.requests).toEqual([[response]]);
+    const restored = JSON.stringify(resumed.setHistory.mock.calls[0]![0]);
+    expect(restored).toContain(`"text":"${input.prompt}"`);
+    for (const text of ['rewritten prompt', 'start context', 'submit context'])
+      expect(restored).not.toContain(text);
   });
 
   it('defers initialization InstructionsLoaded until authentication, preserving native fields', async () => {

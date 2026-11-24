@@ -6,8 +6,14 @@ import java.util.OptionalLong;
 import java.util.Set;
 
 public interface TransportConsumerStore {
+    /**
+     * {@code backstopOwned}: a clean suspension stamped this revision, and its
+     * stamp shows nothing deliverable or a due time still ahead, so the wake
+     * backstop owns the next attempt.
+     */
     public record WakeFence(String sessionStatus, String workspaceId,
-            String headState, long committedSequence, boolean liveWriter) {
+            String headState, long committedSequence, boolean liveWriter,
+            boolean backstopOwned) {
         /** Whether a wake may act: an ACTIVE Session with an ACTIVE or SEALED journal head. */
         public boolean open() {
             return "ACTIVE".equals(sessionStatus)

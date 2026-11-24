@@ -26,6 +26,7 @@ import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { appendAdditionalContext } from '../toolHookTriggers.js';
 import {
   appendAutoMemorySnapshot,
+  EMPTY_AUTO_MEMORY_CATALOG,
   getAutoMemorySnapshot,
 } from '../../memory/request-context.js';
 import { createContextUsageSnapshot } from './context-usage-snapshot.js';
@@ -357,6 +358,24 @@ describe('memory attribution', () => {
     );
     expect(contents).toEqual(original);
   });
+  it('attributes text matching the empty catalog sentinel to the user', () => {
+    const contents = [userText(EMPTY_AUTO_MEMORY_CATALOG)];
+    const snapshot = createContextUsageSnapshot(
+      requestOf(contents, { systemInstruction: 'policy' }),
+      createConfig({
+        autoMemory: 'policy',
+        autoMemoryContext: EMPTY_AUTO_MEMORY_CATALOG,
+      }),
+      100000,
+    )!;
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      estimateContextTextTokens('policy'),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens(contents),
+    );
+  });
+
   it('counts only the injected final catalog as memory, preserving prior identical user text', () => {
     const catalog = 'current catalog';
     const config = createConfig({

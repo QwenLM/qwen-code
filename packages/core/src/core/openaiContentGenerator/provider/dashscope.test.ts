@@ -633,6 +633,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     it.each([
       [undefined, 'qwen-code-cli'],
       ['CLI', 'qwen-code-cli'],
+      ['managed', 'qwen-code-cli'],
       ['desktop', 'qwen-code-desktop'],
     ])(
       'attributes channel %s over a conflicting custom header',
@@ -799,6 +800,16 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ];
       expect(provider.buildMetadata('test-prompt-id')).toEqual({
         metadata: { sessionId: undefined, promptId: 'test-prompt-id' },
+      });
+    });
+
+    it('passes the resolved runtime channel through to metadata.channel', () => {
+      const managedProvider = gen({}, {
+        ...mockCliConfig,
+        getChannel: () => 'managed',
+      } as Config);
+      expect(managedProvider.buildMetadata('test-prompt-id')).toEqual({
+        metadata: { ...META, channel: 'managed' },
       });
     });
   });

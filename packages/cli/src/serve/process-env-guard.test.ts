@@ -60,14 +60,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
-    'packages/cli/src/serve/hosted-harness-profile.ts',
-    {
-      reason:
-        'Hosted profile validation refuses private CSI roots when the process-scoped pool instance identity is configured.',
-      accesses: { 'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1 },
-    },
-  ],
-  [
     'packages/cli/src/serve/hosted-loop-session.ts',
     {
       reason:
@@ -82,10 +74,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/hosted-harness-session.ts',
     {
       reason:
-        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once.',
+        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once. The idle-suspension acceptance arms set QWEN_E2E_IDLE_SUSPEND_MS to a shorter candidate idle period so a packaged run observes suspension without waiting out the production constant; it is read once per registration and only accepts a value below that constant.',
       accesses: {
         'key:QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT': 1,
         'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
+        'key:QWEN_E2E_IDLE_SUSPEND_MS': 1,
       },
     },
   ],
@@ -347,8 +340,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:
-        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions.',
-      accesses: { whole: 2 },
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions. It also reads the QWEN_MANAGED_RUNTIME_OBSERVATION gate that decides whether the worker owns background observation.',
+      accesses: { 'key:QWEN_MANAGED_RUNTIME_OBSERVATION': 1, whole: 2 },
     },
   ],
   [
@@ -442,13 +435,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap. ' +
+        'The Hosted Harness capability digest is a process-scoped deployment contract fixed at daemon bootstrap. ' +
         'One more whole-object read resolves serve.sessionPrWatch: its two environment overrides are boot-time operator ' +
-        'contracts, read once beside the settings they override rather than per tick.',
+        'contracts, read once beside the settings they override rather than per tick. ' +
+        'QWEN_CODE_MANAGED_RUNTIME is the Managed Agent attribution marker: the serve entry reads the ' +
+        "launcher's previous value once, stamps '1' for the Hosted Harness profile under a refcount so co-resident " +
+        'embedded daemons restore the ambient value only at last close (delete when unset), and releases the same ' +
+        'refcount on startup failure — four accesses: read, stamp, restore-delete, restore-write. The inherit-drop ' +
+        'for other profiles applies to the per-daemon base env copy, not process.env.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
-        'computed:HOSTED_CSI_SESSION_STORE_URL_ENV': 1,
+        'computed:QWEN_CODE_MANAGED_RUNTIME_ENV': 4,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
