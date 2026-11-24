@@ -223,10 +223,12 @@ class WorkspaceRuntimeTransportTest {
         var http = mock(HttpRuntimeTransport.class);
         var ownership = mock(JdbcWorkspaceExecutionStore.class);
         var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, ignored -> context);
+        var refusal = new RuntimeBrokerException(409, "workspace_writer_unproven", "Original worker is not alone", false);
         var proof = new CompletableFuture<Void>();
+        var evidence = List.of(CompletableFuture.<Void>failedFuture(refusal), proof).iterator();
         transport.configureConfinedHandback(original -> {
             assertThat(original).isSameAs(runtime);
-            return proof;
+            return evidence.next();
         });
 
         assertThat(transport.release(lease, session).toCompletableFuture().join()).isTrue();
@@ -234,8 +236,11 @@ class WorkspaceRuntimeTransportTest {
 
         when(ownership.isHeld(context, record)).thenReturn(true);
         when(http.activateWorkspace(runtime, record, context, false)).thenReturn(CompletableFuture.completedFuture(null));
-        var heldRelease = transport.release(lease, session).toCompletableFuture();
+        assertThatThrownBy(() -> transport.release(lease, session).toCompletableFuture().join()).hasCause(refusal);
         verify(http).activateWorkspace(runtime, record, context, false);
+        verify(ownership, never()).releaseConfined(context, record, runtime);
+
+        var heldRelease = transport.release(lease, session).toCompletableFuture();
         assertThat(heldRelease).isNotDone();
         verify(ownership, never()).releaseConfined(context, record, runtime);
         proof.complete(null);

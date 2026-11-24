@@ -686,6 +686,49 @@ public class RuntimeHarnessDrainTest {
     @Test
     @EnabledOnOs(OS.LINUX)
     @EnabledIfSystemProperty(named = "qwen.test.cgroup.root", matches = ".+")
+    void liveHandbackWaitsForTheOriginalWorkerToBeTheOnlyCgroupMember(@TempDir Path directory) throws Exception {
+        Path delegation = newTestDelegation();
+        try {
+            var http = new HttpRuntimeTransport();
+            var command = List.of("node",
+                    Path.of("src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString());
+            var store = new LocalRuntimeStore(directory, LocalRuntimeStore.HostIdentity.linux(), delegation);
+            try (var local = new LocalProcessRuntimeProvisioner(command, directory, http, ignored -> "storage", store);
+                    var broker = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope),
+                            local, http, bindings, sessions, executions, "handback",
+                            Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+                var binding = broker.warm("harness").toCompletableFuture().get(10, TimeUnit.SECONDS);
+                var unit = LinuxRuntimeCgroup.saved(binding.getResourceHandle());
+                Path procs = delegation.resolve("qwen-runtime-" + unit.resourceId()).resolve("cgroup.procs");
+                var original = Files.readAllLines(procs);
+                assertEquals(1, original.size());
+                var worker = ProcessHandle.of(Long.parseLong(original.getFirst())).orElseThrow();
+                var writer = new ProcessBuilder("/bin/sleep", "30").start();
+                try {
+                    Files.writeString(procs, Long.toString(writer.pid()), StandardOpenOption.WRITE);
+                    assertTrue(unit.contains(writer.pid()));
+                    var refusal = assertThrows(ExecutionException.class,
+                            () -> local.verifyConfinedHandback(binding).toCompletableFuture().get(5, TimeUnit.SECONDS));
+                    assertEquals("workspace_writer_unproven",
+                            assertInstanceOf(RuntimeBrokerException.class, refusal.getCause()).getCode());
+                    assertTrue(worker.isAlive());
+                    assertTrue(writer.isAlive());
+                } finally {
+                    writer.destroyForcibly();
+                    assertTrue(writer.waitFor(5, TimeUnit.SECONDS));
+                }
+                await().atMost(Duration.ofSeconds(5)).until(() -> Files.readAllLines(procs).equals(original));
+                local.verifyConfinedHandback(binding).toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertTrue(worker.isAlive());
+            }
+        } finally {
+            cleanupDelegation(delegation);
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @EnabledIfSystemProperty(named = "qwen.test.cgroup.root", matches = ".+")
     void cgroupWorkerRequiresBothRealMembershipAndTheLaunchGate(@TempDir Path directory) throws Exception {
         Path delegated = newTestDelegation();
         try {
