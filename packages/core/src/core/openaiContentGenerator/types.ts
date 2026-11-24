@@ -19,6 +19,7 @@ import type { OpenAIResponseParsingOptions } from './responseParsingOptions.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
+import type { LeadingThinkingBlockDemoter } from './leading-thinking-block-demoter.js';
 
 export interface StreamingTextDeltaState {
   /**
@@ -94,6 +95,7 @@ export interface RequestContext {
    */
   textDeltaState?: StreamingTextDeltaState;
   trailingThinkingTagFilter?: TrailingThinkingTagFilter;
+  leadingThinkingBlockDemoter?: LeadingThinkingBlockDemoter;
   /**
    * Same as textDeltaState but for the reasoning/thinking content channel.
    * The two channels are tracked independently so interleaved chunks on each

@@ -49,6 +49,7 @@ import { evictOldestImagesBeyondCap } from './image-budget.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
 import { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
+import { LeadingThinkingBlockDemoter } from './leading-thinking-block-demoter.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1306,6 +1307,7 @@ function convertOpenAITextToParts(
   requestContext: RequestContext,
   final: boolean,
   completed: boolean,
+  demoteLeadingThinking = false,
 ): Part[] {
   // Tagged-thinking streams are out of scope for the trailing-tag filter: once
   // a stream opens a literal thinking block, the parser below owns its tags.
@@ -1327,6 +1329,15 @@ function convertOpenAITextToParts(
           toolCallCount: 0,
         };
         filter.sanitizedTagName = undefined;
+      }
+      if (demoteLeadingThinking) {
+        return (requestContext.leadingThinkingBlockDemoter ??=
+          new LeadingThinkingBlockDemoter()).parse(text, final);
+      }
+      const demoter = requestContext.leadingThinkingBlockDemoter;
+      if (demoter) {
+        requestContext.leadingThinkingBlockDemoter = undefined;
+        text = demoter.release() + text;
       }
     }
     return text ? [{ text }] : [];
@@ -1483,6 +1494,7 @@ export function convertOpenAIResponseToLlm(
           requestContext,
           true,
           completedNormally(choice.finish_reason, reasoningText),
+          !reasoningText,
         )
       : [];
 
@@ -1642,6 +1654,10 @@ export function convertOpenAIChunkToLlm(
     }
 
     // Handle text content
+    const demoteLeadingThinking =
+      !reasoningText &&
+      requestContext.hasStructuredReasoningContent !== true &&
+      requestContext.hasThinkingTagInReasoning !== true;
     if (typeof choice.delta?.content === 'string') {
       const rawContent = choice.delta.content;
       const replayState = requestContext.textDeltaState;
@@ -1686,10 +1702,19 @@ export function convertOpenAIChunkToLlm(
         // than stranded between two prose runs.
         const drainedWhitespace =
           requestContext.trailingThinkingTagFilter?.drainWhitespace() ?? '';
+        // A content-only hold from before the reasoning channel appeared is
+        // released ahead of the takeover; the tagged parser owns only what
+        // follows it.
+        const demotedLeadingText =
+          requestContext.leadingThinkingBlockDemoter?.release() ?? '';
+        requestContext.leadingThinkingBlockDemoter = undefined;
         contentParts = requestContext.taggedThinkingParser.parse(
           drainedWhitespace + taggedThinkingCandidate,
           Boolean(choice.finish_reason),
         );
+        if (demotedLeadingText) {
+          contentParts.unshift({ text: demotedLeadingText });
+        }
       } else if (normalizedContent || choice.finish_reason) {
         // Skip empty-string push mid-stream; still call on finish_reason to
         // flush any buffered tagged-thinking content.
@@ -1698,6 +1723,7 @@ export function convertOpenAIChunkToLlm(
           requestContext,
           Boolean(choice.finish_reason),
           completedNormally(choice.finish_reason, reasoningText),
+          demoteLeadingThinking,
         );
       }
     } else if (choice.finish_reason) {
@@ -1707,6 +1733,7 @@ export function convertOpenAIChunkToLlm(
         requestContext,
         true,
         completedNormally(choice.finish_reason, reasoningText),
+        demoteLeadingThinking,
       );
     }
 

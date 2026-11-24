@@ -1117,6 +1117,115 @@ describe('OpenAIContentConverter', () => {
       expectUnsanitizedLeak(stream);
     });
 
+    describe('content-only leading thinking blocks', () => {
+      const nonStreamingParts = (content: string, ctx = contentOnlyStream()) =>
+        partsOf(
+          converter.convertOpenAIResponseToLlm(
+            {
+              choices: [choice({ content })],
+            } as OpenAI.Chat.ChatCompletion,
+            ctx,
+          ),
+        );
+
+      it('demotes a leading balanced block and keeps the answer visible', () => {
+        expect(
+          nonStreamingParts(
+            '<thinking>\nsecret reasoning\n</thinking>\n\nVisible answer',
+          ),
+        ).toEqual([
+          thoughtPart('\nsecret reasoning\n'),
+          { text: '\n\nVisible answer' },
+        ]);
+      });
+
+      it('demotes consecutive leading blocks', () => {
+        expect(
+          nonStreamingParts(
+            '<think>first</think>\n<thinking>second</thinking>Answer',
+          ),
+        ).toEqual([
+          thoughtPart('first'),
+          thoughtPart('second'),
+          { text: 'Answer' },
+        ]);
+      });
+
+      it('produces the same parts on the streaming path', () => {
+        const stream = contentOnlyStream();
+        const first = send(stream, {
+          content: '<thinking>\nsecret reasoning\n</thinking>\n\nVisible ',
+        });
+        const second = send(stream, { content: 'answer' }, 'stop');
+
+        expect(partsOf(first)).toEqual([
+          thoughtPart('\nsecret reasoning\n'),
+          { text: '\n\nVisible ' },
+        ]);
+        expect(partsOf(second)).toEqual([{ text: 'answer' }]);
+      });
+
+      it('buffers a split leading block until its closing tag and answer', () => {
+        const stream = contentOnlyStream();
+
+        expectHeld(send(stream, { content: '<thi' }));
+        expectHeld(send(stream, { content: 'nk>hidden</thi' }));
+        expect(
+          partsOf(send(stream, { content: 'nk> answer' }, 'stop')),
+        ).toEqual([thoughtPart('hidden'), { text: ' answer' }]);
+      });
+
+      it('leaves a block-only response visible', () => {
+        const content = '<thinking>\nreasoning\n</thinking>';
+
+        expect(nonStreamingParts(content)).toEqual([{ text: content }]);
+      });
+
+      it('leaves tags after visible prose and inside fenced code visible', () => {
+        expect(
+          nonStreamingParts('Visible answer\n<think>literal</think>'),
+        ).toEqual([{ text: 'Visible answer\n<think>literal</think>' }]);
+        expect(
+          nonStreamingParts(
+            '<think>hidden</think>\n\n```xml\n<think>literal</think>\n```',
+          ),
+        ).toEqual([
+          thoughtPart('hidden'),
+          { text: '\n\n```xml\n<think>literal</think>\n```' },
+        ]);
+      });
+
+      it('does not demote when reasoning_content is present', () => {
+        const response = converter.convertOpenAIResponseToLlm(
+          {
+            choices: [
+              choice({
+                content: '<think>literal</think>answer',
+                reasoning_content: 'reasoning',
+              }),
+            ],
+          } as OpenAI.Chat.ChatCompletion,
+          contentOnlyStream(),
+        );
+
+        expect(partsOf(response)).toEqual([
+          thoughtPart('reasoning'),
+          { text: '<think>literal</think>answer' },
+        ]);
+      });
+
+      it('keeps the existing leak rejection when reasoning is present', () => {
+        const stream = contentOnlyStream();
+
+        emitReasoning(stream, 'reasoning');
+        expectThrowType(
+          () =>
+            send(stream, { content: '<think>literal</think>answer' }, 'stop'),
+          'PROTOCOL_TAG_LEAK',
+        );
+      });
+    });
+
     it.each([
       ['think', '\n</think>\n\n'],
       ['thinking', ' </thinking> '],
