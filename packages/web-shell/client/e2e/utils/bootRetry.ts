@@ -6,14 +6,11 @@ import type { Page, Request } from '@playwright/test';
  * The aborts arrive in storms, not one at a time: every in-flight request dies
  * together, and the notifier can keep firing for several seconds. Retrying
  * immediately spends the whole budget inside the storm that caused the first
- * failure — run 42546153793 stranded a boot whose three attempts started at
- * 01:55:24.631, :25.536 and :27.599 while the aborts covered :24–:27. Spacing
- * the attempts is what lands one after the storm has passed.
- *
- * The ladder waits 5.5 s in total, which has to fit inside the 20 s `expect`
- * budget the rest of the suite asserts visibility with.
+ * failure. Run 45205510587 exhausted all three reloads and still saw
+ * request aborts 11 s into a boot. Keep one attempt beyond that interval
+ * while leaving time for the next boot inside the suite's 20 s expect budget.
  */
-export const BOOT_RELOAD_BACKOFF_MS = [500, 1_500, 3_500] as const;
+export const BOOT_RELOAD_BACKOFF_MS = [500, 1_500, 3_500, 6_000] as const;
 
 /** Reloads allowed for one tab whose boot keeps failing. */
 export const MAX_BOOT_RELOADS = BOOT_RELOAD_BACKOFF_MS.length;

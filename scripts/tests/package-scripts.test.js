@@ -1291,7 +1291,7 @@ describe('package scripts', () => {
     );
     expect(lanes).toContain('run_lane_suites "${side_workspaces[@]}"');
     expect(lanes).toContain(
-      'npm run test:ci "$@" -- "${suite_args[@]}" 2>&1 | tee "$log"',
+      'run_logged "$log" npm run test:ci "$@" -- "${suite_args[@]}"',
     );
     expect(lanes).toContain(
       'npm run test:ci "--workspace=${name}" -- "${suite_args[@]}"',
@@ -1448,6 +1448,11 @@ describe('package scripts', () => {
           ].join('\n'),
         );
         chmodSync(path.join(bin, 'npm'), 0o755);
+        writeFileSync(
+          path.join(bin, 'tee'),
+          '#!/bin/sh\nprintf "%s\\n" "simulated runner tee abort" >&2\nexit 86\n',
+          { mode: 0o755 },
+        );
         const allWorkspaces = {
           '@qwen-code/acp-bridge': 'vitest run',
           '@qwen-code/qwen-code': 'vitest run',
@@ -1550,6 +1555,9 @@ describe('package scripts', () => {
         // The two lanes run at once, so only the side lane's order is fixed.
         const passing = run('passing');
         expect(passing.rc).toBe('0');
+        expect(passing.stdout + passing.stderr).not.toContain(
+          'simulated runner tee abort',
+        );
         expect([...passing.calls].sort()).toEqual(
           [mainSuites, sideWorkspaces, standalone, scriptsUnit].sort(),
         );

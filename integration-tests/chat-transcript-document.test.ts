@@ -1,8 +1,12 @@
-import { readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import {
@@ -23,6 +27,7 @@ import {
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
 import { documentExportBudgetMs } from './document-export-budget.js';
 
+const execFileAsync = promisify(execFile);
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
 const RENDERER_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
 const RENDERER_CSS_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.css`;
@@ -738,34 +743,56 @@ describe('ExportTranscriptDocument browser gate', () => {
   });
 
   it('opens V1 and rejects V2 with the pinned pre-V2 public renderer', async () => {
-    const legacyIdentity = '0.28.3+88485ce86a090982';
+    const version = '0.28.3';
+    const legacyIdentity = `${version}+88485ce86a090982`;
     const legacyAssets = [
       {
-        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.js',
+        file: 'export-transcript-document.js',
         integrity:
           'sha384-RmZTu+dlEMG0jEt1MPe6uwIFPUR0wy3BVWW/vf8HIJwf0DvYK5GVg9c8F+mo3xei',
         bytes: 2_149_861,
       },
       {
-        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.css',
+        file: 'export-transcript-document.css',
         integrity:
           'sha384-1b7aeIUXXz756dLmrlvZotdgyGVkZgJTxDJSHyrGt+l87CPiuPqosQM4Uz7dElT7',
         bytes: 2_426_053,
       },
     ];
-    // Fetch immutable public bytes and verify them before serving only these
-    // two requests through Chromium's route handler.
-    const publishedAssets = await Promise.all(
-      legacyAssets.map(async ({ url, integrity, bytes }) => {
-        const response = await fetch(url);
-        expect(response.ok, `${url}: HTTP ${response.status}`).toBe(true);
-        const asset = Buffer.from(await response.arrayBuffer());
+    // UNPKG serves the files in this release. Use the npm cache and registry
+    // transport so the browser compatibility test can run during a CDN outage.
+    const directory = await mkdtemp(resolve(tmpdir(), 'transcript-renderer-'));
+    const publishedAssets: Buffer[] = [];
+    try {
+      const packArgs = [
+        'pack',
+        `@qwen-code/qwen-code@${version}`,
+        '--ignore-scripts',
+        '--prefer-offline',
+      ];
+      const windows = process.platform === 'win32';
+      await execFileAsync(
+        windows ? 'cmd.exe' : 'npm',
+        windows ? ['/d', '/c', 'npm', ...packArgs] : packArgs,
+        { cwd: directory, timeout: 120_000 },
+      );
+      for (const { file, integrity, bytes } of legacyAssets) {
+        const { stdout: asset } = await execFileAsync(
+          'tar',
+          ['-xOf', `qwen-code-qwen-code-${version}.tgz`, `package/${file}`],
+          { cwd: directory, encoding: 'buffer', maxBuffer: bytes + 1 },
+        );
         expect(asset.byteLength).toBe(bytes);
         expect(
           `sha384-${createHash('sha384').update(asset).digest('base64')}`,
         ).toBe(integrity);
-        return asset;
-      }),
+        publishedAssets.push(asset);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+    const legacyUrls = legacyAssets.map(
+      ({ file }) => `https://unpkg.com/@qwen-code/qwen-code@${version}/${file}`,
     );
 
     const prompt = '/loop 60 seconds: preserve this V1 instruction';
@@ -805,9 +832,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     for (const document of documents) {
       const page = await browser.newPage();
       await page.route('**/*', async (route) => {
-        const index = legacyAssets.findIndex(
-          ({ url }) => route.request().url() === url,
-        );
+        const index = legacyUrls.indexOf(route.request().url());
         if (index === -1) {
           await route.abort('blockedbyclient');
           return;
@@ -823,8 +848,8 @@ describe('ExportTranscriptDocument browser gate', () => {
         ...document,
         rendererVersion: legacyIdentity,
       })
-        .replaceAll(RENDERER_URL, legacyAssets[0]!.url)
-        .replaceAll(RENDERER_CSS_URL, legacyAssets[1]!.url)
+        .replaceAll(RENDERER_URL, legacyUrls[0]!)
+        .replaceAll(RENDERER_CSS_URL, legacyUrls[1]!)
         .replaceAll(currentRendererIntegrity, legacyAssets[0]!.integrity)
         .replaceAll(currentCssIntegrity, legacyAssets[1]!.integrity);
       await page.setContent(html, { waitUntil: 'load' });

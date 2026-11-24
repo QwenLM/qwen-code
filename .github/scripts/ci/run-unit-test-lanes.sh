@@ -120,6 +120,18 @@ half_cap() {
 side_forks="$(half_cap "${VITEST_MAX_FORKS:-}")"
 side_threads="$(half_cap "${VITEST_MAX_THREADS:-}")"
 
+# Write the complete report directly to disk. On the pool, uutils tee can
+# abort while duplicating a busy pipe, cutting off the test process and its
+# report. Following the file keeps the output live without piping the tests.
+run_logged() {
+  local log="$1" pid
+  shift
+  "$@" > "$log" 2>&1 &
+  pid=$!
+  tail -n +1 -f -s 0.1 --pid="$pid" "$log"
+  wait "$pid"
+}
+
 # A re-run is bounded by the count in QWEN_CI_RPC_RETRY (default 1) and by
 # nothing else: no time condition survives here. A late re-run can be killed by
 # the step's `timeout-minutes: 45`, and when that happens the job fails with the
@@ -138,17 +150,16 @@ side_threads="$(half_cap "${VITEST_MAX_THREADS:-}")"
 # the workspace lanes use run_lane_suites below, which has to tell one
 # workspace's report from another's.
 #
-# The first attempt is teed because the decision needs the text. The retry is
-# not: nothing reads its status but the lane's, so it streams straight through
-# exactly as this suite did before there was a retry.
+# The first attempt records a log for retry classification. Retries stream
+# directly because the lane only needs their test exit status.
 run_suite() {
   local log rc
   log="$(mktemp "${TMPDIR:-/tmp}/unit-lane-suite.XXXXXX")" || {
     echo "::error::Could not create a suite log under ${TMPDIR:-/tmp}."
     return 1
   }
-  "$@" 2>&1 | tee "$log"
-  rc="${PIPESTATUS[0]}"
+  run_logged "$log" "$@"
+  rc=$?
   if [ "$rc" -ne 0 ] && [ "$RPC_RETRY" -gt 0 ] &&
     rpc_only_failure_text "$rc" < "$log"; then
     local attempt
@@ -182,8 +193,8 @@ run_lane_suites() {
     echo "::error::Could not create a suite log under ${TMPDIR:-/tmp}."
     return 1
   }
-  npm run test:ci "$@" -- "${suite_args[@]}" 2>&1 | tee "$log"
-  rc="${PIPESTATUS[0]}"
+  run_logged "$log" npm run test:ci "$@" -- "${suite_args[@]}"
+  rc=$?
   if [ "$rc" -eq 0 ] || [ "$RPC_RETRY" = '0' ]; then
     rm -f "$log"
     return "$rc"

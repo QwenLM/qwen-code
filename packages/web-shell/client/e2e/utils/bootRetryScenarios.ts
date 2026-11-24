@@ -102,12 +102,9 @@ export const bootRetryScenarios: BootRetryScenario[] = [
     async run(page, testInfo) {
       const scenario = await openShell(page, testInfo);
 
-      // Anchored to the field, not to the ladder: run 42546153793 aborted
-      // scripts across four consecutive seconds. Deriving this from the
-      // backoffs would shrink the storm whenever the ladder shrank, and the
-      // case would keep passing while the real storm stranded the boot again.
-      // The ladder has to outlast this, so shortening it turns this red.
-      const STORM_MS = 5_000;
+      // Run 45205510587 still aborted modules 11 s into a boot. Keep this
+      // independent of the backoff so exhausting the old budget fails here.
+      const STORM_MS = 11_000;
       let stormEndsAt: number | null = null;
       let abortedScripts = 0;
       let entryRequests = 0;
