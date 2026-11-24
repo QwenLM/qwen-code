@@ -13701,6 +13701,34 @@ Other open files:
         );
       });
 
+      it('passes retractToolCallsOnRetry to the Turn constructor and preserves it across stop-policy continuations', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        let turnCall = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          turnCall += 1;
+          return textTurn(turnCall === 1 ? 'first' : 'continued');
+        });
+        let policyCalls = 0;
+        const stopPolicy = {
+          continueAt: vi.fn(async () => {
+            policyCalls += 1;
+            return policyCalls === 1 ? [{ text: 'keep going' }] : undefined;
+          }),
+        };
+
+        await run([{ text: 'acp turn' }], 'session########8', {
+          type: SendMessageType.UserQuery,
+          retractToolCallsOnRetry: true,
+          stopPolicies: [stopPolicy],
+        });
+
+        expect(mockTurnConstructorFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnConstructorFn.mock.calls[0]?.[12]).toBe(true);
+        expect(mockTurnConstructorFn.mock.calls[1]?.[12]).toBe(true);
+      });
+
       it('excludes a concurrent side query and its unflagged continuation', async () => {
         retryChat({
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
