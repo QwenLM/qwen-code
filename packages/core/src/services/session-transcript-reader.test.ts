@@ -2365,72 +2365,95 @@ describe('SessionTranscriptReader', () => {
     const readerUrl = pathToFileURL(
       path.resolve('dist/src/services/session-transcript-reader.js'),
     ).href;
-    const probe = `
-      import fs from 'node:fs';
-      import os from 'node:os';
-      import path from 'node:path';
-      import { SessionTranscriptReader } from ${JSON.stringify(readerUrl)};
-      const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'heap-guard-'));
+    const { createWriteStream } = await import('node:fs');
+    const runtime = await fs.mkdtemp(path.join(os.tmpdir(), 'heap-guard-'));
+    try {
       const workspace = path.join(runtime, 'workspace');
-      fs.mkdirSync(workspace, { recursive: true });
-      const sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-      const chats = path.join(runtime, 'projects', workspace.replace(/[^a-zA-Z0-9]/g, '-'), 'chats');
-      fs.mkdirSync(chats, { recursive: true });
-      const target = path.join(chats, sessionId + '.jsonl');
-      const out = fs.createWriteStream(target);
-      let parent = null;
+      await fs.mkdir(workspace, { recursive: true });
+      const denseSessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const chats = path.join(
+        runtime,
+        'projects',
+        workspace.replace(/[^a-zA-Z0-9]/g, '-'),
+        'chats',
+      );
+      await fs.mkdir(chats, { recursive: true });
+      const target = path.join(chats, denseSessionId + '.jsonl');
+      const out = createWriteStream(target);
+      let parent: string | null = null;
       const payload = 'dense-payload-' + 'x'.repeat(240);
       for (let i = 0; i < 200000; i++) {
         const uuid = 'dense-' + String(i).padStart(7, '0');
-        const record = { uuid, parentUuid: parent, sessionId, timestamp: '2026-11-22T00:00:00.000Z', type: i % 2 === 0 ? 'user' : 'assistant', cwd: workspace, version: '0.28.3', message: { role: i % 2 === 0 ? 'user' : 'model', parts: [{ text: payload }] } };
-        out.write(JSON.stringify(record) + '\\n');
+        const rec = {
+          uuid,
+          parentUuid: parent,
+          sessionId: denseSessionId,
+          timestamp: '2026-11-22T00:00:00.000Z',
+          type: i % 2 === 0 ? 'user' : 'assistant',
+          cwd: workspace,
+          version: '0.28.3',
+          message: {
+            role: i % 2 === 0 ? 'user' : 'model',
+            parts: [{ text: payload }],
+          },
+        };
+        if (!out.write(JSON.stringify(rec) + '\n')) {
+          await new Promise<void>((resolve) => out.once('drain', resolve));
+        }
         parent = uuid;
       }
-      await new Promise((resolve, reject) => out.end((error) => error ? reject(error) : resolve()));
-      let memorySamples = 0;
-      const readMemory = process.memoryUsage.bind(process);
-      process.memoryUsage = () => { memorySamples += 1; return readMemory(); };
-      try {
-        await new SessionTranscriptReader(workspace, undefined, runtime).readPage(sessionId, { limit: 10 });
-        console.log(JSON.stringify({ result: 'served' }));
-      } catch (error) {
-        console.log(JSON.stringify({ result: 'rejected', name: error.name, message: error.message, dimension: error.dimension, maxBytes: error.maxBytes, snapshotSize: error.snapshotSize, fileSize: fs.statSync(target).size, memorySamples }));
-      } finally {
-        fs.rmSync(runtime, { recursive: true, force: true });
-      }
-    `;
-    const cleanEnv = { ...process.env };
-    for (const name of Object.keys(cleanEnv)) {
-      if (name.startsWith('QWEN_')) delete cleanEnv[name];
-    }
-    const child = spawnSync(
-      process.execPath,
-      ['--max-old-space-size=256', '--input-type=module', '-e', probe],
-      { encoding: 'utf8', env: cleanEnv, maxBuffer: 2 * 1024 * 1024 },
-    );
-    if (child.status !== 0) {
-      throw new Error(
-        `Memory guard probe failed (${child.status}/${child.signal}): ${child.stderr}`,
+      await new Promise<void>((resolve, reject) =>
+        out.end((error: Error | null) => (error ? reject(error) : resolve())),
       );
+      const fileSize = (await fs.stat(target)).size;
+      const probe = `
+        import { SessionTranscriptReader } from ${JSON.stringify(readerUrl)};
+        let memorySamples = 0;
+        const readMemory = process.memoryUsage.bind(process);
+        process.memoryUsage = () => { memorySamples += 1; return readMemory(); };
+        try {
+          await new SessionTranscriptReader(${JSON.stringify(workspace)}, undefined, ${JSON.stringify(runtime)}).readPage(${JSON.stringify(denseSessionId)}, { limit: 10 });
+          console.log(JSON.stringify({ result: 'served' }));
+        } catch (error) {
+          console.log(JSON.stringify({ result: 'rejected', name: error.name, message: error.message, dimension: error.dimension, maxBytes: error.maxBytes, snapshotSize: error.snapshotSize, retryable: error.retryable, memorySamples }));
+        }
+      `;
+      const cleanEnv = { ...process.env };
+      for (const name of Object.keys(cleanEnv)) {
+        if (name.startsWith('QWEN_')) delete cleanEnv[name];
+      }
+      const child = spawnSync(
+        process.execPath,
+        ['--max-old-space-size=256', '--input-type=module', '-e', probe],
+        { encoding: 'utf8', env: cleanEnv, maxBuffer: 2 * 1024 * 1024 },
+      );
+      if (child.status !== 0) {
+        throw new Error(
+          `Memory guard probe failed (${child.status}/${child.signal}): ${child.stderr}`,
+        );
+      }
+      const outcome = JSON.parse(child.stdout.trim()) as {
+        result: string;
+        name?: string;
+        dimension?: string;
+        maxBytes?: number;
+        snapshotSize?: number;
+        retryable?: boolean;
+        memorySamples?: number;
+      };
+      expect(outcome).toMatchObject({
+        result: 'rejected',
+        name: 'SessionTranscriptTooLargeError',
+        dimension: 'index',
+      });
+      expect(outcome.retryable).toBeUndefined();
+      expect(outcome.maxBytes).toBeLessThan(512 * 1024 * 1024);
+      expect(outcome.memorySamples).toBeGreaterThan(0);
+      expect(outcome.memorySamples).toBeLessThan(200_000 / 10);
+      expect(outcome.snapshotSize).toBe(fileSize);
+    } finally {
+      await fs.rm(runtime, { recursive: true, force: true });
     }
-    const outcome = JSON.parse(child.stdout.trim()) as {
-      result: string;
-      name?: string;
-      dimension?: string;
-      maxBytes?: number;
-      snapshotSize?: number;
-      fileSize?: number;
-      memorySamples?: number;
-    };
-    expect(outcome).toMatchObject({
-      result: 'rejected',
-      name: 'SessionTranscriptTooLargeError',
-      dimension: 'index',
-    });
-    expect(outcome.maxBytes).toBeLessThan(512 * 1024 * 1024);
-    expect(outcome.memorySamples).toBeGreaterThan(0);
-    expect(outcome.memorySamples).toBeLessThan(200_000 / 10);
-    expect(outcome.snapshotSize).toBe(outcome.fileSize);
   });
 
   it('re-queries prompt time when the effective heap budget is available again', async () => {
@@ -2475,6 +2498,59 @@ describe('SessionTranscriptReader', () => {
     } finally {
       setSessionTranscriptMaxIndexEstimateBytesForTest(undefined);
       setSessionTranscriptAvailableHeapBudgetForTest(undefined);
+    }
+  });
+
+  it('keeps final structural estimate overflows terminal even when a heap budget cap is active', async () => {
+    const records: ChatRecord[] = [];
+    let parent: string | null = null;
+    for (let i = 0; i < 6; i += 1) {
+      const uuid = `${i % 2 === 0 ? 'u' : 'a'}-final-${i}-` + 'b'.repeat(2048);
+      records.push(record(uuid, parent, i % 2 === 0 ? 'prompt' : 'reply'));
+      parent = uuid;
+    }
+    await writeRecords(records);
+    // Loop structural estimate (~56 KiB) stays below 60 KiB; final estimate
+    // adds runtimeUuids/replayUuids/navigationTurns and crosses 72 KiB.
+    setSessionTranscriptMaxIndexEstimateBytesForTest(72 * 1024);
+    setSessionTranscriptAvailableHeapBudgetForTest(60 * 1024);
+    try {
+      let caught: unknown;
+      try {
+        await newReader().readPage(sessionId, { limit: 10 });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+      const err = caught as SessionTranscriptTooLargeError;
+      expect(err.dimension).toBe('index');
+      expect(err.measuredBytes).toBeGreaterThan(72 * 1024);
+      expect(err.retryable).toBeUndefined();
+    } finally {
+      setSessionTranscriptMaxIndexEstimateBytesForTest(undefined);
+      setSessionTranscriptAvailableHeapBudgetForTest(undefined);
+    }
+  });
+
+  it('marks heap-limited structural rejections retryable when live heap occupancy is elevated', async () => {
+    const records = longTurn(400, () => 'answer');
+    await writeRecords(records);
+    const { getHeapStatistics } = await import('node:v8');
+    const heapLimit = getHeapStatistics().heap_size_limit;
+    const original = process.memoryUsage.bind(process);
+    const spy = vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
+      const usage = original();
+      return { ...usage, heapUsed: Math.max(0, heapLimit - 32 * 1024) };
+    });
+    try {
+      await expect(
+        newReader().readPage(sessionId, { limit: 10 }),
+      ).rejects.toMatchObject({
+        dimension: 'index',
+        retryable: true,
+      });
+    } finally {
+      spy.mockRestore();
     }
   });
 

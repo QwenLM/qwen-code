@@ -2654,6 +2654,12 @@ async function buildIndex(params: {
   const remainingHeapBudget =
     availableHeapBudgetForTest ??
     Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
+  // Sampled V8 heapUsed includes uncollected JSON.parse garbage, so give the
+  // real-heap OOM backstop 3/4 of free heap (above the 1/2 structural budget)
+  // and mark backstop rejections retryable (bounded by the client retry cap).
+  const maxHeapGrowthBytes =
+    availableHeapBudgetForTest ??
+    Math.max(64 * 1024, Math.floor((availableHeapBytes * 3) / 4));
   const maxIndexBuildBytes = Math.min(
     maxIndexEstimateBytes,
     remainingHeapBudget,
@@ -2784,19 +2790,15 @@ async function buildIndex(params: {
           if ((sequence & 1023) === 1) {
             const heapGrowth =
               process.memoryUsage().heapUsed - buildHeapUsedStart;
-            if (heapGrowth > remainingHeapBudget) {
-              const retryable =
-                estimatedIndexBytes <= maxIndexEstimateBytes &&
-                (transientHeapPressure ||
-                  estimatedIndexBytes < Math.floor(remainingHeapBudget / 2));
+            if (heapGrowth > maxHeapGrowthBytes) {
               throw new SessionTranscriptTooLargeError(
                 sessionId,
                 snapshotSize,
-                remainingHeapBudget,
+                maxHeapGrowthBytes,
                 {
                   dimension: 'index',
                   measuredBytes: heapGrowth,
-                  ...(retryable ? { retryable: true } : {}),
+                  retryable: true,
                 },
               );
             }
@@ -2957,19 +2959,15 @@ async function buildIndex(params: {
     );
   }
   const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
-  if (finalHeapGrowth > remainingHeapBudget) {
-    const retryable =
-      finalEstimatedBytes <= maxIndexEstimateBytes &&
-      (transientHeapPressure ||
-        finalEstimatedBytes < Math.floor(remainingHeapBudget / 2));
+  if (finalHeapGrowth > maxHeapGrowthBytes) {
     throw new SessionTranscriptTooLargeError(
       sessionId,
       snapshotSize,
-      remainingHeapBudget,
+      maxHeapGrowthBytes,
       {
         dimension: 'index',
         measuredBytes: finalHeapGrowth,
-        ...(retryable ? { retryable: true } : {}),
+        retryable: true,
       },
     );
   }
