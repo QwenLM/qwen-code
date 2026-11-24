@@ -788,8 +788,9 @@ export const RU_PART5: Record<
   'environment.scheduledTasks.scopeWakeup': 'Пробуждение цикла',
   'environment.scheduledTasks.statusActive': 'Активна',
   'environment.scheduledTasks.statusPaused': 'Приостановлена',
-  'environment.scheduledTasks.statusCancelled': 'Отменена',
   'environment.scheduledTasks.nextRun': (v) => `Через ${v?.when ?? ''}`,
+  'scheduledTasks.durableHistoricalSnapshot':
+    'Это постоянная задача по расписанию. Показан снимок при создании: текущее состояние недоступно.',
   'environment.scheduledTasks.stop': 'Остановить',
   'environment.scheduledTasks.viewAll': 'Управление всеми',
   'environment.title': 'Окружение',

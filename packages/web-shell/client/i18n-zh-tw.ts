@@ -4170,10 +4170,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'environment.scheduledTasks.scopeWakeup': '循環喚醒',
   'environment.scheduledTasks.statusActive': '執行中',
   'environment.scheduledTasks.statusPaused': '已暫停',
-  'environment.scheduledTasks.statusCancelled': '已取消',
   'environment.scheduledTasks.nextRun': (v) => `${v?.when ?? ''}後`,
   'environment.scheduledTasks.stop': '停止',
   'environment.scheduledTasks.viewAll': '管理全部',
+  'scheduledTasks.durableHistoricalSnapshot':
+    '這是持久排程任務；即時狀態無法取得，顯示其建立時的快照。',
   'scheduledTasks.sessionScopedActive':
     '目前對話執行中，停止後會立即取消後續觸發。',
   'scheduledTasks.sessionScopedPaused':

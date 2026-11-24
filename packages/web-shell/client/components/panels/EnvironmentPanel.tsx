@@ -68,6 +68,7 @@ interface EnvironmentPanelProps {
   scheduledTaskBusyIds?: ReadonlySet<string>;
   manualRunActive?: boolean;
   focusScheduledTasksNonce?: number;
+  scheduledTasksOwnerSessionId?: string;
   attachments?: readonly DaemonSessionAttachmentReference[];
   attachmentsLoading?: boolean;
   attachmentsError?: string;
@@ -111,6 +112,9 @@ const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
     'scheduledTasks',
     'artifacts',
   ];
+
+const scheduledTaskKey = (entry: SessionScheduledTask): string =>
+  `${entry.scope}:${entry.id}`;
 const AGENT_COLORS: Readonly<Record<string, string>> = {
   red: '#e5484d',
   blue: 'var(--agent-blue-500)',
@@ -204,6 +208,7 @@ export function EnvironmentPanel({
   scheduledTaskBusyIds,
   manualRunActive = false,
   focusScheduledTasksNonce,
+  scheduledTasksOwnerSessionId,
   attachments,
   attachmentsLoading = false,
   attachmentsError,
@@ -247,7 +252,17 @@ export function EnvironmentPanel({
   const [scheduledTasksExpanded, setScheduledTasksExpanded] = useState(true);
   const [artifactsExpanded, setArtifactsExpanded] = useState(true);
   const scheduledSectionRef = useRef<HTMLElement | null>(null);
+  const scheduledSectionHeaderRef = useRef<HTMLButtonElement>(null);
+  const scheduledTaskOpenerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingScheduledTaskFocusRef = useRef<{
+    removedKey: string;
+    nextKey?: string;
+  } | null>(null);
   const lastFocusScheduledTasksNonceRef = useRef(focusScheduledTasksNonce);
+  useEffect(() => {
+    pendingScheduledTaskFocusRef.current = null;
+    scheduledTaskOpenerRefs.current.clear();
+  }, [scheduledTasksOwnerSessionId, workspaceCwd]);
   const hasVisibleScheduledCountdown =
     !hidden &&
     scheduledTasksExpanded &&
@@ -271,6 +286,44 @@ export function EnvironmentPanel({
       sectionEl.scrollIntoView({ block: 'nearest' });
     }
   }, [focusScheduledTasksNonce]);
+
+  useEffect(() => {
+    const pending = pendingScheduledTaskFocusRef.current;
+    if (
+      !pending ||
+      scheduledTasks?.some(
+        (entry) => scheduledTaskKey(entry) === pending.removedKey,
+      )
+    ) {
+      return;
+    }
+    const nextOpener = pending.nextKey
+      ? scheduledTaskOpenerRefs.current.get(pending.nextKey)
+      : undefined;
+    pendingScheduledTaskFocusRef.current = null;
+    if (scheduledTasksExpanded && nextOpener) {
+      nextOpener.focus();
+    } else if (scheduledSectionHeaderRef.current) {
+      scheduledSectionHeaderRef.current.focus();
+    } else {
+      panelRef.current?.focus();
+    }
+  }, [scheduledTasks, scheduledTasksExpanded]);
+
+  const rememberScheduledTaskFocus = (entry: SessionScheduledTask): void => {
+    const removedKey = scheduledTaskKey(entry);
+    const removedIndex = scheduledTasks?.findIndex(
+      (candidate) => scheduledTaskKey(candidate) === removedKey,
+    );
+    const nextEntry =
+      removedIndex === undefined || removedIndex < 0
+        ? undefined
+        : scheduledTasks?.[removedIndex + 1];
+    pendingScheduledTaskFocusRef.current = {
+      removedKey,
+      nextKey: nextEntry ? scheduledTaskKey(nextEntry) : undefined,
+    };
+  };
 
   useEffect(() => {
     if (hidden || !environmentExpanded || !gitWorkspaceCwd || !activeBranch) {
@@ -344,6 +397,7 @@ export function EnvironmentPanel({
       aria-label={t('environment.title')}
       data-testid="environment-panel"
       data-floating={floating}
+      tabIndex={-1}
       hidden={hidden}
     >
       {items.includes('environment') && (
@@ -568,6 +622,7 @@ export function EnvironmentPanel({
               className={`${styles.sectionHeaderRow} ${styles.scheduledTaskHeaderRow}`}
             >
               <button
+                ref={scheduledSectionHeaderRef}
                 type="button"
                 className={styles.sectionHeader}
                 aria-expanded={scheduledTasksExpanded}
@@ -631,6 +686,12 @@ export function EnvironmentPanel({
                       data-enabled={entry.enabled ? 'true' : 'false'}
                     >
                       <button
+                        ref={(node) => {
+                          const key = scheduledTaskKey(entry);
+                          if (node)
+                            scheduledTaskOpenerRefs.current.set(key, node);
+                          else scheduledTaskOpenerRefs.current.delete(key);
+                        }}
                         type="button"
                         className={styles.scheduledItemMain}
                         onClick={() => onOpenScheduledTask?.(entry)}
@@ -714,6 +775,7 @@ export function EnvironmentPanel({
                                       }),
                                     )
                                   ) {
+                                    rememberScheduledTaskFocus(entry);
                                     onDeleteScheduledTask(entry);
                                   }
                                 }}
@@ -730,9 +792,10 @@ export function EnvironmentPanel({
                               aria-label={t('environment.scheduledTasks.stop')}
                               title={t('environment.scheduledTasks.stop')}
                               disabled={busy}
-                              onClick={() =>
-                                onCancelSessionScheduledTask(entry)
-                              }
+                              onClick={() => {
+                                rememberScheduledTaskFocus(entry);
+                                onCancelSessionScheduledTask(entry);
+                              }}
                             >
                               <CircleStopIcon />
                             </button>

@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { EnvironmentPanel } from './EnvironmentPanel';
 import type { SourcesState } from './SourcesSection';
+import type {
+  SessionDurableScheduledTask,
+  SessionScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
 
 vi.mock('../BranchPickerPopover', async () => {
   const { createElement } = await import('react');
@@ -1169,6 +1173,151 @@ describe('EnvironmentPanel', () => {
     expect(onDeleteScheduledTask).toHaveBeenCalledWith(durableEntry);
     expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(sessionEntry);
     expect(onManageAllScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('does not restore focus into a replacement session', () => {
+    const entry = {
+      scope: 'session' as const,
+      source: 'wakeup' as const,
+      id: 'wakeup-old-owner',
+      title: 'Old session wakeup',
+      prompt: 'Old session wakeup',
+      cronExpr: '@wakeup',
+      recurring: false,
+      enabled: true as const,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+      expiresAt: null,
+      task: {
+        id: 'wakeup-old-owner',
+        source: 'wakeup' as const,
+        cronExpr: '@wakeup',
+        prompt: 'Old session wakeup',
+        recurring: false,
+        createdAt: 1_000,
+        expiresAt: null,
+        lastFiredAt: null,
+        nextRunAt: 60_000,
+      },
+    };
+    const receiver = document.createElement('button');
+    receiver.textContent = 'New session';
+    document.body.appendChild(receiver);
+    const onCancelSessionScheduledTask = vi.fn(() => {
+      receiver.focus();
+      root!.render(
+        <I18nProvider language="en">
+          <EnvironmentPanel
+            tasks={[]}
+            scheduledTasks={[]}
+            scheduledTasksOwnerSessionId="session-b"
+            onOpenTask={vi.fn()}
+            onCancelSessionScheduledTask={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    const view = mount({
+      scheduledTasks: [entry],
+      scheduledTasksOwnerSessionId: 'session-a',
+      onCancelSessionScheduledTask,
+    });
+    const stop = view.querySelector<HTMLButtonElement>(
+      'button[aria-label="Stop"]',
+    );
+    expect(stop).not.toBeNull();
+    act(() => {
+      stop!.focus();
+      stop!.click();
+    });
+    expect(document.activeElement).toBe(receiver);
+    receiver.remove();
+  });
+
+  it('keeps a predictable focus target after deleting scheduled tasks', () => {
+    const firstTask: SessionDurableScheduledTask = {
+      scope: 'durable',
+      id: 'd-1',
+      title: 'First report',
+      prompt: 'Generate the first report',
+      cronExpr: '0 9 * * *',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      gate: null,
+      workspaceId: 'ws-1',
+      task: {
+        id: 'd-1',
+        name: 'First report',
+        cron: '0 9 * * *',
+        prompt: 'Generate the first report',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        sessionId: 'session-1',
+        sessionMode: 'persistent',
+      },
+    };
+    let scheduledTasks: SessionScheduledTask[] = [
+      firstTask,
+      { ...firstTask, id: 'd-2', title: 'Second report' },
+    ];
+    const onDeleteScheduledTask = vi.fn(
+      (entry: SessionDurableScheduledTask) => {
+        scheduledTasks = scheduledTasks.filter((task) => task.id !== entry.id);
+        root!.render(
+          <I18nProvider language="en">
+            <EnvironmentPanel
+              tasks={[]}
+              workspaceCwd="/work/qwen-code"
+              scheduledTasks={scheduledTasks}
+              scheduledTasksOwnerSessionId="session-1"
+              onOpenTask={vi.fn()}
+              onDeleteScheduledTask={onDeleteScheduledTask}
+              onOpenScheduledTask={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      },
+    );
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const view = mount({
+      workspaceCwd: '/work/qwen-code',
+      scheduledTasks,
+      scheduledTasksOwnerSessionId: 'session-1',
+      onDeleteScheduledTask,
+      onOpenScheduledTask: vi.fn(),
+    });
+    const firstDelete = view.querySelector<HTMLButtonElement>(
+      '[data-testid="environment-scheduled-task"] button[aria-label="Delete"]',
+    );
+    expect(firstDelete).not.toBeNull();
+    act(() => firstDelete!.focus());
+    expect(document.activeElement).toBe(firstDelete);
+    act(() => firstDelete!.click());
+
+    const remainingTask = view.querySelector(
+      '[data-testid="environment-scheduled-task"]',
+    );
+    expect(remainingTask?.textContent).toContain('Second report');
+    expect(document.activeElement).toBe(remainingTask?.querySelector('button'));
+
+    const lastDelete = remainingTask?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete"]',
+    );
+    expect(lastDelete).not.toBeNull();
+    act(() => lastDelete!.click());
+    expect(
+      view.querySelectorAll('[data-testid="environment-scheduled-task"]'),
+    ).toHaveLength(0);
+    expect(document.activeElement).toBe(
+      view.querySelector('[data-testid="environment-panel"]'),
+    );
   });
 
   it('scrolls on a new focus nonce only, and does not leak wakeup internals', () => {

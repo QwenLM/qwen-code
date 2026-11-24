@@ -4379,10 +4379,11 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'environment.scheduledTasks.scopeWakeup': 'Loop',
   'environment.scheduledTasks.statusActive': 'Active',
   'environment.scheduledTasks.statusPaused': 'Paused',
-  'environment.scheduledTasks.statusCancelled': 'Cancelled',
   'environment.scheduledTasks.nextRun': (v) => `Next in ${v?.when ?? ''}`,
   'environment.scheduledTasks.stop': 'Stop',
   'environment.scheduledTasks.viewAll': 'Manage all',
+  'scheduledTasks.durableHistoricalSnapshot':
+    'This is a durable scheduled task. Showing its creation snapshot because its live status is unavailable.',
   'scheduledTasks.sessionScopedActive':
     'Active in this session. Stopping cancels future runs immediately.',
   'scheduledTasks.sessionScopedPaused':

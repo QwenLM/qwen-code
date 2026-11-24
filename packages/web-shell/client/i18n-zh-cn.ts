@@ -4158,10 +4158,11 @@ export const ZH: Messages = {
   'environment.scheduledTasks.scopeWakeup': '循环唤醒',
   'environment.scheduledTasks.statusActive': '运行中',
   'environment.scheduledTasks.statusPaused': '已暂停',
-  'environment.scheduledTasks.statusCancelled': '已取消',
   'environment.scheduledTasks.nextRun': (v) => `${v?.when ?? ''}后`,
   'environment.scheduledTasks.stop': '停止',
   'environment.scheduledTasks.viewAll': '管理全部',
+  'scheduledTasks.durableHistoricalSnapshot':
+    '这是持久定时任务；实时状态不可用，展示其创建时的快照。',
   'scheduledTasks.sessionScopedActive':
     '当前会话运行中，停止后会立即取消后续触发。',
   'scheduledTasks.sessionScopedPaused':

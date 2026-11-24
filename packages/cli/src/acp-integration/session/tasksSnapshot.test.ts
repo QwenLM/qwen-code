@@ -1108,7 +1108,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(snapshot.scheduledTasks).toEqual([]);
   });
 
-  it('marks a scheduler-disabled pending wakeup as not enabled', () => {
+  it('marks a scheduler-disabled pending cron as not enabled', () => {
     const cfg = {
       ...configWith([]),
       isCronEnabled: () => true,
@@ -1116,14 +1116,13 @@ describe('buildSessionTasksStatus workflow graph', () => {
         disabled: true,
         list: () => [
           {
-            id: 'stopped-wakeup',
-            cronExpr: '@wakeup',
+            id: 'stopped-cron',
+            cronExpr: '*/5 * * * *',
             prompt: 'must not run',
-            recurring: false,
+            recurring: true,
             durable: false,
             createdAt: 100,
             expiresAt: Infinity,
-            fireAtMs: 50_000,
             jitterMs: 0,
           },
         ],
@@ -1133,8 +1132,8 @@ describe('buildSessionTasksStatus workflow graph', () => {
     const snapshot = buildSessionTasksStatus('session-1', cfg, 2_000);
     expect(snapshot.scheduledTasks).toEqual([
       expect.objectContaining({
-        id: 'stopped-wakeup',
-        source: 'wakeup',
+        id: 'stopped-cron',
+        source: 'cron',
         enabled: false,
       }),
     ]);

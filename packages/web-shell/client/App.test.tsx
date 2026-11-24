@@ -6426,6 +6426,290 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  it('normalizes a legacy primary owner identity without changing its task route', async () => {
+    const ownedTask = {
+      id: 'durable:legacy-primary',
+      name: 'Legacy primary',
+      cron: '0 9 * * *',
+      prompt: 'Legacy primary prompt',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary-id',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...ownedTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:session-1:legacy-call',
+          tabs: [
+            {
+              id: 'scheduled-task:session-1:legacy-call',
+              kind: 'scheduled_task',
+              title: 'Legacy primary task',
+              toolCallId: 'scheduled:durable:durable:legacy-primary',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/tmp/project',
+              workspaceId: 'primary-id',
+            },
+          ],
+        },
+      }),
+    );
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (candidate) => candidate.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task.workspaceId).toBe(
+        undefined,
+      );
+    });
+    expect(
+      testState.latestArtifactPanelProps?.tabs.find(
+        (candidate) =>
+          candidate.kind === 'scheduled_task' &&
+          candidate.id === 'scheduled-task:session-1:legacy-call',
+      )?.workspaceId,
+    ).toBe('primary-id');
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      undefined,
+    );
+    const openScheduledTasks =
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks;
+    expect(openScheduledTasks).toBeTypeOf('function');
+    await act(async () => {
+      openScheduledTasks?.();
+    });
+    const envRow = () =>
+      container.querySelector('[data-testid="environment-scheduled-task"]');
+    await vi.waitFor(async () => {
+      await flush();
+      expect(envRow()).not.toBeNull();
+    });
+    expect(container.textContent).toContain('Legacy primary prompt');
+    await act(async () => {
+      envRow()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Disable"]')
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        Array.from(
+          container.querySelectorAll(
+            '[role="group"][aria-label="Scheduled tasks"] button',
+          ),
+        ).some((button) => button.textContent?.trim() === 'Enable'),
+      ).toBe(true);
+    });
+    await act(async () => {
+      envRow()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Delete"]')
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(container.textContent).toContain('has been deleted');
+    });
+    expect(container.textContent).toContain('Legacy primary prompt');
+    expect(container.textContent).not.toContain(
+      'Scheduled task workspace owner no longer matches',
+    );
+  });
+
+  it('does not restore a missing-owner secondary from a legacy primary', async () => {
+    mockConnection.workspaceCwd = '/secondary';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+      workspaces: undefined,
+    } as typeof mockWorkspace.capabilities;
+    testState.messages = [
+      {
+        id: 'legacy-secondary-creation',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'legacy-secondary-call',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 10 * * *',
+              prompt: 'legacy secondary original',
+              recurring: true,
+              durable: true,
+            },
+            rawOutput: {
+              returnDisplay:
+                'Scheduled recurring job durable-legacy-unknown (0 10 * * *).',
+            },
+          },
+        ],
+      },
+    ];
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      {
+        id: 'durable-legacy-unknown',
+        name: 'Wrong primary record',
+        cron: '0 10 * * *',
+        prompt: 'primary must not be borrowed',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        sessionId: 'session-1',
+        runs: [],
+      },
+    ]);
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/secondary\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:session-1:legacy-secondary-call',
+          tabs: [
+            {
+              id: 'scheduled-task:session-1:legacy-secondary-call',
+              kind: 'scheduled_task',
+              title: 'Secondary without an owner ID',
+              toolCallId: 'scheduled:durable:durable-legacy-unknown',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/secondary',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    });
+    expect(container.textContent).toContain(
+      'This workspace may have been removed or the link is no longer valid.',
+    );
+    expect(container.textContent).toContain('Secondary without an owner ID');
+    expect(container.textContent).not.toContain('primary must not be borrowed');
+  });
+
+  it('preserves the secondary workspace identity on restored durable history', async () => {
+    mockConnection.workspaceCwd = '/tmp/secondary';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    testState.messages = [
+      {
+        id: 'secondary-durable-creation',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-secondary',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 12 * * *',
+              prompt: 'secondary history prompt',
+              recurring: true,
+              durable: true,
+            },
+            rawOutput: {
+              returnDisplay:
+                'Scheduled recurring job durable-secondary-backend (0 12 * * *).',
+            },
+          },
+        ],
+      },
+    ];
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/secondary\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:session-1:cron-create-secondary',
+          tabs: [
+            {
+              id: 'scheduled-task:session-1:cron-create-secondary',
+              kind: 'scheduled_task',
+              title: 'Secondary historical task',
+              toolCallId: 'cron-create-secondary',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/tmp/secondary',
+              workspaceId: 'secondary',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task).toMatchObject({
+        id: 'durable-secondary-backend',
+        workspaceId: 'secondary',
+        prompt: 'secondary history prompt',
+      });
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(container.textContent).toContain('secondary history prompt');
+    });
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'secondary',
+    );
+    expect(container.textContent).not.toContain(
+      'Scheduled task workspace owner no longer matches',
+    );
+  });
+
   it('restores an environment durable task without a transcript call and preserves its owner', async () => {
     const ownedTask = {
       id: 'durable:environment',
@@ -6535,7 +6819,7 @@ describe('task activity key', () => {
       expect(legacy.container.textContent).toContain(ownedTask.cron);
     });
     expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
-      'primary',
+      undefined,
     );
     legacy.unmount();
 
@@ -6566,6 +6850,373 @@ describe('task activity key', () => {
     expect(foreign.container.textContent).not.toContain(
       'Prompt from a foreign session',
     );
+  });
+
+  it('does not refresh durable tasks from an unregistered workspace', async () => {
+    mockConnection.workspaceCwd = '/tmp/unregistered-workspace';
+    testState.messages = [
+      {
+        id: 'scheduled-intent-unregistered',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-unregistered',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 9 * * *',
+              prompt: 'must remain unread',
+              recurring: true,
+              durable: true,
+            },
+          },
+        ],
+      },
+    ];
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    const openScheduledTasks =
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks;
+    expect(openScheduledTasks).toBeTypeOf('function');
+    await act(async () => {
+      openScheduledTasks?.();
+    });
+    await flush();
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('must remain unread');
+  });
+
+  it('retires an environment row immediately after a direct detail deletion without awaiting refresh', async () => {
+    const ownedTask = {
+      id: 'durable:detail-delete',
+      name: 'Delete from the detail',
+      cron: '15 8 * * *',
+      prompt: 'Delete this task from its detail',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    const pendingList = Promise.withResolvers<(typeof ownedTask)[]>();
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        Array.from(
+          container.querySelectorAll(
+            '[role="group"][aria-label="Scheduled tasks"] button',
+          ),
+        ).some((button) => button.textContent?.trim() === 'Edit'),
+      ).toBe(true);
+    });
+
+    mockWorkspaceActions.listScheduledTasks.mockImplementation(
+      () => pendingList.promise,
+    );
+    const readsBeforeDelete =
+      mockWorkspaceActions.listScheduledTasks.mock.calls.length;
+    const openDelete = Array.from(
+      container.querySelectorAll(
+        '[role="group"][aria-label="Scheduled tasks"] button',
+      ),
+    ).find((button) => button.textContent?.trim() === 'Delete');
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      ownedTask.id,
+      undefined,
+    );
+    expect(
+      mockWorkspaceActions.listScheduledTasks.mock.calls.length,
+    ).toBeGreaterThan(readsBeforeDelete);
+    expect(
+      container.querySelector('[data-testid="environment-scheduled-task"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('has been deleted');
+    await act(async () => {
+      pendingList.resolve([]);
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it('keeps a confirmed detail deletion after an Environment update lands first', async () => {
+    const ownedTask = {
+      id: 'durable:live-during-delete',
+      name: 'Delete while another update lands',
+      cron: '15 8 * * *',
+      prompt: 'A live update arrives before delete settles',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    let finishDelete: (() => void) | undefined;
+    const pendingList = Promise.withResolvers<(typeof ownedTask)[]>();
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...ownedTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDelete = resolve;
+        }),
+    );
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        Array.from(
+          container.querySelectorAll(
+            '[role="group"][aria-label="Scheduled tasks"] button',
+          ),
+        ).some((button) => button.textContent?.trim() === 'Edit'),
+      ).toBe(true);
+    });
+
+    mockWorkspaceActions.listScheduledTasks.mockImplementation(
+      () => pendingList.promise,
+    );
+    const openDelete = Array.from(
+      container.querySelectorAll(
+        '[role="group"][aria-label="Scheduled tasks"] button',
+      ),
+    ).find((button) => button.textContent?.trim() === 'Delete');
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+    });
+    expect(finishDelete).toBeTypeOf('function');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Disable"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container
+        .querySelector('[data-testid="environment-scheduled-task"]')
+        ?.getAttribute('data-enabled'),
+    ).toBe('false');
+
+    await act(async () => {
+      finishDelete?.();
+      await Promise.resolve();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="environment-scheduled-task"]'),
+      ).toBeNull();
+    });
+    expect(container.textContent).toContain('has been deleted');
+    await act(async () => {
+      pendingList.resolve([]);
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it('synchronizes durable environment mutations into an already open detail', async () => {
+    const ownedTask = {
+      id: 'durable:environment-sync',
+      name: 'Synchronized environment task',
+      cron: '15 8 * * *',
+      prompt: 'Prompt owned by both panels',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockImplementation(async () => ({
+      ...ownedTask,
+      enabled: false,
+    }));
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    const detailButton = (label: string) =>
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[role="group"][aria-label="Scheduled tasks"] button',
+        ),
+      ).find((button) => button.textContent?.trim() === label);
+    await vi.waitFor(async () => {
+      await flush();
+      expect(detailButton('Disable')).not.toBeNull();
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Disable"]',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(detailButton('Enable')).not.toBeNull();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      ownedTask.id,
+      { enabled: false },
+      undefined,
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Delete"]',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(container.textContent).toContain('has been deleted');
+    });
+    expect(detailButton('Edit')?.disabled).toBe(true);
+    expect(detailButton('Enable')?.disabled).toBe(true);
+    expect(detailButton('Delete')?.disabled).toBe(true);
+    expect(
+      container.querySelectorAll('[data-testid="environment-scheduled-task"]'),
+    ).toHaveLength(0);
   });
 
   it('restores a stopped session task from its original creation record', async () => {

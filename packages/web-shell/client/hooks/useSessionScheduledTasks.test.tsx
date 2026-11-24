@@ -212,6 +212,75 @@ describe('useSessionScheduledTasks', () => {
     expect(latest?.taskStatusById.get('wakeup-1')).toBe('active');
   });
 
+  it('keeps durable discovery and explicit refresh silent when durable reads are disabled', async () => {
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([]);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+      durableSeeded: true,
+      durableEnabled: false,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      latest!.refresh();
+      await Promise.resolve();
+    });
+    expect(sdkMock.workspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(latest?.hasLiveDurableSnapshot).toBe(false);
+  });
+
+  it('revokes an in-flight durable discovery across disable and re-enable', async () => {
+    let resolveStaleRead: ((tasks: DaemonScheduledTask[]) => void) | undefined;
+    sdkMock.workspaceActions.listScheduledTasks
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveStaleRead = resolve;
+        }),
+      )
+      .mockResolvedValue([]);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+      durableSeeded: true,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+    expect(resolveStaleRead).toBeDefined();
+
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+      durableSeeded: true,
+      durableEnabled: false,
+    });
+    expect(latest?.tasks).toEqual([]);
+    expect(latest?.hasLiveDurableSnapshot).toBe(false);
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+      durableSeeded: true,
+      durableEnabled: true,
+    });
+    await act(async () => {
+      resolveStaleRead?.([durableTask()]);
+      await Promise.resolve();
+    });
+
+    expect(sdkMock.workspaceActions.listScheduledTasks).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(latest?.tasks).toEqual([]);
+    expect(latest?.hasLiveDurableSnapshot).toBe(true);
+  });
+
   it('toggles and deletes durable tasks and cancels session-scoped tasks', async () => {
     const durable = durableTask({ id: 'd-1', enabled: true });
     const sessionTask = sessionCronTask({ id: 'c-1' });

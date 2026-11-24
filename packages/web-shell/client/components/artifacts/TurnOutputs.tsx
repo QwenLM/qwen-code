@@ -54,7 +54,7 @@ export interface TurnOutputScheduledTask {
   durable: boolean;
   workspaceId?: string;
   display?: string;
-  liveStatus?: 'active' | 'paused' | 'cancelled';
+  liveStatus?: 'active' | 'paused';
 }
 
 export type TurnOutputKind = 'file' | 'artifact' | 'scheduled_task';
@@ -594,9 +594,7 @@ function ScheduledTaskCard({
       ? t('environment.scheduledTasks.statusActive')
       : task.liveStatus === 'paused'
         ? t('environment.scheduledTasks.statusPaused')
-        : task.liveStatus === 'cancelled'
-          ? t('environment.scheduledTasks.statusCancelled')
-          : null;
+        : null;
   return (
     <div className={styles.card} data-scheduled-task-status={task.liveStatus}>
       <div className={styles.summary}>

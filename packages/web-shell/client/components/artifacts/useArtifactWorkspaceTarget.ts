@@ -43,6 +43,7 @@ interface ArtifactWorkspaceAuthority {
 export interface ArtifactWorkspaceTarget {
   workspaceCwd: string;
   workspaceId?: string;
+  primary?: boolean;
   actions: ArtifactWorkspaceActions;
 }
 
@@ -199,7 +200,8 @@ export function useArtifactWorkspaceTarget(
     };
     const requireScheduledTaskOwner = (workspaceId: string | undefined) => {
       const current = requireOwner();
-      if (current.id !== workspaceId) {
+      const matchesPrimaryRoute = current.primary && workspaceId === undefined;
+      if (!matchesPrimaryRoute && current.id !== workspaceId) {
         throw new Error('Scheduled task workspace owner no longer matches');
       }
       return current;
@@ -356,6 +358,7 @@ export function useArtifactWorkspaceTarget(
   return {
     workspaceCwd: authority.owner.cwd,
     ...(authority.owner.id ? { workspaceId: authority.owner.id } : {}),
+    primary: authority.owner.primary,
     actions,
   };
 }

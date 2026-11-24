@@ -2384,6 +2384,30 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'sessionId'
     >;
 
+function resolveScheduledTaskWorkspace(
+  capabilities: ReturnType<typeof useWorkspace>['capabilities'],
+  workspaceCwd?: string,
+): { workspaceId?: string; resolvable: boolean } {
+  const registeredWorkspaces = capabilities?.workspaces;
+  if (!registeredWorkspaces || registeredWorkspaces.length === 0) {
+    return {
+      workspaceId: undefined,
+      resolvable:
+        workspaceCwd !== undefined &&
+        workspaceCwd === capabilities?.workspaceCwd,
+    };
+  }
+  const matched = registeredWorkspaces.find(
+    (entry) => entry.cwd === workspaceCwd,
+  );
+  if (!matched) return { workspaceId: undefined, resolvable: false };
+  // The primary can use the unqualified route when it is trusted.
+  return {
+    workspaceId: matched.primary ? undefined : matched.id,
+    resolvable: matched.trusted,
+  };
+}
+
 interface ScheduledTaskRestoreReference {
   id: string;
   scope: 'durable' | 'session';
@@ -6986,16 +7010,27 @@ export function App({
       tabWorkspaceId?: string,
       sourceSessionId?: string,
     ) => {
+      const routeWorkspaceCwd = tabWorkspaceCwd ?? activeWorkspaceCwd;
+      const workspaceTarget = resolveScheduledTaskWorkspace(
+        workspace.capabilities,
+        routeWorkspaceCwd,
+      );
+      const matchedOwner = workspace.capabilities?.workspaces?.find(
+        (entry) => entry.cwd === routeWorkspaceCwd,
+      );
+      const ownerSessionId = sourceSessionId ?? connection.sessionId;
+      const ownerWorkspaceId =
+        tabWorkspaceId ?? matchedOwner?.id ?? workspaceTarget.workspaceId;
       const tab: ArtifactPanelTab = {
-        id: sourceSessionId
-          ? `scheduled-task:${sourceSessionId}:${task.toolCallId}`
+        id: ownerSessionId
+          ? `scheduled-task:${ownerSessionId}:${task.toolCallId}`
           : `scheduled-task:${task.toolCallId}`,
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
-        task: tabWorkspaceId ? { ...task, workspaceId: tabWorkspaceId } : task,
-        ...(tabWorkspaceCwd ? { workspaceCwd: tabWorkspaceCwd } : {}),
-        ...(tabWorkspaceId ? { workspaceId: tabWorkspaceId } : {}),
-        ...(sourceSessionId ? { sourceSessionId } : {}),
+        task: { ...task, workspaceId: workspaceTarget.workspaceId },
+        ...(routeWorkspaceCwd ? { workspaceCwd: routeWorkspaceCwd } : {}),
+        ...(ownerWorkspaceId ? { workspaceId: ownerWorkspaceId } : {}),
+        ...(ownerSessionId ? { sourceSessionId: ownerSessionId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -7008,7 +7043,13 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [
+      activeWorkspaceCwd,
+      connection.sessionId,
+      getDefaultReviewPanelWidth,
+      t,
+      workspace.capabilities,
+    ],
   );
   const openMonitorPanel = useCallback(
     (
@@ -7851,7 +7892,15 @@ export function App({
                 id: tab.id,
                 kind: 'scheduled_task',
                 title: tab.title,
-                task,
+                task: {
+                  ...task,
+                  workspaceId: task.durable
+                    ? resolveScheduledTaskWorkspace(
+                        workspace.capabilities,
+                        tab.workspaceCwd,
+                      ).workspaceId
+                    : task.workspaceId,
+                },
                 sourceSessionId: tab.sourceSessionId,
                 workspaceCwd: tab.workspaceCwd,
                 workspaceId: tab.workspaceId,
@@ -8359,11 +8408,19 @@ export function App({
                   const liveSourceSessionId =
                     tab.sourceSessionId ?? connection.sessionId;
                   if (reference && liveSourceSessionId) {
-                    const task = await restoreScheduledTaskFromLiveSource(
-                      liveSourceSessionId,
-                      reference,
-                      tab.workspaceId,
-                    ).catch(() => undefined);
+                    const workspaceTarget = resolveScheduledTaskWorkspace(
+                      workspace.capabilities,
+                      tab.workspaceCwd,
+                    );
+                    const task =
+                      reference.scope === 'session' ||
+                      workspaceTarget.resolvable
+                        ? await restoreScheduledTaskFromLiveSource(
+                            liveSourceSessionId,
+                            reference,
+                            workspaceTarget.workspaceId,
+                          ).catch(() => undefined)
+                        : undefined;
                     if (task) {
                       return {
                         id: tab.id,
@@ -8406,7 +8463,18 @@ export function App({
                       : undefined;
                   }
                   const { toolCallId: _toolCallId, ...rest } = tab;
-                  return { ...rest, task };
+                  return {
+                    ...rest,
+                    task: {
+                      ...task,
+                      workspaceId: task.durable
+                        ? resolveScheduledTaskWorkspace(
+                            workspace.capabilities,
+                            tab.workspaceCwd,
+                          ).workspaceId
+                        : task.workspaceId,
+                    },
+                  };
                 }
                 case 'image': {
                   if (!tab.source) return undefined;
@@ -9625,25 +9693,11 @@ export function App({
     () => getScheduledTaskActivityKey(messages),
     [messages],
   );
-  const scheduledTaskWorkspaceTarget = useMemo(() => {
-    const registeredWorkspaces = workspace.capabilities?.workspaces;
-    if (!registeredWorkspaces || registeredWorkspaces.length === 0) {
-      return { workspaceId: undefined, resolvable: true };
-    }
-    if (!activeWorkspaceCwd) {
-      return { workspaceId: undefined, resolvable: false };
-    }
-    const matched = registeredWorkspaces.find(
-      (entry) => entry.cwd === activeWorkspaceCwd,
-    );
-    if (matched) {
-      return { workspaceId: matched.id, resolvable: true };
-    }
-    if (activeWorkspaceCwd === workspace.capabilities?.workspaceCwd) {
-      return { workspaceId: undefined, resolvable: true };
-    }
-    return { workspaceId: undefined, resolvable: false };
-  }, [activeWorkspaceCwd, workspace.capabilities]);
+  const scheduledTaskWorkspaceTarget = useMemo(
+    () =>
+      resolveScheduledTaskWorkspace(workspace.capabilities, activeWorkspaceCwd),
+    [activeWorkspaceCwd, workspace.capabilities],
+  );
   const sessionScheduledTasks = useSessionScheduledTasks({
     sessionId: connection.sessionId,
     workspaceId: scheduledTaskWorkspaceTarget.workspaceId,
@@ -24616,9 +24670,26 @@ export function App({
     onSideTaskInitialPromptRefused: handleSideTaskInitialPromptRefused,
     liveSessionScheduledTasks: sessionScheduledTasks.liveSessionTaskById,
     liveSessionScheduledTasksOwnerSessionId: connection.sessionId,
+    liveDurableScheduledTasks: sessionScheduledTasks.tasks.filter(
+      (entry) => entry.scope === 'durable',
+    ),
+    confirmedDeletedDurableTaskKeys:
+      sessionScheduledTasks.confirmedDeletedDurableTaskKeys,
+    hasLiveDurableScheduledSnapshot:
+      sessionScheduledTasks.hasLiveDurableSnapshot,
     hasLiveSessionScheduledSnapshot:
       sessionScheduledTasks.hasLiveSessionSnapshot,
     onCancelSessionScheduledTask: sessionScheduledTasks.cancelSessionTaskById,
+    onDurableScheduledTaskDeleted: (
+      id: string,
+      workspaceId: string | undefined,
+      sourceSessionId: string | undefined,
+    ) =>
+      sessionScheduledTasks.confirmDurableDeletion({
+        id,
+        workspaceId,
+        sessionId: sourceSessionId,
+      }),
     onScheduledTasksMutated: sessionScheduledTasks.refresh,
     onNestedRightPanelOpen: handleTurnOutputOpen,
     onNestedArtifactsChange: handlePaneArtifactsChange,
@@ -28212,6 +28283,7 @@ export function App({
                 scheduledTaskBusyIds={sessionScheduledTasks.busyIds}
                 manualRunActive={sessionScheduledTasks.manualRunActive}
                 focusScheduledTasksNonce={focusScheduledTasksNonce}
+                scheduledTasksOwnerSessionId={connection.sessionId}
                 attachments={
                   logicalSessionKey
                     ? (sessionAttachmentsBySessionRef.current.get(

@@ -2421,4 +2421,23 @@ describe('nextCronJobFireMs', () => {
     expect(base).toBe(localMidnight.getTime());
     expect(jittered).toBe(base! + 3_000);
   });
+
+  it('preserves negative jitter for a one-shot session job', () => {
+    const withoutJitter = nextCronJobFireMs({
+      id: 'one-shot-negative-jitter',
+      cronExpr: '*/5 * * * *',
+      recurring: false,
+      createdAt: anchor,
+      jitterMs: 0,
+    });
+    const early = nextCronJobFireMs({
+      id: 'one-shot-negative-jitter',
+      cronExpr: '*/5 * * * *',
+      recurring: false,
+      createdAt: anchor,
+      jitterMs: -3_000,
+    });
+    expect(withoutJitter).not.toBeNull();
+    expect(early).toBe(withoutJitter! - 3_000);
+  });
 });
