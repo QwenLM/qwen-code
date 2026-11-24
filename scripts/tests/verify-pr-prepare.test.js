@@ -562,6 +562,132 @@ describe('git hardening', () => {
     expect(existsSync(subMarker)).toBe(false);
   });
 
+  it('refuses non-UTF-8 filter names, custom core.worktree, and keeps submodule diffs visible for trust classification', () => {
+    // 1. Non-UTF-8 bytes in filter subsection name fail closed in both C and
+    // UTF-8 locales without executing the filter.
+    const { dir, base, head } = makeRepo();
+    const rceMarker = join(dir, 'non-utf8-rce-fired');
+    const cfgPath = join(dir, '.git', 'config');
+    const existingCfg = readFileSync(cfgPath);
+    const nonUtf8Section = Buffer.concat([
+      Buffer.from('\n[filter "a', 'utf8'),
+      Buffer.from([0x80]),
+      Buffer.from(`b"]\n\tclean = touch ${rceMarker}\n`, 'utf8'),
+    ]);
+    writeFileSync(cfgPath, Buffer.concat([existingCfg, nonUtf8Section]));
+    expect(() => localFilterOverrides(dir)).toThrow(/non-UTF-8 bytes/);
+    const fakeEnv = installFakeGh(snapshotFor({ base, head }));
+    for (const lc of ['C', 'en_US.UTF-8']) {
+      const res = runPrepare(dir, ['42', '--repo', REPO], {
+        ...fakeEnv,
+        LC_ALL: lc,
+      });
+      expect(res.status, `LC_ALL=${lc}: ${res.stderr}`).toBe(3);
+      expect(res.stderr).toContain('non-UTF-8 bytes');
+      expect(existsSync(rceMarker)).toBe(false);
+    }
+
+    // 2. Custom core.worktree redirecting to a clean subdirectory is refused.
+    const { dir: wtRepo, base: wtBase, head: wtHead } = makeRepo();
+    const cleanSub = join(wtRepo, 'clean-sub');
+    mkdirSync(cleanSub, { recursive: true });
+    writeFileSync(join(cleanSub, 'a.txt'), 'clean\n');
+    writeFileSync(join(wtRepo, 'untracked-evil.js'), 'evil\n');
+    execFileSync(
+      'git',
+      ['-C', wtRepo, 'config', '--local', 'core.worktree', cleanSub],
+      { stdio: 'pipe' },
+    );
+    const wtRes = runPrepare(
+      wtRepo,
+      ['42', '--repo', REPO],
+      installFakeGh(snapshotFor({ base: wtBase, head: wtHead })),
+    );
+    expect(wtRes.status).toBe(3);
+    expect(wtRes.stderr).toContain('core.worktree');
+
+    // 3. Submodule commit bump still escalates to hardware-isolated even when
+    // diff.ignoreSubmodules=all and submodule.sub.ignore=all are configured.
+    const { dir: subSrc } = makeRepo();
+    const { dir: superRepo } = makeRepo();
+    execFileSync(
+      'git',
+      [
+        '-C',
+        superRepo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        subSrc,
+        'sub',
+      ],
+      { stdio: 'pipe' },
+    );
+    execFileSync('git', ['-C', superRepo, 'commit', '-m', 'add sub'], {
+      stdio: 'pipe',
+    });
+    const subBase = execFileSync(
+      'git',
+      ['-C', superRepo, 'rev-parse', 'HEAD'],
+      {
+        encoding: 'utf8',
+      },
+    ).trim();
+    writeFileSync(join(subSrc, 'new.txt'), 'bump\n');
+    execFileSync('git', ['-C', subSrc, 'add', 'new.txt'], { stdio: 'pipe' });
+    execFileSync('git', ['-C', subSrc, 'commit', '-m', 'bump'], {
+      stdio: 'pipe',
+    });
+    execFileSync(
+      'git',
+      [
+        '-C',
+        join(superRepo, 'sub'),
+        '-c',
+        'protocol.file.allow=always',
+        'pull',
+        '--ff-only',
+      ],
+      { stdio: 'pipe' },
+    );
+    execFileSync('git', ['-C', superRepo, 'add', 'sub'], { stdio: 'pipe' });
+    execFileSync('git', ['-C', superRepo, 'commit', '-m', 'bump sub'], {
+      stdio: 'pipe',
+    });
+    const subHead = execFileSync(
+      'git',
+      ['-C', superRepo, 'rev-parse', 'HEAD'],
+      {
+        encoding: 'utf8',
+      },
+    ).trim();
+    execFileSync(
+      'git',
+      ['-C', superRepo, 'config', '--local', 'diff.ignoreSubmodules', 'all'],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', superRepo, 'config', '--local', 'submodule.sub.ignore', 'all'],
+      { stdio: 'pipe' },
+    );
+    const outCtx = join(makeTmpDir(), 'sub-trust.json');
+    const subRes = runPrepare(
+      superRepo,
+      ['42', '--repo', REPO, '--local-owner', '--context-out', outCtx],
+      installFakeGh(snapshotFor({ base: subBase, head: subHead })),
+    );
+    expect(subRes.status, subRes.stderr).toBe(0);
+    const writtenCtx = JSON.parse(readFileSync(outCtx, 'utf8'));
+    expect(writtenCtx.trustClassification.executionClass).toBe(
+      'hardware-isolated',
+    );
+    expect(writtenCtx.trustClassification.escalationReasons).toContain(
+      'symlink-or-submodule:sub',
+    );
+  });
+
   // A filter VALUE may contain newlines; parsing the rendered `key value`
   // output would accept the second line as a key and forge a `-c` that
   // outranks the hardening (git applies the last -c for a key).

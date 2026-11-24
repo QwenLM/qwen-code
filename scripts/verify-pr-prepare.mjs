@@ -889,36 +889,42 @@ export const GIT_HARDENING = [
 ];
 
 const FILTER_NAME = /^filter\..*\.(clean|smudge|process)$/s;
+const FILTER_PREFIX_BYTES = Buffer.from('filter.', 'ascii');
+const FILTER_SUFFIX_BYTES = ['.clean', '.smudge', '.process'].map((suffix) =>
+  Buffer.from(suffix, 'ascii'),
+);
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+function isRawFilterKey(rawKey) {
+  if (
+    rawKey.length < FILTER_PREFIX_BYTES.length + 6 ||
+    !rawKey.subarray(0, FILTER_PREFIX_BYTES.length).equals(FILTER_PREFIX_BYTES)
+  ) {
+    return false;
+  }
+  return FILTER_SUFFIX_BYTES.some(
+    (suffix) =>
+      rawKey.length >= FILTER_PREFIX_BYTES.length + suffix.length &&
+      rawKey.subarray(rawKey.length - suffix.length).equals(suffix),
+  );
+}
 
 /**
- * A filter name git allows (e.g. `filter.a=b.clean`) but `-c key=value`
- * cannot represent: git splits the argument at the FIRST `=`, so emitting an
- * override would set a different key and leave the real filter armed. The
- * gate refuses such names instead, with their own remedy.
+ * A filter name git allows (e.g. `filter.a=b.clean` or raw non-UTF-8 bytes)
+ * that `-c key=value` cannot safely represent: git splits `-c` at the FIRST
+ * `=`, and Node argv cannot pass invalid UTF-8 bytes verbatim, leaving the
+ * real filter armed. The gate refuses such names instead, with their own remedy.
  */
 export class UnsafeFilterNameError extends Error {
-  constructor(name) {
+  constructor(name, detail = "contains '='") {
     super(
-      `filter name ${name} contains '=' and cannot be safely disabled with -c — remove the filter from the tree's git config, or re-clone, then re-run prepare`,
+      `filter name ${printable(name)} ${detail} and cannot be safely disabled with -c — remove the filter from the tree's git config, or re-clone, then re-run prepare`,
     );
     this.name = 'UnsafeFilterNameError';
   }
 }
 
-/**
- * Empty `-c` overrides for every locally defined filter command. The filter
- * name is attacker-chosen, so the override set has to be enumerated from the
- * tree's own config instead of hardcoded. Three properties are load-bearing:
- * `--includes` follows `include.path` the way the config parsing `git status`
- * uses does; `--null --name-only` frames KEY NAMES only, because a filter
- * VALUE may contain newlines that would forge extra entries if the rendered
- * `key value` output were parsed; and each name is re-validated before it
- * becomes a `-c` argument. When `extensions.worktreeConfig` is set,
- * `git status` also reads `.git/config.worktree`, so that scope is enumerated
- * too. Names containing `=` throw UnsafeFilterNameError — no override can
- * represent them.
- */
-export function localFilterOverrides(root) {
+function activeGitConfigScopes(root) {
   const prefix = root ? ['-C', root] : [];
   const scopes = ['--local'];
   const worktreeConfig = run('git', [
@@ -930,37 +936,103 @@ export function localFilterOverrides(root) {
     'extensions.worktreeConfig',
   ]);
   if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
-    scopes.push('--worktree');
+    const wtPath = run('git', [
+      ...prefix,
+      'rev-parse',
+      '--git-path',
+      'config.worktree',
+    ]);
+    const rawWt = singleLineOutput(wtPath);
+    if (rawWt) {
+      const resolvedWt = isAbsolute(rawWt)
+        ? rawWt
+        : resolve(root ?? process.cwd(), rawWt);
+      if (existsSync(resolvedWt)) {
+        scopes.push('--worktree');
+      }
+    }
   }
+  return scopes;
+}
+
+/**
+ * Empty `-c` overrides for every locally defined filter command. The filter
+ * name is attacker-chosen, so the override set has to be enumerated from the
+ * tree's own config instead of hardcoded. Key framing uses `--list --null` on
+ * raw bytes (avoiding both UTF-8 locale regex skips on non-UTF-8 bytes and
+ * lossy UTF-8 replacement to U+FFFD). Names with `=`, CR/LF, or non-UTF-8
+ * bytes throw UnsafeFilterNameError — no `-c` override can represent them.
+ */
+export function localFilterOverrides(root) {
+  const prefix = root ? ['-C', root] : [];
+  const scopes = activeGitConfigScopes(root);
+  const seen = new Set();
   const overrides = [];
   for (const scope of scopes) {
-    const result = run('git', [
-      ...prefix,
-      'config',
-      scope,
-      '--includes',
-      '--null',
-      '--name-only',
-      '--get-regexp',
-      '^filter\\..*\\.(clean|smudge|process)$',
-    ]);
+    const result = spawnSync(
+      'git',
+      [...prefix, 'config', scope, '--includes', '--null', '--list'],
+      { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 },
+    );
     if (result.status === 1) continue;
-    if (result.status !== 0) {
+    if (result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
       throw new Error('could not enumerate local git filters');
     }
-    for (const name of result.stdout.split('\0')) {
-      if (!name) continue;
-      if (
-        !FILTER_NAME.test(name) ||
-        name.includes('=') ||
-        /[\r\n]/.test(name)
-      ) {
-        throw new UnsafeFilterNameError(name);
+    const raw = result.stdout;
+    let start = 0;
+    while (start < raw.length) {
+      let end = raw.indexOf(0, start);
+      if (end === -1) end = raw.length;
+      const entry = raw.subarray(start, end);
+      start = end + 1;
+      if (entry.length === 0) continue;
+      const nl = entry.indexOf(0x0a);
+      const rawKey = nl === -1 ? entry : entry.subarray(0, nl);
+      if (!isRawFilterKey(rawKey)) continue;
+      let name;
+      try {
+        name = STRICT_UTF8.decode(rawKey);
+      } catch {
+        throw new UnsafeFilterNameError(
+          rawKey.toString('utf8'),
+          'contains non-UTF-8 bytes',
+        );
       }
-      overrides.push('-c', `${name}=`);
+      if (name.includes('=')) throw new UnsafeFilterNameError(name);
+      if (!FILTER_NAME.test(name) || /[\r\n]/.test(name)) {
+        throw new UnsafeFilterNameError(
+          name,
+          'contains unsupported characters',
+        );
+      }
+      if (!seen.has(name)) {
+        seen.add(name);
+        overrides.push('-c', `${name}=`);
+      }
     }
   }
   return overrides;
+}
+
+function hasCustomWorktreeConfig(root) {
+  const scopes = activeGitConfigScopes(root);
+  for (const scope of scopes) {
+    const res = run('git', [
+      ...GIT_HARDENING,
+      '-C',
+      root,
+      'config',
+      scope,
+      '--includes',
+      '--get-all',
+      'core.worktree',
+    ]);
+    if (res.status === 0 && res.stdout.trim() !== '') return true;
+    if (res.status !== 0 && res.status !== 1) {
+      throw new Error('could not inspect core.worktree in git config');
+    }
+  }
+  return false;
 }
 
 export function gitStatusArgs(root) {
@@ -1573,6 +1645,12 @@ function main(argv) {
   const root = toplevel.stdout.trim();
   let rootFilterOverrides;
   try {
+    if (hasCustomWorktreeConfig(root)) {
+      return fail(
+        3,
+        'git config sets core.worktree, which redirects the working tree root — re-clone or clear core.worktree, then re-run prepare',
+      );
+    }
     rootFilterOverrides = localFilterOverrides(root);
   } catch (error) {
     return fail(3, error.message);
@@ -1715,6 +1793,7 @@ function main(argv) {
     'diff',
     '--raw',
     '--no-renames',
+    '--ignore-submodules=none',
     '-z',
     `${context.base}..${context.head}`,
   ]);
