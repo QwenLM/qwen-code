@@ -3071,6 +3071,75 @@ it.each(['status', 'fire'] as const)(
   },
 );
 
+it.each(['status', 'fire'] as const)(
+  'keeps a late async Stop receipt out of the recovered decision via %s',
+  async (recovery) => {
+    catalog = {
+      ...catalog,
+      hooks: [
+        { ...catalog.hooks[0], eventName: HookEventName.Stop, async: true },
+      ],
+    };
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const originalControl = control.getMockImplementation()!;
+    control.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      operation,
+    ) {
+      if (operation.kind === 'hook-execute') {
+        requests.push(operation);
+        return { operationId: operation.operationId, state: 'running' };
+      }
+      return originalControl.call(this, operation);
+    });
+    const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+    const lost = loseFinalMarkerWrite();
+    await expect(
+      hooks.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).rejects.toThrow('lost final marker write');
+    lost.mockRestore();
+
+    const dispatch = requests.find(
+      (request) => request.kind === 'hook-execute',
+    )!;
+    const result: ManagedHookResult = {
+      success: false,
+      outcome: 'blocking',
+      duration: 1,
+      output: { decision: 'deny' },
+    };
+    replies.set(dispatch.operationId, {
+      operationId: dispatch.operationId,
+      state: 'settled',
+      result,
+    });
+    const childRecord = () =>
+      session.authority.extensionRecord('hook_execution', dispatch.operationId);
+    await vi.waitFor(
+      () => expect(childRecord()?.run.execution).toBe('settled'),
+      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+    );
+    const resultRef = parseHookExecution(childRecord()!.record).resultRef!;
+
+    await reopenSession();
+    const restored = new HostedHookSession(options, session, pin);
+    if (recovery === 'status') await restored.status('stop-1');
+    await expect(
+      restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).resolves.toBeUndefined();
+    expect(await restored.wasStopBlocked('prompt-1')).toBe(false);
+    expect(parseHookExecution(childRecord()!.record).resultRef).toEqual(
+      resultRef,
+    );
+    expect(
+      JSON.parse((await session.resources.read(resultRef)).toString()),
+    ).toEqual(result);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+  },
+);
+
 it('reads each saved Stop plan once however many turns check it', async () => {
   catalog = {
     ...catalog,
@@ -3302,6 +3371,7 @@ it.each([
   [HookEventName.PermissionRequest, false],
   [HookEventName.PreToolUse, true],
   [HookEventName.PermissionRequest, true],
+  [HookEventName.Stop, true],
 ] as const)(
   'persists a hard capacity refusal for fail-open %s Hooks across reconstruction (async: %s)',
   async (eventName, async) => {
@@ -3344,6 +3414,41 @@ it.each([
     ).toHaveLength(1);
   },
 );
+
+it('keeps a fail-closed async Stop quota refusal when rebuilding the result', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [
+      { ...catalog.hooks[0], eventName: HookEventName.Stop, async: true },
+    ],
+  };
+  execute = async () => ({
+    success: false,
+    outcome: 'non_blocking_error',
+    duration: 0,
+    error: 'Managed hook execution quota exceeded before dispatch.',
+  });
+  const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+  const lost = loseFinalMarkerWrite();
+  await expect(
+    hooks.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+  ).rejects.toThrow('lost final marker write');
+  lost.mockRestore();
+
+  await reopenSession();
+  const restored = new HostedHookSession(options, session, pin);
+  await restored.status('stop-1');
+  await expect(
+    restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+  ).resolves.toMatchObject({
+    decision: 'block',
+    reason: 'Hook evaluation failed.',
+  });
+  expect(await restored.wasStopBlocked('prompt-1')).toBe(true);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
+});
 
 it.each([false, true])(
   'settles parallel quota refusals after a lost reply using the saved fail policy (closed: %s)',

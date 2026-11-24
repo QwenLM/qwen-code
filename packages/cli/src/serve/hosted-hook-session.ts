@@ -118,12 +118,31 @@ function isLegacyCommandStopBlock(receipt: ManagedHookResult): boolean {
   );
 }
 
+function asyncAdmission(): ManagedHookResult {
+  return { success: true, outcome: 'success', duration: 0 };
+}
+
+function isCommandCompletion(result: ManagedHookResult): boolean {
+  // The runner also synthesizes a deny decision for a silent exit 2.
+  return (
+    !result.notStarted &&
+    (result.success ||
+      result.stdout !== undefined ||
+      result.stderr !== undefined ||
+      (result.outcome === 'blocking' && result.output?.decision === 'deny'))
+  );
+}
+
 function hookExecutionResult(
   result: ManagedHookResult,
   hook: ManagedHookDescriptor,
   event: HookEventName,
 ): HookExecutionResult {
-  const { error, ...receipt } = result;
+  // A saved async receipt may settle after the occurrence was admitted.
+  const { error, ...receipt } =
+    event === HookEventName.Stop && hook.async && isCommandCompletion(result)
+      ? asyncAdmission()
+      : result;
   const output = receipt.output;
   if (
     event === HookEventName.Stop &&
@@ -1401,7 +1420,7 @@ export class HostedHookSession {
         pending.admitted.then(() => null),
         pending.result,
       ]);
-      return completed ?? this.asyncAdmission();
+      return completed ?? asyncAdmission();
     }
     const abort = new AbortController();
     const executionSignal = hook.async
@@ -1607,7 +1626,7 @@ export class HostedHookSession {
     void result.catch(() => undefined).finally(() => this.pending.delete(id));
     if (!hook.async) return result;
     const completed = await Promise.race([admitted.then(() => null), result]);
-    return completed ?? this.asyncAdmission();
+    return completed ?? asyncAdmission();
   }
 
   private cancelRequested(id: string): boolean {
@@ -1728,10 +1747,6 @@ export class HostedHookSession {
       )!.record,
     );
     return this.read<ManagedHookResult>(committed.resultRef!);
-  }
-
-  private asyncAdmission(): ManagedHookResult {
-    return { success: true, outcome: 'success', duration: 0 };
   }
 
   private async lookup(
@@ -1978,9 +1993,10 @@ export class HostedHookSession {
       const result = child.resultRef
         ? await this.read<ManagedHookResult>(child.resultRef)
         : cancelledResult();
-      results.push(hookExecutionResult(result, hook, event));
+      const execution = hookExecutionResult(result, hook, event);
+      results.push(execution);
       if (plan.sequential) {
-        effectiveInput = sequentialInput(effectiveInput, result, event);
+        effectiveInput = sequentialInput(effectiveInput, execution, event);
         if (malformedShellInput(effectiveInput, event)) break;
       }
     }
