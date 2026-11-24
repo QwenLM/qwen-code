@@ -528,6 +528,14 @@ function transformPart(
   }
   if (
     maxTextChars !== undefined &&
+    // A signed thought is a replay unit: providers validate the signature
+    // against the exact text, so truncating the text while keeping the
+    // signature would silently relabel a mutated unit as intact. Keep signed
+    // units byte-exact; the unsigned cap still applies to everything else.
+    !(
+      typeof nextPart.thoughtSignature === 'string' &&
+      nextPart.thoughtSignature.length > 0
+    ) &&
     typeof nextPart.text === 'string' &&
     nextPart.text.length > maxTextChars
   ) {

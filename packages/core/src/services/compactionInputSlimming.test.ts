@@ -1461,5 +1461,44 @@ describe('compactionInputSlimming', () => {
       expect(result.slimmedHistory).toBe(history);
       expect(result.stats.thoughtsStripped).toBe(0);
     });
+
+    it('keeps a signed thought byte-exact under the text cap (combined strip + cap path)', () => {
+      const signed = {
+        text: 'r'.repeat(4001),
+        thought: true,
+        thoughtSignature: 'fixture-signature',
+      };
+      const result = slimCompactionInput(
+        [{ role: 'model', parts: [signed] }],
+        undefined,
+        { stripUnsignedThoughts: true, maxTextChars: 4000 },
+      );
+      expect(result.slimmedHistory[0]!.parts).toEqual([signed]);
+      expect(result.stats.textPartsTruncated).toBe(0);
+    });
+
+    it('still caps an unsigned thought and an ordinary text part under the text cap', () => {
+      const unsigned = { text: 'u'.repeat(4001), thought: true };
+      const plain = { text: 'p'.repeat(4001) };
+      const result = slimCompactionInput(
+        [
+          { role: 'model', parts: [unsigned] },
+          { role: 'user', parts: [plain] },
+        ],
+        undefined,
+        { maxTextChars: 4000 },
+      );
+      expect(result.stats.textPartsTruncated).toBe(2);
+      const unsignedText = (
+        result.slimmedHistory[0]!.parts![0] as { text: string }
+      ).text;
+      const plainText = (
+        result.slimmedHistory[1]!.parts![0] as { text: string }
+      ).text;
+      expect(unsignedText.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
+      expect(unsignedText).not.toContain('u'.repeat(4001));
+      expect(plainText.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
+      expect(plainText).not.toContain('p'.repeat(4001));
+    });
   });
 });

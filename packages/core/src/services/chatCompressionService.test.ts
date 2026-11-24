@@ -5575,6 +5575,61 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     );
   });
 
+  it.each([
+    {
+      name: 'plain prose cut mid-sentence',
+      cutText:
+        'Summary of work so far: the user asked to port the parser and I',
+    },
+    {
+      name: 'a closed snapshot followed by cut prose',
+      cutText:
+        '<state_snapshot><overall_goal>port the parser</overall_goal></state_snapshot> And then I continued to',
+    },
+  ])(
+    'retries once when the clamped budget exhausts on $name (no shape predicate)',
+    async ({ cutText }) => {
+      // The retry keys off reported spend reaching the clamped budget — the
+      // same condition the truncation guard drops on — not the visible shape,
+      // so prose cuts and closed-snapshot-then-prose recover too.
+      configureWindow(65_536);
+      const budgets: number[] = [];
+      const generateText = vi.fn().mockImplementation(async (args) => {
+        const maxOut =
+          args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+        budgets.push(maxOut);
+        if (budgets.length === 1) {
+          return {
+            text: cutText,
+            usage: {
+              promptTokenCount: 54_000,
+              candidatesTokenCount: maxOut,
+              totalTokenCount: 54_000 + maxOut,
+            },
+          };
+        }
+        return {
+          text: '<state_snapshot><overall_goal>recovered prose cut</overall_goal></state_snapshot>',
+          usage: {
+            promptTokenCount: 18_000,
+            candidatesTokenCount: 600,
+            totalTokenCount: 18_600,
+          },
+        };
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as BaseLlmClient);
+
+      const result = await compressHistory(toolSession(12, 17_500), 54_000);
+
+      expectCompressed(result);
+      expect(budgets).toHaveLength(2);
+      expect(budgets[0]!).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+      expect(budgets[1]!).toBeGreaterThan(budgets[0]!);
+    },
+  );
+
   it('strips unsigned thoughts from the reduced retry payload (combined oversized-text + thought fixture)', async () => {
     // getColdInput strips the thoughts so the first budget is clamped but
     // sendable; reduceColdInput must strip them again on the retry, otherwise
