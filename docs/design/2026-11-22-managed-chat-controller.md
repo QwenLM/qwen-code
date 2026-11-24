@@ -193,8 +193,8 @@ actions, and Java command operations into `SessionChatController`:
 
 ## Deferred (slices 3b–3c and later)
 
-- **Slice 3b — `useManagedChatController` binding hook** wiring
-  `useManagedSession`, `useManagedPendingActions`, and `ManagedAgentProvider`
+- **[Slice 3b — `useManagedChatController` binding hook](2026-11-24-managed-chat-controller-binding.md)**
+  wiring `useManagedSession`, `useManagedActions`, and `ManagedAgentProvider`
   into `createManagedChatController`.
 - **Slice 3c — `ManagedSessionsPage` switch onto `ChatSurface`** with the
   browser before/after visual gate (first real UI convergence across both modes).
