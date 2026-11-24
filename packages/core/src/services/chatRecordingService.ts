@@ -22,7 +22,11 @@ import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import path from 'node:path';
 import fs from 'node:fs';
-import { isManagedExecutionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import {
+  isManagedExecutionTranscriptSync,
+  readManagedExecutionEvidenceSync,
+} from '../utils/sessionStorageUtils.js';
+import { withoutCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import {
   SessionExecutionEngineError,
   type SessionExecutionEngine,
@@ -1529,6 +1533,59 @@ export class ChatRecordingService {
       // The file creation below reports the actionable error.
     }
     return chatsDir;
+  }
+
+  /** Resolve the existing local transcript without initializing a writer. */
+  async getExistingTranscriptPath(): Promise<string | undefined> {
+    try {
+      const sessionId = this.getSessionId();
+      const lease = this.binding?.lease;
+      if (
+        this.managedSink ||
+        this.config.getExecutionEnvironment?.() ||
+        this.config.getFileSystemService?.()?.textFileIo ||
+        this.state !== 'active' ||
+        !this.acceptingWrites ||
+        this.writeFailure ||
+        sessionId !== this.config.getSessionId() ||
+        (this.writerLeaseRequired && !lease) ||
+        lease?.isReleased
+      )
+        return undefined;
+      const filename = `${sessionId}.jsonl`;
+      // An exact grep glob must remain a literal basename, even if an SDK
+      // caller bypassed CLI session ID validation.
+      if (
+        !/^[a-zA-Z0-9._-]+$/.test(sessionId) ||
+        path.basename(filename) !== filename
+      ) {
+        return undefined;
+      }
+      const transcriptPath = path.join(
+        this.config.storage.getProjectDir(),
+        'chats',
+        filename,
+      );
+      if (
+        !path.isAbsolute(transcriptPath) ||
+        (lease && lease.transcriptPath !== transcriptPath) ||
+        (this.cachedConversationFile &&
+          this.cachedConversationFile !== transcriptPath)
+      )
+        return undefined;
+      const stat = fs.lstatSync(transcriptPath);
+      if (!stat.isFile() || stat.size === 0) return undefined;
+      await lease?.assertOwnedAndUnchanged();
+      if (sessionId !== this.config.getSessionId() || this.state !== 'active') {
+        return undefined;
+      }
+      return readManagedExecutionEvidenceSync(transcriptPath) === false
+        ? transcriptPath
+        : undefined;
+    } catch {
+      // The hint is optional; a missing or unreadable transcript is no error.
+      return undefined;
+    }
   }
 
   private captureLegacyArchiveGeneration() {
@@ -4019,7 +4076,9 @@ export class ChatRecordingService {
     try {
       // Own the containers before hook rescue replaces parts on live entries;
       // spread preserves the symbol metadata used to derive prompt identities.
-      const compressedHistory = payload.compressedHistory.map((content) => ({
+      const compressedHistory = withoutCompactionTranscriptHint(
+        payload.compressedHistory,
+      ).map((content) => ({
         ...content,
         ...(content.parts ? { parts: [...content.parts] } : {}),
       }));

@@ -91,17 +91,31 @@ final class AgentActionParking {
     }
 
     /**
+     * Makes a wake-started Turn's park due now: it has no Turn row to
+     * unpark, so the wake-recovery scan claims its head on the next pass.
+     */
+    static void dueWakeParks(JdbcTemplate jdbc, String tenantId,
+            String sessionId, long now) {
+        jdbc.update("UPDATE ma_session_head SET wake_retry_at = ?, gmt_modified = ?"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?"
+                        + " AND head_kind = 'MANAGED_SESSION' AND wake_seal_parked_owner = 'wake'"
+                        + " AND (wake_retry_at IS NULL OR wake_retry_at > ?)",
+                now, now, tenantId, sessionId, now);
+    }
+
+    /**
      * Whether the head carries an intact Action park certificate and the
-     * parked Turn is the Session's only live work: the sole active Turn is
-     * the parked one, and no other prompt holds a requested Action. Only
-     * such a certificate may exempt an approval change from the busy gates.
+     * parked Turn is the Session's only live work: no other prompt holds a
+     * requested Action, and the sole active Turn row is the parked one, or,
+     * for a wake-started Turn, which has no row, there is none. Only such a
+     * certificate may exempt an approval change from the busy gates.
      */
     static boolean certificateMatches(JdbcTemplate jdbc, String tenantId,
             String sessionId) {
         List<Map<String, Object>> heads = jdbc.queryForList(
                 "SELECT state, activation_phase, journal_revision, wake_seal_revision,"
                         + " wake_seal_parked_prompt_id, wake_seal_parked_until,"
-                        + " wake_seal_parked_approval_revision FROM ma_session_head"
+                        + " wake_seal_parked_approval_revision, wake_seal_parked_owner FROM ma_session_head"
                         + " WHERE tenant_id = ? AND harness_session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION'",
                 tenantId, sessionId);
@@ -134,18 +148,23 @@ final class AgentActionParking {
                 "SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')",
                 Integer.class, tenantId, sessionId);
+        Integer foreignRequested = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
+                        + " AND record_kind = 'ACTION' AND state = 'requested' AND prompt_id <> ?",
+                Integer.class, tenantId, sessionId, parkedPromptId);
+        if (foreignRequested == null || foreignRequested != 0) {
+            return false;
+        }
+        if ("wake".equals(head.get("wake_seal_parked_owner"))) {
+            return activeTurns != null && activeTurns == 0;
+        }
         Integer parkedTurns = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND status = 'RUNNING' AND error_code = ? AND prompt_id = ?"
                         + " AND dispatch_owner IS NULL",
                 Integer.class, tenantId, sessionId,
                 AgentStateStore.HARNESS_ACTION_PARKED, parkedPromptId);
-        Integer foreignRequested = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
-                        + " AND record_kind = 'ACTION' AND state = 'requested' AND prompt_id <> ?",
-                Integer.class, tenantId, sessionId, parkedPromptId);
         return activeTurns != null && activeTurns == 1
-                && parkedTurns != null && parkedTurns == 1
-                && foreignRequested != null && foreignRequested == 0;
+                && parkedTurns != null && parkedTurns == 1;
     }
 }
