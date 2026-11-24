@@ -288,7 +288,7 @@ class ManagedArtifactReadIntegrationTest {
         if (deleteSession) {
             assertThat(fixture.jdbc().queryForObject(
                     "SELECT status FROM ma_session"
-                            + " WHERE session_id = X'73657373696f6e2d31'",
+                            + " WHERE session_id = 'session-1'",
                     String.class)).isEqualTo("DELETING");
         } else {
             assertThat(permission).isFalse();
@@ -336,7 +336,7 @@ class ManagedArtifactReadIntegrationTest {
         // mid-stream, and the window is what let the stream complete.
         assertThat(fixture.jdbc().queryForObject(
                 "SELECT status FROM ma_session"
-                        + " WHERE session_id = X'73657373696f6e2d31'",
+                        + " WHERE session_id = 'session-1'",
                 String.class)).isEqualTo("DELETING");
     }
 

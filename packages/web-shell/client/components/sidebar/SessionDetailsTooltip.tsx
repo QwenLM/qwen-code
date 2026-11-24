@@ -1,4 +1,6 @@
 import {
+  useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -34,6 +36,7 @@ import {
 import { openableSessionPrs } from '../SessionPrBadge';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
 interface SessionDetailsTooltipProps {
   session: DaemonSessionSummary;
@@ -82,6 +85,9 @@ export function SessionDetailsTooltip({
   const contentRef = useRef<HTMLDivElement | null>(null);
   const copyButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
+  const hoverSuppressionActive = useContext(SidebarHoverSuppressionContext);
+  const hoverSuppressedRef = useRef(hoverSuppressionActive);
+  hoverSuppressedRef.current = hoverSuppressionActive;
   // The overview shares one token so its own entry points replace each
   // other; every other instance keeps its own, so a hover elsewhere (e.g.
   // the sidebar) never moves focus out of this popover.
@@ -111,8 +117,11 @@ export function SessionDetailsTooltip({
     );
   // A turn in flight hides the row's background dot and the blocked states
   // outrank it, so this status is where background work still gets named.
-  // Appended, never reordered: blocked-state precedence is pinned. The
-  // background-only arm below already names it and must not repeat it.
+  // Blocked-state precedence is pinned. The unread arm mirrors the row's dot
+  // precedence — the unread dot outranks the running/active-work dots, the
+  // background dot outranks unread — and carries the suffix for the same
+  // hidden-background reason. The background-only arm already names it and
+  // must not repeat it.
   const backgroundSuffix = session.hasRunningBackgroundTasks
     ? ` · ${t('background.running')}`
     : '';
@@ -120,16 +129,16 @@ export function SessionDetailsTooltip({
     ? `${t('sessionsOverview.status.needsApproval')}${backgroundSuffix}`
     : session.isWaitingForUserQuestion
       ? `${t('sessionsOverview.status.askUserQuestion')}${backgroundSuffix}`
-      : session.hasActivePrompt
-        ? `${t('sidebar.running')}${backgroundSuffix}`
-        : session.hasRunningBackgroundTasks
-          ? t('background.running')
-          : session.activeWorkState === 'active'
-            ? t('sidebar.activeWork')
-            : session.activeWorkState === 'unknown'
-              ? t('sidebar.activityUnknown')
-              : completedUnread
-                ? t('sidebar.completedUnread')
+      : !session.hasActivePrompt && session.hasRunningBackgroundTasks
+        ? t('background.running')
+        : completedUnread
+          ? `${t('sidebar.completedUnread')}${backgroundSuffix}`
+          : session.hasActivePrompt
+            ? `${t('sidebar.running')}${backgroundSuffix}`
+            : session.activeWorkState === 'active'
+              ? t('sidebar.activeWork')
+              : session.activeWorkState === 'unknown'
+                ? t('sidebar.activityUnknown')
                 : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
 
   useEffect(() => {
@@ -171,12 +180,16 @@ export function SessionDetailsTooltip({
     }
   }, [session.sessionId, open]);
 
-  const cancelClose = () => window.clearTimeout(closeTimerRef.current);
+  const cancelClose = useCallback(
+    () => window.clearTimeout(closeTimerRef.current),
+    [],
+  );
   const openAfterDelay = () => {
     cancelClose();
-    if (open) return;
+    if (hoverSuppressedRef.current || open) return;
     window.clearTimeout(openTimerRef.current);
     openTimerRef.current = window.setTimeout(() => {
+      if (hoverSuppressedRef.current) return;
       const anchor = anchorRef.current;
       let activeElement = anchor?.ownerDocument.activeElement;
       while (activeElement?.shadowRoot?.activeElement) {
@@ -193,7 +206,7 @@ export function SessionDetailsTooltip({
       setOpen(true);
     }, 300);
   };
-  const close = () => {
+  const close = useCallback(() => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
     restoreFocusRef.current = true;
@@ -201,7 +214,16 @@ export function SessionDetailsTooltip({
     copyAttemptRef.current += 1;
     window.clearTimeout(copyResetTimerRef.current);
     setCopyStatus('idle');
-  };
+  }, [cancelClose, setOpen]);
+
+  useEffect(() => {
+    if (hoverSuppressionActive) {
+      window.clearTimeout(openTimerRef.current);
+    }
+    if (!hoverSuppressionActive || openOnClick || !open) return;
+    close();
+  }, [close, hoverSuppressionActive, open, openOnClick]);
+
   const closeAfterDelay = () => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
@@ -356,7 +378,11 @@ export function SessionDetailsTooltip({
           })}
           <div className={styles.sessionDetailsRow}>
             <RadioTowerIcon aria-hidden="true" />
-            <span>{statusLabel ?? status}</span>
+            {/* An override replaces the line but must keep naming hidden
+                background work: the row hides that dot in these states. */}
+            <span>
+              {statusLabel ? `${statusLabel}${backgroundSuffix}` : status}
+            </span>
           </div>
           {details}
           <div className={styles.sessionDetailsIdRow}>

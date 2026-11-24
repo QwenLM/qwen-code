@@ -75,7 +75,7 @@ class HostedHarnessMySqlIT {
     private final CountDownLatch cancellationRequested = new CountDownLatch(1);
     private final CountDownLatch releaseCancellation = new CountDownLatch(1);
     private final StringBuilder output = new StringBuilder();
-    private final String tenant = "hosted-mysql-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final String sessionId = UUID.randomUUID().toString();
     private final ScheduledExecutorService watchdog =
             Executors.newSingleThreadScheduledExecutor();
@@ -226,7 +226,7 @@ class HostedHarnessMySqlIT {
 
     private JsonNode modelStatistics() {
         var snapshots = jdbc.query("SELECT DISTINCT u.inline_bytes FROM ma_resource u JOIN ma_resource_ref r"
-                        + " ON r.session_scope_key = u.session_scope_key AND r.resource_id = u.resource_id"
+                        + " ON r.tenant_id = u.tenant_id AND r.session_id = u.session_id AND r.resource_id = u.resource_id"
                         + " WHERE u.tenant_id = ? AND u.session_id = ? AND r.owner_kind = 'JOURNAL'"
                         + " AND u.kind IN ('managed-hosted-model-usage-v2', 'managed-hook-model-usage-v2', 'managed-session-model-stats')",
                 (row, index) -> {

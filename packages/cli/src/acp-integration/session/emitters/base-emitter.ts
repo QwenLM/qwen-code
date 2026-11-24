@@ -29,15 +29,8 @@ export abstract class BaseEmitter {
     return undefined;
   }
 
-  /**
-   * Sends a session update to the ACP client.
-   * If a message rewriter is configured, updates pass through it first
-   * (original messages are sent as-is, rewritten versions are appended).
-   */
+  /** Sends a session update to the ACP client. */
   protected async sendUpdate(update: SessionUpdate): Promise<void> {
-    if (this.ctx.messageRewriter) {
-      return this.ctx.messageRewriter.interceptUpdate(update);
-    }
     return this.ctx.sendUpdate(update);
   }
 

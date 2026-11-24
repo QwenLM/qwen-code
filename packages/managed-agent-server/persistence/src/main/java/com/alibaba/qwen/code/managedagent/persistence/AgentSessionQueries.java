@@ -13,7 +13,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -108,10 +107,11 @@ final class AgentSessionQueries {
         }
         List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
-        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
+        sessionIds.forEach(id -> arguments.add(
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(id)));
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM"
                         + " ma_operation WHERE tenant_id = ?"
-                        + " AND scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size())
+                        + " AND scope_kind = 'SESSION' AND scope_id IN (" + AgentStoreRows.placeholders(sessionIds.size())
                         + ") AND operation_kind = 'CLOSE' AND state = 'COMPLETED'"
                         + " AND receipt_id IS NOT NULL",
                 String.class, arguments.toArray()));
@@ -155,7 +155,8 @@ final class AgentSessionQueries {
                                 + " s.workspace_storage_id AND r.state = 'ACTIVE' LEFT JOIN"
                                 + " ma_workspace_access a ON a.tenant_id = r.tenant_id AND"
                                 + " a.workspace_id = r.workspace_id AND a.actor_id ="
-                                + " s.creator_actor_key AND a.role IN ('OPERATOR', 'OWNER') WHERE"
+                                + " s.creator_actor_key"
+                                + " AND a.role IN ('OPERATOR', 'OWNER') WHERE"
                                 + " s.tenant_id = ? AND s.session_id IN ("
                                     + AgentStoreRows.placeholders(pending.size())
                                     + ")",
@@ -218,12 +219,13 @@ final class AgentSessionQueries {
 
     SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
+        if (actorId != null) {
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        }
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        arguments.add(actorId == null ? null
-                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
-        arguments.add(actorId == null ? null
-                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        arguments.add(actorId);
+        arguments.add(actorId);
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
@@ -270,7 +272,7 @@ final class AgentSessionQueries {
                             + " o.phase AS worktree_phase, o.attempt_count AS worktree_attempt_count FROM"
                             + " ma_session LEFT JOIN ma_event_stream es ON es.tenant_id ="
                             + " ma_session.tenant_id AND es.session_id = ma_session.session_id AND"
-                            + " es.stream_kind = 'SESSION' AND es.stream_id = X''"
+                            + " es.stream_kind = 'SESSION' AND es.stream_id = ''"
                             + " LEFT JOIN ma_session_worktree w ON w.tenant_id = ma_session.tenant_id"
                             + " AND w.session_id = ma_session.session_id LEFT JOIN ma_operation o"
                             + " ON o.operation_kind = 'SESSION_WORKTREE' AND o.tenant_id = w.tenant_id"
@@ -310,7 +312,6 @@ final class AgentSessionQueries {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.addAll(sessionIds);
-        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
         Map<String, WebShellLifecycleOperation> result = new HashMap<>();
         jdbc.query("SELECT * FROM (SELECT o.session_id, o.operation_id, o.operation_kind, o.state, o.failure_code,"
                         + " ROW_NUMBER() OVER (PARTITION BY o.session_id ORDER BY CASE WHEN o.state IN"
@@ -318,7 +319,6 @@ final class AgentSessionQueries {
                         + " o.gmt_modified DESC, o.gmt_create DESC, o.operation_id DESC) AS lifecycle_rank FROM ma_operation o"
                         + " JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
                         + " WHERE o.tenant_id = ? AND o.session_id IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
-                        + " AND o.session_scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
                         + " AND ((s.status = 'CLOSING' AND o.operation_kind = 'CLOSE')"
                         + " OR (s.status = 'DELETING' AND o.operation_kind = 'DELETE')"
                         + " OR (s.status = 'ARCHIVING' AND o.operation_kind = 'ARCHIVE'))) lifecycle WHERE lifecycle_rank = 1",
@@ -373,13 +373,13 @@ final class AgentSessionQueries {
                                 + " event.turn_id FROM ma_public_event event JOIN (SELECT"
                                 + " accepted.session_id, MAX(accepted.sequence_id) AS max_sequence FROM"
                                 + " ma_public_event accepted WHERE accepted.stream_kind = 'SESSION' AND accepted.stream_id ="
-                                + " X'' AND accepted.tenant_id = ? AND accepted.session_id IN ("
+                                + " '' AND accepted.tenant_id = ? AND accepted.session_id IN ("
                                 + AgentStoreRows.placeholders(sessionIds.size())
                                 + ") AND accepted.event_type = 'turn.accepted' GROUP BY"
                                 + " accepted.session_id) latest ON latest.session_id ="
                                 + " event.session_id AND latest.max_sequence ="
                                 + " event.sequence_id WHERE event.tenant_id = ? AND event.stream_kind = 'SESSION'"
-                                + " AND event.stream_id = X'')"
+                                + " AND event.stream_id = '')"
                                 + " latest_turn ON latest_turn.session_id ="
                                 + " turn_record.session_id AND latest_turn.turn_id ="
                                 + " turn_record.turn_id WHERE turn_record.tenant_id ="
@@ -456,7 +456,7 @@ final class AgentSessionQueries {
         }
         List<Object> args = new ArrayList<>();
         args.add(tenantId);
-        args.add(ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        args.add(actorId);
         args.addAll(sessionIds);
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=?"
                         + " AND COALESCE(owner_actor_key, creator_actor_key)=? AND session_id IN ("
@@ -535,13 +535,13 @@ final class AgentSessionQueries {
     Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
             String sessionId) {
         return jdbc.query("SELECT session_status_before FROM ma_operation"
-                        + " WHERE scope_key = ? AND operation_kind = 'DELETE'"
-                        + " AND target_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind = 'DELETE'"
+                        + " AND target_id = ? AND tenant_id = ? AND session_id = ?"
                         + " AND session_status_before IS NOT NULL"
                         + " ORDER BY gmt_create DESC LIMIT 1",
                 (rows, row) -> rows.getString(1),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId)
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId)
                 .stream().findFirst();
     }
 

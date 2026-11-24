@@ -8,7 +8,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.RelayRow;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -217,7 +216,7 @@ class ChildResultRelayStoreTest {
         // ledger its owed step: it surfaces, until classify retires it.
         jdbc.update("UPDATE ma_session_record SET"
                         + " delivery_state = 'consumed'"
-                        + " WHERE tenant_id = ? AND record_id = X'72756e2d736574746c6564'",
+                        + " WHERE tenant_id = ? AND record_id = 'run-settled'",
                 TENANT);
         RelayRow delivering = relayStore.claim(TENANT, session, "run-settled",
                 "key-settled", "owner", 30_000, 400);
@@ -310,10 +309,9 @@ class ChildResultRelayStoreTest {
         return jdbc.queryForObject("SELECT CONCAT(transport_state, '/',"
                         + " reception_state, '/', consumption_state) FROM"
                         + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
-                        + " 'CHILD_RESULT' AND source_scope_key = ? AND"
+                        + " 'CHILD_RESULT' AND source_scope_id = ? AND"
                         + " delivery_id = ?", String.class, TENANT,
-                ManagedSessionStore
-                        .sessionScopeKey(TENANT, session), run);
+                session, run);
     }
 
     private void insertRecordRow(String scopeKey, String sessionId,
@@ -327,15 +325,13 @@ class ChildResultRelayStoreTest {
             String recordId, String kind, String deliveryState,
             String taskState, long createdAt) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
+                        + " VALUES (?, 'workspace', ?, 'child_run', ?,"
                         + " 'h', 1, ?, ?, ?, ?, ?, ?)",
-                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
                 TENANT, sessionId, recordId,
                 "resource-" + recordId,
                 "shell".equals(kind) ? "background_shell" : kind, taskState,
@@ -681,9 +677,9 @@ class ChildResultRelayStoreTest {
             }
             // Keep START eligible so only NOT EXISTS can exclude this record.
             jdbc.update("UPDATE ma_operation SET state = 'binding'"
-                            + " WHERE scope_key = ? AND operation_id = ?"
+                            + " WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_id = ?"
                             + " AND operation_kind = 'CHILD_SESSION_START'",
-                    ManagedSessionStore.sessionScopeKey(TENANT, session), run);
+                    session, run);
         }
         insertRecordRow("scope-filter", session, "shell", "shell",
                 delivery, "pending", now - 100);
@@ -764,7 +760,7 @@ class ChildResultRelayStoreTest {
         jdbc.update("UPDATE ma_session_record SET"
                         + " runtime_state = 'unbound'"
                         + " WHERE tenant_id = ?"
-                        + " AND record_id = X'72756e2d657865632d696e74656e74'",
+                        + " AND record_id = 'run-exec-intent'",
                 TENANT);
         insertRecordBody("resource-run-exec-intent", session, "intent");
         assertThat(relayStore.executionState(TENANT, session,
@@ -774,7 +770,7 @@ class ChildResultRelayStoreTest {
         jdbc.update("UPDATE ma_session_record SET"
                         + " runtime_state = 'provisioning'"
                         + " WHERE tenant_id = ?"
-                        + " AND record_id = X'72756e2d657865632d6469737061746368'",
+                        + " AND record_id = 'run-exec-dispatch'",
                 TENANT);
         insertRecordBody("resource-run-exec-dispatch", session,
                 "dispatch_started");
@@ -804,10 +800,9 @@ class ChildResultRelayStoreTest {
     }
 
     private void resource(String sessionId, String resourceId, String kind, String body) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), scope, TENANT, sessionId,
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                TENANT, sessionId,
                 resourceId, kind, bytes.length, "a".repeat(64), bytes);
     }
 

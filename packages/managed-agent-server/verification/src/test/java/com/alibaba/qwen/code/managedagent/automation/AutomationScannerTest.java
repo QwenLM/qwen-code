@@ -7,7 +7,6 @@ import com.alibaba.qwen.code.managedagent.AutomationHarnessFake;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.automation.AutomationSessionModels;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
@@ -129,7 +128,7 @@ class AutomationScannerTest {
         // class shares one H2: earlier methods' armed rows must never be
         // the current method's fake's fires.
         for (String previousTenant : jdbc.queryForList("SELECT DISTINCT tenant_id FROM ma_session", String.class)) {
-            if (previousTenant.startsWith("tenant-automation-")) {
+            if (previousTenant.startsWith("automation-")) {
                 jdbc.update("DELETE FROM ma_schedule_occurrence WHERE tenant_id=?", previousTenant);
                 jdbc.update("DELETE FROM ma_schedule WHERE tenant_id=?", previousTenant);
                 jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND tenant_id=?", previousTenant);
@@ -137,7 +136,7 @@ class AutomationScannerTest {
                 jdbc.update("DELETE FROM ma_request_receipt WHERE namespace='AUTOMATION' AND tenant_id=?", previousTenant);
             }
         }
-        tenant = "tenant-automation-" + UUID.randomUUID();
+        tenant = "automation-" + UUID.randomUUID().toString().substring(0, 25);
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
@@ -346,7 +345,7 @@ class AutomationScannerTest {
         assertThat(sessionStore.creatorActor(tenant, nullKeySession)).isEmpty();
         // The tenant predicate is part of the identity: the same session id
         // under another tenant must not read this tenant's creator key.
-        String otherTenant = "tenant-automation-" + UUID.randomUUID();
+        String otherTenant = UUID.randomUUID().toString();
         assertThat(sessionStore.creatorActor(otherTenant, sessionId)).isEmpty();
     }
 
@@ -884,15 +883,13 @@ class AutomationScannerTest {
         // The first run settles in the Session store: its projection row
         // reads completed, so the next manual run is admitted.
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, 'automation_run', ?, ?, 3,"
+                        + " VALUES (?, ?, ?, 'automation_run', ?, ?, 3,"
                         + " 'resource', 'automation_run', 'completed', ?)",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
-                ManagedExtensionProjection.recordKey(sessionId, "automation_run",
-                        first.id()), tenant, WORKSPACE, sessionId, first.id(),
+                tenant, WORKSPACE, sessionId, first.id(),
                 "0".repeat(64), clock.get());
         jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 1"
                         + " WHERE tenant_id = ? AND schedule_id = ? AND session_id = ? AND run_id = ?",
@@ -1929,34 +1926,30 @@ class AutomationScannerTest {
                         tenantId, sessionId, body);
                 if (!applied && "reconcile_run".equals(body.get("kind"))) {
                     applied = true;
-                    String scope = ManagedSessionStore.sessionScopeKey(tenant,
-                            sessionId);
                     byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
                     jdbc.update("INSERT INTO ma_resource"
-                            + " (resource_key, session_scope_key, tenant_id, workspace_id,"
+                            + " (tenant_id, workspace_id,"
                             + " session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind,"
                             + " inline_bytes, publish_command_id, state,"
                             + " gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, 'wedged-run-rev-3',"
+                            + " VALUES (?, ?, ?, 'wedged-run-rev-3',"
                             + " 'managed-automation-run', 1, ?, ?,"
                             + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', ?)",
-                            com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "wedged-run-rev-3"), scope, tenant, WORKSPACE, sessionId, bytes.length,
+                            tenant, WORKSPACE, sessionId, bytes.length,
                             AutomationLedgerStore.sha256(
                                     new String(bytes, StandardCharsets.UTF_8)),
                             bytes, new java.sql.Timestamp(clock.get()));
                     jdbc.update(
                             "INSERT INTO ma_session_record"
-                            + " (session_scope_key, record_key, tenant_id,"
+                            + " (tenant_id,"
                             + " workspace_id, session_id, domain, record_id,"
-                            + " operation_hash, revision, record_resource_id,"
+                            + " operation_id, revision, record_resource_id,"
                             + " task_kind, task_state, definition_revision,"
                             + " gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, 'automation_run', ?, ?, 3,"
+                            + " VALUES (?, ?, ?, 'automation_run', ?, ?, 3,"
                             + " 'wedged-run-rev-3', 'automation_run', 'failed',"
                             + " 1, ?)",
-                            scope, ManagedExtensionProjection.recordKey(
-                                    sessionId, "automation_run", wedgedRunId),
                             tenant, WORKSPACE, sessionId, wedgedRunId,
                             "0".repeat(64), clock.get());
                     jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 1"
