@@ -406,7 +406,7 @@ function decodeEnvelopeValue(value: unknown): ChannelInputEnvelope {
       'channelInstanceId',
     ),
     accountId: assertNoSeparator(
-      text(record['accountId'], 'accountId', 512),
+      text(record['accountId'], 'accountId', 256),
       'accountId',
     ),
     accountGeneration: positive(
@@ -423,9 +423,9 @@ function decodeEnvelopeValue(value: unknown): ChannelInputEnvelope {
     ),
     routeId: text(record['routeId'], 'routeId', 512),
     routeRevision: positive(record['routeRevision'] as number, 'routeRevision'),
-    senderId: text(record['senderId'], 'senderId', 512),
-    chatId: nullableText(record['chatId'], 'chatId', 512),
-    threadId: nullableText(record['threadId'], 'threadId', 512),
+    senderId: text(record['senderId'], 'senderId', 256),
+    chatId: nullableText(record['chatId'], 'chatId', 256),
+    threadId: nullableText(record['threadId'], 'threadId', 256),
     subject: nullableText(
       record['subject'],
       'subject',
@@ -654,9 +654,9 @@ export function assertChannelRouteScope(value: unknown): ChannelRouteScope {
   }
   return Object.freeze({
     kind: record['kind'] as ChannelRouteScope['kind'],
-    senderId: nullableText(record['senderId'], 'scope.senderId', 512),
-    chatId: nullableText(record['chatId'], 'scope.chatId', 512),
-    threadId: nullableText(record['threadId'], 'scope.threadId', 512),
+    senderId: nullableText(record['senderId'], 'scope.senderId', 256),
+    chatId: nullableText(record['chatId'], 'scope.chatId', 256),
+    threadId: nullableText(record['threadId'], 'scope.threadId', 256),
   });
 }
 
