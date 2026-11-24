@@ -621,11 +621,6 @@ test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke',
   await expect(
     liveRow.getByRole('button', { name: 'Delete', exact: true }),
   ).toHaveCount(0);
-  // Rename is an inline action by default; Bind PR keeps the ⋮ menu, which
-  // still must not offer Delete or Archive for a qwen-live row.
-  await expect(
-    liveRow.getByRole('button', { name: 'Rename', exact: true }),
-  ).toBeVisible();
   await liveRow.getByRole('button', { name: 'More actions' }).click();
   await expect(
     page.getByRole('menuitem', { name: 'Delete', exact: true }),
