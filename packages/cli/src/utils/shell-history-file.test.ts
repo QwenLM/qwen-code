@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -15,7 +16,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendShellHistoryFile,
   readShellHistoryFile,
-  SHELL_HISTORY_MAX_ENTRIES,
 } from './shell-history-file.js';
 
 const execFileAsync = promisify(execFile);
@@ -151,6 +151,56 @@ describe('shell-history-file', () => {
     expect(await readShellHistoryFile(historyPath)).toEqual(['recovered']);
   });
 
+  it('recovers a new append after a crashed writer becomes stale', async () => {
+    await fs.writeFile(historyPath, JSON.stringify(['seed']));
+    const holderProgram = `
+      import lockfile from 'proper-lockfile';
+      await lockfile.lock(process.argv.at(-1), {
+        realpath: false,
+        stale: 10_000,
+        retries: 0,
+        onCompromised: () => {},
+      });
+      process.send('locked');
+      setInterval(() => {}, 60_000);
+    `;
+    const holder = spawn(
+      process.execPath,
+      ['--input-type=module', '--eval', holderProgram, historyPath],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    try {
+      const errorChunks: Buffer[] = [];
+      holder.stderr?.on('data', (chunk: Buffer) => errorChunks.push(chunk));
+      const holderExit = once(holder, 'exit');
+      const earlyFailure = holderExit.then(([code, signal]) => {
+        throw new Error(
+          `holder exited before locking (${code}/${signal}): ${Buffer.concat(errorChunks)}`,
+        );
+      });
+      await Promise.race([once(holder, 'message'), earlyFailure]);
+      holder.kill('SIGKILL');
+      const [, signal] = await holderExit;
+      expect(signal).toBe('SIGKILL');
+      expect((await fs.stat(`${historyPath}.lock`)).isDirectory()).toBe(true);
+
+      const started = performance.now();
+      await appendShellHistoryFile(historyPath, 'after-stale');
+      const elapsed = performance.now() - started;
+      expect(elapsed).toBeGreaterThan(8_000);
+      expect(elapsed).toBeLessThan(20_000);
+      expect(await readShellHistoryFile(historyPath)).toEqual([
+        'seed',
+        'after-stale',
+      ]);
+      await expect(fs.stat(`${historyPath}.lock`)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      if (!holder.killed) holder.kill('SIGKILL');
+    }
+  }, 20_000);
+
   it('moves a repeated command to the newest position without duplicates', async () => {
     await fs.writeFile(
       historyPath,
@@ -169,14 +219,11 @@ describe('shell-history-file', () => {
     await fs.writeFile(
       historyPath,
       JSON.stringify(
-        Array.from(
-          { length: SHELL_HISTORY_MAX_ENTRIES + 20 },
-          (_, index) => `command-${index}`,
-        ),
+        Array.from({ length: 120 }, (_, index) => `command-${index}`),
       ),
     );
     const bounded = await appendShellHistoryFile(historyPath, 'latest');
-    expect(bounded).toHaveLength(SHELL_HISTORY_MAX_ENTRIES);
+    expect(bounded).toHaveLength(100);
     expect(bounded[0]).toBe('command-21');
     expect(bounded.at(-1)).toBe('latest');
     expect(await fs.readFile(historyPath, 'utf8')).toBe(

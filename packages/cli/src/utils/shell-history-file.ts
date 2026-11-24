@@ -13,8 +13,10 @@ import { MAX_INPUT_HISTORY_ENTRIES } from '@qwen-code/qwen-code-core/utils/input
 export const SHELL_HISTORY_MAX_ENTRIES = MAX_INPUT_HISTORY_ENTRIES;
 
 const STALE_LOCK_MS = 10_000;
+// Outlast the stale window so an orphaned lock can be reclaimed before the
+// append gives up, rather than losing the new command to the retry budget.
 const LOCK_RETRIES = Object.freeze({
-  retries: 50,
+  retries: 120,
   factor: 1.25,
   minTimeout: 10,
   maxTimeout: 100,
