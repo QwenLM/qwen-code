@@ -47593,6 +47593,16 @@ describe('idle suspension', () => {
             isHostedWakeContinuationId(String(event.payload['turnId'])),
         ),
       ).toBe(false);
+      // The journal settles the Turn before its run releases the Runtime
+      // and frees the Session's active slot, which the close requires.
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(replacement, clientId)).body).toMatchObject({
+            hasActivePrompt: false,
+          });
+        },
+        { timeout: 5000 },
+      );
       await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
         .set('X-Qwen-Client-Id', clientId)
         .expect(204);
