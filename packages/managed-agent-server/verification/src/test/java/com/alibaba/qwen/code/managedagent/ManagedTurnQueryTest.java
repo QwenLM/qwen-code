@@ -158,7 +158,7 @@ class ManagedTurnQueryTest {
                     "turn.accepted", Map.of("input", List.of()), false, "accepted:" + turnId));
         }
         long sequence = jdbc.queryForObject("SELECT sequence_id FROM ma_public_event WHERE tenant_id = ?"
-                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " AND event_type = 'turn.accepted' AND turn_id = ?",
                 Long.class, tenant, sessionId, "turn_a");
         String eventId = UUID.randomUUID().toString();
@@ -456,7 +456,7 @@ class ManagedTurnQueryTest {
                 .containsExactly("turn_own");
         error(turnRead(tenant, sessionId, "turn_other"), 404,
                 "turn_not_found");
-        String otherTenant = tenant + "-other";
+        String otherTenant = UUID.randomUUID().toString();
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
                 .header(TENANT, otherTenant)), 404, "session_not_found");
         error(turnRead(otherTenant, sessionId, "turn_own"), 404,
@@ -592,7 +592,7 @@ class ManagedTurnQueryTest {
     }
 
     private static String tenant() {
-        return "tenant-turns-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 
     private static AuthenticatedTenantActor actor(String tenant,

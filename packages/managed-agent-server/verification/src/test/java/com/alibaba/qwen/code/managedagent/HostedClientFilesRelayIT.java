@@ -53,7 +53,7 @@ class HostedClientFilesRelayIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "client-files-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<String> browserMethods = new CopyOnWriteArrayList<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;

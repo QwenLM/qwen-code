@@ -1,13 +1,12 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -71,23 +70,25 @@ class ManagedMcpSettingsProjection {
         Long settledAt = ManagedConfigInstall.barrier(settings) ? null : occurredAt;
         long revision = settings.get("revision").longValue();
         JdbcManagedExtensionRecordStore.require(revision == (previous == null ? 1 : previous.get("revision").longValue() + 1), "MCP settings revision conflicts");
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        String key = ManagedExtensionProjection.recordKey(sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
+        String ownerRef = JdbcManagedExtensionRecordStore.sessionRecordOwnerRef(
+                sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
         if (previous == null) {
-            jdbc.update("INSERT INTO ma_session_record (record_kind, record_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_kind, tenant_id, workspace_id,"
                             + " session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
-                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", key, tenantId, workspaceId,
+                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", tenantId, workspaceId,
                     sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision, resource.resourceId(),
                     occurredAt, settledAt, sequence);
         } else {
             JsonNode predecessor = settings.get("previousRecordRef");
             String previousResource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record"
-                    + " WHERE tenant_id=? AND session_id=? AND record_key=?", String.class, tenantId, sessionId, key);
+                    + " WHERE tenant_id=? AND session_id=? AND domain=? AND record_id=?", String.class,
+                    tenantId, sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
             JdbcManagedExtensionRecordStore.require(previousResource.equals(predecessor.path("resourceId").asText()), "MCP settings predecessor conflicts");
             JdbcManagedExtensionRecordStore.requireReference(resources.apply(previousResource), predecessor);
             jdbc.update("UPDATE ma_session_record SET revision=?, record_resource_id=?, settled_at=?"
-                    + " WHERE tenant_id=? AND session_id=? AND record_key=? AND revision=?",
-                    revision, resource.resourceId(), settledAt, tenantId, sessionId, key, revision - 1);
+                    + " WHERE tenant_id=? AND session_id=? AND domain=? AND record_id=? AND revision=?",
+                    revision, resource.resourceId(), settledAt, tenantId, sessionId,
+                    ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision - 1);
         }
         if (ManagedConfigInstall.isPackageConfig(settings)) {
             // Package config accumulates across revisions: the retained seed
@@ -95,23 +96,23 @@ class ManagedMcpSettingsProjection {
             // revision already pinned.
             Set<String> retained = new HashSet<>(jdbc.queryForList(
                     "SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SESSION_RECORD'"
-                            + " AND owner_key=?",
-                    String.class, tenantId, sessionId, key));
+                            + " AND owner_ref=?",
+                    String.class, tenantId, sessionId, ManagedSchemaKeys.identity(ownerRef)));
             if (retained.add(resource.resourceId())) {
-                JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
+                JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, ownerRef, revision, tenantId, workspaceId,
                         sessionId, resource.resourceId());
             }
             // A sealed writer cannot rely on its old journal to retain the
             // recovery resources named by the active package configuration.
-            retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
+            retainPackageConfiguration(ownerRef, revision, tenantId, workspaceId,
                     sessionId, settings, resources, retained);
         } else {
             // Legacy MCP settings need no closure: replace the superseded
             // projection row so the key keeps exactly one row instead of
             // accumulating one per revision for the Session's whole life (R2-5).
             jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SESSION_RECORD'"
-                    + " AND owner_key=?", tenantId, sessionId, key);
-            JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
+                    + " AND owner_ref=?", tenantId, sessionId, ManagedSchemaKeys.identity(ownerRef));
+            JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, ownerRef, revision, tenantId, workspaceId,
                     sessionId, resource.resourceId());
         }
     }
@@ -120,7 +121,7 @@ class ManagedMcpSettingsProjection {
     // predecessor, so a resource retained by an earlier commit already pins its whole reference
     // closure: the walk only has to name the resources this commit adds, probing existence once
     // per level instead of per resource and leaving the rows it already wrote untouched.
-    private void retainPackageConfiguration(String scope, String key, long revision,
+    private void retainPackageConfiguration(String ownerRef, long revision,
             String tenantId, String workspaceId, String sessionId, JsonNode settings,
             Function<String, StoredResource> resources, Set<String> retained) {
         List<JsonNode> level = configurationReferences(settings);
@@ -144,7 +145,7 @@ class ManagedMcpSettingsProjection {
                 }
                 StoredResource resource = resources.apply(resourceId);
                 JdbcManagedExtensionRecordStore.requireReference(resource, candidate.getValue());
-                JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
+                JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, ownerRef, revision, tenantId, workspaceId,
                         sessionId, resourceId);
                 if (RETAINED_REFERENCE_KINDS.contains(resource.kind())) {
                     level.addAll(packageReferences(resource.kind(), JdbcManagedExtensionRecordStore.readBody(resource)));

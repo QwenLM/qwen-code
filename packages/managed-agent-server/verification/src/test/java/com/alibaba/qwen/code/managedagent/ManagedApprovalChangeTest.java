@@ -75,7 +75,7 @@ class ManagedApprovalChangeTest {
 
     @BeforeEach
     void setup() {
-        tenant = "approval-change-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -123,9 +123,9 @@ class ManagedApprovalChangeTest {
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
         jdbc.update("UPDATE ma_turn SET error_code = ?, retry_after = 1234 WHERE tenant_id = ? AND session_id = ?"
                 + " AND turn_id = ?", TurnExecutionStore.HARNESS_ACTION_PARKED, tenant, session, turn.turnId());
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
+                + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?)", tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).liveSupported()).isTrue();
         assertThat(change("actor", "live-change", "yolo", 0).approvalRevision()).isEqualTo(1);
@@ -188,10 +188,10 @@ class ManagedApprovalChangeTest {
     void aForeignRequestedActionKeepsTheParkedCertificateFromExemptingTheApprovalChange() {
         when(harness.supportsLiveApprovalSelection()).thenReturn(true);
         String turnId = parkedApprovalTurn();
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json,prompt_id)"
-                + " VALUES (?,?,?,'action','action2',1,1,'ACTION','requested','action2',1,'{}','other-prompt')",
-                "c".repeat(64), tenant, session);
+                + " VALUES (?,?,'action','action2',1,1,'ACTION','requested','action2',1,'{}','other-prompt')",
+                tenant, session);
 
         assertCode(() -> change("actor", "parked-foreign-action", "yolo", 0), "session_context_busy");
 
@@ -231,6 +231,57 @@ class ManagedApprovalChangeTest {
                 "parked-rules-mismatch", "default", 0, null, rules)), "turn_active");
     }
 
+    // S4 (#18149): a wake-started Turn's park has no Turn row to unpark, so
+    // the change makes its head due for the wake scan instead.
+    @Test
+    void aWakeOwnedParkCertificateAdmitsTheApprovalChangeAndMakesItsWakeDue() {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        wakeParkedApproval();
+        long before = System.currentTimeMillis();
+
+        assertThat(change("actor", "wake-parked-change", "yolo", 0).approvalRevision()).isEqualTo(1);
+
+        assertThat(jdbc.queryForObject("SELECT wake_retry_at FROM ma_session_head WHERE tenant_id=? AND session_id=?",
+                Long.class, tenant, session)).isLessThanOrEqualTo(before + 1_000);
+    }
+
+    @Test
+    void aLiveTurnKeepsAWakeOwnedCertificateFromExemptingTheApprovalChange() {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        long due = wakeParkedApproval();
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                + "status,gmt_create,gmt_modified) VALUES (?,?,'live-turn','live-prompt','[]','digest2','RUNNING',0,0)",
+                tenant, session);
+
+        assertCode(() -> change("actor", "wake-parked-live-turn", "yolo", 0), "session_context_busy");
+
+        assertThat(jdbc.queryForObject("SELECT wake_retry_at FROM ma_session_head WHERE tenant_id=? AND session_id=?",
+                Long.class, tenant, session)).isEqualTo(due);
+    }
+
+    private long wakeParkedApproval() {
+        String prompt = "monitor-1:notify:1";
+        long due = System.currentTimeMillis() + 100_000;
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE tenant_id=? AND session_id=?",
+                Integer.class, tenant, session) == 0) {
+            jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, head_kind,"
+                    + " state, writer_generation, journal_revision, committed_sequence, activation_epoch,"
+                    + " compacted_through_revision, gmt_create, gmt_modified)"
+                    + " VALUES (?,?,?,'MANAGED_SESSION','SEALED',1,1,1,0,0,0,0)", tenant, session, session);
+        }
+        jdbc.update("UPDATE ma_session_head SET state='SEALED', activation_phase='released',"
+                + " journal_revision=1, wake_seal_revision=1, wake_head_revision=1, is_wake_pending=1,"
+                + " wake_retry_at=?, wake_seal_parked_prompt_id=?, wake_seal_parked_until=?,"
+                + " wake_seal_parked_approval_revision=0, wake_seal_parked_owner='wake'"
+                + " WHERE tenant_id=? AND session_id=?",
+                due, prompt, due, tenant, session);
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
+                + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json,prompt_id)"
+                + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?,?)",
+                tenant, session, "{\"expiresAt\":" + due + "}", prompt);
+        return due;
+    }
+
     // A real parked seal through the production park guard: the head
     // certificate, the claimed Turn and the projected Action row all carry
     // the identities the guard joins, never a hand-written Turn error code.
@@ -254,10 +305,10 @@ class ManagedApprovalChangeTest {
                 + " wake_seal_parked_until=?, wake_seal_parked_approval_revision=0"
                 + " WHERE tenant_id=? AND session_id=?",
                 prompt, System.currentTimeMillis() + 100_000, tenant, session);
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json,prompt_id)"
-                + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?,?)",
-                "a".repeat(64), tenant, session,
+                + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?,?)",
+                tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}", prompt);
         assertThat(store.parkTurnForAction(tenant, session, turnId, "owner")).isTrue();
         return turnId;
@@ -845,9 +896,9 @@ class ManagedApprovalChangeTest {
             when(harness.supportsApprovalSelection()).thenReturn(false);
         }
         if (shape.equals("approval")) {
-            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+            jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                     + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                    + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
+                    + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?)", tenant, session,
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
