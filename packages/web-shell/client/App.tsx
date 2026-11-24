@@ -592,6 +592,7 @@ import {
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
 import {
+  createPromptIdempotencyKey,
   isDefinitelyRejectedPromptAdmission,
   isMcpAppPromptAdmissionRejected,
   PromptDispatchCancelledError,
@@ -923,6 +924,7 @@ interface SendPromptOptionsWithRetry {
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
+  idempotencyKey?: string;
   beforeDispatch?: (clientId: string | undefined) => void;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
@@ -947,6 +949,8 @@ interface FailedPrompt {
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
+  idempotencyKey?: string;
+  reason?: 'failed' | 'uncertain';
   owner: CancelledRetryOwner;
 }
 
@@ -1028,6 +1032,7 @@ type CancelledRetryState =
       images?: PromptImage[];
       files?: PromptFile[];
       inputAnnotations?: DaemonInputAnnotation[];
+      idempotencyKey?: string;
       previousRetriedTurnErrorId: string | null;
       previousShowRetryHint: boolean;
     };
@@ -1082,16 +1087,6 @@ function mergeCancelledRetryEntries(
     },
     [...current],
   );
-}
-
-interface UnknownPromptAdmission {
-  sessionId: string;
-  messageId?: string;
-  text?: string;
-  images?: PromptImage[];
-  files?: PromptFile[];
-  inputAnnotations?: DaemonInputAnnotation[];
-  payloadAvailable: boolean;
 }
 
 function getLatestUserBlockId(
@@ -5292,16 +5287,6 @@ export function App({
   );
   const cancelledRetryAttemptRef = useRef(0);
   const [cancelledRetryRevision, setCancelledRetryRevision] = useState(0);
-  const [unknownPromptAdmission, setUnknownPromptAdmission] =
-    useState<UnknownPromptAdmission | null>(null);
-  const unknownPromptAdmissionRef = useRef<UnknownPromptAdmission | null>(null);
-  const updateUnknownPromptAdmission = useCallback(
-    (next: UnknownPromptAdmission | null) => {
-      unknownPromptAdmissionRef.current = next;
-      setUnknownPromptAdmission(next);
-    },
-    [],
-  );
   const updateFailedPrompt = useCallback((next: FailedPrompt | null) => {
     failedPromptRef.current = next;
     setFailedPrompt(next);
@@ -5332,13 +5317,11 @@ export function App({
     }
     updateFailedPrompt(null);
     setFailedPromptRetry(null);
-    updateUnknownPromptAdmission(null);
   }, [
     connection.sessionId,
     connection.workspaceCwd,
     sessionOwnerGuard,
     updateFailedPrompt,
-    updateUnknownPromptAdmission,
   ]);
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
     null,
@@ -5379,6 +5362,27 @@ export function App({
       return;
     }
     if (!failedBlock) return;
+    if (failedBlock.promptId) {
+      updateFailedPrompt(null);
+      return;
+    }
+    const failedBlockIndex = blocks.indexOf(failedBlock);
+    if (
+      failedBlockIndex >= 0 &&
+      blocks
+        .slice(failedBlockIndex + 1)
+        .some(
+          (block) =>
+            isDaemonRewindUserBlock(block) ||
+            (block.kind === 'assistant' &&
+              block.meta?.['source'] !== 'background_notification') ||
+            block.kind === 'thought' ||
+            block.kind === 'tool',
+        )
+    ) {
+      updateFailedPrompt(null);
+      return;
+    }
     const failedIndex = displayMessages.findIndex(
       (message) => message.id === failedBlock.id,
     );
@@ -5386,7 +5390,12 @@ export function App({
     if (
       displayMessages
         .slice(failedIndex + 1)
-        .some((message) => message.role === 'user')
+        .some(
+          (message) =>
+            message.role === 'user' ||
+            message.role === 'assistant' ||
+            message.role === 'tool_group',
+        )
     ) {
       updateFailedPrompt(null);
       return;
@@ -5409,12 +5418,6 @@ export function App({
     store,
     updateFailedPrompt,
   ]);
-  useEffect(() => {
-    const unknown = unknownPromptAdmissionRef.current;
-    if (unknown && unknown.sessionId !== connection.sessionId) {
-      updateUnknownPromptAdmission(null);
-    }
-  }, [connection.sessionId, updateUnknownPromptAdmission]);
   const {
     artifacts,
     loading: artifactsLoading,
@@ -10060,6 +10063,7 @@ export function App({
     TranscriptTurnErrorIdentity | undefined
   >(undefined);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
+  const turnErrorRetryIdempotencyKeyRef = useRef<string | null>(null);
   const failedTurnErrorRetryRef = useRef<{
     errorId: string;
     text: string;
@@ -10079,6 +10083,7 @@ export function App({
     retryableTurnErrorIdRef.current = null;
     retryableTurnErrorIdentityRef.current = undefined;
     retriedTurnErrorIdRef.current = null;
+    turnErrorRetryIdempotencyKeyRef.current = null;
     failedTurnErrorRetryRef.current = null;
   }, []);
   const rearmFailedTurnErrorRetry = useCallback(
@@ -10196,6 +10201,7 @@ export function App({
     retryableTurnErrorIdRef.current = null;
     retryableTurnErrorIdentityRef.current = undefined;
     retriedTurnErrorIdRef.current = null;
+    turnErrorRetryIdempotencyKeyRef.current = null;
     failedTurnErrorRetryRef.current = null;
     setShowRetryHint(false);
   }, [
@@ -10290,6 +10296,7 @@ export function App({
       retryableTurnErrorIdRef.current = renderedTurnError.id;
       retryableTurnErrorIdentityRef.current = { block: renderedTurnError };
       retriedTurnErrorIdRef.current = state.previousRetriedTurnErrorId;
+      turnErrorRetryIdempotencyKeyRef.current = state.idempotencyKey ?? null;
       setShowRetryHint(state.previousShowRetryHint);
       setFailedPromptRetry(null);
       return 'restored';
@@ -13694,6 +13701,7 @@ export function App({
         optimisticUserMessage?: boolean;
         bindBlockId?: string;
         retry?: boolean;
+        idempotencyKey?: string;
         // Skips prepareSubmit without daemon retry semantics; used
         // by the failed-prompt retry, whose user message was never
         // recorded.
@@ -13924,6 +13932,9 @@ export function App({
                   ? preparedInputAnnotations
                   : undefined,
               retry: opts?.retry,
+              ...(opts?.idempotencyKey
+                ? { idempotencyKey: opts.idempotencyKey }
+                : {}),
               onAdmissionStarted: () => {
                 opts?.onAdmissionStarted?.(detachedSessionId);
               },
@@ -13995,6 +14006,7 @@ export function App({
         retryableTurnErrorIdRef.current = null;
         retryableTurnErrorIdentityRef.current = undefined;
         retriedTurnErrorIdRef.current = null;
+        turnErrorRetryIdempotencyKeyRef.current = null;
         failedTurnErrorRetryRef.current = null;
         retryOwnerRef.current = {
           sessionId: sessionIdAfterEnsure,
@@ -14071,6 +14083,9 @@ export function App({
         optimisticUserMessage: opts?.optimisticUserMessage,
         ...(opts?.bindBlockId ? { bindBlockId: opts.bindBlockId } : {}),
         retry: opts?.retry,
+        ...(opts?.idempotencyKey
+          ? { idempotencyKey: opts.idempotencyKey }
+          : {}),
         ...(opts?.beforeDispatch
           ? { beforeDispatch: opts.beforeDispatch }
           : {}),
@@ -14119,13 +14134,19 @@ export function App({
         ) => ReturnType<typeof sessionActions.sendPrompt>
       )(preparedPrompt, promptOptions);
       trackInFlightPrompt();
-      if (
-        sessionIdAfterEnsure &&
-        opts?.optimisticUserMessage !== false &&
-        opts?.onOptimisticUserMessage
-      ) {
+      let optimisticUserMessageReported = false;
+      const reportOptimisticUserMessage = () => {
+        if (
+          optimisticUserMessageReported ||
+          !sessionIdAfterEnsure ||
+          opts?.optimisticUserMessage === false ||
+          !opts?.onOptimisticUserMessage
+        ) {
+          return;
+        }
         const message = getLatestUserBlock(store.getSnapshot().blocks);
         if (message && message !== previousUserMessage) {
+          optimisticUserMessageReported = true;
           opts.onOptimisticUserMessage({
             sessionId: sessionIdAfterEnsure,
             messageId: message.id,
@@ -14136,10 +14157,12 @@ export function App({
               : {}),
           });
         }
-      }
+      };
+      reportOptimisticUserMessage();
       try {
         return await resultPromise;
       } catch (error) {
+        reportOptimisticUserMessage();
         if (
           admissionStarted &&
           !admitted &&
@@ -14580,11 +14603,14 @@ export function App({
     });
     let admitted = false;
     let admissionStarted = false;
+    const retryIdempotencyKey =
+      failed.idempotencyKey ?? createPromptIdempotencyKey();
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
       // The failed attempt appended this block but never got it bound.
       bindBlockId: failed.messageId,
       skipPrepareSubmit: true,
+      idempotencyKey: retryIdempotencyKey,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
         admissionStarted = true;
@@ -14604,40 +14630,36 @@ export function App({
         restoreOrDeferCancelledRetry(retryOwner, {
           kind: 'failed-prompt',
           attemptId: retryAttemptId,
-          failed,
+          failed: { ...failed, idempotencyKey: retryIdempotencyKey },
         });
       },
     })
       .catch((error: unknown) => {
         if (!retryOwnerIsCurrent(retryOwner)) return;
         const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-        if (admissionStarted && !admitted && !definitelyRejected) {
-          if (!retryTranscriptIsCurrent()) return;
-          updateUnknownPromptAdmission({
-            sessionId: failed.sessionId,
-            messageId: failed.messageId,
-            text: failed.text,
-            images: failed.images ? [...failed.images] : undefined,
-            files: failed.files ? [...failed.files] : undefined,
-            inputAnnotations: failed.inputAnnotations,
-            payloadAvailable: true,
-          });
-          pushToast('warning', t('queue.admissionUnknown'));
-          console.warn(
-            '[WebShell] prompt retry admission outcome is unknown',
-            error,
-          );
-          return;
-        }
+        const admissionUncertain =
+          admissionStarted && !admitted && !definitelyRejected;
         if (!admitted) {
           restoreOrDeferCancelledRetry(retryOwner, {
             kind: 'failed-prompt',
             attemptId: retryAttemptId,
-            failed,
+            failed: {
+              ...failed,
+              idempotencyKey: retryIdempotencyKey,
+              reason: admissionUncertain ? 'uncertain' : 'failed',
+            },
           });
         }
         if (retryTranscriptIsCurrent()) {
-          reportError(error, 'Failed to resend message');
+          if (admissionUncertain) {
+            pushToast('warning', t('userMessage.deliveryUncertain'));
+            console.warn(
+              '[WebShell] prompt retry admission outcome is unknown',
+              error,
+            );
+          } else {
+            reportError(error, 'Failed to resend message');
+          }
         }
       })
       .finally(() => {
@@ -14660,7 +14682,6 @@ export function App({
     store,
     t,
     updateFailedPrompt,
-    updateUnknownPromptAdmission,
   ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
@@ -14748,11 +14769,7 @@ export function App({
           current.standaloneSession?.errorCode !==
             'working_directory_missing' &&
           current.standaloneSession?.errorCode !==
-            'working_directory_compromised' &&
-          !(
-            unknownPromptAdmissionRef.current?.payloadAvailable &&
-            unknownPromptAdmissionRef.current.sessionId === sessionId
-          )
+            'working_directory_compromised'
         );
       };
       const assertCurrent = () => {
@@ -19953,11 +19970,6 @@ export function App({
         return false;
       }
       const sessionId = connectionRef.current.sessionId;
-      if (
-        unknownPromptAdmissionRef.current?.payloadAvailable &&
-        unknownPromptAdmissionRef.current.sessionId === sessionId
-      )
-        return false;
       const original = getLatestUserBlock(store.getSnapshot().blocks);
       if (!sessionId || original?.kind !== 'user') return false;
       const images: PromptImage[] | undefined = original.images?.map(
@@ -20014,6 +20026,7 @@ export function App({
           throw new Error(t('userMessage.editStale'));
         }
       };
+      const editIdempotencyKey = createPromptIdempotencyKey();
       let preparedEdit: WebShellPreparedSubmit = {
         prompt: trimmed,
         inputAnnotations,
@@ -20027,6 +20040,7 @@ export function App({
         await sendPrompt(trimmed, images, files, {
           submittedPrompt: trimmed,
           inputAnnotations,
+          idempotencyKey: editIdempotencyKey,
           clearComposerOnPromptStart: false,
           onPreparedSubmit: (prepared) => {
             preparedEdit = prepared;
@@ -20100,17 +20114,11 @@ export function App({
           !isDefinitelyRejectedPromptAdmission(error)
         ) {
           admissionUnknown = true;
-          updateUnknownPromptAdmission({
-            sessionId,
-            text: preparedEdit.prompt,
-            images,
-            files,
-            inputAnnotations: preparedEdit.inputAnnotations
-              ? [...preparedEdit.inputAnnotations]
-              : undefined,
-            payloadAvailable: true,
-          });
-          pushToast('warning', t('queue.admissionUnknown'));
+          pushToast('warning', t('userMessage.deliveryUncertain'));
+          console.warn(
+            '[WebShell] edit prompt admission outcome is unknown',
+            error,
+          );
         } else if (!isAbortError(error) && !isAlreadyDispatched(error)) {
           reportError(
             error,
@@ -20118,7 +20126,7 @@ export function App({
           );
         }
       } finally {
-        if (rewindStarted && !admitted && !admissionUnknown && isCurrent()) {
+        if (rewindStarted && !admitted && isCurrent()) {
           const recover = () => {
             // Only create a replacement after the old turn has been removed.
             if (countUserTurns(store.getSnapshot().blocks) === turnIndex) {
@@ -20157,6 +20165,8 @@ export function App({
               inputAnnotations: preparedEdit.inputAnnotations
                 ? [...preparedEdit.inputAnnotations]
                 : undefined,
+              idempotencyKey: editIdempotencyKey,
+              reason: admissionUnknown ? 'uncertain' : 'failed',
             });
           };
           if (
@@ -20184,7 +20194,6 @@ export function App({
       sessionOwnerGuard,
       store,
       t,
-      updateUnknownPromptAdmission,
       updateFailedPrompt,
       getComposerWorkspaceCwd,
       logicalSessionKey,
@@ -20401,13 +20410,6 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
-      if (
-        unknownPromptAdmissionRef.current?.payloadAvailable &&
-        unknownPromptAdmissionRef.current.sessionId ===
-          connectionRef.current.sessionId
-      ) {
-        return false;
-      }
       // Account commands must pass login and model checks before host overrides.
       const subscriptionHandled = handleSubscriptionLogout(text);
       if (subscriptionHandled !== undefined) return subscriptionHandled;
@@ -20492,7 +20494,7 @@ export function App({
         let submittedInputAnnotations = sendOptions.inputAnnotations;
         let admitted = false;
         let admissionStarted = false;
-        let admissionSessionId: string | undefined;
+        const submissionIdempotencyKey = createPromptIdempotencyKey();
         const attempt = (
           recovering = false,
           onSessionAllocated?: (sessionId: string) => void,
@@ -20505,6 +20507,7 @@ export function App({
               submittedPrompt: text,
               ownerRef: admissionAttachment,
               ...sendOptions,
+              idempotencyKey: submissionIdempotencyKey,
               clearComposerOnPromptStart:
                 !recovering && clearComposerOnPromptStart,
               ...(recovering
@@ -20536,9 +20539,8 @@ export function App({
                 !recovering && clearComposerOnPromptStart
                   ? commitComposerAccepted
                   : undefined,
-              onAdmissionStarted: (sessionId) => {
+              onAdmissionStarted: () => {
                 admissionStarted = true;
-                admissionSessionId = sessionId;
               },
               onAdmitted: () => {
                 admitted = true;
@@ -20579,30 +20581,8 @@ export function App({
             const failedMessage = optimisticUserMessage;
             const definitelyRejected =
               isDefinitelyRejectedPromptAdmission(error);
-            if (admissionStarted && !admitted && !definitelyRejected) {
-              updateFailedPrompt(null);
-              const uncertainSessionId =
-                failedMessage?.sessionId ??
-                admissionSessionId ??
-                connectionRef.current.sessionId;
-              if (uncertainSessionId) {
-                updateUnknownPromptAdmission({
-                  sessionId: uncertainSessionId,
-                  messageId: failedMessage?.messageId,
-                  text: submittedPromptText,
-                  images: promptImages ? [...promptImages] : undefined,
-                  files: promptFiles ? [...promptFiles] : undefined,
-                  inputAnnotations: submittedInputAnnotations,
-                  payloadAvailable: true,
-                });
-              }
-              pushToast('warning', t('queue.admissionUnknown'));
-              console.warn(
-                '[WebShell] prompt admission outcome is unknown',
-                error,
-              );
-              return;
-            }
+            const admissionUncertain =
+              admissionStarted && !admitted && !definitelyRejected;
             if (
               trackSendFailure &&
               !admitted &&
@@ -20626,7 +20606,17 @@ export function App({
                 images: promptImages,
                 files: promptFiles,
                 inputAnnotations: submittedInputAnnotations,
+                idempotencyKey: submissionIdempotencyKey,
+                reason: admissionUncertain ? 'uncertain' : 'failed',
               });
+            }
+            if (admissionUncertain) {
+              pushToast('warning', t('userMessage.deliveryUncertain'));
+              console.warn(
+                '[WebShell] prompt admission outcome is unknown',
+                error,
+              );
+              return;
             }
             if (
               !admissionStarted &&
@@ -21914,7 +21904,6 @@ export function App({
       composerAttachmentsEnabled,
       effectiveSessionContext,
       updateFailedPrompt,
-      updateUnknownPromptAdmission,
       isGoalGateBlocked,
     ],
   );
@@ -22210,50 +22199,6 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-  const discardUnknownPromptPayload = useCallback(() => {
-    const current = unknownPromptAdmissionRef.current;
-    if (
-      !current?.payloadAvailable ||
-      current.sessionId !== connectionRef.current.sessionId
-    ) {
-      return;
-    }
-    updateUnknownPromptAdmission({
-      sessionId: current.sessionId,
-      messageId: current.messageId,
-      payloadAvailable: false,
-    });
-  }, [updateUnknownPromptAdmission]);
-  const restoreUnknownPromptPayload = useCallback(() => {
-    const current = unknownPromptAdmissionRef.current;
-    const editor = editorRef.current;
-    if (
-      !current?.payloadAvailable ||
-      current.sessionId !== connectionRef.current.sessionId ||
-      !editor
-    ) {
-      return;
-    }
-    if (!window.confirm(t('queue.continueEditingConfirm'))) return;
-    const draft = editor.getText();
-    const restoredText = current.text?.trim()
-      ? draft.trim()
-        ? `${current.text}\n${draft}`
-        : current.text
-      : draft;
-    if (restoredText !== draft) editor.setText(restoredText);
-    if (current.images?.length) editor.restoreImages(current.images);
-    if (current.files?.length) editor.restoreFiles(current.files);
-    if (current.inputAnnotations?.length) {
-      editor.restoreInputAnnotations?.(current.inputAnnotations);
-    }
-    editor.focus();
-    updateUnknownPromptAdmission({
-      sessionId: current.sessionId,
-      messageId: current.messageId,
-      payloadAvailable: false,
-    });
-  }, [t, updateUnknownPromptAdmission]);
   const handleCanScrollToBottomChange = useCallback(
     (canScrollToBottom: boolean) => {
       setCanScrollMessageListToBottom(canScrollToBottom);
@@ -22339,15 +22284,20 @@ export function App({
       });
       let admissionStarted = false;
       let admitted = false;
+      const retryIdempotencyKey =
+        turnErrorRetryIdempotencyKeyRef.current ?? createPromptIdempotencyKey();
+      turnErrorRetryIdempotencyKeyRef.current = retryIdempotencyKey;
       sendPrompt(retryText, retryImages, retryFiles, {
         optimisticUserMessage: false,
         retry: true,
+        idempotencyKey: retryIdempotencyKey,
         inputAnnotations: retryInputAnnotations,
         onAdmissionStarted: () => {
           admissionStarted = true;
         },
         onAdmitted: () => {
           admitted = true;
+          turnErrorRetryIdempotencyKeyRef.current = null;
           if (!retryOwnerIsCurrent(retryOwner)) return;
           setFailedPromptRetry((current) =>
             current?.transcriptIdentity === retryTranscriptIdentity
@@ -22367,6 +22317,7 @@ export function App({
             images: retryImages,
             files: retryFiles,
             inputAnnotations: retryInputAnnotations,
+            idempotencyKey: retryIdempotencyKey,
             previousRetriedTurnErrorId,
             previousShowRetryHint,
           });
@@ -22375,18 +22326,24 @@ export function App({
         .catch((error: unknown) => {
           if (!retryOwnerIsCurrent(retryOwner)) return;
           const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-          if (admissionStarted && !admitted && !definitelyRejected) {
+          const admissionUncertain =
+            admissionStarted && !admitted && !definitelyRejected;
+          if (admissionUncertain) {
             if (!retryTranscriptIsCurrent()) return;
-            updateUnknownPromptAdmission({
-              sessionId: retrySessionId,
-              messageId: retryErrorId,
+            restoreOrDeferCancelledRetry(retryOwner, {
+              kind: 'turn-error',
+              attemptId: retryAttemptId,
+              errorId: retryErrorId,
+              identity: retryErrorIdentity,
               text: retryText,
-              images: retryImages ? [...retryImages] : undefined,
-              files: retryFiles ? [...retryFiles] : undefined,
+              images: retryImages,
+              files: retryFiles,
               inputAnnotations: retryInputAnnotations,
-              payloadAvailable: true,
+              idempotencyKey: retryIdempotencyKey,
+              previousRetriedTurnErrorId,
+              previousShowRetryHint,
             });
-            pushToast('warning', t('queue.admissionUnknown'));
+            pushToast('warning', t('userMessage.deliveryUncertain'));
             console.warn(
               '[WebShell] post-turn retry admission outcome is unknown',
               error,
@@ -22403,6 +22360,7 @@ export function App({
               images: retryImages,
               files: retryFiles,
               inputAnnotations: retryInputAnnotations,
+              idempotencyKey: retryIdempotencyKey,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
             });
@@ -22471,7 +22429,6 @@ export function App({
     sendPrompt,
     store,
     t,
-    updateUnknownPromptAdmission,
   ]);
 
   useEffect(() => {
@@ -24325,10 +24282,7 @@ export function App({
     onBeforeCompress: prepareContextCompression,
     busy: streamingState !== 'idle' || sessionHasActivePrompt,
     writeBlocked:
-      isDisabled ||
-      isStartingNewSessionSuggestion ||
-      approvalOverlayActive ||
-      unknownPromptAdmission?.payloadAvailable === true,
+      isDisabled || isStartingNewSessionSuggestion || approvalOverlayActive,
   });
   const [paneContextControls, setPaneContextControls] = useState<
     Record<string, ContextUsageControls>
@@ -26979,6 +26933,14 @@ export function App({
                                     ? undefined
                                     : visibleFailedPromptBlock?.id
                                 }
+                                failedPromptStatus={
+                                  isPreparingPrompt ||
+                                  streamingState !== 'idle' ||
+                                  sessionHasActivePrompt ||
+                                  !visibleFailedPromptBlock
+                                    ? undefined
+                                    : failedPrompt?.reason
+                                }
                                 onRetryFailedPrompt={handleFailedPromptRetry}
                                 onEditUserMessage={
                                   userMessageEditing
@@ -27509,45 +27471,6 @@ export function App({
                             {t('editor.escClearHint')}
                           </div>
                         ) : null}
-                        {unknownPromptAdmission &&
-                          unknownPromptAdmission.sessionId ===
-                            connection.sessionId && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="status"
-                            data-testid="prompt-admission-unknown"
-                          >
-                            <span
-                              className={styles.composerActionTipIcon}
-                              aria-hidden="true"
-                            >
-                              !
-                            </span>
-                            <span className={styles.composerActionTipText}>
-                              {t('queue.admissionUnknown')}
-                            </span>
-                            {unknownPromptAdmission.payloadAvailable && (
-                              <div
-                                className={styles.composerActionTipActions}
-                              >
-                                <button
-                                  type="button"
-                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                  onClick={restoreUnknownPromptPayload}
-                                >
-                                  {t('queue.restoreUnknown')}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={styles.composerActionTipButton}
-                                  onClick={discardUnknownPromptPayload}
-                                >
-                                  {t('queue.discardUnknown')}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
                         {!CustomFooter && (
                           <ComposerTaskChips
                             ref={composerTaskChipsRef}
@@ -27603,10 +27526,7 @@ export function App({
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
                             <CustomComposerHeader
-                              disabled={
-                                isDisabled ||
-                                unknownPromptAdmission?.payloadAvailable === true
-                              }
+                              disabled={isDisabled}
                               isRunning={
                                 streamingState !== 'idle' ||
                                 sessionHasActivePrompt
@@ -27627,8 +27547,7 @@ export function App({
                             isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
-                            sessionHasActivePrompt ||
-                            unknownPromptAdmission?.payloadAvailable === true
+                            sessionHasActivePrompt
                           }
                         />
                         {sessionLimitReached && workspaceContextActive && (
@@ -27673,8 +27592,7 @@ export function App({
                             composerInputDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
-                            approvalOverlayActive ||
-                            unknownPromptAdmission?.payloadAvailable === true
+                            approvalOverlayActive
                           }
                           submitDisabled={sessionWriteBlocked}
                           commands={commands}

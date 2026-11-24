@@ -5182,7 +5182,6 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active?.promptId !== registration.promptId)
       return 'turn_mismatch';
     if (session.recoveredTurn !== undefined) return 'recovered_turn';
-    if (session.definition?.['lineage'] !== undefined) return 'lineage';
     if (
       session.stores?.supportsActionParking?.() !== true ||
       session.stores?.supportsWakeDispatch?.() !== true
@@ -5232,9 +5231,9 @@ export function registerHostedHarnessSessionRoutes(
       ? hostedCommandStepResumeShapeRefusal(session, brokerOptions)
       : hostedApprovalResumeShapeRefusal(session, brokerOptions);
     if (shape) return shape;
-    // Recovery admits a command step on an MCP Session, but parking one waits
-    // for MCP parking (#18149 Stage 4).
-    if (commandStep && session.mcp) return 'mcp';
+    // A drained MCP owner comes back under a new connection, so its tool
+    // names would no longer match the saved batch.
+    if (session.mcp && !session.mcp.parkable()) return 'mcp_not_parkable';
     // The pump resumes only a native wait.
     if (commandStep && wakeOwned) return 'wake_owned';
     if (
@@ -8543,8 +8542,9 @@ export function registerHostedHarnessSessionRoutes(
         await managed.close();
         return error(res, 409, 'hosted_tool_profile_conflict');
       }
-      const pendingCommandApproval =
-        session.extensions?.enabled && unsettled
+      const pendingContinuation =
+        (session.extensions?.enabled || session.hooks || session.mcp) &&
+        unsettled
           ? await findHostedApprovalContinuation(managed, unsettled)
           : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
@@ -8562,18 +8562,27 @@ export function registerHostedHarnessSessionRoutes(
         takeoverFlags &&
         !lifecycle &&
         !!session.extensions?.enabled &&
-        pendingCommandApproval?.plan.commandStep !== undefined;
-      // A parked command-step round must never be answered by a cold load:
-      // answering writes a durable tool_result for the plan's own skill call,
-      // which permanently destroys the continuation. Both answer guards below
-      // key on this one predicate. pendingCommandApproval is computed
-      // unconditionally above; resumeApproval is only assigned inside the
-      // takeover arm, so on a bare load it is undefined and cannot be the key
-      // (R9-1).
+        pendingContinuation?.plan.commandStep !== undefined;
+      // A Hooks or MCP Session's saved native batch is recovered the same
+      // way: only by an explicit takeover load, and only on a shape recovery
+      // admits.
+      const hooksNativePark =
+        (session.hooks !== undefined || session.mcp !== undefined) &&
+        pendingContinuation !== undefined &&
+        pendingContinuation.plan.commandStep === undefined &&
+        hostedApprovalResumeShapeRefusal(session, brokerOptions) === undefined;
+      const hooksNativeTakeover =
+        takeoverFlags && !lifecycle && hooksNativePark;
+      // A parked command-step or Hooks native round must never be answered by
+      // a cold load: answering writes a durable tool_result for one of the
+      // plan's own calls, which permanently destroys the continuation. Both
+      // answer guards below key on this one predicate. pendingContinuation is
+      // computed unconditionally above; resumeApproval is only assigned inside
+      // the takeover arm, so on a bare load it is undefined and cannot be the
+      // key (R9-1).
       let resumeApproval: RestoredHostedApprovalContinuation | undefined;
-      const commandStepPark =
-        pendingCommandApproval?.plan.commandStep !== undefined ||
-        resumeApproval?.plan.commandStep !== undefined;
+      const continuationPark =
+        pendingContinuation?.plan.commandStep !== undefined || hooksNativePark;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -8585,7 +8594,7 @@ export function registerHostedHarnessSessionRoutes(
         session.hooks &&
         !lifecycle &&
         unsettled !== undefined &&
-        !commandStepPark
+        !continuationPark
       ) {
         try {
           await answerResumedTurnCalls({
@@ -8652,7 +8661,9 @@ export function registerHostedHarnessSessionRoutes(
         !fileHistory?.pendingUndo &&
         fileHistory?.pendingTurn &&
         !pumpOwnedParked
-          ? (takeover || extensionsCommandStepTakeover) &&
+          ? (takeover ||
+              extensionsCommandStepTakeover ||
+              hooksNativeTakeover) &&
             unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
               ? null
@@ -8799,11 +8810,12 @@ export function registerHostedHarnessSessionRoutes(
       // the settle exemption above): an explicit, non-lifecycle takeover of an
       // extensions Session's parked command-step plan, even when a Hook catalog
       // makes `takeover` itself false. It is scoped to a command-step plan — a
-      // native approval on a hooks/MCP Session is refused by
-      // resumeSavedNativeBatch, so admitting it here would 503 the load instead
-      // of attaching (R7-2); native approvals stay on the no-hooks arm. Sharing
-      // the boolean with the settle exemption keeps a file-history-owing batch
-      // recoverable instead of 409'ing before this arm is consulted (R8-1).
+      // native approval on an MCP Session is refused by resumeSavedNativeBatch,
+      // so admitting it here would 503 the load instead of attaching (R7-2);
+      // a Hooks Session's native plan takes the Hooks arm on the shape terms
+      // its park eligibility read. Sharing the booleans with the settle
+      // exemption keeps a file-history-owing batch recoverable instead of
+      // 409'ing before this arm is consulted (R8-1).
       if (
         unsettled &&
         ((takeover &&
@@ -8811,7 +8823,8 @@ export function registerHostedHarnessSessionRoutes(
             undefined) ||
           (extensionsCommandStepTakeover &&
             hostedCommandStepResumeShapeRefusal(session, brokerOptions) ===
-              undefined))
+              undefined) ||
+          hooksNativeTakeover)
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -8821,7 +8834,7 @@ export function registerHostedHarnessSessionRoutes(
           )
         ) {
           resumeApproval =
-            pendingCommandApproval ??
+            pendingContinuation ??
             (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const text = await hostedOriginalPromptText(managed, unsettled);
@@ -9132,7 +9145,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId && !commandStepPark)
+        if (promptId && !continuationPark)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
@@ -9212,8 +9225,8 @@ export function registerHostedHarnessSessionRoutes(
           !resume &&
           !settlePromptId &&
           // A Hooks Session otherwise recovers through this load, but only a
-          // takeover may resume a parked command step (R9-1).
-          (!session.hooks || commandStepPark) &&
+          // takeover may resume a parked command step or native batch (R9-1).
+          (!session.hooks || continuationPark) &&
           !recovery &&
           !inapplicableAnswer)
       ) {

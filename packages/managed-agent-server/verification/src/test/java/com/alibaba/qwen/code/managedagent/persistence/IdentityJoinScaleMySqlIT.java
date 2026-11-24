@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.persistence.evidence.CancelEvidence;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -140,8 +143,38 @@ class IdentityJoinScaleMySqlIT {
             assertThat(repository.findRecoveryCandidates("local-process", null, 100)).isEmpty();
             String sql = statements.stream().filter(statement -> statement.contains("FROM ma_operation recovery"))
                     .findFirst().orElseThrow();
-            var plan = ExecutedQueryPlan.explain(jdbc, sql, "local-process", "", 100);
-            assertThat(plan.usesIndex("idx_ma_operation_target")).as(plan.text()).isTrue();
+            JsonNode plan = jsonPlan(jdbc, new Query(sql, new Object[] {"local-process", "", 100}));
+            assertThat(usedKeyParts(plan, "recovery")).as(plan.toString()).contains("target_id", "target_revision");
+        }
+    }
+
+    @Test
+    void cancelEvidenceProbesTheTurnKey() {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            ManagedSchema.initialize(database.source());
+            var jdbc = new CapturingJdbc(database.source(), "LEFT JOIN ma_turn t");
+            var turns = new ArrayList<Object[]>();
+            for (int index = 0; index < 2000; index++) {
+                turns.add(new Object[] {"turn-" + index, "prompt-" + index});
+            }
+            jdbc.batchUpdate("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest,"
+                    + " status, gmt_create, gmt_modified) VALUES ('tenant', 'session', ?, ?, '[]', 'digest',"
+                    + " 'CANCELLED', 1, 1)", turns);
+            String operationId = "cancel-1000";
+            String turnId = "turn-1000";
+            jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id,"
+                    + " tenant_id, session_id, target_kind, target_id, request_json, request_digest, phase, state,"
+                    + " delivery_state, gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, 'CANCEL', ?, 'tenant',"
+                    + " 'session', 'TURN', ?, '{}', 'digest', 'RECOVERY_BLOCKED', 'RECOVERY_BLOCKED', 'BLOCKED', 1, 1)",
+                    ManagedIdentityRefs.operationRef("CANCEL", "tenant", "SESSION", "session", turnId, operationId),
+                    ManagedSchemaKeys.identity("session"), operationId, ManagedSchemaKeys.identity(turnId));
+            jdbc.execute("ANALYZE TABLE ma_operation, ma_turn");
+
+            var evidence = new CancelEvidence(jdbc, new ObjectMapper());
+            assertThat(evidence.read(new ParkedOperation("tenant", "session", operationId, "CANCEL")))
+                    .contains(AcceptanceVerdict.unknown());
+            JsonNode plan = jsonPlan(jdbc, jdbc.captured);
+            assertThat(usedKeyParts(plan, "t")).as(plan.toString()).contains("turn_id");
         }
     }
 

@@ -49,6 +49,7 @@ export interface SessionUpdateMeta {
     modelInvocable?: boolean;
   }> | null;
   source?: string | null;
+  stopReason?: string | null;
   qwenDiscreteMessage?: boolean | null;
   // Set on the summary that older CLIs' MessageRewriteMiddleware emitted, so
   // consumers can distinguish the rewritten copy from the original chunk

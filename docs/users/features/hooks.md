@@ -998,10 +998,10 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 **Output Options**:
 
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
-- `stopReason`: feedback to include in the stop response
-- `continue`: set to false to stop execution
+- Set `decision` to `"block"` or `"deny"` to keep Qwen working. A command hook can also keep Qwen working by exiting with code 2.
+- `reason`: the instruction Qwen continues with when the hook blocks
+- `continue`: `false` ends the turn. When the hook also blocks, the block wins and Qwen keeps working
+- When the hook blocks, `stopReason` takes precedence over `reason`. With `continue: false` and no block, the interactive CLI and non-interactive text mode show the reason as a notice. ACP sends the reason in `_meta.stopReason` on an empty `agent_message_chunk` with `_meta.source` set to `stop_hook_notice`.
 - `hookSpecificOutput.additionalContext`: additional context information
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
@@ -1125,8 +1125,10 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 **Output Options**:
 
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
+- Set `decision` to `"block"` or `"deny"` to keep the subagent working. A command hook can also keep it working by exiting with code 2.
+- `reason`: the instruction the subagent continues with when the hook blocks
+- `stopReason`: when the hook blocks, used instead of `reason`
+- `continue`: `false` without a block lets the subagent stop
 
 **Example Output**:
 

@@ -135,6 +135,7 @@ import {
   REPEATED_TOOL_FAILURE_STOP_MESSAGE,
 } from './repeated-tool-failure-guard.js';
 import type { DaemonTodoStopGuard } from './daemon-todo-stop-guard.js';
+import { AcpModSession } from './acp-mod-session.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const readActualSettingsSnapshot = settingsModule.readSettingsSnapshot;
@@ -6781,6 +6782,34 @@ describe('Session', () => {
       ]);
     });
 
+    it('emits a shared Stop hook reason outside the assistant reply', async () => {
+      const answer = '{"ok":true}';
+      const stopReason = 'Build is red.';
+      const send = useSharedRounds([
+        text(answer),
+        finished(),
+        {
+          type: core.LlmEventType.HookSystemMessage,
+          value: stopReason,
+          isStopReason: true,
+        },
+      ]);
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(agentText()).toEqual([answer]);
+      expect(updates()).toContainEqual({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'stop_hook_notice',
+          qwenDiscreteMessage: true,
+          stopReason,
+        },
+      });
+    });
+
     it.each([false, true])(
       'runs completion memory work when the client ends at the Stop hook cap (channel turn: %s)',
       async (channel) => {
@@ -11479,7 +11508,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { isSessionTurn: true, promptId },
+          { isSessionTurn: true, retractToolCallsOnRetry: true, promptId },
         );
         expect(
           mockChatRecordingService.recordUserMessage,
@@ -11713,7 +11742,10 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toEqual({ isSessionTurn: true });
+      expect(sendOptions).toEqual({
+        isSessionTurn: true,
+        retractToolCallsOnRetry: true,
+      });
     });
 
     it('does not re-lend an id that is still live after a retry strips only a continuation', async () => {
@@ -11753,7 +11785,10 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toEqual({ isSessionTurn: true });
+      expect(sendOptions).toEqual({
+        isSessionTurn: true,
+        retractToolCallsOnRetry: true,
+      });
     });
 
     it('re-lends the newest stripped id when a retry strips two orphans', async () => {
@@ -11789,6 +11824,7 @@ describe('Session', () => {
         .calls[0][4];
       expect(sendOptions).toEqual({
         isSessionTurn: true,
+        retractToolCallsOnRetry: true,
         promptId: 'test-session-id########7',
       });
     });
@@ -21988,7 +22024,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        { isSessionTurn: false },
+        { isSessionTurn: false, retractToolCallsOnRetry: true },
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -25467,7 +25503,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        { isSessionTurn: false },
+        { isSessionTurn: false, retractToolCallsOnRetry: true },
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -26638,7 +26674,11 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { isSessionTurn: true, promptId: 'test-session-id########1' },
+        {
+          isSessionTurn: true,
+          retractToolCallsOnRetry: true,
+          promptId: 'test-session-id########1',
+        },
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
@@ -26646,7 +26686,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { isSessionTurn: true },
+        { isSessionTurn: true, retractToolCallsOnRetry: true },
       );
       expect(resolveForModel).toHaveBeenCalledWith(
         'vision-agent\0https://vision.example.com/v1',
@@ -26670,7 +26710,11 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { isSessionTurn: true, promptId: 'test-session-id########2' },
+        {
+          isSessionTurn: true,
+          retractToolCallsOnRetry: true,
+          promptId: 'test-session-id########2',
+        },
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -30679,7 +30723,11 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
       });
 
@@ -30799,7 +30847,11 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
       });
 
@@ -31135,7 +31187,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -31251,7 +31307,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { isSessionTurn: true, promptId: expect.any(String) },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: expect.any(String),
+          },
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
 
@@ -42972,6 +43032,59 @@ describe('Session', () => {
         ).toMatchObject({ goal: { goalId: 'goal-2' } });
       });
 
+      it('cancels old Mod work when /clear switches sessions', async () => {
+        const invalidateTools = vi.fn();
+        const syncSession = vi.fn().mockResolvedValue(undefined);
+        const createMods = vi.spyOn(AcpModSession, 'create').mockReturnValue({
+          admit: vi.fn().mockResolvedValue(undefined),
+          invalidateTools,
+          syncSession,
+          close: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AcpModSession);
+        session.installMods();
+        createMods.mockRestore();
+
+        let finishSwitch!: () => void;
+        const switched = new Promise<void>((resolve) => {
+          finishSwitch = resolve;
+        });
+        let finishReset!: () => void;
+        const reset = new Promise<void>((resolve) => {
+          finishReset = resolve;
+        });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(
+          async (_query, _abort, _config, _settings, hooks) => {
+            vi.mocked(mockConfig.getSessionId).mockReturnValue(
+              'new-session-id',
+            );
+            hooks?.startNewSession?.('new-session-id');
+            finishSwitch();
+            await reset;
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Cleared.',
+            };
+          },
+        );
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/clear' }],
+        });
+        try {
+          await Promise.race([switched, prompt]);
+          expect(invalidateTools).toHaveBeenCalledOnce();
+          expect(syncSession).not.toHaveBeenCalled();
+        } finally {
+          finishReset();
+          await prompt;
+        }
+        expect(syncSession).toHaveBeenCalledOnce();
+      });
+
       // R20-9: `/clear` swaps in a fresh recorder inside its action, so its
       // user-turn record must land BEFORE the action runs — otherwise the
       // deferred record is written into the NEW session's transcript.
@@ -43421,7 +43534,7 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
-          { isSessionTurn: true },
+          { isSessionTurn: true, retractToolCallsOnRetry: true },
         );
         expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
           'goal-runtime:turn-1',
@@ -45844,7 +45957,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          { isSessionTurn: true },
+          { isSessionTurn: true, retractToolCallsOnRetry: true },
         );
       });
 
@@ -45961,7 +46074,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
@@ -46076,7 +46193,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { isSessionTurn: true, promptId: 'test-session-id########2' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########2',
+          },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -46328,7 +46449,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { isSessionTurn: true, promptId: 'test-session-id########2' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########2',
+          },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });
@@ -51033,6 +51158,56 @@ describe('Session', () => {
           expect(textParts(continuation.message)).toEqual([
             'External stop hook feedback',
           ]);
+        });
+
+        it('ends the turn and emits stopReason separately from the assistant reply', async () => {
+          const answer = '{"ok":true}';
+          const stopReason = 'Build is red.';
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { continue: false, stopReason },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([{ role: 'model', parts: [{ text: answer }] }]);
+          mockChat.getLastModelMessageText = vi.fn().mockReturnValue(answer);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: answer }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(agentMessageChunks().filter(Boolean)).toEqual([answer]);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                source: 'stop_hook_notice',
+                qwenDiscreteMessage: true,
+                stopReason,
+              },
+            },
+          });
         });
 
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
@@ -70950,6 +71125,126 @@ describe('Session', () => {
 
       await session.cancelPendingPrompt();
       expect(capturedSignal!.aborted).toBe(true);
+    });
+  });
+
+  describe('transport failure cause and tool-call retry options', () => {
+    it('passes retractToolCallsOnRetry to chat.sendMessageStream', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Object),
+        expect.any(String),
+        undefined,
+        expect.objectContaining({
+          isSessionTurn: true,
+          retractToolCallsOnRetry: true,
+        }),
+      );
+    });
+
+    it('preserves error.cause in RequestError and recorded turn_result on transport failure', async () => {
+      const socketErr = Object.assign(new Error('other side closed'), {
+        code: 'UND_ERR_SOCKET',
+      });
+      const terminatedErr = Object.assign(new TypeError('terminated'), {
+        cause: socketErr,
+      });
+      mockChat.sendMessageStream = vi.fn().mockRejectedValue(terminatedErr);
+
+      let rejection: unknown;
+      try {
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'prompt-cause-1',
+            originatorClientId: 'client-1',
+          },
+        );
+      } catch (err) {
+        rejection = err;
+      }
+
+      expect(rejection).toBeInstanceOf(RequestError);
+      const rpcErr = rejection as RequestError;
+      expect(rpcErr.code).toBe(-32603);
+      expect(rpcErr.message).toBe(
+        'terminated (cause: UND_ERR_SOCKET: other side closed)',
+      );
+      expect(rpcErr.data).toEqual({
+        details: 'terminated (cause: UND_ERR_SOCKET: other side closed)',
+      });
+      expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          promptId: 'prompt-cause-1',
+          state: 'error',
+          error: {
+            code: '-32603',
+            message: 'terminated (cause: UND_ERR_SOCKET: other side closed)',
+          },
+        }),
+        expect.stringContaining('test-session-id########'),
+      );
+    });
+
+    it('passes retractToolCallsOnRetry on the unified agent loop path', async () => {
+      const sendSpy = vi.fn(async function* () {
+        yield {
+          type: core.LlmEventType.Finished,
+          value: { reason: FinishReason.STOP },
+        };
+        return {};
+      });
+      Object.assign(mockLlmClient, {
+        admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+        sendMessageStream: sendSpy,
+      });
+      mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello unified' }],
+      });
+
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          toolCallPreparations: true,
+          retractToolCallsOnRetry: true,
+        }),
+      );
+    });
+
+    it('does not wrap a cause-less long Error into RequestError solely due to truncation', async () => {
+      const longErr = new Error('x'.repeat(1200));
+      mockChat.sendMessageStream = vi.fn().mockRejectedValue(longErr);
+
+      let rejection: unknown;
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+      } catch (err) {
+        rejection = err;
+      }
+
+      expect(rejection).toBe(longErr);
     });
   });
 });
