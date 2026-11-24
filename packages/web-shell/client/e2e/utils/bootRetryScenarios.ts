@@ -2,6 +2,7 @@ import { expect, type Page, type TestInfo } from '@playwright/test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
+  BOOT_READY_TIMEOUT_MS,
   BOOT_RELOAD_BACKOFF_MS,
   installBootRetry,
   MAX_BOOT_RELOADS,
@@ -18,10 +19,6 @@ const RELOAD_QUIET_WINDOW_MS = Math.max(...BOOT_RELOAD_BACKOFF_MS) + 1_000;
 // A reload the harness should never have scheduled is now deferred by the
 // first backoff, so a count read at the load event would miss it.
 const SPURIOUS_RELOAD_WINDOW_MS = BOOT_RELOAD_BACKOFF_MS[0] + 500;
-// Every mount assertion here allows for a second full boot of the graph: the
-// suite's 20 s visibility budget measures one, and a cold dev server measured
-// 26 s for the first here before the reload even started.
-const BOOT_VISIBLE_TIMEOUT_MS = 40_000;
 const ENTRY_URL = (sessionId: string, suffix = '') =>
   `/session/${sessionId}?theme=light&language=en${suffix}`;
 
@@ -85,7 +82,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       await page.goto(ENTRY_URL(scenario.sessionId));
 
       await expect(page.locator(SHELL)).toBeVisible({
-        timeout: BOOT_VISIBLE_TIMEOUT_MS,
+        timeout: BOOT_READY_TIMEOUT_MS,
       });
       await expect(page.locator('[data-boot-fallback]')).toHaveCount(0);
       expect(entryRequests).toBe(2);
@@ -102,9 +99,9 @@ export const bootRetryScenarios: BootRetryScenario[] = [
     async run(page, testInfo) {
       const scenario = await openShell(page, testInfo);
 
-      // Run 45205510587 still aborted modules 11 s into a boot. Keep this
+      // Run 45318801967 still aborted modules 16.4 s into a boot. Keep this
       // independent of the backoff so exhausting the old budget fails here.
-      const STORM_MS = 11_000;
+      const STORM_MS = 17_000;
       let stormEndsAt: number | null = null;
       let abortedScripts = 0;
       let entryRequests = 0;
@@ -131,7 +128,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       await page.goto(ENTRY_URL(scenario.sessionId));
 
       await expect(page.locator(SHELL)).toBeVisible({
-        timeout: BOOT_VISIBLE_TIMEOUT_MS,
+        timeout: BOOT_READY_TIMEOUT_MS,
       });
       await expect(page.locator('[data-boot-fallback]')).toHaveCount(0);
       // Without these the case passes vacuously on a host where the storm
@@ -195,7 +192,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
           ENTRY_URL(scenario.sessionId, `&navigation=${navigation}`),
         );
         await expect(page.locator(SHELL)).toBeVisible({
-          timeout: BOOT_VISIBLE_TIMEOUT_MS,
+          timeout: BOOT_READY_TIMEOUT_MS,
         });
       }
 
@@ -216,7 +213,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
 
       await page.goto(ENTRY_URL(scenario.sessionId, '&navigation=1'));
       await expect(page.locator(SHELL)).toBeVisible({
-        timeout: BOOT_VISIBLE_TIMEOUT_MS,
+        timeout: BOOT_READY_TIMEOUT_MS,
       });
       await page.evaluate(() => {
         void import('/pending-import.js').catch(() => {});
@@ -225,7 +222,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       const documents = trackDocuments(page);
       await page.goto(ENTRY_URL(scenario.sessionId, '&navigation=2'));
       await expect(page.locator(SHELL)).toBeVisible({
-        timeout: BOOT_VISIBLE_TIMEOUT_MS,
+        timeout: BOOT_READY_TIMEOUT_MS,
       });
 
       await page.waitForTimeout(SPURIOUS_RELOAD_WINDOW_MS);
@@ -247,7 +244,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       const documents = trackDocuments(page);
       await page.goto(ENTRY_URL(scenario.sessionId));
       await expect(page.locator(SHELL)).toBeVisible({
-        timeout: BOOT_VISIBLE_TIMEOUT_MS,
+        timeout: BOOT_READY_TIMEOUT_MS,
       });
 
       await page.waitForTimeout(SPURIOUS_RELOAD_WINDOW_MS);
@@ -301,7 +298,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       const documents = trackDocuments(page);
       await page.goto(ENTRY_URL(scenario.sessionId));
       await expect(page.locator(SHELL)).toBeVisible({
-        timeout: BOOT_VISIBLE_TIMEOUT_MS,
+        timeout: BOOT_READY_TIMEOUT_MS,
       });
 
       await page.waitForTimeout(SPURIOUS_RELOAD_WINDOW_MS);

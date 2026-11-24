@@ -6,11 +6,15 @@ import type { Page, Request } from '@playwright/test';
  * The aborts arrive in storms, not one at a time: every in-flight request dies
  * together, and the notifier can keep firing for several seconds. Retrying
  * immediately spends the whole budget inside the storm that caused the first
- * failure. Run 45205510587 exhausted all three reloads and still saw
- * request aborts 11 s into a boot. Keep one attempt beyond that interval
- * while leaving time for the next boot inside the suite's 20 s expect budget.
+ * failure. Run 45318801967 still saw request aborts at 16.4 s, after
+ * the fourth reload. Reserve another attempt beyond that interval.
  */
-export const BOOT_RELOAD_BACKOFF_MS = [500, 1_500, 3_500, 6_000] as const;
+export const BOOT_RELOAD_BACKOFF_MS = [
+  500, 1_500, 3_500, 6_000, 8_000,
+] as const;
+
+/** Startup waits must allow for the backoff and rebuilding the module graph. */
+export const BOOT_READY_TIMEOUT_MS = 40_000;
 
 /** Reloads allowed for one tab whose boot keeps failing. */
 export const MAX_BOOT_RELOADS = BOOT_RELOAD_BACKOFF_MS.length;

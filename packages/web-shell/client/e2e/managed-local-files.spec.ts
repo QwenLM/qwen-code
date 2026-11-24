@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test } from '@playwright/test';
+import { BOOT_READY_TIMEOUT_MS, installBootRetry } from './utils/bootRetry';
 
 // The disposable peer lives on its own loopback port; headless Chromium
 // auto-denies the Local Network Access permission prompt, so disable the
@@ -11,6 +12,10 @@ test.use({
       '--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests',
     ],
   },
+});
+
+test.beforeEach(async ({ page }) => {
+  await installBootRetry(page);
 });
 
 /**
@@ -296,7 +301,7 @@ test('Managed local files entry connects a directory through the relay peer @smo
       name: 'Local files',
       exact: true,
     });
-    await expect(trigger).toBeVisible();
+    await expect(trigger).toBeVisible({ timeout: BOOT_READY_TIMEOUT_MS });
     await trigger.click();
     await page.getByRole('button', { name: 'Connect a directory…' }).click();
     // Exact match: the trigger's sr-only state description also names the
@@ -349,7 +354,9 @@ test('Managed local files entry is withheld without the capability', async ({
     await page.goto(
       `/e2e/fixtures/managed-local-files.html?api=${encodeURIComponent(peer.url)}&session=s1`,
     );
-    await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+    await expect(page.locator('[data-web-shell-root]')).toBeVisible({
+      timeout: BOOT_READY_TIMEOUT_MS,
+    });
     // Anchor past mount: the session summary (which carries the capability)
     // must actually have been served before asserting the entry is absent, or
     // the count-0 check would pass even if the gate never ran.

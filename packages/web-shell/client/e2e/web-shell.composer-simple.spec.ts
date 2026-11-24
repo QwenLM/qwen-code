@@ -11,6 +11,7 @@ import {
   type Page,
   type TestInfo,
 } from '@playwright/test';
+import { BOOT_READY_TIMEOUT_MS } from './utils/bootRetry';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -49,7 +50,9 @@ async function openComposerHarness(
   await page.goto(
     `/e2e/composer-layout-harness.html?composerVariant=${variant}&tags=${tags}&sessionId=${scenario.sessionId}`,
   );
-  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId, {
+    timeout: BOOT_READY_TIMEOUT_MS,
+  });
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: connection.sessionId, replayedCount: 0 }),
   );
