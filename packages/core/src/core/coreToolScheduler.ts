@@ -2055,7 +2055,10 @@ export class CoreToolScheduler {
   private nestedToolCalls: ToolCall[] = [];
   private nestedSequence = 0;
   private nestedFlushScheduled = false;
-  private readonly pendingNestedTools = new Set<Promise<CodeModeToolResult>>();
+  private readonly pendingNestedTools = new Map<
+    Promise<CodeModeToolResult>,
+    NonNullable<CoreToolScheduler['activeRequest']>
+  >();
   private nestedQueue: Array<{
     request: ToolCallRequestInfo;
     signal: AbortSignal;
@@ -2089,17 +2092,33 @@ export class CoreToolScheduler {
 
   private getOrCreateNestedToolScheduler(): CoreToolScheduler {
     if (this.nestedToolScheduler) return this.nestedToolScheduler;
-    this.nestedToolScheduler = new CoreToolScheduler({
+    const isFinished = (): boolean =>
+      this.nestedToolScheduler !== scheduler ||
+      this.schedulerOptions.isFinished?.() === true;
+    const scheduler: CoreToolScheduler = new CoreToolScheduler({
       ...this.schedulerOptions,
+      isFinished,
       modToolCheck: undefined,
       beforeToolLaunch: undefined,
+      outputUpdateHandler: this.outputUpdateHandler
+        ? (callId, output) => {
+            if (!isFinished()) this.outputUpdateHandler?.(callId, output);
+          }
+        : undefined,
+      onEditorClose: () => {
+        if (!isFinished()) this.onEditorClose();
+      },
+      onToolResultFullTurnModel: this.onToolResultFullTurnModel
+        ? (model) =>
+            !isFinished() && this.onToolResultFullTurnModel?.(model) === true
+        : undefined,
       onAllToolCallsComplete: async (calls) => {
         for (const call of calls) {
           const resolver = this.nestedResolvers.get(call.request.callId);
           if (!resolver) continue;
           this.nestedResolvers.delete(call.request.callId);
           try {
-            resolver.onResult?.(call.response);
+            if (!isFinished()) resolver.onResult?.(call.response);
           } catch (error) {
             resolver.reject(error);
             continue;
@@ -2127,15 +2146,18 @@ export class CoreToolScheduler {
         }
       },
       onToolCallsUpdate: (calls) => {
+        if (isFinished()) return;
         this.nestedToolCalls = calls;
         this.notifyToolCallsUpdate();
       },
     });
-    this.nestedToolScheduler.hookContextSink = (request, context) => {
+    this.nestedToolScheduler = scheduler;
+    scheduler.hookContextSink = (request, context) => {
       const parentCallId = request.parentCallId;
       // Only a parent still executing can deliver it; a late nested call
       // must not leave an entry nothing will consume.
       if (
+        isFinished() ||
         !parentCallId ||
         !this.toolCalls.some(
           (call) =>
@@ -2148,13 +2170,14 @@ export class CoreToolScheduler {
       contexts.push(context);
       this.nestedHookContexts.set(parentCallId, contexts);
     };
-    return this.nestedToolScheduler;
+    return scheduler;
   }
 
   private dispatchCodeModeTool(
     name: string,
     args: Record<string, unknown>,
     parent: ToolCallRequestInfo,
+    owner: CoreToolScheduler['activeRequest'],
     signal: AbortSignal,
     onResult?: (response: ToolCallResponseInfo) => void,
   ): Promise<CodeModeToolResult> {
@@ -2184,8 +2207,8 @@ export class CoreToolScheduler {
       this.nestedFlushScheduled = true;
       setTimeout(() => this.flushNestedQueue(), CODE_MODE_BATCH_WINDOW_MS);
     });
-    if (this.schedulerOptions.waitForNestedToolSettlement) {
-      this.pendingNestedTools.add(settled);
+    if (this.schedulerOptions.waitForNestedToolSettlement && owner) {
+      this.pendingNestedTools.set(settled, owner);
       const remove = () => this.pendingNestedTools.delete(settled);
       void settled.then(remove, remove);
     }
@@ -2209,9 +2232,17 @@ export class CoreToolScheduler {
     };
     for (const entry of active) {
       entry.signal.addEventListener('abort', abortBatch, { once: true });
+      const stopForwardingAbort = () =>
+        entry.signal.removeEventListener('abort', abortBatch);
       this.nestedResolvers.set(entry.request.callId, {
-        resolve: entry.resolve,
-        reject: entry.reject,
+        resolve: (result) => {
+          stopForwardingAbort();
+          entry.resolve(result);
+        },
+        reject: (error) => {
+          stopForwardingAbort();
+          entry.reject(error);
+        },
         onResult: entry.onResult,
       });
     }
@@ -2220,18 +2251,13 @@ export class CoreToolScheduler {
         active.map((entry) => entry.request),
         batchController.signal,
       ),
-    )
-      .catch((error) => {
-        for (const entry of active) {
-          this.nestedResolvers.delete(entry.request.callId);
-          entry.reject(error);
-        }
-      })
-      .finally(() => {
-        for (const entry of active) {
-          entry.signal.removeEventListener('abort', abortBatch);
-        }
-      });
+    ).catch((error) => {
+      for (const { request } of active) {
+        const resolver = this.nestedResolvers.get(request.callId);
+        this.nestedResolvers.delete(request.callId);
+        resolver?.reject(error);
+      }
+    });
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -6302,6 +6328,7 @@ export class CoreToolScheduler {
     span: Span,
   ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
+    const batch = this.activeRequest;
     const canonicalName = canonicalToolName(toolName);
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
@@ -6674,6 +6701,7 @@ export class CoreToolScheduler {
                         name,
                         args,
                         scheduledCall.request,
+                        batch,
                         nestedSignal,
                         onResult,
                       ),
@@ -6681,7 +6709,7 @@ export class CoreToolScheduler {
                   execute,
                 )
               : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                ? runWithToolCallSource({ kind: 'code_mode', signal }, execute)
                 : execute();
           }),
         );
@@ -6729,6 +6757,7 @@ export class CoreToolScheduler {
                         name,
                         args,
                         scheduledCall.request,
+                        batch,
                         nestedSignal,
                         onResult,
                       ),
@@ -6736,7 +6765,7 @@ export class CoreToolScheduler {
                   execute,
                 )
               : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                ? runWithToolCallSource({ kind: 'code_mode', signal }, execute)
                 : execute();
           }),
         );
@@ -8248,6 +8277,7 @@ export class CoreToolScheduler {
       );
       this.toolCalls = [];
       this.isFinalizingToolCalls = true;
+      const batch = this.activeRequest;
       // Captured before PostToolBatch, which can rewrite a cancelled call
       // into an error; a cancelled call never delivers PreToolUse context.
       const preToolUseContextCallIds = new Set(
@@ -8283,11 +8313,6 @@ export class CoreToolScheduler {
         );
       }
       try {
-        // The host can exit before its cancelled children settle. Keep the
-        // parent batch open so the owner's cancellation deadline still runs.
-        if (batchSignal?.aborted && this.pendingNestedTools.size > 0) {
-          await Promise.allSettled(this.pendingNestedTools);
-        }
         const releases = completedCalls.flatMap((call) => {
           const pending = this.invocationReleases.get(call.request.callId);
           this.invocationReleases.delete(call.request.callId);
@@ -8438,6 +8463,21 @@ export class CoreToolScheduler {
           completedCalls = await this.applyBatchOutputBudget(
             appendHookContexts(withoutHookContext, hookContexts),
           );
+        }
+
+        if (batchSignal?.aborted && this.pendingNestedTools.size > 0) {
+          const ownPending = [...this.pendingNestedTools]
+            .filter(([, owner]) => owner === batch)
+            .map(([pending]) => pending);
+          if (ownPending.length > 0) await Promise.allSettled(ownPending);
+          // An earlier exec can leave an aborted child in a hook. Detach
+          // those children so they can't hold this batch's completed results
+          // or block the next batch's nested calls.
+          if (this.pendingNestedTools.size > 0) {
+            this.pendingNestedTools.clear();
+            this.nestedToolScheduler = undefined;
+            this.nestedToolCalls = [];
+          }
         }
 
         for (const call of completedCalls) {
