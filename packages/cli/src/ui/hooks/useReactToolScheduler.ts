@@ -316,7 +316,12 @@ export function useReactToolScheduler(
         if (released.size === 0) return;
         if (clearDisplay) {
           setToolCallsForDisplay((calls) =>
-            calls.filter(({ request }) => !released.has(request.callId)),
+            calls.filter(
+              ({ request }) =>
+                !released.has(request.callId) &&
+                (request.parentCallId === undefined ||
+                  !released.has(request.parentCallId)),
+            ),
           );
         }
         void onBatchComplete([]).catch((error: unknown) => {

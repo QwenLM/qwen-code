@@ -2042,10 +2042,12 @@ export class CoreToolScheduler {
     signal: AbortSignal;
     runtimeView?: RuntimeContentGeneratorView;
     owner?: HookExecutionOwner;
+    sessionId: string;
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
   private activeRequest?: ToolCallRequestInfo | ToolCallRequestInfo[];
+  private activeSessionId?: string;
   private retired = false;
   private nestedToolScheduler?: CoreToolScheduler;
   private nestedToolCalls: ToolCall[] = [];
@@ -3190,6 +3192,7 @@ export class CoreToolScheduler {
     runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     const owner = captureHookExecutionOwner(this.config);
+    const sessionId = this.config.getSessionId();
     if (this.isRunning() || this.isScheduling) {
       if (signal.aborted) {
         return Promise.reject(new Error('Tool call cancelled while in queue.'));
@@ -3213,6 +3216,7 @@ export class CoreToolScheduler {
           signal,
           runtimeView,
           owner,
+          sessionId,
           resolve: () => {
             signal.removeEventListener('abort', abortHandler);
             resolve();
@@ -3224,7 +3228,13 @@ export class CoreToolScheduler {
         });
       });
     }
-    return this.scheduleWithOwner(request, signal, runtimeView, owner);
+    return this.scheduleWithOwner(
+      request,
+      signal,
+      runtimeView,
+      owner,
+      sessionId,
+    );
   }
 
   /**
@@ -3255,8 +3265,10 @@ export class CoreToolScheduler {
     signal: AbortSignal,
     runtimeView: RuntimeContentGeneratorView | undefined,
     owner: HookExecutionOwner | undefined,
+    sessionId: string,
   ): Promise<void> {
     this.activeRequest = request;
+    this.activeSessionId = sessionId;
     const items = Array.isArray(request) ? request : [request];
     for (const item of items) this.hookOwners.set(item.callId, owner);
     return runWithHookExecutionOwner(owner, () =>
@@ -3277,6 +3289,7 @@ export class CoreToolScheduler {
       return;
     }
     this.activeRequest = undefined;
+    this.activeSessionId = undefined;
     if (this.requestQueue.length === 0) return;
     const next = this.requestQueue.shift()!;
     this.scheduleWithOwner(
@@ -3284,6 +3297,7 @@ export class CoreToolScheduler {
       next.signal,
       next.runtimeView,
       next.owner,
+      next.sessionId,
     )
       .then(next.resolve)
       .catch(next.reject);
@@ -8412,6 +8426,9 @@ export class CoreToolScheduler {
           this.finalizeToolSpan(call.request.callId, true);
         }
 
+        // A cancelled batch can settle after /clear rotates this Config.
+        const ownsTelemetry =
+          this.activeSessionId === this.config.getSessionId();
         for (const call of completedCalls) {
           const provenance =
             call.response.responseParts
@@ -8437,7 +8454,10 @@ export class CoreToolScheduler {
           );
           this.runtimeContentGeneratorViews.delete(call.request.callId);
           // A call its owner refused to launch never ran.
-          if (!this.launchRefusedCallIds.delete(call.request.callId)) {
+          if (
+            !this.launchRefusedCallIds.delete(call.request.callId) &&
+            ownsTelemetry
+          ) {
             logToolCall(this.config, new ToolCallEvent(call, this.config));
           }
         }
