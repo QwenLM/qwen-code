@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ParkedTurn;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WakeStamp;
+import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -380,6 +382,42 @@ class RuntimeStageStoreTest {
         writerGeneration = transaction.execute(status -> sessionStore.acquireWriter(
                 TENANT, session, TOKEN, new AcquireWriterRequest(WORKSPACE, "writer", 60_000L)))
                 .writerGeneration();
+    }
+
+    // S2 (#18149): a wake-worthy batch staged while a Turn is Action-parked
+    // keeps the certificate but makes it due now, and releases a Turn row
+    // the park CAS already parked, so the coordinator redispatches at once.
+    @Test
+    void stagingAWakeMakesAParkDueNowAndUnparksItsTurn() {
+        String callId = "call-park";
+        seedPreparedBackgroundProcess(callId);
+        PullerClaim claim = stageStore.claimBindingPuller(bindingId, 1L, "broker-1", Duration.ofSeconds(30));
+        long before = System.currentTimeMillis();
+        sealWriter(new WakeStamp(1, false, 0, true,
+                new ParkedTurn("prompt-parked", before + 3_600_000L, 3L)));
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, error_code, retry_after, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, 'turn-parked', 'prompt-parked', '[]', ?, 'RUNNING', ?, ?, 1, 1)",
+                TENANT, session, "sha256:" + "0".repeat(64), AgentStateStore.HARNESS_ACTION_PARKED,
+                before + 3_600_000L);
+
+        assertThat(stageStore.stageBatch(new StageBatchRequest(claim, TENANT, WORKSPACE, session, callId,
+                List.of(terminalEntry(callId, 1L, "man-1", "exited", "success", false)))).wakeMarked())
+                .isTrue();
+
+        assertThat(headInt("is_wake_pending")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT wake_seal_background FROM ma_session_head WHERE session_id = ?",
+                Integer.class, session)).isEqualTo(1);
+        Map<String, Object> head = jdbc.queryForMap("SELECT wake_seal_parked_prompt_id, wake_seal_parked_until,"
+                + " wake_seal_parked_approval_revision FROM ma_session_head WHERE session_id = ?", session);
+        assertThat(head.get("wake_seal_parked_prompt_id")).isEqualTo("prompt-parked");
+        assertThat(((Number) head.get("wake_seal_parked_until")).longValue())
+                .isBetween(before - 1_000L, System.currentTimeMillis());
+        assertThat(((Number) head.get("wake_seal_parked_approval_revision")).longValue()).isEqualTo(3L);
+        Map<String, Object> turn = jdbc.queryForMap(
+                "SELECT error_code, retry_after FROM ma_turn WHERE session_id = ?", session);
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
     }
 
     private void sealWriter(WakeStamp wake) {
