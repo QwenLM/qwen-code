@@ -122,10 +122,29 @@ describe('qwen pr review runner routing', () => {
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
     expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\' && (github.event_name != \'pull_request_target\' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
     );
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
+    // A fork pull_request_target payload never reaches the persistent pool:
+    // the PR's own install/build runs in this job, and `off` containment on
+    // a shared host exposes CI_BOT_PAT + the model key AND persists whatever
+    // a postinstall plants. Comment/dispatch triggers keep the pool (no fork
+    // payload); the sandbox preflight is their fail-closed backstop.
+    expect(runsOn).toContain(
+      "github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository",
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The hosted toolchain setup must fire on every shape the routing sends
+    // to ubuntu-latest, the fork payload included — a hosted runner has no
+    // pool-preinstalled node.
+    const setupNode = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Setup Node.js for hosted review',
+    );
+    expect(setupNode.if).toContain(
+      "(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)",
+    );
   });
 
   it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
@@ -3100,6 +3119,45 @@ describe('review execution sandbox opt-in (#9556)', () => {
     );
     expect(review.env.DOCKER_HOST).toBe('');
     expect(review.env.DOCKER_CONTEXT).toBe('default');
+  });
+
+  it('refuses a fork-head review when containment cannot be required', () => {
+    // `off` hands the PR's own install/build/test this step's GH_TOKEN and
+    // OPENAI_API_KEY. On the persistent pool a same-repo head keeps the
+    // documented fail-open behaviour; a cross-repository head (or an
+    // unreadable one — deleted fork, payload-less trigger) must fail closed
+    // instead. On a GitHub-hosted runner the disposable VM bounds the
+    // fallback, so the refusal is scoped to self-hosted.
+    const preflight = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Resolve review sandbox',
+    );
+    expect(preflight.env.HEAD_REPO).toBe(
+      '${{ github.event.pull_request.head.repo.full_name }}',
+    );
+    expect(preflight.env.RUNNER_ENVIRONMENT).toBe(
+      '${{ runner.environment }}',
+    );
+    // Payload-less triggers resolve the head repo through the read-only job
+    // token, never CI_BOT_PAT: this step must not need the write credential.
+    expect(preflight.env.GH_TOKEN).toBe('${{ github.token }}');
+    expect(preflight.run).toContain(
+      'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"',
+    );
+    const refusalStart = preflight.run.indexOf(
+      `if [ "$policy" != 'required' ] && [ "\${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "\${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then`,
+    );
+    expect(refusalStart).toBeGreaterThan(-1);
+    const refusal = preflight.run.slice(
+      refusalStart,
+      preflight.run.indexOf('echo "sandbox_policy=$policy"'),
+    );
+    expect(refusal).toContain('exit 1');
+    expect(refusal).toContain('::error::');
+    // The refusal precedes the policy output, so a refused run can never
+    // feed `off` into 'Run review'.
+    expect(refusalStart).toBeLessThan(
+      preflight.run.indexOf('echo "policy=$policy" >> "$GITHUB_OUTPUT"'),
+    );
   });
 });
 

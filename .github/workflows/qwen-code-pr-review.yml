@@ -535,8 +535,15 @@ jobs:
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
     # The schedule switches the managed fleet to `ecs-review` at 17:00
     # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
-    # is closed.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # is closed. A pull_request_target event with a cross-repository head
+    # never reaches the persistent pool: the PR's own install/build/test run
+    # in this job, `off` containment there hands them CI_BOT_PAT and the
+    # model key, and the shared host keeps whatever a postinstall plants for
+    # the NEXT run. Fork-payload reviews route to the disposable hosted
+    # runner instead (the kill-switch lane every review already supports);
+    # comment/dispatch triggers carry no fork payload here and keep the
+    # pool, with the sandbox preflight below as their fail-closed backstop.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request_target'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -938,7 +945,11 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Setup Node.js for hosted review'
-        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true')"
+        # KEEP IN SYNC with review-pr.runs-on: every shape that routes this
+        # job to ubuntu-latest (other repository, ECS kill-switch, fork
+        # pull_request_target payload) lands on a runner without the pool's
+        # preinstalled toolchain.
+        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' || (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository))"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -1170,8 +1181,15 @@ jobs:
       # (TLS handshake timeout to the blob CDN). So: `required` when both halves
       # hold, `off` — today's behaviour — with a warning and a summary line
       # when they do not, and containment turns on by itself once the pool can
-      # pull the image. The image resolves through the repo's resolver first,
-      # so an unpublished tag cannot be charged to the PR under review.
+      # pull the image. On the persistent pool that fail-open fallback is for
+      # SAME-REPO heads only (their authors already hold write): a
+      # cross-repository head that still reaches the pool is refused outright
+      # when containment cannot be `required`, because `off` would hand
+      # PR-controlled install/build scripts this step's credentials AND the
+      # shared host. Fork pull_request_target payloads route to hosted
+      # (see runs-on), where the disposable VM bounds the same fallback.
+      # The image resolves through the repo's resolver first, so an
+      # unpublished tag cannot be charged to the PR under review.
       - name: 'Resolve review sandbox'
         id: 'review_sandbox'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1181,8 +1199,19 @@ jobs:
         # (#9527). The same pin the other sandboxed jobs use.
         env:
           SANDBOX_COMMAND: '/usr/bin/docker'
+          HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          GH_TOKEN: '${{ github.token }}'
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
         run: |-
+          # Comment/dispatch triggers carry no pull_request payload, so the
+          # head repo is read through the API with the job's read-only token —
+          # this step runs before any PR code executes. An unreadable head
+          # repo stays empty and is treated as a fork below (fail closed).
+          if [ -z "${HEAD_REPO:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
+            HEAD_REPO="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.repo.full_name // ""' 2>/dev/null || true)"
+          fi
           policy='off'
           # A daemon round trip, not presence on PATH: a client with no
           # reachable daemon is the shape that then refuses every reviewed
@@ -1194,6 +1223,31 @@ jobs:
             echo "::warning::the review sandbox image is not available on this runner; the PR's own install/build/test run unsandboxed for this review."
           else
             policy='required'
+          fi
+          # Fail closed for fork heads on the PERSISTENT pool: `off` hands
+          # the PR's own install/build/test this step's GH_TOKEN and
+          # OPENAI_API_KEY, a postinstall reads both in one line, and the
+          # shared host keeps whatever it plants for the next run. The
+          # routing above already sends fork pull_request_target payloads to
+          # the disposable hosted runner; this backstop covers the shapes
+          # that still reach the pool with fork code (a maintainer's /review
+          # comment, workflow_dispatch) — those refuse rather than run
+          # uncontained; the maintainer can re-dispatch with the ECS
+          # kill-switch to review on the disposable hosted lane. Disabling
+          # only the prebuild would NOT contain the review: the yolo agent's
+          # own shell probes run in this same environment. On a GitHub-
+          # hosted runner the VM is destroyed after the job, so `off` keeps
+          # the documented fail-open behaviour there (residual risk: this
+          # job's own credentials, no cross-run persistence). A same-repo
+          # head keeps fail-open everywhere: its authors already hold write.
+          if [ "$policy" != 'required' ] && [ "${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::fork PR review refused: the execution sandbox is '$policy' on this runner, and an uncontained review would expose CI credentials to PR-controlled install/build scripts (the agent's own shell probes included). Re-run with MAINTAINER_ECS_RUNNER_DISABLED=true to review on the hosted lane."
+            {
+              echo "### Review sandbox"
+              echo "runtime: ${SANDBOX_COMMAND}"
+              echo "policy: $policy (fork head ${HEAD_REPO:-unknown}; review refused)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           echo "sandbox_policy=$policy"
           {
@@ -1302,10 +1356,15 @@ jobs:
           # OPENAI_API_KEY, and a `postinstall` reads both in one line.
           # `required` only when the 'Resolve review sandbox' step above found a
           # runtime AND an image; `off` (today's behaviour) with a warning and a
-          # summary line otherwise. `required` on a host that cannot satisfy it
-          # would fail the PR's own install instead of containing it, and a
-          # silently refused prebuild leaves the tree bare for every agent
-          # (#10108) — so the policy follows what the runner can do, visibly.
+          # summary line otherwise — and on the persistent pool that fallback
+          # only ever reaches a SAME-REPO head: the resolver refuses a fork
+          # head there when containment cannot be `required`, and fork
+          # pull_request_target payloads route to the disposable hosted
+          # runner in the first place (see runs-on). `required` on a host that cannot
+          # satisfy it would fail the PR's own install instead of containing
+          # it, and a silently refused prebuild leaves the tree bare for every
+          # agent (#10108) — so the policy follows what the runner can do,
+          # visibly, within that boundary.
           # A contained command that fails for environmental reasons (no git in
           # the mount, image toolchain gaps, egress) is a PR-attributed
           # failure, not "unavailable". It does NOT contain the agent's own
