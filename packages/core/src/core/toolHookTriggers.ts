@@ -582,6 +582,8 @@ export interface PermissionRequestHookResult {
   shouldAllow?: boolean;
   /** Updated tool input to use if allowed */
   updatedInput?: Record<string, unknown>;
+  /** Permission updates to apply if allowed */
+  updatedPermissions?: unknown[];
   /** Deny message to pass back to the AI if denied */
   denyMessage?: string;
   /** Whether to interrupt the AI after denial */
@@ -652,10 +654,12 @@ export async function firePermissionRequestHook(
             'PermissionRequest hook returned an invalid updatedInput: expected a JSON object that replaces the tool input.',
         };
       }
+      const updatedPermissions = permissionOutput.getUpdatedPermissions();
       return {
         hasDecision: true,
         shouldAllow: true,
         ...(updatedInput && { updatedInput }),
+        ...(updatedPermissions && { updatedPermissions }),
       };
     }
 

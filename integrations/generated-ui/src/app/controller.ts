@@ -6,8 +6,10 @@
 import { parseToolResult } from '../contracts.js';
 import type { GeneratedDocument } from '../contracts.js';
 import type { ViewSurface } from './surface.js';
+import { isUiEffect } from './runtime-contract.js';
 import type {
   InputValues,
+  UiEffect,
   UiEvent,
   UiWorkerRequest,
   UiWorkerResponse,
@@ -26,6 +28,8 @@ export interface ViewState {
   viewAvailable: boolean;
   lastUpdate?: 'applied' | 'superseded' | 'outdated';
   rejectedEvents: number;
+  /** The last click's copy or download was dropped: values had changed. */
+  effectDropped?: boolean;
   error?: string;
 }
 export type EventAdmission =
@@ -105,6 +109,7 @@ export class ViewController {
   private applied?: AppliedParametersV1;
   private lastUpdate?: ViewState['lastUpdate'];
   private rejectedEvents = 0;
+  private effectDropped = false;
   private readonly activationId = Array.from(
     crypto.getRandomValues(new Uint32Array(4)),
     (value) => value.toString(16),
@@ -122,6 +127,7 @@ export class ViewController {
       load: async () => null,
       save: () => {},
     },
+    private readonly onEffect: (effect: UiEffect) => void = () => {},
   ) {}
 
   async receive(result: unknown): Promise<void> {
@@ -165,7 +171,9 @@ export class ViewController {
             (request.type === 'init'
               ? response.execution !== 'initialized'
               : !['handled', 'unhandled'].includes(response.execution)) ||
-            (response.state !== undefined && typeof response.state !== 'string')
+            (response.state !== undefined &&
+              typeof response.state !== 'string') ||
+            (response.effect !== undefined && !isUiEffect(response.effect))
           ) {
             throw new Error('Invalid execution result.');
           }
@@ -179,10 +187,12 @@ export class ViewController {
           // Persist only validated rounds, including superseded patches.
           if (response.state !== undefined) this.state.save(response.state);
           this.observeInputs(outcome.inputs);
+          let current = false;
           if (outcome.kind === 'superseded') {
             this.lastUpdate = 'superseded';
           } else if (response.execution !== 'unhandled') {
             if (baseInputRevision === preApplyInputRevision) {
+              current = true;
               const inputs = copyInputs(outcome.inputs);
               for (const input of Object.values(inputs)) Object.freeze(input);
               this.applied = Object.freeze({
@@ -198,6 +208,16 @@ export class ViewController {
             } else {
               this.lastUpdate = 'outdated';
             }
+          }
+          // Only the App's own click request can carry an effect, and only
+          // with the values the user sees; a stale copy or export is wrong.
+          if (
+            response.effect &&
+            request.type === 'event' &&
+            request.event.type === 'click'
+          ) {
+            this.effectDropped = !current;
+            if (current) this.onEffect(response.effect);
           }
           if (request.type === 'init') this.initialized = true;
           clearTimeout(this.timer);
@@ -345,6 +365,7 @@ export class ViewController {
       viewAvailable: this.initialized,
       lastUpdate: this.lastUpdate,
       rejectedEvents: this.rejectedEvents,
+      ...(this.effectDropped ? { effectDropped: true } : {}),
       error: this.error,
     });
   }

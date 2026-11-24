@@ -6908,6 +6908,12 @@ export function useDaemonHistoryNavigationStore(): DaemonHistoryNavigationStore 
   return store;
 }
 
+export function useOptionalDaemonHistoryNavigationStore():
+  | DaemonHistoryNavigationStore
+  | undefined {
+  return useContext(DaemonTurnNavigationContext);
+}
+
 export function useDaemonTurnNavigationState(): DaemonTurnNavigationSnapshot {
   const store = useDaemonTurnNavigationStore();
   return useSyncExternalStore(

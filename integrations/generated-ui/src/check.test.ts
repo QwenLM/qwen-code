@@ -92,6 +92,22 @@ describe('checkDocument', () => {
     );
   });
 
+  it('names a copy or download that initialization does not catch', async () => {
+    await expect(
+      checkDocument(view('<p id="out"></p>', 'ui.copy("total");')),
+    ).resolves.toMatch(
+      /^Script error: ui\.copy can only be called while handling a click\./,
+    );
+    await expect(
+      checkDocument(
+        view(
+          '<button id="go">Go</button>',
+          'ui.on("go", "click", () => ui.download("a", "text/csv", "a,b"));',
+        ),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it('uses initial input values when it runs the calculation', async () => {
     await expect(
       checkDocument(

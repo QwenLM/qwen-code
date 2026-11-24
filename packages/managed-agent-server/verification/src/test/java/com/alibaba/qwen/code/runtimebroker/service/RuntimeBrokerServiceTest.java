@@ -1866,6 +1866,60 @@ class RuntimeBrokerServiceTest {
         }
     }
 
+    // #18149 Stage 5 pre-start check: a cold-recovered Shell approval
+    // re-prepares under its saved key, so a Tool v3 reservation must replay
+    // like a native one, never dispatch from prepare, and refuse a changed
+    // publication.
+    @Test
+    void shellV3PrepareReplaysTheOriginalReservationUnderItsExactKey() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            Map<String, Object> notStarted = new LinkedHashMap<>();
+            notStarted.put("executionStatus", "not_started");
+            notStarted.put("capture", null);
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", notStarted));
+            ToolExecutionRecord first = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            ToolExecutionRecord replayed = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            assertEquals(first.getExecutionCallId(), replayed.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.PREPARED, replayed.getState());
+            assertEquals(first.getReference(), replayed.getReference());
+            assertEquals(0, fixture.transport.executeV3Calls.get());
+            assertEquals("runtime_idempotency_conflict", failure(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-2")).getCode());
+            assertEquals("runtime_idempotency_conflict", failure(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, "sha256:" + "b".repeat(64), "pub-1")).getCode());
+
+            join(fixture.service.startExecution("harness", "runtime",
+                    first.getExecutionCallId(), payload, "pub-1", "token"));
+            awaitExecution(fixture.executionRepository, first.getExecutionCallId(),
+                    ToolExecutionRecord.State.SETTLED);
+            ToolExecutionRecord answered = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            assertEquals(first.getExecutionCallId(), answered.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.SETTLED, answered.getState());
+            assertEquals(1, fixture.transport.executeV3Calls.get());
+        }
+    }
+
     @Test
     void backgroundV3DetachedHandleSettlesThroughTheStatusAnswer() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";

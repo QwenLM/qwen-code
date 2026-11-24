@@ -999,6 +999,12 @@ export interface PromptRequest {
    * relying on it.
    */
   deadlineMs?: number;
+  /**
+   * Caller-supplied deduplication key (1–200 chars). Retries with the same
+   * key after an uncertain admission return the original prompt admission
+   * instead of enqueueing a duplicate turn.
+   */
+  idempotencyKey?: string;
   [key: string]: unknown;
 }
 
@@ -1017,6 +1023,8 @@ export interface NonBlockingPromptAccepted {
    * older daemons.
    */
   eventEpoch?: string;
+  /** True when the daemon deduplicated this request via `idempotencyKey`. */
+  deduplicated?: boolean;
 }
 
 export interface SubscribeOptions {
