@@ -404,7 +404,7 @@ describe('build artifact — package boundary', () => {
       }
     });
 
-    expect(scrollbarRootRule?.selector).toContain(':scope');
+    expect(scrollbarRootRule?.selectors).toEqual([':scope', ':scope *']);
     expect(hasWebShellScope(enclosingScope(scrollbarRootRule!))).toBe(true);
   });
 
@@ -975,6 +975,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       );
 
       expect(preflightIndex).toBeGreaterThanOrEqual(0);
+      expect(rules[preflightIndex]?.selectors).toContain(':scope ::backdrop');
       expect(katexIndex).toBeGreaterThan(preflightIndex);
     }
   });

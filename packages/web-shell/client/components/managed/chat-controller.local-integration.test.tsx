@@ -18,7 +18,10 @@ import { regionsToCapabilities } from '../../chat-core/capabilities';
 import { ChatSurface } from '../../chat-core/ChatSurface';
 import { cleanupReact, flushReact, mountReact } from '../../test/reactHarness';
 import { createManagedChatController } from './chat-controller';
-import type { ManagedAgentQuestionAnswer } from './managed-agent-provider';
+import type {
+  ManagedAgentPendingAction,
+  ManagedAgentQuestionAnswer,
+} from './managed-agent-provider';
 
 afterEach(cleanupReact);
 
@@ -31,49 +34,48 @@ it('submits exact managed option ids and separately typed text through the real 
     },
   );
   const onError = vi.fn();
+  const pendingAction: ManagedAgentPendingAction = {
+    actionId: 'question-real-surface',
+    sessionId: 'managed-live-fixture',
+    turnId: 'turn-1',
+    functionCallId: 'call-1',
+    toolName: 'ask_user_question',
+    kind: 'question',
+    inputRevision: 1,
+    policyRevision: 'policy-1',
+    expiresAt: Date.now() + 60_000,
+    questions: [
+      {
+        id: 'env',
+        prompt: 'Target environment?',
+        required: true,
+        multiple: false,
+        allowText: true,
+        options: [
+          { id: 'dev', label: 'Dev' },
+          { id: 'prod', label: 'Prod' },
+        ],
+      },
+      {
+        id: 'notes',
+        prompt: 'Extra flags?',
+        required: true,
+        multiple: true,
+        allowText: true,
+        options: [
+          { id: 'dry', label: 'Dry run' },
+          { id: 'verbose', label: 'Verbose' },
+        ],
+      },
+    ],
+  };
   const controller = createManagedChatController({
     sessionId: 'managed-live-fixture',
     storageKey: 'managed-live-fixture',
     sessionPhase: 'created',
     messages: [],
     transcriptState: 'error',
-    pendingActions: [
-      {
-        actionId: 'question-real-surface',
-        sessionId: 'managed-live-fixture',
-        turnId: 'turn-1',
-        functionCallId: 'call-1',
-        toolName: 'ask_user_question',
-        kind: 'question',
-        inputRevision: 1,
-        policyRevision: 'policy-1',
-        expiresAt: Date.now() + 60_000,
-        questions: [
-          {
-            id: 'env',
-            prompt: 'Target environment?',
-            required: true,
-            multiple: false,
-            allowText: true,
-            options: [
-              { id: 'dev', label: 'Dev' },
-              { id: 'prod', label: 'Prod' },
-            ],
-          },
-          {
-            id: 'notes',
-            prompt: 'Extra flags?',
-            required: true,
-            multiple: true,
-            allowText: true,
-            options: [
-              { id: 'dry', label: 'Dry run' },
-              { id: 'verbose', label: 'Verbose' },
-            ],
-          },
-        ],
-      },
-    ],
+    pendingActions: [pendingAction],
     statusFacts: { queueLength: 0, goalActive: false },
     capabilities: regionsToCapabilities([]),
     submitPrompt: vi.fn(async () => ({ admission: 'rejected' as const })),
@@ -116,6 +118,13 @@ it('submits exact managed option ids and separately typed text through the real 
     )?.set?.call(input, 'Verbose');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
+  act(() => {
+    pendingAction.expiresAt += 60_000;
+    rerenderParent();
+  });
+  expect(parentRenders).toBeGreaterThan(previousRenderCount);
+  expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
+  expect(input.value).toBe('Verbose');
   const submit = question!.querySelector<HTMLButtonElement>(
     '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
   )!;
