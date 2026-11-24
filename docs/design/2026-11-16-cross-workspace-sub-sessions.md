@@ -2,7 +2,7 @@
 
 [English](2026-11-16-cross-workspace-sub-sessions.md) | [简体中文](2026-11-16-cross-workspace-sub-sessions.zh-CN.md)
 
-Status: steps 1, 2 and 3 implemented.
+Status: steps 1, 2 and 3 and the approval-flow refinements are implemented.
 
 ## Problem
 
@@ -43,8 +43,8 @@ The work lands in three changes, each usable on its own.
 
 1. **A new session in another workspace.** `create_sub_session` takes a
    `workspace`. This change.
-2. **Follow-ups to a session the caller created.** `create_sub_session`
-   takes a `sessionId`.
+2. **Follow-ups to an existing session.** `create_sub_session` takes a
+   `sessionId`.
 3. **Web Shell.** A `/send` command on a session page.
 
 ## Step 1: a new session in another workspace
@@ -67,13 +67,58 @@ link to the child in the target workspace. After confirmation, a selector
 for the caller's own workspace uses the same-runtime execution and
 completion path.
 
-Each call with a named workspace requires one-time human approval in the
-calling session. The daemon resolves the selector before the confirmation,
-which shows the registered workspace's path and the full prompt. The approval
-is tied to that runtime generation. If the selector resolves to a different
-runtime at launch, the caller must request approval again. Deny rules apply to the supplied selector,
-the registered path, and the workspace ID. Existing permanent grants continue
-to apply to calls that omit the selector.
+Before the permission decision, the daemon resolves a named selector and returns
+`sameWorkspace`, computed by the caller's launcher as `target.launcher === launcher`.
+The tool caches that binding, so confirmation and execution use one runtime
+generation. A selector for the caller's own runtime follows the ordinary
+permission flow, exactly like an omitted selector; it adds no destination
+confirmation. A different runtime requires one-time human approval in `default`
+and `auto-edit`. `auto` sends the call through its classifier even when a legacy
+allow rule matches, while `yolo` auto-approves it. Deny rules apply to the
+selector, registered path, and workspace ID; deny rules still take precedence.
+An explicit ask rule takes the same identities and still requires a one-time
+human decision. An explicitly named workspace stays blocked in Plan mode.
+
+A manual cross-workspace confirmation shows the resolved path and full prompt
+and is tied to that runtime generation. Automatic paths consume the cached
+resolved binding instead, applying the actual approval decision made after the
+async resolution and, for a `PermissionRequest` replacement, after the
+replacement resolves too. Entering `auto` during resolution therefore cannot
+invent a classifier approval, and a stale `default` decision cannot bypass the
+classifier after the mode changes. If the selector resolves to a different
+runtime at launch, the caller must request approval again. Existing permanent
+grants continue to apply to calls that omit the selector. In `yolo` mode the
+same pre-permission resolution applies. After resolution, the tool rechecks the
+calling mode and resolved binding before execution; deny and generation checks
+still apply. For a call requiring AUTO review, both the ACP permission host and
+the unified-agent-loop Core scheduler recheck the live mode before their
+automatic `ProceedOnce`. An upgrade from AUTO to YOLO is supported; any other
+mode change rejects the stale automatic grant as not started, rather than
+recording it as a manual one-time destination approval. Automatic grants
+record the current authorization mode at confirmation. Losing that recorded
+mode after another asynchronous guard or before execution refuses to spawn
+instead of preserving that automated decision as a one-time manual approval. An actual human `ProceedOnce` clears that automated provenance and
+keeps its one-time approval. Same-workspace human confirmations record that
+approval too rather than looking indistinguishable from automatic YOLO.
+Remote automatic launches carry
+`requiresAutoMode` when the confirmed authorization mode is AUTO, and
+`requiresYolo` when it is YOLO, including an AUTO-to-YOLO upgrade. The launcher
+rechecks the mode corresponding to that marker and refuses to launch if it no
+longer matches. A human `ProceedOnce` clears automatic provenance and carries
+neither requirement, while YOLO keeps its existing waiver checks. Later permission-flow
+evaluations on the same invocation reuse the cached binding without another
+workspace query, but re-check the current ask and deny rules against the
+selector and its registered path and ID. Live rule additions and removals
+therefore change the approval decision without treating a permission-rule
+update as a runtime-generation update. For a call without one-time approval,
+the daemon validates the mode captured during automatic confirmation and
+requires it again at dispatch. An AUTO decision can be upgraded to YOLO
+during the approval flow, after which it requires YOLO rather than AUTO.
+Switching to `default` or `auto-edit`, or otherwise losing the recorded mode,
+invalidates the request and requires a new decision under that mode. It checks
+the caller's approval revision again before dispatch. A
+workspace settings reload invalidates existing approval checks on the affected
+ACP channel and blocks new checks until the reload request settles.
 
 ### Resolving the target
 
@@ -131,32 +176,46 @@ depth gate refuses it if it tries to create sub-sessions of its own. The
 completion notification's task id is the new session's id, which is unique
 because every step 1 launch creates a session.
 
-## Step 2: follow-ups to a session the caller created
+## Step 2: follow-ups to an existing session
 
 `create_sub_session` gains `sessionId`, combined with `workspace` when the
 session lives in another workspace. `model` and `name` apply only to a new
 session, so they cannot be combined with `sessionId`.
 
-**Which sessions.** The session must be one this caller created: its recorded
-parent is the caller, and it carries no source marker. Side tasks and
-scheduled-task runs also record the session they came from as their parent,
-but a person or a schedule started them, and they carry `side_task` or a
-`scheduled_task_run:` source. The launcher checks this before it touches the
-session, from the live entry or, for a session the idle reaper already
-closed, from the creation records at the head of its transcript. That lineage
-is persisted, so it holds across a daemon restart. The caller itself, an
-archived session, and a standalone session are refused. Sessions the caller
-did not create stay out of reach: prompting one would put another session's
-model text into it as a user turn, and `send_message`, which carries no user
-authority, remains the way to talk to them.
+**Which sessions.** Any session in that workspace except the caller itself:
+a sub-session the caller created, a side task, a scheduled-task run, a
+person's session, or a sub-session of another session. The session keeps its
+own parent and source. The launcher reads them from the live entry or, for a
+session the idle reaper already closed, from the creation records at the head
+of its transcript. The caller itself, an unknown or archived session, and a
+standalone session are refused. A closed worktree session must be opened
+before a follow-up so the daemon verifies and restores its worktree first.
+For a live worktree session, the launcher checks before attaching and again
+at dispatch that the effective directory is inside the worktree. If the
+persisted worktree metadata changes while the prompt is queued, the follow-up
+fails and can be retried.
+
+The first version reached only sessions the caller created, because a
+follow-up puts the caller model's text into the target as a user turn. That
+ruled out the common case of a skill handing work to a session the person
+already uses, which `/send` serves. The trust, cap, and depth checks apply to
+each follow-up. A destination using `consensus` refuses tool follow-ups before
+attaching a client, since that client would count toward approvals without
+casting votes. In another workspace a tightened mode stays on the target after
+the turn, so a follow-up can leave a person's session in a stricter mode than
+they chose. Two top-level sessions can prompt each other back and forth with
+`sent`, bounded only by the caps.
 
 **Approval.** A follow-up that names a workspace goes through everything step
-1 requires for that workspace: the one-time approval, which also names the
-session, the trust and generation checks, and the approval rule, applied to
-the target mode at admission. If the rule tightens the mode, the change
-takes effect when the follow-up starts its turn. A follow-up in the caller's
-own workspace uses the tool's usual permission flow and keeps the session's
-mode, as a new sub-session in that workspace does.
+1 requires for that workspace: one-time approval in `default` and `auto-edit`,
+the classifier in `auto`, and a `yolo` waiver that deny and explicit ask rules
+still override. A required human confirmation identifies the target session. The launcher compares both
+sessions' approval modes. A follow-up in the same workspace follows the tool's
+ordinary permission flow, including the caller's current-workspace and
+classifier rules above. Cross-workspace follow-ups follow those same modes and
+any required mode change takes effect when the follow-up starts its turn. Any
+approval-mode change after admission invalidates the pending dispatch in either
+workspace.
 
 **Running the turn.** The launcher resumes the session on its workspace's
 bridge, which attaches if it is live and restores it from its transcript if
@@ -190,8 +249,9 @@ to the work that asked for it. The tool description tells the caller's model
 that results come back on their own and that it should not ask the
 sub-session to report back, which would deliver the result twice.
 
-Because a child cannot delegate, a caller and its children cannot form a
-cycle, so no daemon-wide delegation record is needed.
+The depth gate still stops a child from delegating. There is no daemon-wide
+delegation record, so sessions that prompt each other are bounded only by the
+caps (see "Which sessions").
 
 ## Step 3: Web Shell
 
@@ -220,7 +280,7 @@ workspace, which runs it like a `sent` launch from the tool: the same trust and
 cap checks and the same chat-recording requirement. It answers with
 `{ sessionId, workspaceCwd?, taskId? }`.
 
-Five things differ from the tool, because a person wrote the message and
+Four things differ from the tool, because a person wrote the message and
 chose the target. Each rests on the same point: the person could open the
 target session and type the same message there.
 
@@ -231,21 +291,18 @@ target session and type the same message there.
   permission policy refuses `/send` before launch. Its approvals fix the
   voter set before the side panel attaches. Open the destination session
   and send the message there.
-- Any session can be the target, not only one this session created: a side
-  task, another person's Web Shell session, a sub-session of another session.
-  It keeps its own parent and source. Only the caller itself is refused. The
-  depth limit does not apply either, so a sub-session's page can send too: it
+- The depth limit does not apply, so a sub-session's page can send too: it
   exists to stop a model delegating without end, and a person's send does
   not recurse.
 - The message is recorded in the caller, and the reply comes back as a turn
   in which the caller's model passes it on to the person (see "The exchange
   in the caller" below).
-- A new session's title has no thread glyph. The person started it, so it
-  reads like any session they start.
 
 Only the route can ask for these; they are not fields the ACP child can send,
 so a model cannot claim them. The tool keeps its rules, including for a
-session a person created or sent to.
+session a person created or sent to. As with the tool, any session but the
+caller can be the target, keeping its own parent and source, and neither a new
+session's title nor a session link carries a thread glyph.
 
 **After sending.** The page does not move. While the target runs the turn,
 a "1 other session" chip shows above the composer, beside the chips for
@@ -372,8 +429,9 @@ and any pending notification.
 
 - A `first-turn` follow-up waits at most five minutes, and a busy session can
   hold it in the queue past that. This wait does not withdraw the prompt,
-  so it still runs later, and nothing reports its result. Use `sent` when
-  the queue delay is uncertain.
+  so it can still run later without a result notification. The timeout result
+  warns that the prompt may still be queued or running and includes any partial
+  output. Use `sent` when the queue delay is uncertain.
 
 - Should every `sent` sub-session notify its caller, not only one that names
   a workspace? That would make the tool consistent, but it would change
@@ -383,8 +441,18 @@ and any pending notification.
 
 - Unit: resolution by absolute path and id, refusal of unknown and untrusted
   targets and callers, the depth gate, target-bridge dispatch, caller-bridge
-  notification delivery, named-workspace confirmation despite legacy grants,
-  live approval reads, incompatible or changed modes, and target cancellation.
+  notification delivery, destination confirmation under `default` and
+  `auto-edit` even with a legacy allow rule, the current-runtime selector's
+  ordinary permission flow,
+  mandatory AUTO classification after legacy grants and replacements, live
+  permission-rule updates evaluated against cached destination identities,
+  stale automatic grants rejected rather than recorded as manual one-time approval
+  on either ACP or the unified-agent-loop Core path, no confirmation while
+  the caller stays in `yolo`, deny rules still applied, loss of YOLO during
+  resolution or before dispatch, an already-cancelled call never starting
+  resolution, cancellation while destination resolution is pending, settings reload
+  invalidation on control and secondary channels, live approval reads,
+  incompatible or changed modes, and target cancellation.
 - End to end: with two trusted workspaces, start a child in B from A, read B's
   `QWEN.md` in `first-turn` mode, and verify `sent` notification delivery in A.
   Open the child link from A and verify it loads B. Naming an untrusted target
@@ -393,19 +461,22 @@ and any pending notification.
   a `sent` follow-up reports under `<sessionId>:<promptId>` and releases the
   client it attached; a `sent` follow-up to a busy session returns once
   queued, and one refused when its turn comes is reported as failed; a reaped child's lineage is read from its transcript;
-  another session, the caller itself, a side task, a scheduled-task run, a
-  Live caller, and a caller that cannot take a `sent` completion are refused
-  before the session is touched; a failed follow-up does not close the
-  session; a follow-up in another workspace runs on that workspace's bridge
-  under the delegated mode.
+  a session another session started, such as a side task, is followed up
+  with its own lineage and compatible mode; an incompatible local mode
+  prevents dispatch; the caller itself, an unknown session, a Live caller,
+  a consensus destination, a closed worktree session, and a caller that cannot
+  take a `sent` completion are refused before the target session is attached;
+  `first-turn` timeout reports the pending execution and any partial output;
+  a failed follow-up releases its client; a follow-up in another workspace
+  runs on that workspace's bridge under the delegated mode.
 - Step 2, end to end: follow up a child in B with `first-turn`, and again with
   `sent` after a daemon restart, and see B answer with the context of its
   earlier turns; follow up while the child runs a long turn and receive only
-  the new turn's text; a session the caller did not create is refused.
+  the new turn's text; a session the caller did not create is followed up.
 - Step 3, unit: the route's validation, owner check and capability tag; a
   person's launch keeps the target's mode where the tool's would be clamped
-  or refused, reaches a session the caller did not create while the tool is
-  refused, works from a sub-session, and refuses the caller itself; reported
+  or refused, reaches a session the caller did not create, works from a
+  sub-session where the tool is refused, and refuses the caller itself; reported
   launches are listed on the caller's launcher until they settle, cancelled
   when the daemon stops, bounded per caller, and left out for a launch the
   tool reports itself; the tasks route adds them only when asked; `/send`
@@ -414,7 +485,7 @@ and any pending notification.
   composer; a person's send writes the message to the caller as a record and
   returns the reply as a notification that asks the model to pass it on,
   names the caller on the target's prompt, and titles a new session without
-  the glyph; a turn started by a session's reply is labeled as a
+  a glyph, as the tool does; a turn started by a session's reply is labeled as a
   cross-session message; `sentTo` survives
   replay and the SDK parser, and a malformed one is dropped; the "To" and
   "From" lines on a user message.

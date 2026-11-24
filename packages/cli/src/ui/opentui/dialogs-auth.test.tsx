@@ -66,8 +66,15 @@ const mocks = vi.hoisted(() => {
           type === 'box' ? 'div' : 'span',
           {
             ...(key === undefined ? null : { key }),
+            ...((config as { id?: string }).id
+              ? { 'data-screen-reader-id': (config as { id?: string }).id }
+              : null),
             ...(bg === undefined ? null : { 'data-bg': bg }),
             ...(fg === undefined ? null : { 'data-fg': fg }),
+            ...((config as { id?: string }).id ===
+            'screen-reader-protected-input'
+              ? { 'data-screen-reader-protected': true }
+              : null),
             ...(flexShrink === undefined
               ? null
               : { 'data-flex-shrink': flexShrink }),
@@ -267,6 +274,7 @@ async function pasteText(text: string): Promise<FakePasteEvent> {
 function createMockConfig(authType?: AuthType): Config {
   return {
     isBrowserLaunchSuppressed: () => false,
+    getScreenReader: () => false,
     getAuthType: vi.fn(() => authType),
     getContentGeneratorConfig: vi.fn(() => ({})),
     getModelsConfig: vi.fn(() => ({
@@ -342,6 +350,9 @@ async function runCustomProviderToModels(
   }
   await typeText('https://api.example.com/v1');
   await press('return'); // baseUrl → apiKey
+  expect(
+    document.querySelector('[data-screen-reader-protected]'),
+  ).not.toBeNull();
   await typeText('sk-test');
   await press('return'); // apiKey → models
   return { onClose, notify };
@@ -599,6 +610,28 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
     },
   );
+
+  it('keeps the sign-in waiting spinner on the live lane, not the scrollback', async () => {
+    const config = createMockConfig(AuthType.USE_OPENAI);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      model: 'test-model',
+      baseUrl: 'https://api.deepseek.com',
+    });
+    render(
+      <OpenTuiAuthDialog
+        config={config}
+        settings={createMockSettings()}
+        onClose={vi.fn()}
+      />,
+    );
+    await press('return');
+    expect(
+      document.querySelector(
+        '[data-screen-reader-id="screen-reader-live-auth-waiting"]',
+      )?.textContent,
+    ).toContain('Waiting for sign-in…');
+  });
 
   it('blocks Esc on the main view while unauthenticated', async () => {
     const { onClose } = renderDialog();
@@ -1365,6 +1398,28 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(focusedField()).toEqual({ text: 'abcdXef', cell: 'e' });
   });
 
+  it('marks an empty field as a placeholder lane and a filled one as a value lane', async () => {
+    await runToBaseUrlStep();
+    const lane = () =>
+      document
+        .querySelector('[data-screen-reader-id^="screen-reader-input-line"]')
+        ?.getAttribute('data-screen-reader-id');
+    expect(lane()).toBe('screen-reader-input-line-placeholder');
+    await typeText('https://api.example.com/v1');
+    expect(lane()).toBe('screen-reader-input-line');
+  });
+
+  it('marks the empty context-window row as a placeholder lane', async () => {
+    await runToContextWindowRow();
+    const lane = () =>
+      document
+        .querySelector('[data-screen-reader-id^="screen-reader-input-line"]')
+        ?.getAttribute('data-screen-reader-id');
+    expect(lane()).toBe('screen-reader-input-line-placeholder');
+    await typeText('4096');
+    expect(lane()).toBe('screen-reader-input-line');
+  });
+
   it('draws the model step’s custom-ID field with its own caret', async () => {
     await runToBaseUrlStep();
     await typeText('https://api.example.com/v1');
@@ -1875,6 +1930,66 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
   });
 
+  it('marks the real ASCII caret and Models custom/search focus without changing field values', async () => {
+    await runToModelsStep();
+    await typeText('abc');
+    await press('left');
+    const fields = () => [...document.querySelectorAll('[data-field-text]')];
+    expect(
+      fields()[0].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-2"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      fields()[1].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-inactive-0"]',
+      ),
+    ).not.toBeNull();
+    await press('tab');
+    expect(
+      fields()[0].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-inactive-2"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      fields()[1].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-0"]',
+      ),
+    ).not.toBeNull();
+    expect(fields()[0].textContent).toBe('abc');
+  });
+
+  it('marks the actual advanced toggle focus and boolean state', async () => {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('down');
+    await press('down');
+    await press('return'); // main: Custom Provider → protocol
+    await press('return'); // protocol → API selection
+    await press('return'); // API → base URL
+    await typeText('https://api.example.com/v1');
+    await press('return'); // base URL → API key
+    await typeText('sk-test');
+    await press('return'); // API key → models
+    await typeText('test-model');
+    await press('return'); // models → advanced config
+    expect(
+      screen.getByText(/Optional: configure advanced generation settings/),
+    ).toBeTruthy();
+    const focused = () =>
+      document.querySelector(
+        '[data-screen-reader-id^="screen-reader-auth-toggle-focused-"]',
+      )!;
+    expect(focused().textContent).toContain('Enable thinking');
+    const before = focused().getAttribute('data-screen-reader-id');
+    await press('space');
+    expect(focused().getAttribute('data-screen-reader-id')).not.toBe(before);
+    expect(focused().textContent).toContain('Enable thinking');
+    await press('down');
+    expect(focused().textContent).toContain('Enable modality');
+  });
+
   it('clears the custom-model-ID field on Ctrl+C before the step submits', async () => {
     await runToModelsStep();
     await typeText('my-model');
@@ -2151,6 +2266,35 @@ describe('real subscription entry', () => {
       act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
       expect(waiting.textContent).toContain(SPINNER_FRAMES[1]);
       await pressEsc();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the screen-reader waiting row byte-identical across spinner ticks', async () => {
+    vi.useFakeTimers();
+    const config = createMockConfig();
+    config.getScreenReader = () => true;
+    render(
+      <OpenTuiAuthDialog
+        config={config}
+        settings={createMockSettings()}
+        onClose={vi.fn()}
+      />,
+    );
+    try {
+      await press('return');
+      const waiting = document.querySelector(
+        '[data-screen-reader-id="screen-reader-live-auth-waiting"]',
+      );
+      expect(waiting?.textContent).toBe('Waiting for sign-in\u2026');
+      const first = waiting!.textContent;
+      for (let tick = 0; tick < 3; tick++) {
+        act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
+        expect(waiting!.textContent).toBe(first);
+      }
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       cleanup();

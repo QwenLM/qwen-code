@@ -50,6 +50,7 @@ import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
 import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -64,7 +65,11 @@ import {
   firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
-import type { PermissionRequestHookResult } from './toolHookTriggers.js';
+import type {
+  PermissionRequestHookResult,
+  PostToolUseFailureHookResult,
+  PostToolUseHookResult,
+} from './toolHookTriggers.js';
 import {
   appendTextToFunctionResponse,
   appendToolHookContextToParts,
@@ -165,8 +170,8 @@ import {
   getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
   prepareAutoModeFallback,
-  shouldClassifyAllShellForAutoMode,
-  shouldForceAutoModeReviewForAllow,
+  confirmAutomaticReviewOnAllow,
+  shouldRequireAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
@@ -440,6 +445,15 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
   return '';
 }
 
+export function getToolResultErrorMessage(
+  result: ToolResult,
+): string | undefined {
+  if (result.error) return result.error.message;
+  if (result.isError !== true) return undefined;
+  const body = extractTextFromPartListUnion(result.llmContent);
+  return body.trim() ? body : 'Tool reported an error.';
+}
+
 function extractCodeModeToolOutput(parts: Part[]): string {
   return parts
     .map((part) => {
@@ -488,6 +502,58 @@ const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
   'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
 const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
   'The tool had already completed; its output was discarded. User intentionally cancelled. Stop and await further instructions; do not retry.';
+/**
+ * The abort reason of a turn the user ended to send a message. A tool it
+ * interrupts is told to read that message, not to stop for good.
+ */
+export const USER_MESSAGE_INTERRUPT_ABORT_REASON = 'qwen:mid-turn-send-now';
+export const TOOL_INTERRUPTED_FOR_USER_MESSAGE =
+  'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.';
+export const TOOL_DISCARDED_FOR_USER_MESSAGE =
+  'The tool had already completed, but its output was discarded when the user interrupted to send you a message, which follows. Read it before deciding whether to run the tool again.';
+
+function interruptedForUserMessage(signal: AbortSignal): boolean {
+  return signal.reason === USER_MESSAGE_INTERRUPT_ABORT_REASON;
+}
+
+function cancelledBeforeCompletionMessage(signal: AbortSignal): string {
+  return interruptedForUserMessage(signal)
+    ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
+    : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
+}
+
+function cancelledAfterCompletionMessage(signal: AbortSignal): string {
+  return interruptedForUserMessage(signal)
+    ? TOOL_DISCARDED_FOR_USER_MESSAGE
+    : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+}
+
+type PostToolHookResult<T> = T & { waitInterrupted?: true };
+
+async function waitForPostToolHook<T>(
+  signal: AbortSignal,
+  interruptedResult: T,
+  runHook: (hookSignal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const hookController = new AbortController();
+  let finishWait!: () => void;
+  const interrupted = new Promise<T>((resolve) => {
+    finishWait = () => resolve(interruptedResult);
+  });
+  // Ordinary Stop still waits for the hook and keeps its output.
+  const onAbort = () => {
+    if (!interruptedForUserMessage(signal)) return;
+    finishWait();
+    hookController.abort(signal.reason);
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await Promise.race([interrupted, runHook(hookController.signal)]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
 
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
@@ -596,24 +662,31 @@ async function safelyFirePostToolUseFailureHook(
   toolInput: Record<string, unknown>,
   errorMessage: string,
   isInterrupt: boolean,
+  turnSignal: AbortSignal,
   permissionMode?: string,
   tool_call_id?: string,
   durationMs?: number,
   owner?: HookExecutionOwner,
-): ReturnType<typeof firePostToolUseFailureHook> {
+): Promise<PostToolHookResult<PostToolUseFailureHookResult>> {
   try {
-    return await firePostToolUseFailureHook(
-      messageBus,
-      toolUseId,
-      toolName,
-      toolInput,
-      errorMessage,
-      isInterrupt,
-      permissionMode,
-      undefined,
-      tool_call_id,
-      durationMs,
-      owner,
+    return await waitForPostToolHook<
+      PostToolHookResult<PostToolUseFailureHookResult>
+    >(turnSignal, { waitInterrupted: true }, (hookSignal) =>
+      firePostToolUseFailureHook(
+        messageBus,
+        toolUseId,
+        toolName,
+        toolInput,
+        errorMessage,
+        isInterrupt,
+        permissionMode,
+        // An interrupt still emits the failure hook. Its result is no longer
+        // needed by the ending turn.
+        isInterrupt && hookSignal.aborted ? undefined : hookSignal,
+        tool_call_id,
+        durationMs,
+        owner,
+      ),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1268,7 +1341,7 @@ const createErrorResponse = (
   };
 };
 
-const createCancelledResponse = (
+export const createCancelledResponse = (
   request: ToolCallRequestInfo,
   reason: string,
   executionStatus: ToolExecutionStatus,
@@ -1543,12 +1616,20 @@ function withPostToolBatchStop(
 }
 
 interface CoreToolSchedulerOptions {
+  onManagedRuntimeOutcomeUnknown?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+    callId: string,
+  ) => void;
+  onManagedRuntimeBatchFailed?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+  ) => void;
   onToolExecutionStarted?: (callId: string, startedAt: number) => void;
   onToolExecutionSettled?: (
     callId: string,
     status: ToolExecutionStatus,
     durationMs: number,
   ) => void;
+  onManagedToolExecutionSettled?: (callId: string) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -1571,6 +1652,8 @@ interface CoreToolSchedulerOptions {
   beforeToolLaunch?: (call: ScheduledToolCall) => boolean | Promise<boolean>;
   /** Whether the owning agent loop has already settled. */
   isFinished?: () => boolean;
+  /** Keep cancelled Code Mode batches open for the owning loop's deadline. */
+  waitForNestedToolSettlement?: boolean;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
   /**
@@ -1961,13 +2044,21 @@ export class CoreToolScheduler {
     signal: AbortSignal;
     runtimeView?: RuntimeContentGeneratorView;
     owner?: HookExecutionOwner;
+    sessionId: string;
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
+  private activeRequest?: ToolCallRequestInfo | ToolCallRequestInfo[];
+  private activeSessionId?: string;
+  private retired = false;
   private nestedToolScheduler?: CoreToolScheduler;
   private nestedToolCalls: ToolCall[] = [];
   private nestedSequence = 0;
   private nestedFlushScheduled = false;
+  private readonly pendingNestedTools = new Map<
+    Promise<CodeModeToolResult>,
+    NonNullable<CoreToolScheduler['activeRequest']>
+  >();
   private nestedQueue: Array<{
     request: ToolCallRequestInfo;
     signal: AbortSignal;
@@ -2001,17 +2092,33 @@ export class CoreToolScheduler {
 
   private getOrCreateNestedToolScheduler(): CoreToolScheduler {
     if (this.nestedToolScheduler) return this.nestedToolScheduler;
-    this.nestedToolScheduler = new CoreToolScheduler({
+    const isFinished = (): boolean =>
+      this.nestedToolScheduler !== scheduler ||
+      this.schedulerOptions.isFinished?.() === true;
+    const scheduler: CoreToolScheduler = new CoreToolScheduler({
       ...this.schedulerOptions,
+      isFinished,
       modToolCheck: undefined,
       beforeToolLaunch: undefined,
+      outputUpdateHandler: this.outputUpdateHandler
+        ? (callId, output) => {
+            if (!isFinished()) this.outputUpdateHandler?.(callId, output);
+          }
+        : undefined,
+      onEditorClose: () => {
+        if (!isFinished()) this.onEditorClose();
+      },
+      onToolResultFullTurnModel: this.onToolResultFullTurnModel
+        ? (model) =>
+            !isFinished() && this.onToolResultFullTurnModel?.(model) === true
+        : undefined,
       onAllToolCallsComplete: async (calls) => {
         for (const call of calls) {
           const resolver = this.nestedResolvers.get(call.request.callId);
           if (!resolver) continue;
           this.nestedResolvers.delete(call.request.callId);
           try {
-            resolver.onResult?.(call.response);
+            if (!isFinished()) resolver.onResult?.(call.response);
           } catch (error) {
             resolver.reject(error);
             continue;
@@ -2039,15 +2146,18 @@ export class CoreToolScheduler {
         }
       },
       onToolCallsUpdate: (calls) => {
+        if (isFinished()) return;
         this.nestedToolCalls = calls;
         this.notifyToolCallsUpdate();
       },
     });
-    this.nestedToolScheduler.hookContextSink = (request, context) => {
+    this.nestedToolScheduler = scheduler;
+    scheduler.hookContextSink = (request, context) => {
       const parentCallId = request.parentCallId;
       // Only a parent still executing can deliver it; a late nested call
       // must not leave an entry nothing will consume.
       if (
+        isFinished() ||
         !parentCallId ||
         !this.toolCalls.some(
           (call) =>
@@ -2060,13 +2170,14 @@ export class CoreToolScheduler {
       contexts.push(context);
       this.nestedHookContexts.set(parentCallId, contexts);
     };
-    return this.nestedToolScheduler;
+    return scheduler;
   }
 
   private dispatchCodeModeTool(
     name: string,
     args: Record<string, unknown>,
     parent: ToolCallRequestInfo,
+    owner: CoreToolScheduler['activeRequest'],
     signal: AbortSignal,
     onResult?: (response: ToolCallResponseInfo) => void,
   ): Promise<CodeModeToolResult> {
@@ -2090,12 +2201,18 @@ export class CoreToolScheduler {
       source: 'code_mode',
       goalContext: parent.goalContext,
     };
-    return new Promise<CodeModeToolResult>((resolve, reject) => {
+    const settled = new Promise<CodeModeToolResult>((resolve, reject) => {
       this.nestedQueue.push({ request, signal, resolve, reject, onResult });
       if (this.nestedFlushScheduled) return;
       this.nestedFlushScheduled = true;
       setTimeout(() => this.flushNestedQueue(), CODE_MODE_BATCH_WINDOW_MS);
     });
+    if (this.schedulerOptions.waitForNestedToolSettlement && owner) {
+      this.pendingNestedTools.set(settled, owner);
+      const remove = () => this.pendingNestedTools.delete(settled);
+      void settled.then(remove, remove);
+    }
+    return settled;
   }
 
   private flushNestedQueue(): void {
@@ -2115,9 +2232,17 @@ export class CoreToolScheduler {
     };
     for (const entry of active) {
       entry.signal.addEventListener('abort', abortBatch, { once: true });
+      const stopForwardingAbort = () =>
+        entry.signal.removeEventListener('abort', abortBatch);
       this.nestedResolvers.set(entry.request.callId, {
-        resolve: entry.resolve,
-        reject: entry.reject,
+        resolve: (result) => {
+          stopForwardingAbort();
+          entry.resolve(result);
+        },
+        reject: (error) => {
+          stopForwardingAbort();
+          entry.reject(error);
+        },
         onResult: entry.onResult,
       });
     }
@@ -2126,18 +2251,13 @@ export class CoreToolScheduler {
         active.map((entry) => entry.request),
         batchController.signal,
       ),
-    )
-      .catch((error) => {
-        for (const entry of active) {
-          this.nestedResolvers.delete(entry.request.callId);
-          entry.reject(error);
-        }
-      })
-      .finally(() => {
-        for (const entry of active) {
-          entry.signal.removeEventListener('abort', abortBatch);
-        }
-      });
+    ).catch((error) => {
+      for (const { request } of active) {
+        const resolver = this.nestedResolvers.get(request.callId);
+        this.nestedResolvers.delete(request.callId);
+        resolver?.reject(error);
+      }
+    });
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -2716,13 +2836,15 @@ export class CoreToolScheduler {
    */
   private postToolUseFailureEndMeta = (
     r: Awaited<ReturnType<typeof safelyFirePostToolUseFailureHook>>,
-  ): HookSpanMetadata =>
-    r.hookError
+  ): HookSpanMetadata => {
+    if (r.waitInterrupted) return { waitInterrupted: true };
+    return r.hookError
       ? { success: false, error: r.hookError }
       : {
           success: true,
           hasAdditionalContext: !!r.additionalContext,
         };
+  };
 
   /**
    * Open the call's tool span, or return the one already open for it. It is
@@ -3105,6 +3227,7 @@ export class CoreToolScheduler {
     runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     const owner = captureHookExecutionOwner(this.config);
+    const sessionId = this.config.getSessionId();
     if (this.isRunning() || this.isScheduling) {
       if (signal.aborted) {
         return Promise.reject(new Error('Tool call cancelled while in queue.'));
@@ -3128,6 +3251,7 @@ export class CoreToolScheduler {
           signal,
           runtimeView,
           owner,
+          sessionId,
           resolve: () => {
             signal.removeEventListener('abort', abortHandler);
             resolve();
@@ -3139,7 +3263,40 @@ export class CoreToolScheduler {
         });
       });
     }
-    return this.scheduleWithOwner(request, signal, runtimeView, owner);
+    return this.scheduleWithOwner(
+      request,
+      signal,
+      runtimeView,
+      owner,
+      sessionId,
+    );
+  }
+
+  /**
+   * Leave an abandoned batch on this instance and move its queue to a fresh
+   * scheduler. The queue keeps its identity for queued abort listeners.
+   */
+  handoffAfterAbandonment(
+    request: ToolCallRequestInfo | ToolCallRequestInfo[],
+    createReplacement: (
+      nestedCallIds: ReadonlySet<string>,
+    ) => CoreToolScheduler,
+  ): void {
+    if (
+      this.retired ||
+      this.activeRequest !== request ||
+      (!this.isScheduling && !this.isRunning())
+    ) {
+      return;
+    }
+    const replacement = createReplacement(
+      new Set(this.nestedToolCalls.map(({ request }) => request.callId)),
+    );
+    this.retired = true;
+    this.activeRequest = undefined;
+    replacement.requestQueue = this.requestQueue;
+    replacement.validationRetryCounts = new Map(this.validationRetryCounts);
+    replacement.drainRequestQueueIfIdle();
   }
 
   private scheduleWithOwner(
@@ -3147,7 +3304,10 @@ export class CoreToolScheduler {
     signal: AbortSignal,
     runtimeView: RuntimeContentGeneratorView | undefined,
     owner: HookExecutionOwner | undefined,
+    sessionId: string,
   ): Promise<void> {
+    this.activeRequest = request;
+    this.activeSessionId = sessionId;
     const items = Array.isArray(request) ? request : [request];
     for (const item of items) this.hookOwners.set(item.callId, owner);
     return runWithHookExecutionOwner(owner, () =>
@@ -3164,19 +3324,19 @@ export class CoreToolScheduler {
   }
 
   private drainRequestQueueIfIdle(): void {
-    if (
-      this.requestQueue.length === 0 ||
-      this.isScheduling ||
-      this.isRunning()
-    ) {
+    if (this.retired || this.isScheduling || this.isRunning()) {
       return;
     }
+    this.activeRequest = undefined;
+    this.activeSessionId = undefined;
+    if (this.requestQueue.length === 0) return;
     const next = this.requestQueue.shift()!;
     this.scheduleWithOwner(
       next.request,
       next.signal,
       next.runtimeView,
       next.owner,
+      next.sessionId,
     )
       .then(next.resolve)
       .catch(next.reject);
@@ -3558,6 +3718,30 @@ export class CoreToolScheduler {
               reqInfo.name,
               rejectionMessage,
             );
+            // The budget note is appended after the rejectionMessage key was
+            // recorded, for the same reason as the directive below: the
+            // numbers vary call-to-call, so folding them into the key would
+            // reset the retry count at every truncation (#16417).
+            // The "size each part" guidance is emitted only when the usage
+            // corroborates the cut (used ≥ half the limit) — a provider can
+            // cut far below the configured ceiling (#16417's own DeepSeek
+            // case: cut near 3K against a 64K ceiling), and telling the
+            // model to size parts "well under 64K" when 95% of that budget
+            // was never spent licenses a retry an order of magnitude too
+            // large (#16417 R1-2).
+            const budget = reqInfo.outputBudgetAtTruncation;
+            const usageCorroboratesCut =
+              budget !== undefined &&
+              budget.usedTokens >= budget.limitTokens / 2;
+            const budgetNote =
+              truncated && budget
+                ? ` This response used ${budget.usedTokens} of the ` +
+                  `${budget.limitTokens}-token output limit.` +
+                  (usageCorroboratesCut
+                    ? ` No single response can carry the whole file — size ` +
+                      `each part well under that limit.`
+                    : '')
+                : '';
             // The directive is appended after the rejectionMessage key was
             // recorded: recordRetryableToolError prunes the tool's other keys,
             // so folding the directive into the key would reset the count at
@@ -3572,7 +3756,7 @@ export class CoreToolScheduler {
                       ? TRUNCATION_RETRY_LOOP_DIRECTIVE
                       : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
                   }`
-                : rejectionMessage,
+                : `${rejectionMessage}${budgetNote}`,
             );
             newToolCalls.push({
               status: 'error',
@@ -3955,8 +4139,12 @@ export class CoreToolScheduler {
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(canonicalName, this.config));
+            shouldRequireAutoModeReviewForAllow(
+              invocation,
+              pmCtx,
+              canonicalName,
+              this.config,
+            );
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -4249,13 +4437,53 @@ export class CoreToolScheduler {
               continue;
             }
             switch (outcome.kind) {
-              case 'approved':
+              case 'approved': {
+                const automaticApproval = await confirmAutomaticReviewOnAllow(
+                  this.config,
+                  invocation,
+                  signal,
+                );
+                if (
+                  automaticApproval === 'mode-changed' ||
+                  automaticApproval === 'requires-human'
+                ) {
+                  this.setStatusInternal(
+                    reqInfo.callId,
+                    'error',
+                    createErrorResponse(
+                      reqInfo,
+                      new Error(
+                        automaticApproval === 'mode-changed'
+                          ? 'Approval mode changed before confirmation. Please retry.'
+                          : 'This tool call requires one-time human approval under the current permission rules. Please retry.',
+                      ),
+                      ToolErrorType.EXECUTION_DENIED,
+                      'not_started',
+                    ),
+                  );
+                  setToolSpanFailure(
+                    toolSpan,
+                    TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                    TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                  );
+                  this.finalizeToolSpan(reqInfo.callId);
+                  continue;
+                }
+                if (automaticApproval === 'cancelled') {
+                  this.cancelPreExecutionIfAborted(
+                    reqInfo.callId,
+                    signal,
+                    toolSpan,
+                  );
+                  continue;
+                }
                 this.setToolCallOutcome(
                   reqInfo.callId,
                   ToolConfirmationOutcome.ProceedAlways,
                 );
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
+              }
               case 'blocked':
                 debugLogger.warn(
                   `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
@@ -4683,11 +4911,48 @@ export class CoreToolScheduler {
                     }
                     continue;
                   }
-                  await runInRequestGoalContext(reqInfo, () =>
-                    preparedConfirmationDetails.onConfirm(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    ),
-                  );
+                  if (
+                    invocation.requiresUserInteraction?.() === true ||
+                    (invocation.requiresAutoReviewOnAllow?.() === true &&
+                      this.config.getApprovalMode() !== approvalMode &&
+                      !(
+                        approvalMode === ApprovalMode.AUTO &&
+                        this.config.getApprovalMode() === ApprovalMode.YOLO
+                      ))
+                  ) {
+                    this.setStatusInternal(
+                      reqInfo.callId,
+                      'error',
+                      createErrorResponse(
+                        reqInfo,
+                        new Error(
+                          invocation.requiresUserInteraction?.()
+                            ? 'This tool call requires one-time human approval under the current permission rules. Please retry.'
+                            : 'Approval mode changed before confirmation. Please retry.',
+                        ),
+                        ToolErrorType.EXECUTION_DENIED,
+                        'not_started',
+                      ),
+                    );
+                    setToolSpanFailure(
+                      toolSpan,
+                      TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                      TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                    );
+                    this.finalizeToolSpan(reqInfo.callId);
+                    continue;
+                  }
+                  await runInRequestGoalContext(reqInfo, async () => {
+                    if (preparedConfirmationDetails.onAutoConfirm) {
+                      await preparedConfirmationDetails.onAutoConfirm(
+                        this.config.getApprovalMode(),
+                      );
+                    } else {
+                      await preparedConfirmationDetails.onConfirm(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
+                    }
+                  });
                   if (
                     this.cancelPreExecutionIfAborted(
                       reqInfo.callId,
@@ -5568,6 +5833,23 @@ export class CoreToolScheduler {
   private async attemptExecutionOfScheduledCalls(
     signal: AbortSignal,
   ): Promise<void> {
+    try {
+      await this.executeScheduledCalls(signal);
+    } catch (error) {
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        if (this.postToolBatchSpanCallId !== undefined) {
+          this.finalizeToolSpan(this.postToolBatchSpanCallId, true);
+        }
+        this.schedulerOptions.onManagedRuntimeBatchFailed?.(error);
+      }
+      throw error;
+    }
+  }
+
+  private async executeScheduledCalls(signal: AbortSignal): Promise<void> {
     // Re-check after each pass for a call that became 'scheduled' meanwhile.
     // Each iteration either drains ≥1 'scheduled' call or returns, so this
     // cannot spin.
@@ -5665,30 +5947,36 @@ export class CoreToolScheduler {
     );
     const executing = new Set<Promise<void>>();
     const admitted: ScheduledToolCall[] = [];
+    let failure: { error: unknown } | undefined;
     const launchAdmitted = () => {
       for (const call of admitted.splice(0)) {
-        const p = this.executeSingleToolCall(call, signal).finally(() => {
-          executing.delete(p);
-        });
-        executing.add(p);
+        const execution = this.executeSingleToolCall(call, signal)
+          .catch((error: unknown) => {
+            failure ??= { error };
+          })
+          .finally(() => {
+            executing.delete(execution);
+          });
+        executing.add(execution);
       }
     };
 
     for (const call of calls) {
-      if (
+      if (failure) break;
+      const refused =
         this.schedulerOptions.beforeToolLaunch &&
-        (await this.launchRefused(call))
-      ) {
-        continue;
-      }
+        (await this.launchRefused(call));
+      if (failure) break;
+      if (refused) continue;
       admitted.push(call);
       if (executing.size + admitted.length >= maxConcurrency) {
         launchAdmitted();
         await Promise.race(executing);
       }
     }
-    launchAdmitted();
+    if (!failure) launchAdmitted();
     await Promise.all(executing);
+    if (failure) throw failure.error;
   }
 
   private async executeSingleToolCall(
@@ -5775,6 +6063,14 @@ export class CoreToolScheduler {
         TOOL_FAILURE_KIND_TOOL_EXCEPTION,
         errorMessage,
       );
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        this.finalizeToolSpan(callId, true);
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown(error, callId);
+        throw error;
+      }
       this.setStatusInternal(
         callId,
         'error',
@@ -6032,6 +6328,7 @@ export class CoreToolScheduler {
     span: Span,
   ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
+    const batch = this.activeRequest;
     const canonicalName = canonicalToolName(toolName);
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
@@ -6230,7 +6527,7 @@ export class CoreToolScheduler {
     let executionSettled = false;
     let execSpan: Span | undefined;
     const cancelIfFinished = (
-      message = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+      message = cancelledAfterCompletionMessage(signal),
     ): boolean => {
       if (!this.schedulerOptions.isFinished?.()) return false;
       this.setStatusInternal(callId, 'cancelled', message, executionStatus);
@@ -6332,10 +6629,16 @@ export class CoreToolScheduler {
         // Stash the promote AbortController on the executing tool call so
         // a UI surface (Ctrl+B keybind) can find the foreground shell's
         // promote trigger by callId.
-        const setPromoteAbortControllerCallback = (ac: AbortController) => {
+        const setPromoteAbortControllerCallback = (
+          ac: AbortController | undefined,
+        ) => {
           this.toolCalls = this.toolCalls.map((tc) =>
             tc.request.callId === callId && tc.status === 'executing'
-              ? { ...tc, promoteAbortController: ac }
+              ? {
+                  ...tc,
+                  promoteAbortController: ac,
+                  ...(ac === undefined && { pid: undefined }),
+                }
               : tc,
           );
           this.notifyToolCallsUpdate();
@@ -6398,6 +6701,7 @@ export class CoreToolScheduler {
                         name,
                         args,
                         scheduledCall.request,
+                        batch,
                         nestedSignal,
                         onResult,
                       ),
@@ -6405,7 +6709,7 @@ export class CoreToolScheduler {
                   execute,
                 )
               : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                ? runWithToolCallSource({ kind: 'code_mode', signal }, execute)
                 : execute();
           }),
         );
@@ -6453,6 +6757,7 @@ export class CoreToolScheduler {
                         name,
                         args,
                         scheduledCall.request,
+                        batch,
                         nestedSignal,
                         onResult,
                       ),
@@ -6460,7 +6765,7 @@ export class CoreToolScheduler {
                   execute,
                 )
               : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                ? runWithToolCallSource({ kind: 'code_mode', signal }, execute)
                 : execute();
           }),
         );
@@ -6470,27 +6775,33 @@ export class CoreToolScheduler {
       let schedulerTimeoutResultSelected = false;
       let schedulerTimeoutWon = false;
       if (timeoutController) {
+        const waitForManagedSettlement =
+          this.schedulerOptions.onManagedRuntimeOutcomeUnknown !== undefined &&
+          this.config
+            .getManagedRuntimeEnvironment?.()
+            ?.toolNames?.has(canonicalName) === true;
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           toolResult = await new Promise<ToolResult>((resolve, reject) => {
             timeoutTimer = setTimeout(() => {
-              schedulerTimeoutResultSelected = true;
-              schedulerTimeoutWon = !signal.aborted;
+              schedulerTimeoutResultSelected = !waitForManagedSettlement;
+              schedulerTimeoutWon =
+                schedulerTimeoutResultSelected && !signal.aborted;
               debugLogger.warn(
                 `Tool ${canonicalName} (${callId}) timed out after ` +
                   `${toolExecutionTimeoutMs}ms — aborting`,
               );
-              // Cancel the in-flight tool via the derived signal, then resolve
-              // with a timeout error so the scheduler is unblocked even if the
-              // tool ignores the abort. A later settle from `promise` is a
-              // no-op once this wrapper Promise has already resolved.
+              // Cancel via the derived signal. Only non-Managed tools may
+              // resolve with a synthetic timeout before their actual outcome.
               timeoutController?.abort(
                 new DOMException(
                   `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
                   'TimeoutError',
                 ),
               );
-              resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              if (!waitForManagedSettlement) {
+                resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              }
             }, toolExecutionTimeoutMs);
             timeoutTimer.unref?.();
             promise.then(resolve, reject);
@@ -6650,17 +6961,15 @@ export class CoreToolScheduler {
         (!schedulerTimeoutResultSelected || schedulerTimeoutWon);
       const parentAbortedAtExecutionSettle = signal.aborted;
       const aborted = parentAbortedAtExecutionSettle && !isTimeout;
-      const executionErrorType = toolResult.error
-        ? (toolResult.error.type ??
+      const failureMessage = getToolResultErrorMessage(toolResult);
+      const failed = failureMessage !== undefined;
+      const executionErrorType = failed
+        ? (toolResult.error?.type ??
           (scheduledCall.tool instanceof DiscoveredMCPTool
             ? ToolErrorType.MCP_TOOL_ERROR
             : ToolErrorType.UNKNOWN))
         : undefined;
-      executionStatus = aborted
-        ? 'cancelled'
-        : toolResult.error
-          ? 'error'
-          : 'success';
+      executionStatus = aborted ? 'cancelled' : failed ? 'error' : 'success';
       executionSettled = true;
       try {
         this.schedulerOptions.onToolExecutionSettled?.(
@@ -6671,6 +6980,7 @@ export class CoreToolScheduler {
       } catch (error) {
         debugLogger.warn('Tool lifecycle end observer failed:', error);
       }
+      this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -6680,7 +6990,7 @@ export class CoreToolScheduler {
             ? TOOL_SPAN_STATUS_TOOL_CANCELLED
             : isTimeout
               ? TOOL_SPAN_STATUS_TOOL_TIMEOUT
-              : toolResult.error
+              : failed
                 ? TOOL_SPAN_STATUS_TOOL_ERROR
                 : undefined,
           cancelled: aborted,
@@ -6694,8 +7004,8 @@ export class CoreToolScheduler {
         // finished: producers that signal interruption by returning (the shell
         // tool on user cancel) set `interruptedBeforeCompletion`.
         let cancelMessage = toolResult.interruptedBeforeCompletion
-          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+          ? cancelledBeforeCompletionMessage(signal)
+          : cancelledAfterCompletionMessage(signal);
         if (cancelIfFinished(cancelMessage)) return;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
@@ -6714,6 +7024,7 @@ export class CoreToolScheduler {
                 toolInput,
                 cancelMessage,
                 true,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -6747,7 +7058,18 @@ export class CoreToolScheduler {
             ? toolResult.llmContent
             : undefined,
         );
-        observeProducerOutput(cancelledResponse, true);
+        if (toolResult.keptWhenCancelled) {
+          cancelledResponse.responseParts = convertToFunctionResponse(
+            getModelFacingToolName(scheduledCall.request),
+            callId,
+            toolResult.llmContent,
+          );
+          cancelledResponse.contentLength =
+            typeof toolResult.llmContent === 'string'
+              ? toolResult.llmContent.length
+              : undefined;
+        }
+        observeProducerOutput(cancelledResponse, !toolResult.keptWhenCancelled);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return; // Both code paths should return here
@@ -6760,26 +7082,30 @@ export class CoreToolScheduler {
           persistedOutputFiles?: string[];
           visionBridgeNotice?: string;
         },
+        result?: CoreToolCallResponseInfo,
       ): boolean => {
         if (!signal.aborted || (isTimeout && parentAbortedAtExecutionSettle)) {
           return false;
         }
-        const cancelledResponse = createCancelledResponse(
-          scheduledCall.request,
-          // Reached only after `execute()` settled with a result.
-          TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-          executionStatus,
-          artifacts,
-          preserved?.persistedOutputFiles,
-          preserved?.visionBridgeNotice,
-        );
-        observeProducerOutput(cancelledResponse, true);
+        const cancelledResponse =
+          result && toolResult.keptWhenCancelled
+            ? result
+            : createCancelledResponse(
+                scheduledCall.request,
+                // Reached only after `execute()` settled with a result.
+                cancelledAfterCompletionMessage(signal),
+                executionStatus,
+                artifacts,
+                preserved?.persistedOutputFiles,
+                preserved?.visionBridgeNotice,
+              );
+        observeProducerOutput(cancelledResponse, cancelledResponse !== result);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return true;
       };
 
-      if (toolResult.error === undefined) {
+      if (!failed) {
         let content = toolResult.llmContent ?? '';
         let persistedOutputFiles = toolResult.persistedOutputFiles
           ? [...toolResult.persistedOutputFiles]
@@ -6813,20 +7139,29 @@ export class CoreToolScheduler {
           const postHookResult = await this.withHookSpan(
             { hookEvent: 'PostToolUse', toolName: canonicalName, toolUseId },
             () =>
-              firePostToolUseHook(
-                messageBus,
-                canonicalName,
-                toolInput,
-                toolResponse,
-                toolUseId,
-                permissionMode,
-                undefined, // signal
-                callId, // Original API call ID (e.g., call_xxx)
-                elapsedExecutionMs(),
-                this.hookOwners.get(callId),
+              waitForPostToolHook<PostToolHookResult<PostToolUseHookResult>>(
+                signal,
+                {
+                  shouldStop: false,
+                  waitInterrupted: true,
+                },
+                (hookSignal) =>
+                  firePostToolUseHook(
+                    messageBus,
+                    canonicalName,
+                    toolInput,
+                    toolResponse,
+                    toolUseId,
+                    permissionMode,
+                    hookSignal,
+                    callId,
+                    elapsedExecutionMs(),
+                    this.hookOwners.get(callId),
+                  ),
               ),
-            (r) =>
-              r.hookError
+            (r) => {
+              if (r.waitInterrupted) return { waitInterrupted: true };
+              return r.hookError
                 ? {
                     success: false,
                     error: r.hookError,
@@ -6842,7 +7177,8 @@ export class CoreToolScheduler {
                     shouldStop: r.shouldStop,
                     hasAdditionalContext: !!r.additionalContext,
                     blockType: r.shouldStop ? 'stop' : undefined,
-                  },
+                  };
+            },
           );
           if (cancelIfFinished()) return;
 
@@ -7326,10 +7662,14 @@ export class CoreToolScheduler {
           }
         }
         if (
-          cancelAfterPostProcessing(artifacts, {
-            persistedOutputFiles: successResponse.persistedOutputFiles,
-            visionBridgeNotice: successResponse.visionBridgeNotice,
-          })
+          cancelAfterPostProcessing(
+            artifacts,
+            {
+              persistedOutputFiles: successResponse.persistedOutputFiles,
+              visionBridgeNotice: successResponse.visionBridgeNotice,
+            },
+            successResponse,
+          )
         ) {
           return;
         }
@@ -7352,8 +7692,10 @@ export class CoreToolScheduler {
       } else {
         // It is a failure
         // PostToolUseFailure Hook
-        const operationalErrorMessage = toolResult.error.message;
-        let errorMessage = operationalErrorMessage;
+        const preserveErrorBody =
+          isTimeout ||
+          (toolResult.isError === true && toolResult.error === undefined);
+        let errorMessage = failureMessage;
         let errorPersistedOutputFiles = toolResult.persistedOutputFiles
           ? [...toolResult.persistedOutputFiles]
           : toolResult.persistedOutputFiles;
@@ -7373,8 +7715,9 @@ export class CoreToolScheduler {
                 toolUseId,
                 canonicalName,
                 toolInput,
-                toolResult.error!.message,
+                failureMessage,
                 false,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7392,7 +7735,7 @@ export class CoreToolScheduler {
               failureHookResult.additionalContext,
             )
           ) {
-            if (isTimeout) {
+            if (preserveErrorBody) {
               failureHookAdditionalContext =
                 failureHookResult.additionalContext;
             } else {
@@ -7402,8 +7745,8 @@ export class CoreToolScheduler {
           failureHookArtifacts = failureHookResult.artifacts;
         }
 
-        if (isTimeout) {
-          // The generic gate stands down for a marked body; bound the timeout
+        if (preserveErrorBody) {
+          // The generic gate stands down for a marked body; bound the failure
           // detail at the producer's own declared budget instead — char-only,
           // mirroring the success path's per-tool pass. An honest producer is
           // a no-op under its own budget; anything appended after the mark
@@ -7413,7 +7756,7 @@ export class CoreToolScheduler {
             toolResult.outputBudgetApplied === true
               ? scheduledCall.tool.maxOutputChars
               : undefined;
-          let timeoutContent: {
+          let errorContent: {
             content: PartListUnion;
             persistedOutputFiles?: string[];
           };
@@ -7437,7 +7780,7 @@ export class CoreToolScheduler {
                 markedProducerBudget,
                 'per_tool',
               );
-              timeoutContent = {
+              errorContent = {
                 content: truncated.content,
                 persistedOutputFiles: persistedOutputFilesForTruncation(
                   toolResult.llmContent,
@@ -7448,16 +7791,16 @@ export class CoreToolScheduler {
               // A truncation/IO failure must never demote the result — keep
               // the detail and warn, same as the success-path pass.
               debugLogger.warn(
-                `TRUNCATION (timeout detail) failed for ${toolName}: ${
+                `TRUNCATION (failure detail) failed for ${toolName}: ${
                   truncErr instanceof Error
                     ? truncErr.message
                     : String(truncErr)
                 }`,
               );
-              timeoutContent = { content: toolResult.llmContent };
+              errorContent = { content: toolResult.llmContent };
             }
           } else {
-            timeoutContent = await this.maybePersistLargeToolResult(
+            errorContent = await this.maybePersistLargeToolResult(
               callId,
               toolName,
               toolResult.llmContent,
@@ -7469,16 +7812,18 @@ export class CoreToolScheduler {
           if (markedProducerBudget === undefined)
             recordBudgetReduction(
               toolResult.llmContent,
-              timeoutContent.content,
+              errorContent.content,
               this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM,
               globalBudgetSource,
             );
           let responseParts = convertToFunctionErrorResponse(
             getModelFacingToolName(scheduledCall.request),
             callId,
-            timeoutContent.content,
-            operationalErrorMessage,
+            errorContent.content,
+            failureMessage,
           );
+          const bodyError =
+            responseParts[0]?.functionResponse?.response?.['error'];
           if (failureHookAdditionalContext && responseParts.length > 0) {
             const lastIndex = responseParts.length - 1;
             responseParts = [...responseParts];
@@ -7503,36 +7848,47 @@ export class CoreToolScheduler {
             ...(toolResult.artifacts ?? []),
             ...(failureHookArtifacts ?? []),
           ];
-          const timeoutPersistedOutputFiles =
+          const persistedOutputFiles =
             errorPersistedOutputFiles === undefined &&
-            timeoutContent.persistedOutputFiles === undefined
+            errorContent.persistedOutputFiles === undefined
               ? undefined
               : Array.from(
                   new Set([
                     ...(errorPersistedOutputFiles ?? []),
-                    ...(timeoutContent.persistedOutputFiles ?? []),
+                    ...(errorContent.persistedOutputFiles ?? []),
                   ]),
                 );
           if (
             cancelAfterPostProcessing(artifacts, {
-              persistedOutputFiles: timeoutPersistedOutputFiles,
+              persistedOutputFiles,
               visionBridgeNotice: processedImages.visionBridgeNotice,
             })
           ) {
             return;
           }
-          const timeoutResponse: CoreToolCallResponseInfo = {
+          const settledErrorMessage =
+            !isTimeout && typeof bodyError === 'string'
+              ? bodyError
+              : failureMessage;
+          let resultDisplay = toolResult.returnDisplay;
+          if (
+            !isTimeout &&
+            typeof resultDisplay === 'string' &&
+            !resultDisplay.trim()
+          ) {
+            resultDisplay = settledErrorMessage;
+          }
+          const errorResponse: CoreToolCallResponseInfo = {
             callId,
             responseParts,
-            resultDisplay: this.compactResultDisplayForInteractiveHistory(
-              toolResult.returnDisplay,
-            ),
-            error: new Error(operationalErrorMessage),
-            errorType: ToolErrorType.EXECUTION_TIMEOUT,
+            resultDisplay:
+              this.compactResultDisplayForInteractiveHistory(resultDisplay),
+            error: new Error(settledErrorMessage),
+            errorType: executionErrorType ?? ToolErrorType.UNKNOWN,
             executionStatus,
             contentLength,
-            ...(timeoutPersistedOutputFiles !== undefined
-              ? { persistedOutputFiles: timeoutPersistedOutputFiles }
+            ...(persistedOutputFiles !== undefined
+              ? { persistedOutputFiles }
               : {}),
             ...(processedImages.modelOverride !== undefined
               ? { modelOverride: processedImages.modelOverride }
@@ -7542,12 +7898,16 @@ export class CoreToolScheduler {
               : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
           };
-          observeProducerOutput(timeoutResponse);
-          this.setStatusInternal(callId, 'error', timeoutResponse);
+          observeProducerOutput(errorResponse);
+          this.setStatusInternal(callId, 'error', errorResponse);
           setToolSpanFailure(
             span,
-            TOOL_FAILURE_KIND_TIMEOUT,
-            TOOL_SPAN_STATUS_TOOL_TIMEOUT,
+            isTimeout
+              ? TOOL_FAILURE_KIND_TIMEOUT
+              : TOOL_FAILURE_KIND_TOOL_ERROR,
+            isTimeout
+              ? TOOL_SPAN_STATUS_TOOL_TIMEOUT
+              : TOOL_SPAN_STATUS_TOOL_ERROR,
           );
           return;
         }
@@ -7744,9 +8104,19 @@ export class CoreToolScheduler {
         });
       }
 
+      if (
+        executionError instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        throw executionError;
+      }
+      if (executionThrew) {
+        this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
+      }
+
       const cancelMessage = executionThrew
-        ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-        : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        ? cancelledBeforeCompletionMessage(signal)
+        : cancelledAfterCompletionMessage(signal);
       if (cancelIfFinished(cancelMessage)) return;
       if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
@@ -7771,6 +8141,7 @@ export class CoreToolScheduler {
                 toolInput,
                 failureMessage,
                 true,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7822,6 +8193,7 @@ export class CoreToolScheduler {
                 toolInput,
                 errorMessage,
                 false,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7849,8 +8221,8 @@ export class CoreToolScheduler {
             // The abort landed while the failure hook was running; the
             // tool's own outcome is still what `executionThrew` says.
             executionThrew
-              ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-              : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+              ? cancelledBeforeCompletionMessage(signal)
+              : cancelledAfterCompletionMessage(signal),
             executionStatus,
             failureHookArtifacts,
           );
@@ -7905,6 +8277,7 @@ export class CoreToolScheduler {
       );
       this.toolCalls = [];
       this.isFinalizingToolCalls = true;
+      const batch = this.activeRequest;
       // Captured before PostToolBatch, which can rewrite a cancelled call
       // into an error; a cancelled call never delivers PreToolUse context.
       const preToolUseContextCallIds = new Set(
@@ -8092,10 +8465,28 @@ export class CoreToolScheduler {
           );
         }
 
+        if (batchSignal?.aborted && this.pendingNestedTools.size > 0) {
+          const ownPending = [...this.pendingNestedTools]
+            .filter(([, owner]) => owner === batch)
+            .map(([pending]) => pending);
+          if (ownPending.length > 0) await Promise.allSettled(ownPending);
+          // An earlier exec can leave an aborted child in a hook. Detach
+          // those children so they can't hold this batch's completed results
+          // or block the next batch's nested calls.
+          if (this.pendingNestedTools.size > 0) {
+            this.pendingNestedTools.clear();
+            this.nestedToolScheduler = undefined;
+            this.nestedToolCalls = [];
+          }
+        }
+
         for (const call of completedCalls) {
           this.finalizeToolSpan(call.request.callId, true);
         }
 
+        // A cancelled batch can settle after /clear rotates this Config.
+        const ownsTelemetry =
+          this.activeSessionId === this.config.getSessionId();
         for (const call of completedCalls) {
           const provenance =
             call.response.responseParts
@@ -8121,7 +8512,10 @@ export class CoreToolScheduler {
           );
           this.runtimeContentGeneratorViews.delete(call.request.callId);
           // A call its owner refused to launch never ran.
-          if (!this.launchRefusedCallIds.delete(call.request.callId)) {
+          if (
+            !this.launchRefusedCallIds.delete(call.request.callId) &&
+            ownsTelemetry
+          ) {
             logToolCall(this.config, new ToolCallEvent(call, this.config));
           }
         }
@@ -8470,17 +8864,20 @@ export class CoreToolScheduler {
           continue;
         }
 
+        // Preserve this contract for future invocation implementations.
+        // Named-workspace confirmations are excluded by hideAlwaysAllow above.
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-            shouldClassifyAllShellForAutoMode(
-              pendingTool.request.name,
-              this.config,
-            ));
+          shouldRequireAutoModeReviewForAllow(
+            pendingTool.invocation,
+            pmCtx,
+            pendingTool.request.name,
+            this.config,
+          );
 
         if (finalPermission === 'allow' && forceAutoReviewForAllow) {
           debugLogger.info(
-            `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
+            `Auto mode: pending L4 allow requires AUTO review for ${pendingTool.request.name}`,
           );
           const actionFingerprint = getAutoModeActionFingerprint(
             pendingTool.request.name,

@@ -232,10 +232,9 @@ public final class CsiNativeActivationProof {
         closed(headerRecord, ENVELOPE);
         envelope(headerRecord, original, "managed_session_header_v1", text(engine, "uuid"));
         JsonNode header = headerRecord.path("managedSession");
-        closed(header, Set.of("formatVersion", "minimumReader", "sessionKey", "engine",
+        closed(header, Set.of("formatVersion", "sessionKey", "engine",
                 "definitionRef", "rootSnapshotRef", "createdBy"));
         require(number(header.get("formatVersion")) == 1
-                && "managed-session/1".equals(text(header, "minimumReader"))
                 && "managed".equals(text(header, "engine")));
         key(header.path("sessionKey"), original);
         require("hosted-harness".equals(text(header, "createdBy")));

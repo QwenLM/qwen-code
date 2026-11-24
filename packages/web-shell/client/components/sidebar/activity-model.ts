@@ -1,4 +1,5 @@
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import { hasLiveWork } from '../../session-catalog/session-live-work';
 import { getScheduledTaskSessionGroup } from './scheduled-task-session-groups';
 import { comparePinnedSectionSessions } from './pinned-session-order';
 
@@ -51,12 +52,7 @@ export function activityState(entry: ActivityEntry): ActivityState {
   if (session.isWaitingForPermission) return 'approval';
   if (session.hasTurnError) return 'error';
   if (isActivityUnread(entry)) return 'unread';
-  if (
-    session.hasActivePrompt ||
-    session.activeWorkState === 'active' ||
-    session.hasRunningBackgroundTasks
-  )
-    return 'active';
+  if (hasLiveWork(session)) return 'active';
   return 'idle';
 }
 

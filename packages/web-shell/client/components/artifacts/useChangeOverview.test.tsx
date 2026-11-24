@@ -47,7 +47,6 @@ function prFiles(number: number) {
     additions: 5,
     deletions: 1,
     headSha: `head${number}`,
-    headIsAncestor: true,
   };
 }
 
@@ -55,7 +54,10 @@ beforeEach(() => {
   const container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  mock.features = ['workspace_github_pr_files'];
+  mock.features = [
+    'workspace_github_pr_files',
+    'workspace_git_log_exclude_refs',
+  ];
   mock.sessionStatus.mockReset().mockResolvedValue({
     prs: [
       { number: 1, url: 'https://github.com/o/r/pull/1' },
@@ -102,13 +104,13 @@ async function renderAndSettle() {
 }
 
 describe('useChangeOverview', () => {
-  it('assembles uncommitted, PR, and commit-fallback units', async () => {
+  it('assembles uncommitted, newest-bound-first PR, and commit-fallback units', async () => {
     await renderAndSettle();
     expect(output.gitAvailable).toBe(true);
     expect(output.units.map((unit) => unit.id)).toEqual([
       'uncommitted',
-      'pr:1',
       'pr:2',
+      'pr:1',
       'commit:c9',
     ]);
     const pr2 = output.units.find((unit) => unit.id === 'pr:2');
@@ -122,15 +124,209 @@ describe('useChangeOverview', () => {
     expect(ws.workspaceGitDiff).toHaveBeenCalledWith('/work/wt', 's1');
   });
 
-  it('scopes the commit fallback to the latest bound PR head', async () => {
+  it('scopes the commit fallback to the base branch when no start commit is recorded', async () => {
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      branch: { name: 'feat', baseBranch: 'origin/main' },
+      worktree: { path: '/work/wt' },
+    });
     await renderAndSettle();
     const ws = mock.workspaceByCwd.mock.results[0]!.value;
     expect(ws.workspaceGitLog).toHaveBeenCalledWith(
       20,
       0,
       '/work/wt',
-      'head2..HEAD',
+      'origin/main..HEAD',
+      { sessionId: 's1', excludeRefs: ['origin/main'] },
+    );
+  });
+
+  it('prefers the session start commit as the fallback boundary', async () => {
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      branch: { name: 'feat', baseBranch: 'origin/main', baseCommit: 'base0' },
+      worktree: { path: '/work/wt' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'base0..HEAD',
+      { sessionId: 's1', excludeRefs: ['origin/main'] },
+    );
+  });
+
+  it('uses the worktree base commit as the fallback boundary', async () => {
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      worktree: { path: '/work/wt', baseCommit: 'wtbase' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'wtbase..HEAD',
       { sessionId: 's1' },
+    );
+  });
+
+  it('uses a plain session top-level base commit as the fallback boundary', async () => {
+    // A plain session has no branch/worktree meta; its start commit is the
+    // HEAD captured at creation, projected top-level on the summary.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      baseCommit: 'plainbase',
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work',
+      'plainbase..HEAD',
+      { sessionId: 's1' },
+    );
+  });
+
+  it('prefers the session creation start over a later worktree creation tip (R6-1)', async () => {
+    // A plain session recorded start S, then committed A,B (HEAD moved to T)
+    // and handed off into a worktree whose creation tip is T. The session's
+    // own start S must win over worktree.baseCommit T, or the pre-handoff
+    // S..T commits vanish from the panel for as long as it lives in the
+    // worktree. Two distinct values pin the precedence, not just presence.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      baseCommit: 'sessionstartS',
+      worktree: { path: '/work/wt', baseCommit: 'handofftipT' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'sessionstartS..HEAD',
+      { sessionId: 's1' },
+    );
+  });
+
+  it('excludes the worktree base branch so upstream integration is not re-listed', async () => {
+    // A worktree session has no branch meta; its base branch is carried on
+    // worktree.baseBranch. Integrating upstream advances HEAD past the start
+    // commit, so the base branch must join the exclusion set or those upstream
+    // commits re-list as loose work.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      worktree: {
+        path: '/work/wt',
+        baseCommit: 'wtbase',
+        baseBranch: 'origin/main',
+      },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'wtbase..HEAD',
+      { sessionId: 's1', excludeRefs: ['head1', 'origin/main'] },
+    );
+  });
+
+  it('excludes the remote-tracking ref of a local base branch (integration advances origin/main, not main)', async () => {
+    // The recorded baseBranch is the LOCAL name (main); integrating upstream
+    // only advances a remote-tracking ref. The remote-tracking refs under both
+    // documented remotes (origin for a standard clone, upstream for a fork)
+    // join the exclusion set — but NOT the local name itself, which would
+    // subtract the session's own commits once local main absorbs them (R4-1).
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      branch: { name: 'feat/x', baseBranch: 'main', baseCommit: 'base0' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work',
+      'base0..HEAD',
+      {
+        sessionId: 's1',
+        excludeRefs: ['head1', 'origin/main', 'upstream/main'],
+      },
+    );
+  });
+
+  it('excludes upstream/<base> so a fork integrating from upstream is narrowed', async () => {
+    // Fork layout (CONTRIBUTING): origin is the personal fork, integration
+    // comes from upstream/main. Excluding only origin/main would subtract the
+    // fork's stale main, not the integrated upstream commits; upstream/main
+    // must be in the exclusion set. The log route drops whichever remote ref
+    // is absent locally, so the present one still narrows the window.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      worktree: {
+        slug: 'wt',
+        path: '/work/wt',
+        branch: 'feat',
+        baseBranch: 'main',
+        baseCommit: 'base0',
+      },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'base0..HEAD',
+      {
+        sessionId: 's1',
+        excludeRefs: ['head1', 'origin/main', 'upstream/main'],
+      },
+    );
+  });
+
+  it('never excludes the local base name, which absorbs the session commits (R4-1)', async () => {
+    // Once local main absorbs the session's work (a local merge of the session
+    // branch), `--not main` covers the session's own commits and empties the
+    // window — the panel would report no committed work. Only the remote-
+    // tracking refs (which lag the unpushed session commits) may be excluded.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      branch: { name: 'feat/x', baseBranch: 'main', baseCommit: 'base0' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    const call = ws.workspaceGitLog.mock.calls.find(
+      (c: unknown[]) => c[3] === 'base0..HEAD',
+    );
+    expect(call).toBeDefined();
+    const excludeRefs = (call![4] as { excludeRefs?: string[] }).excludeRefs;
+    expect(excludeRefs).not.toContain('main');
+    expect(excludeRefs).toContain('origin/main');
+  });
+
+  it('excludes commits reachable from every bound PR head when supported', async () => {
+    // Reachability exclusion (not a single-head boundary) drops each PR's own
+    // commits, including for merged or incomparable heads.
+    mock.features = [
+      'workspace_github_pr_files',
+      'workspace_git_log_exclude_refs',
+    ];
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1', excludeRefs: ['head2', 'head1', 'origin/main'] },
     );
   });
 
@@ -337,7 +533,7 @@ describe('useChangeOverview', () => {
     const prIds = output.units
       .filter((unit) => unit.kind === 'pr')
       .map((unit) => unit.id);
-    expect(prIds).toEqual(['pr:1', 'pr:3']);
+    expect(prIds).toEqual(['pr:3', 'pr:1']);
   });
 
   it('still shows the commit fallback when the files capability is absent', async () => {
@@ -360,10 +556,13 @@ describe('useChangeOverview', () => {
   });
 
   it('suppresses the unscoped walk when bound PRs exist without the files capability', async () => {
-    // prResults stays empty without the capability even though the session
-    // has bindings; keying the suppression on prResults would walk HEAD
-    // unscoped and re-list the bindings' commits as this session's loose
-    // work. The discriminator must be the bindings themselves.
+    // Without the files capability the bindings render no PR units (the files
+    // fetch is gated off, prResults stays empty). This mock also records no
+    // boundary, so the fallback suppresses via the no-boundary rule — no
+    // unscoped walk is issued. The bound-PR discriminator itself (files
+    // present, exclude absent, a boundary recorded) is pinned separately by
+    // the capability-skew test below; here we pin that the files fetch stays
+    // gated and no range-less walk leaks when bindings exist without it.
     mock.features = [];
     mock.sessionStatus.mockResolvedValue({
       prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
@@ -463,7 +662,10 @@ describe('useChangeOverview', () => {
     expect(output.loadFailed).toBe(false);
   });
 
-  it('still walks HEAD recent history when no baseline is known', async () => {
+  it('suppresses the fallback when no boundary is known (no unscoped walk)', async () => {
+    // R7-1: a session with no start commit and no base branch must NOT walk
+    // HEAD unscoped — that re-lists the repository's pre-session history as
+    // this session's loose work. With no trustworthy boundary, suppress.
     mock.sessionStatus.mockResolvedValue({
       prs: [],
       branch: { name: 'feat' },
@@ -471,13 +673,9 @@ describe('useChangeOverview', () => {
     });
     await renderAndSettle();
     const ws = mock.workspaceByCwd.mock.results[0]!.value;
-    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
-      20,
-      0,
-      '/work/wt',
-      undefined,
-      { sessionId: 's1' },
-    );
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).toEqual(['uncommitted']);
+    expect(output.loadFailed).toBe(false);
   });
 
   it('surfaces a retryable failure when the commit log is unavailable', async () => {
@@ -536,224 +734,15 @@ describe('useChangeOverview', () => {
     expect(ws.workspaceGitDiff).toHaveBeenCalledWith('/work', undefined);
   });
 
-  it('retries with the base-branch window when a PR head range is unavailable', async () => {
-    // A cross-repo (or never-fetched) PR head makes <head>..HEAD unavailable;
-    // the loose commits must still surface via the base-branch window.
-    const ws = {
-      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
-      workspaceGitHubPullRequestFiles: vi
-        .fn()
-        .mockImplementation((number: number) =>
-          Promise.resolve(prFiles(number)),
-        ),
-      workspaceGitLog: vi
-        .fn()
-        .mockResolvedValueOnce({
-          v: 1,
-          available: false,
-          entries: [],
-          hasMore: false,
-        })
-        .mockResolvedValueOnce({
-          v: 1,
-          available: true,
-          entries: [
-            { sha: 'c9', shortSha: 'c9', subject: 'loose', parents: ['head2'] },
-          ],
-          hasMore: false,
-        }),
-      workspaceGitCommitDetail: vi.fn().mockResolvedValue({
-        v: 1,
-        available: true,
-        files: [{ path: 'loose.ts', added: 1, removed: 0, isBinary: false }],
-        filesCount: 1,
-        linesAdded: 1,
-        linesRemoved: 0,
-      }),
-    };
-    mock.workspaceByCwd.mockReturnValue(ws);
-    await renderAndSettle();
-    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
-    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
-      2,
-      20,
-      0,
-      '/work/wt',
-      'origin/main..HEAD',
-      { sessionId: 's1' },
-    );
-    expect(output.units.map((unit) => unit.id)).toContain('commit:c9');
-    expect(output.loadFailed).toBe(false);
-  });
-
-  it('does not scope the fallback to a head that is not an ancestor of HEAD', async () => {
-    // A merged or rewritten PR's head still resolves locally but is not an
-    // ancestor; <head>..HEAD would re-list the base branch's history as this
-    // session's loose work. The base-branch window must be used instead.
-    const ws = {
-      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
-      workspaceGitHubPullRequestFiles: vi
-        .fn()
-        .mockImplementation((number: number) =>
-          Promise.resolve({ ...prFiles(number), headIsAncestor: false }),
-        ),
-      workspaceGitLog: vi.fn().mockResolvedValue({
-        v: 1,
-        available: true,
-        entries: [],
-        hasMore: false,
-      }),
-      workspaceGitCommitDetail: vi.fn(),
-    };
-    mock.workspaceByCwd.mockReturnValue(ws);
-    await renderAndSettle();
-    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
-    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
-      20,
-      0,
-      '/work/wt',
-      'origin/main..HEAD',
-      { sessionId: 's1' },
-    );
-    expect(output.loadFailed).toBe(false);
-  });
-
-  it('uses the base window when the latest bound PR head is not an ancestor', async () => {
-    // The newest PR was squash-merged (its head is not an ancestor) while an
-    // older bound PR's head is. Skipping to the older ancestor head would
-    // compose <older>..HEAD, straddling the main history that absorbed the
-    // merged PR — re-listing main-only commits and the squash commit as loose
-    // work. The base-branch window is the trustworthy boundary instead.
-    const ws = {
-      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
-      workspaceGitHubPullRequestFiles: vi
-        .fn()
-        .mockImplementation((number: number) =>
-          Promise.resolve({
-            ...prFiles(number),
-            headIsAncestor: number === 1,
-          }),
-        ),
-      workspaceGitLog: vi.fn().mockResolvedValue({
-        v: 1,
-        available: true,
-        entries: [],
-        hasMore: false,
-      }),
-      workspaceGitCommitDetail: vi.fn(),
-    };
-    mock.workspaceByCwd.mockReturnValue(ws);
-    await renderAndSettle();
-    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
-    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
-      20,
-      0,
-      '/work/wt',
-      'origin/main..HEAD',
-      { sessionId: 's1' },
-    );
-  });
-
-  it('uses the base window when an older bound PR head is not an ancestor', async () => {
-    // Mirror: even with the latest head an ancestor, a merged older PR means
-    // the base history absorbed work the latest head's window could straddle
-    // once main is merged into the session branch; refuse the head boundary.
-    const ws = {
-      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
-      workspaceGitHubPullRequestFiles: vi
-        .fn()
-        .mockImplementation((number: number) =>
-          Promise.resolve({
-            ...prFiles(number),
-            headIsAncestor: number === 2,
-          }),
-        ),
-      workspaceGitLog: vi.fn().mockResolvedValue({
-        v: 1,
-        available: true,
-        entries: [],
-        hasMore: false,
-      }),
-      workspaceGitCommitDetail: vi.fn(),
-    };
-    mock.workspaceByCwd.mockReturnValue(ws);
-    await renderAndSettle();
-    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
-    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
-      20,
-      0,
-      '/work/wt',
-      'origin/main..HEAD',
-      { sessionId: 's1' },
-    );
-  });
-
   it('suppresses the fallback when a merged PR leaves no baseline', async () => {
-    // Same merged-PR shape with no base branch: no trustworthy boundary, so
-    // skip the fetch rather than walk HEAD unscoped.
+    // Bound PRs but no start commit and no base branch: no trustworthy
+    // boundary, so skip the fetch rather than walk HEAD unscoped and re-list
+    // PR-covered or pre-session commits as loose work.
     mock.sessionStatus.mockResolvedValue({
       prs: [
         { number: 1, url: 'https://github.com/o/r/pull/1' },
         { number: 2, url: 'https://github.com/o/r/pull/2' },
       ],
-      branch: { name: 'feat' },
-      worktree: { path: '/work/wt' },
-    });
-    const ws = {
-      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
-      workspaceGitHubPullRequestFiles: vi
-        .fn()
-        .mockImplementation((number: number) =>
-          Promise.resolve({
-            ...prFiles(number),
-            headIsAncestor: number === 1,
-          }),
-        ),
-      workspaceGitLog: vi.fn(),
-      workspaceGitCommitDetail: vi.fn(),
-    };
-    mock.workspaceByCwd.mockReturnValue(ws);
-    await renderAndSettle();
-    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
-    expect(output.units.map((unit) => unit.kind)).not.toContain('commit');
-    expect(output.loadFailed).toBe(false);
-  });
-
-  it('suppresses the fallback when no head is an ancestor and no baseline is known', async () => {
-    // With bound PRs but neither an ancestor head nor a base branch, an
-    // omitted range would walk HEAD unscoped and re-list PR-covered commits;
-    // there is no trustworthy boundary, so skip the fetch entirely.
-    mock.sessionStatus.mockResolvedValue({
-      prs: [
-        { number: 1, url: 'https://github.com/o/r/pull/1' },
-        { number: 2, url: 'https://github.com/o/r/pull/2' },
-      ],
-      branch: { name: 'feat' },
-      worktree: { path: '/work/wt' },
-    });
-    const ws = {
-      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
-      workspaceGitHubPullRequestFiles: vi
-        .fn()
-        .mockImplementation((number: number) =>
-          Promise.resolve({ ...prFiles(number), headIsAncestor: false }),
-        ),
-      workspaceGitLog: vi.fn(),
-      workspaceGitCommitDetail: vi.fn(),
-    };
-    mock.workspaceByCwd.mockReturnValue(ws);
-    await renderAndSettle();
-    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
-    expect(output.units.map((unit) => unit.kind)).not.toContain('commit');
-    expect(output.loadFailed).toBe(false);
-  });
-
-  it('does not retry range-less when no base branch is known', async () => {
-    // The undefined "no baseline" sentinel must not pass the retry guard: a
-    // range-less retry would walk HEAD unscoped and render PR-covered commits
-    // as loose work. The unavailable verdict stands as a retryable failure.
-    mock.sessionStatus.mockResolvedValue({
-      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
       branch: { name: 'feat' },
       worktree: { path: '/work/wt' },
     });
@@ -764,19 +753,14 @@ describe('useChangeOverview', () => {
         .mockImplementation((number: number) =>
           Promise.resolve(prFiles(number)),
         ),
-      workspaceGitLog: vi.fn().mockResolvedValue({
-        v: 1,
-        available: false,
-        entries: [],
-        hasMore: false,
-      }),
+      workspaceGitLog: vi.fn(),
       workspaceGitCommitDetail: vi.fn(),
     };
     mock.workspaceByCwd.mockReturnValue(ws);
     await renderAndSettle();
-    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
-    expect(output.loadFailed).toBe(true);
-    expect(output.units).toEqual([]);
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).not.toContain('commit');
+    expect(output.loadFailed).toBe(false);
   });
 
   it('surfaces a retryable failure when the commit log fetch throws', async () => {
@@ -799,9 +783,50 @@ describe('useChangeOverview', () => {
     expect(output.units).toEqual([]);
   });
 
-  it('keeps the unavailable verdict when the retry fetch throws', async () => {
-    // A rejected retry must not erase the first response's available:false
-    // into a silent "no loose commits".
+  it('surfaces a retryable failure when the boundary log stays unavailable after the no-exclusion retry', async () => {
+    // An unavailable log (e.g. the start commit itself is not in the object
+    // database) is a retryable failure, not an empty session. The hook retries
+    // once without excludeRefs; when that is unavailable too it surfaces the
+    // failure rather than walking HEAD unscoped.
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve(prFiles(number)),
+        ),
+      workspaceGitLog: vi.fn().mockResolvedValue({
+        v: 1,
+        available: false,
+        entries: [],
+        hasMore: false,
+      }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
+    expect(output.loadFailed).toBe(true);
+    expect(output.units).toEqual([]);
+  });
+
+  it('degrades to the no-exclusion window when the excluded log is unavailable', async () => {
+    // The hook's degraded path: when the excluded log comes back unavailable
+    // (an unsafe excluded ref fails closed, or the start commit itself is
+    // absent from the object database), retry the same boundary window without
+    // excludeRefs so the loose commits render instead of blanking every unit.
+    // A merely missing bound PR head no longer reaches here as unavailable —
+    // the log route's presence probe drops absent refs and keeps the present
+    // exclusions (pinned in the core gitDiff suite). This PR's commits may
+    // duplicate in the degraded window — the accepted residual.
     const ws = {
       workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
       workspaceGitHubPullRequestFiles: vi
@@ -817,13 +842,104 @@ describe('useChangeOverview', () => {
           entries: [],
           hasMore: false,
         })
-        .mockRejectedValueOnce(new Error('504')),
-      workspaceGitCommitDetail: vi.fn(),
+        .mockResolvedValueOnce({
+          v: 1,
+          workspaceCwd: '/work',
+          available: true,
+          entries: [
+            { sha: 'c9', shortSha: 'c9', subject: 'loose', parents: ['head2'] },
+          ],
+          hasMore: false,
+        }),
+      workspaceGitCommitDetail: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/work',
+        available: true,
+        files: [{ path: 'loose.ts', added: 1, removed: 0, isBinary: false }],
+        filesCount: 1,
+        linesAdded: 1,
+        linesRemoved: 0,
+      }),
     };
     mock.workspaceByCwd.mockReturnValue(ws);
     await renderAndSettle();
     expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
-    expect(output.loadFailed).toBe(true);
-    expect(output.units).toEqual([]);
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      1,
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1', excludeRefs: ['head2', 'head1', 'origin/main'] },
+    );
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      20,
+      0,
+      '/work/wt',
+      'origin/main..HEAD',
+      { sessionId: 's1' },
+    );
+    expect(output.loadFailed).toBe(false);
+    expect(output.units.map((unit) => unit.id)).toContain('commit:c9');
+    expect(output.units.map((unit) => unit.id)).toContain('uncommitted');
+  });
+
+  it('keeps a legitimately empty excluded window empty (no over-retry, R8-1)', async () => {
+    // A worktree session created at the origin/main tip authors nothing and the
+    // user pulls: the excluded walk startS..HEAD --not origin/main is legitimately
+    // empty (the pulled commits are foreign upstream, not this session's work).
+    // Emptiness must NOT trigger a retry that drops the base-branch exclusion —
+    // that would re-list the foreign commits as this session's commit units and
+    // invert the upstream-integration guarantee. One call, no commit unit.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      worktree: {
+        path: '/work/wt',
+        baseCommit: 'startS',
+        baseBranch: 'main',
+      },
+    });
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi.fn(),
+      workspaceGitLog: vi.fn().mockResolvedValue({
+        v: 1,
+        available: true,
+        entries: [],
+        hasMore: false,
+      }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'startS..HEAD',
+      { sessionId: 's1', excludeRefs: ['origin/main', 'upstream/main'] },
+    );
+    expect(output.loadFailed).toBe(false);
+    expect(output.units.map((unit) => unit.kind)).toEqual(['uncommitted']);
+  });
+
+  it('suppresses the fallback when bound PR heads cannot be excluded (capability skew)', async () => {
+    // A new client against an older daemon: the files capability is present
+    // (PR units render with resolved heads) but the exclude capability is
+    // absent. An unfiltered window would re-list those PRs' own commits as
+    // loose work, so suppress the fallback rather than duplicate them.
+    mock.features = ['workspace_github_pr_files'];
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitHubPullRequestFiles).toHaveBeenCalled();
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).toEqual([
+      'uncommitted',
+      'pr',
+      'pr',
+    ]);
+    expect(output.loadFailed).toBe(false);
   });
 });

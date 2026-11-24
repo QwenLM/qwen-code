@@ -314,6 +314,11 @@ function RadioList({
         return (
           <box
             key={item.key}
+            id={
+              selected
+                ? 'screen-reader-selected-auth'
+                : 'screen-reader-unselected-auth'
+            }
             flexDirection="column"
             marginTop={windowIndex === 0 ? 0 : 1}
           >
@@ -362,10 +367,17 @@ function FieldText({
   active?: boolean;
 }) {
   if (value.length === 0 && placeholder) {
-    if (!active) return <text fg={C.dim}>{placeholder}</text>;
+    if (!active)
+      return (
+        <text id={`screen-reader-caret-inactive-${caret}`} fg={C.dim}>
+          {placeholder}
+        </text>
+      );
     return (
       <>
-        <text bg={C.accent}>{placeholder.slice(0, 1)}</text>
+        <text id={`screen-reader-caret-active-${caret}`} bg={C.accent}>
+          {placeholder.slice(0, 1)}
+        </text>
         <text fg={C.dim}>{placeholder.slice(1)}</text>
       </>
     );
@@ -380,9 +392,13 @@ function FieldText({
           highlight says which field the caret is in. Dropping it while inactive
           would print a value one character shorter than the one held. */}
       {active ? (
-        <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
+        <text id={`screen-reader-caret-active-${caret}`} bg={C.accent}>
+          {sanitizeTerminalText(spans.at) || ' '}
+        </text>
       ) : (
-        <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
+        <text id={`screen-reader-caret-inactive-${caret}`} fg={C.text}>
+          {sanitizeTerminalText(spans.at)}
+        </text>
       )}
       {after ? <text fg={C.text}>{after}</text> : null}
     </>
@@ -395,7 +411,9 @@ function InputLine({
   placeholder,
   active,
   marginTop = 1,
+  secret = false,
 }: {
+  secret?: boolean;
   value: string;
   caret: number;
   placeholder?: string;
@@ -403,8 +421,20 @@ function InputLine({
   marginTop?: number;
 }) {
   return (
-    <box flexDirection="row" marginTop={marginTop}>
-      <text fg={C.accent}>{'> '}</text>
+    <box
+      id={
+        secret
+          ? 'screen-reader-protected-input'
+          : value.length === 0 && placeholder
+            ? 'screen-reader-input-line-placeholder'
+            : 'screen-reader-input-line'
+      }
+      flexDirection="row"
+      marginTop={marginTop}
+    >
+      <text id="screen-reader-input-glyph" fg={C.accent}>
+        {'> '}
+      </text>
       <FieldText
         value={value}
         caret={caret}
@@ -688,6 +718,7 @@ function ApiKeyStep({
         </box>
       )}
       <InputLine
+        secret
         value={flow.state.apiKey}
         caret={caret}
         placeholder={provider.apiKeyPlaceholder ?? 'sk-...'}
@@ -1234,7 +1265,10 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         {t('Optional: configure advanced generation settings.')}
       </text>
       <box flexDirection="row" marginTop={1} paddingLeft={2}>
-        <text fg={rowFg(0)}>
+        <text
+          id={`screen-reader-auth-toggle-${focusedConfigIndex === 0 ? 'focused' : 'unfocused'}-${thinkingEnabled ? 'on' : 'off'}`}
+          fg={rowFg(0)}
+        >
           {`${cursor(0)} ${checkmark(thinkingEnabled)} ${t('Enable thinking')}`}
         </text>
       </box>
@@ -1246,7 +1280,10 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         </text>
       </box>
       <box flexDirection="row" marginTop={1} paddingLeft={2}>
-        <text fg={rowFg(1)}>
+        <text
+          id={`screen-reader-auth-toggle-${focusedConfigIndex === 1 ? 'focused' : 'unfocused'}-${modalityEnabled ? 'on' : 'off'}`}
+          fg={rowFg(1)}
+        >
           {`${cursor(1)} ${checkmark(modalityEnabled)} ${t('Enable modality')}`}
         </text>
       </box>
@@ -1258,20 +1295,33 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       {modalityEnabled && (
         <box flexDirection="row" paddingLeft={6}>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 2 ? 'focused' : 'unfocused'}-${modalityImage ? 'on' : 'off'}`}
             fg={rowFg(2)}
           >{`${cursor(2)} ${checkmark(modalityImage)} Image  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 3 ? 'focused' : 'unfocused'}-${modalityVideo ? 'on' : 'off'}`}
             fg={rowFg(3)}
           >{`${cursor(3)} ${checkmark(modalityVideo)} Video  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 4 ? 'focused' : 'unfocused'}-${modalityAudio ? 'on' : 'off'}`}
             fg={rowFg(4)}
           >{`${cursor(4)} ${checkmark(modalityAudio)} Audio  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 5 ? 'focused' : 'unfocused'}-${modalityPdf ? 'on' : 'off'}`}
             fg={rowFg(5)}
           >{`${cursor(5)} ${checkmark(modalityPdf)} PDF`}</text>
         </box>
       )}
-      <box flexDirection="row" marginTop={1} paddingLeft={2}>
+      <box
+        id={
+          contextWindowSize
+            ? 'screen-reader-input-line'
+            : 'screen-reader-input-line-placeholder'
+        }
+        flexDirection="row"
+        marginTop={1}
+        paddingLeft={2}
+      >
         <text
           fg={rowFg(ctxIdx)}
         >{`${cursor(ctxIdx)} ${t('Context window')}: `}</text>
@@ -1425,18 +1475,29 @@ export function OpenTuiAuthDialog(props: AuthDialogProps) {
   return <AuthDialogFlow {...props} config={props.config} />;
 }
 
-function SubscriptionWaitingIndicator() {
+function SubscriptionWaitingIndicator({
+  screenReader = false,
+}: {
+  screenReader?: boolean;
+}) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
+    // The spinner glyph would change the row's text every tick, defeating the
+    // writer's byte-identical suppression on the screen-reader live lane.
+    if (screenReader) return;
     const timer = setInterval(
       () => setFrame((current) => (current + 1) % SPINNER_FRAMES.length),
       SPINNER_INTERVAL_MS,
     );
     return () => clearInterval(timer);
-  }, []);
+  }, [screenReader]);
   return (
-    <text>
-      <span fg={C.accent}>{SPINNER_FRAMES[frame]}</span>{' '}
+    <text id="screen-reader-live-auth-waiting">
+      {screenReader ? null : (
+        <>
+          <span fg={C.accent}>{SPINNER_FRAMES[frame]}</span>{' '}
+        </>
+      )}
       {t('Waiting for sign-in…')}
     </text>
   );
@@ -1449,6 +1510,7 @@ function SubscriptionView({
   suppressBrowserLaunch,
   availableTerminalHeight,
   onConnect,
+  screenReader,
 }: {
   onBack: () => void;
   onModelSelectionRequired: () => void;
@@ -1456,6 +1518,7 @@ function SubscriptionView({
   onConnect?: (signal: AbortSignal, authorizationUrl: string) => Promise<void>;
   suppressBrowserLaunch?: boolean;
   availableTerminalHeight?: number;
+  screenReader?: boolean;
 }) {
   const flow = useSubscription({
     suppressBrowserLaunch,
@@ -1631,7 +1694,7 @@ function SubscriptionView({
             </>
           )}
           <box marginTop={1}>
-            <SubscriptionWaitingIndicator />
+            <SubscriptionWaitingIndicator screenReader={screenReader} />
           </box>
           <box marginTop={1}>
             <text fg={C.dim}>{t('c to copy link · Esc to cancel')}</text>
@@ -2122,6 +2185,7 @@ function AuthDialogFlow({
       <SubscriptionView
         availableTerminalHeight={availableTerminalHeight}
         suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
+        screenReader={config.getScreenReader()}
         onBack={goBack}
         onModelSelectionRequired={onClose}
         onConnect={async (signal, authorizationUrl) => {

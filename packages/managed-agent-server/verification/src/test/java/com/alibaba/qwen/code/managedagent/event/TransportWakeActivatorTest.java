@@ -19,6 +19,7 @@ import java.util.concurrent.RejectedExecutionException;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -46,7 +47,7 @@ class TransportWakeActivatorTest {
 
     private static WakeFence fence(String status, String workspace,
             String state, long committed, boolean liveWriter) {
-        return new WakeFence(status, workspace, state, committed, liveWriter);
+        return new WakeFence(status, workspace, state, committed, liveWriter, false);
     }
 
     private void fenceIs(String status, String workspace, String state,
@@ -57,7 +58,7 @@ class TransportWakeActivatorTest {
 
     private void verifyNoAttempt() {
         verify(store, never()).claimWake(anyString(), anyString(), anyLong());
-        verify(harness, never()).activateForWake(anyString(), anyString());
+        verify(harness, never()).recoverForWake(anyString(), anyString());
     }
 
     @BeforeEach
@@ -75,15 +76,15 @@ class TransportWakeActivatorTest {
     void anUnownedWakeIsClaimedOnTheListenerAndLoadedOffIt() {
         fenceIs("ACTIVE", "w1", "SEALED", 5, false);
         when(store.claimWake("t1", "s1", 3)).thenReturn(true);
-        when(harness.activateForWake("t1", "s1")).thenReturn(true);
 
         assertEquals(Outcome.SCHEDULED, activator.onWake(wake(3)));
 
         // Nothing loaded on the listener thread: the ordered lane moves on.
-        verify(harness, never()).activateForWake(anyString(), anyString());
+        verify(harness, never()).recoverForWake(anyString(), anyString());
         assertEquals(1, queued.size());
         queued.getFirst().run();
-        verify(harness).activateForWake("t1", "s1");
+        verify(harness).recoverForWake("t1", "s1");
+        verify(harness, never()).activateForWake(anyString(), anyString());
         assertEquals(List.of("s1"), activated);
     }
 
@@ -102,6 +103,16 @@ class TransportWakeActivatorTest {
         fenceIs("ACTIVE", "w1", "ACTIVE", 5, true);
 
         assertEquals(Outcome.OWNED, activator.onWake(wake(3)));
+
+        verifyNoAttempt();
+    }
+
+    @Test
+    void aWakeForAStampedHeadNotYetDueIsLeftToTheBackstop() {
+        when(store.wakeFence("t1", "s1")).thenReturn(Optional.of(
+                new WakeFence("ACTIVE", "w1", "SEALED", 5, false, true)));
+
+        assertEquals(Outcome.NOT_DUE, activator.onWake(wake(3)));
 
         verifyNoAttempt();
     }
@@ -165,24 +176,15 @@ class TransportWakeActivatorTest {
 
         assertEquals(Outcome.DROPPED, saturated.onWake(wake(3)));
 
-        verify(harness, never()).activateForWake(anyString(), anyString());
-    }
-
-    @Test
-    void aSessionAlreadyAttachedHereLoadsNothingAndSubscribesNothing() {
-        when(harness.activateForWake("t1", "s1")).thenReturn(false);
-
-        assertEquals(LoadOutcome.ALREADY_ATTACHED, activator.load(wake(3)));
-
-        assertEquals(List.of(), activated);
+        verify(harness, never()).recoverForWake(anyString(), anyString());
     }
 
     // Whether another writer won is read from SQL after the failure, never
     // from the failure's status: a 409 also names a parked Turn.
     @Test
     void aFailedLoadIsFencedOnlyWhenSqlShowsAnotherWriter() {
-        when(harness.activateForWake("t1", "s1")).thenThrow(
-                AutomationHarnessFake.refusal(409, "writer_conflict"));
+        doThrow(AutomationHarnessFake.refusal(409, "writer_conflict"))
+                .when(harness).recoverForWake("t1", "s1");
 
         when(store.wakeFence("t1", "s1")).thenReturn(Optional.of(
                 fence("ACTIVE", "w1", "ACTIVE", 5, true)));

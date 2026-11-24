@@ -1323,7 +1323,7 @@ class HostedAutomationFaultGatesIT {
     private List<String> sessionLedger(String session) {
         return jdbc.queryForList("SELECT CONCAT(sequence_id, ' ', CAST(event_id AS CHAR), ' ', event_type) FROM"
                 + " ma_public_event WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND"
-                + " stream_id = X'' ORDER BY sequence_id", String.class, tenant, session);
+                + " stream_id = '' ORDER BY sequence_id", String.class, tenant, session);
     }
 
     // The ledger once every Runtime warm a Turn started has reported: the
@@ -2675,7 +2675,7 @@ class HostedAutomationFaultGatesIT {
                             + " FROM ma_resource WHERE tenant_id = ? AND kind = 'managed-tool-outcome' ORDER BY resource_id LIMIT 16", tenant),
                     "publications", jdbc.queryForList("SELECT session_id, publication_id, producer_phase, is_quarantined, admission_resource_id"
                             + " FROM ma_output_capture WHERE tenant_id = ? ORDER BY publication_id LIMIT 16", tenant),
-                    "heads", jdbc.queryForList("SELECT session_id, storage_version, journal_revision, committed_sequence, recovery_status, recovery_detail_code"
+                    "heads", jdbc.queryForList("SELECT session_id, has_activity_diagnostics, journal_revision, committed_sequence, recovery_status, recovery_detail_code"
                             + " FROM ma_session_head WHERE tenant_id = ? AND head_kind = 'MANAGED_SESSION' ORDER BY session_id LIMIT 16", tenant))));
         }
     }

@@ -871,7 +871,7 @@ class HostedWorkflowRelayFaultGatesIT {
         List<String> bodies = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'child_run'",
@@ -1129,7 +1129,7 @@ class HostedWorkflowRelayFaultGatesIT {
                         + " event_type, gmt_create, data_json, is_terminal"
                         + " FROM ma_public_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND stream_kind = 'SESSION' AND"
-                        + " stream_id = X'' ORDER BY sequence_id",
+                        + " stream_id = '' ORDER BY sequence_id",
                 tenant, session);
     }
 
