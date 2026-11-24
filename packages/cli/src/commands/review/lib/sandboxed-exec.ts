@@ -106,12 +106,14 @@ export {
   selectReviewSandboxBackend,
 } from './sandbox-backends.js';
 export {
+  closeGuestSessionSync,
   executeViaGuestBridge,
   executeViaGuestBridgeSync,
   reapVmWorker,
   validateBridgeSocketEndpoint,
   type GuestExecRequest,
   type GuestExecResult,
+  type GuestWorkspaceMode,
 } from './guest-exec-bridge.js';
 
 // Re-exported from its old home: `mountRootFor` moved into `worktree.ts` so

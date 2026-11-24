@@ -48,6 +48,7 @@
 // `killed`.
 
 import type { CommandModule } from 'yargs';
+import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -69,6 +70,7 @@ import { inertPath, probeWorktreePath } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   boxedRunLeftContainer,
+  closeGuestSessionSync,
   containerCommand,
   containerName,
   containerPathFor,
@@ -88,6 +90,7 @@ import {
   type ReviewTeardownStatus,
   type ReviewTrustInput,
 } from './lib/sandboxed-exec.js';
+import { lockfileInstaller } from './lib/npm-toolchain.js';
 import {
   checkoutFilterCommands,
   describeFilterScreen,
@@ -1776,6 +1779,12 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
  * runs share a window that reserves the revert probe's full slot, and the
  * revert probe gets the remainder of the whole budget.
  */
+interface MicrovmProbeSession {
+  sessionId: string;
+  socketPath: string;
+  initialized: boolean;
+}
+
 function runProbeSuite(
   probeTree: string,
   probes: string[],
@@ -1784,6 +1793,7 @@ function runProbeSuite(
   dependencyRoot: string = probeTree,
   trustContext?: ReviewTrustInput,
   onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): {
   perFile: ProbeResult[];
   ms: number;
@@ -1825,8 +1835,76 @@ function runProbeSuite(
     trustContext,
   );
   if (probeVerdict.kind === 'microvm') {
+    const handleBridgeFault = (
+      res: {
+        timedOut: boolean;
+        protocolError?: string;
+        signal: NodeJS.Signals | null;
+      },
+      phaseLabel: string,
+    ): void => {
+      if (res.timedOut || res.protocolError) {
+        if (probeVerdict.workerPidFile) {
+          const reap = reapVmWorker({
+            pidFile: probeVerdict.workerPidFile,
+            expectedExeTokens: [probeVerdict.backend],
+          });
+          onTeardown?.(reap.status);
+        } else {
+          onTeardown?.('partial');
+        }
+      }
+      if (res.timedOut) {
+        throw new ProbeRunFailure(
+          `microVM ${phaseLabel} timed out after ${Math.round(timeout / 1000)}s`,
+          'runner-died',
+        );
+      }
+      if (res.protocolError) {
+        throw new ProbeRunFailure(
+          `microVM bridge (${probeVerdict.backend}) ${phaseLabel} error: ${res.protocolError}`,
+          'not-run',
+        );
+      }
+      if (res.signal) {
+        throw new ProbeRunFailure(
+          `microVM ${phaseLabel} killed by ${res.signal}`,
+          'runner-died',
+        );
+      }
+    };
+
     // Content-only sync into the microVM — never expose host node_modules
-    // symlinks across a host mount boundary.
+    // symlinks across a host mount boundary. When a session is active and a
+    // lockfile is present, initialize dependencies once in the guest session
+    // and then overlay mutated source files onto that session for each probe.
+    if (vmSession && !vmSession.initialized) {
+      const installer = lockfileInstaller(probeTree);
+      if (installer) {
+        const installCmd =
+          installer === 'pnpm'
+            ? 'corepack pnpm install --frozen-lockfile --reporter=append-only'
+            : 'npm ci --no-audit --no-fund';
+        const installRes = executeViaGuestBridgeSync(probeVerdict.socketPath, {
+          command: installCmd,
+          kind: 'install',
+          timeoutMs: timeout,
+          env: guestCommandEnv('install'),
+          workspaceDir: probeTree,
+          workspaceSessionId: vmSession.sessionId,
+          workspaceMode: 'replace',
+        });
+        handleBridgeFault(installRes, 'dependency install');
+        vmSession.initialized = true;
+        if (installRes.exitCode !== 0) {
+          throw new ProbeRunFailure(
+            `microVM dependency install exited ${String(installRes.exitCode)}`,
+            'not-run',
+          );
+        }
+      }
+    }
+
     const guestSuite = `npx --no-install vitest run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
     const bridgeResult = executeViaGuestBridgeSync(probeVerdict.socketPath, {
       command: guestSuite,
@@ -1834,36 +1912,17 @@ function runProbeSuite(
       timeoutMs: timeout,
       env: guestCommandEnv('test'),
       workspaceDir: probeTree,
+      ...(vmSession
+        ? {
+            workspaceSessionId: vmSession.sessionId,
+            // `sync` removes stale non-node_modules files (e.g. PR-added files
+            // deleted during the revert probe) while keeping guest node_modules.
+            workspaceMode: vmSession.initialized ? 'sync' : 'replace',
+          }
+        : {}),
     });
-    if (bridgeResult.timedOut || bridgeResult.protocolError) {
-      if (probeVerdict.workerPidFile) {
-        const reap = reapVmWorker({
-          pidFile: probeVerdict.workerPidFile,
-          expectedExeTokens: [probeVerdict.backend],
-        });
-        onTeardown?.(reap.status);
-      } else {
-        onTeardown?.('partial');
-      }
-    }
-    if (bridgeResult.timedOut) {
-      throw new ProbeRunFailure(
-        `microVM probe timed out after ${Math.round(timeout / 1000)}s`,
-        'runner-died',
-      );
-    }
-    if (bridgeResult.protocolError) {
-      throw new ProbeRunFailure(
-        `microVM bridge (${probeVerdict.backend}) error: ${bridgeResult.protocolError}`,
-        'not-run',
-      );
-    }
-    if (bridgeResult.signal) {
-      throw new ProbeRunFailure(
-        `microVM runner killed by ${bridgeResult.signal}`,
-        'runner-died',
-      );
-    }
+    handleBridgeFault(bridgeResult, 'probe');
+    if (vmSession) vmSession.initialized = true;
     return {
       perFile: classifyProbeRun(
         bridgeResult.exitCode ?? 1,
@@ -2217,6 +2276,7 @@ export function runOneHunkProbe(
   dependencyRoot: string = probeTree,
   trustContext?: ReviewTrustInput,
   onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
@@ -2305,6 +2365,7 @@ export function runOneHunkProbe(
         dependencyRoot,
         trustContext,
         onTeardown,
+        vmSession,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2375,6 +2436,7 @@ export function runControlMutant(
   dependencyRoot: string = probeTree,
   trustContext?: ReviewTrustInput,
   onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
   // A probe file reached through a symlink — at the leaf or an ancestor —
@@ -2412,6 +2474,7 @@ export function runControlMutant(
         dependencyRoot,
         trustContext,
         onTeardown,
+        vmSession,
       );
       // `gated` is the runner's "went red" verdict; anything else — still
       // green, collected nothing, crashed — means the control did NOT
@@ -2446,6 +2509,7 @@ export function runOneMutant(
   dependencyRoot: string = probeTree,
   trustContext?: ReviewTrustInput,
   onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   if (probeTargetEscapes(probeTree, mutant.file)) {
@@ -2517,6 +2581,7 @@ export function runOneMutant(
         dependencyRoot,
         trustContext,
         onTeardown,
+        vmSession,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2716,9 +2781,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       teardownState.status = 'clean';
     }
   };
+  const initialVerdict = sandboxVerdict(
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
+  const vmSession: MicrovmProbeSession | undefined =
+    initialVerdict.kind === 'microvm'
+      ? {
+          sessionId: `eff-${randomBytes(6).toString('hex')}`,
+          socketPath: initialVerdict.socketPath,
+          initialized: false,
+        }
+      : undefined;
   const sandboxRefusal = refuseUnsandboxedPhase(
     probeWorktreePath(worktree),
-    undefined,
+    initialVerdict,
     undefined,
     undefined,
     trustContext,
@@ -2988,6 +3067,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           worktree,
           trustContext,
           recordTeardown,
+          vmSession,
         );
         noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
@@ -3044,6 +3124,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               worktree,
               trustContext,
               recordTeardown,
+              vmSession,
             );
             if (harnessValidated === null) {
               // THREE causes share this `null` and the note must not name one:
@@ -3121,6 +3202,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 worktree,
                 trustContext,
                 recordTeardown,
+                vmSession,
               ),
             );
           }
@@ -3174,6 +3256,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 worktree,
                 trustContext,
                 recordTeardown,
+                vmSession,
               ),
             );
           }
@@ -3328,6 +3411,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           worktree,
           trustContext,
           recordTeardown,
+          vmSession,
         );
         noteDependencyFarm(revertRun.exposed);
         results.push(...revertRun.perFile);
@@ -3348,6 +3432,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           })),
         );
       } finally {
+        if (vmSession?.initialized) {
+          closeGuestSessionSync(vmSession.socketPath, vmSession.sessionId);
+        }
         // Discard the whole probe tree. There is no in-place restore to fail —
         // the shared worktree was never mutated — and a path that survives the
         // discard corrupts nothing: the next run's pre-sweep and cleanup.ts both

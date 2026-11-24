@@ -38,6 +38,7 @@
 //     never file "the build timed out" as a Critical against a PR.
 
 import type { CommandModule } from 'yargs';
+import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -51,6 +52,7 @@ import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   boxedRunLeftContainer,
+  closeGuestSessionSync,
   containerCommand,
   containerCommandEnv,
   containerName,
@@ -81,7 +83,11 @@ import {
   DEFAULT_WHOLE_CALL_BUDGET_S,
 } from './lib/build-budget.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { npmToolchainAdapter, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
+import {
+  lockfileInstaller,
+  npmToolchainAdapter,
+  TEST_COMMAND_RE,
+} from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
   type ReviewToolchainAdapter,
@@ -688,12 +694,20 @@ function containerised(
   };
 }
 
+interface MicrovmBuildSession {
+  sessionId: string;
+  socketPath: string;
+  initialized: boolean;
+  installed: boolean;
+}
+
 export function run(
   command: string,
   cwd: string,
   timeoutMs: number,
   kind: CommandKind = 'test',
   trustContext?: ReviewTrustInput,
+  vmSession?: MicrovmBuildSession,
 ): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
@@ -713,15 +727,49 @@ export function run(
   const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
   if (verdict.kind === 'microvm') {
     const guestEnv = guestCommandEnv(kind, heapMb);
+    const useReuse = Boolean(vmSession?.initialized);
     const bridgeResult = executeViaGuestBridgeSync(verdict.socketPath, {
       command,
       kind,
       timeoutMs: deadlineMs,
       env: guestEnv,
-      workspaceDir: cwd,
+      ...(useReuse ? {} : { workspaceDir: cwd }),
+      ...(vmSession
+        ? {
+            workspaceSessionId: vmSession.sessionId,
+            workspaceMode: useReuse ? 'reuse' : 'replace',
+          }
+        : {}),
     });
+    let markerFault = false;
+    if (vmSession && !bridgeResult.timedOut && !bridgeResult.protocolError) {
+      vmSession.initialized = true;
+      if (kind === 'install') {
+        // Verify the installer's real completeness marker inside the guest
+        // session (never on the host worktree, which is not mounted RW).
+        const marker =
+          lockfileInstaller(cwd) === 'pnpm'
+            ? '.modules.yaml'
+            : '.package-lock.json';
+        const markerCheck = executeViaGuestBridgeSync(verdict.socketPath, {
+          command: `test -f node_modules/${marker}`,
+          kind: 'test',
+          timeoutMs: Math.min(5_000, deadlineMs),
+          env: guestCommandEnv('test'),
+          workspaceSessionId: vmSession.sessionId,
+          workspaceMode: 'reuse',
+        });
+        markerFault =
+          markerCheck.timedOut || Boolean(markerCheck.protocolError);
+        vmSession.installed =
+          markerCheck.ok &&
+          !markerCheck.timedOut &&
+          !markerCheck.protocolError &&
+          markerCheck.exitCode === 0;
+      }
+    }
     let teardownStatus: ReviewTeardownStatus | undefined;
-    if (bridgeResult.timedOut || bridgeResult.protocolError) {
+    if (bridgeResult.timedOut || bridgeResult.protocolError || markerFault) {
       teardownStatus = verdict.workerPidFile
         ? reapVmWorker({
             pidFile: verdict.workerPidFile,
@@ -1293,6 +1341,21 @@ function runBuildTestUnguarded(
       );
     }
   }
+  const initialVerdict = sandboxVerdict(
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
+  const vmSession: MicrovmBuildSession | undefined =
+    !args.exec && initialVerdict.kind === 'microvm'
+      ? {
+          sessionId: `bt-${randomBytes(6).toString('hex')}`,
+          socketPath: initialVerdict.socketPath,
+          initialized: false,
+          installed: false,
+        }
+      : undefined;
   const runArgs = {
     root,
     changedFiles,
@@ -1302,10 +1365,11 @@ function runBuildTestUnguarded(
     buildOnly: args.buildOnly,
     budget: args.budget,
     previous,
+    ...(vmSession ? { installComplete: () => vmSession.installed } : {}),
     exec:
       args.exec ??
       ((cmd: string, cwd: string, timeoutMs: number, kind?: CommandKind) =>
-        run(cmd, cwd, timeoutMs, kind, trustContext)),
+        run(cmd, cwd, timeoutMs, kind, trustContext, vmSession)),
   };
   // BEFORE anything is executed or handed off. Under `review.sandbox: required`
   // or `tiered` with no eligible runtime answering, this phase must produce no
@@ -1316,7 +1380,7 @@ function runBuildTestUnguarded(
   // otherwise run the install and the suite with nothing consulted.
   const refusal = refuseUnsandboxedPhase(
     root,
-    undefined,
+    initialVerdict,
     undefined,
     undefined,
     trustContext,
@@ -1409,7 +1473,13 @@ function runBuildTestUnguarded(
         'and give each command a deadline it can actually meet.',
     };
   }
-  return { ...adapter.run(runArgs), run: runIdentity };
+  try {
+    return { ...adapter.run(runArgs), run: runIdentity };
+  } finally {
+    if (vmSession?.initialized) {
+      closeGuestSessionSync(vmSession.socketPath, vmSession.sessionId);
+    }
+  }
 }
 
 export const buildTestCommand: CommandModule = {

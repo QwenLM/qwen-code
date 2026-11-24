@@ -14,10 +14,12 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   type Stats,
 } from 'node:fs';
 import { createConnection } from 'node:net';
-import { isAbsolute, join, posix } from 'node:path';
+import { basename, isAbsolute, join, posix, sep } from 'node:path';
 import type { ReviewTeardownStatus } from './sandbox-trust.js';
 
 export const GUEST_EXEC_PROTOCOL = 'guest-exec-v1';
@@ -38,10 +40,13 @@ export type GuestExecFrameKind =
   | 'D'
   | 'V'
   | 'X'
+  | 'C'
   | 'O'
   | 'E'
   | 'Z'
   | 'R';
+
+export type GuestWorkspaceMode = 'replace' | 'sync' | 'overlay' | 'reuse';
 
 const VALID_FRAME_KINDS: ReadonlySet<string> = new Set([
   'H',
@@ -50,6 +55,7 @@ const VALID_FRAME_KINDS: ReadonlySet<string> = new Set([
   'D',
   'V',
   'X',
+  'C',
   'O',
   'E',
   'Z',
@@ -58,10 +64,15 @@ const VALID_FRAME_KINDS: ReadonlySet<string> = new Set([
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const SIGNAL_NAME_RE = /^SIG[A-Z0-9]+$/;
+const WORKSPACE_SESSION_ID_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 const DEFAULT_SKIP_DIRS: ReadonlySet<string> = new Set([
   '.git',
   'node_modules',
 ]);
+
+export function validateWorkspaceSessionId(id: string): boolean {
+  return WORKSPACE_SESSION_ID_RE.test(id) && id !== '.' && id !== '..';
+}
 
 function assertPositiveSafeInt(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -101,6 +112,20 @@ export interface GuestExecRequest {
   env: Record<string, string>;
   /** Optional host worktree directory packed by content (never RW-mounted). */
   workspaceDir?: string;
+  /**
+   * Optional guest-side session identifier so `install` -> `build` -> `test`
+   * (or mutation probe overlays) share the same guest-resident workspace
+   * without ever mounting or writing back to the host worktree.
+   */
+  workspaceSessionId?: string;
+  /**
+   * How the guest updates `workspaceSessionId`:
+   * - `replace` (default when uploading): create/reset session dir with uploaded files.
+   * - `sync`: remove all non-`node_modules` entries in session dir, then write uploaded files (preserves guest `node_modules` while reflecting deletions).
+   * - `overlay`: write uploaded files on top of existing session dir without deleting existing files.
+   * - `reuse`: upload no files; execute in the already-populated session dir.
+   */
+  workspaceMode?: GuestWorkspaceMode;
   packOptions?: PackWorkspaceOptions;
   maxFrameBytes?: number;
   maxOutputBytes?: number;
@@ -324,11 +349,24 @@ export function packWorkspaceFiles(
       reason: `workspace root must be a regular directory (not a symlink): ${workspaceDir}`,
     };
   }
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(workspaceDir);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `workspace root realpath failed: ${(err as Error).message}`,
+    };
+  }
 
   const files: WorkspaceFileEntry[] = [];
   let totalBytes = 0;
 
   const walk = (absDir: string, relPrefix: string): string | null => {
+    const dirReal = realpathSync(absDir);
+    if (dirReal !== rootReal && !dirReal.startsWith(rootReal + sep)) {
+      return `refusing escaped workspace directory outside root: ${relPrefix || '.'}`;
+    }
     const entries = readdirSync(absDir).sort();
     for (const name of entries) {
       if (relPrefix === '' && skipDirs.has(name)) continue;
@@ -411,11 +449,28 @@ export function buildOutgoingWireBuffer(
 ): { ok: true; wire: Buffer; runId: string } | { ok: false; reason: string } {
   const maxFrameBytes = request.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
   const runId = request.runId ?? `rev-${randomBytes(6).toString('hex')}`;
+  if (
+    request.workspaceSessionId !== undefined &&
+    !validateWorkspaceSessionId(request.workspaceSessionId)
+  ) {
+    return {
+      ok: false,
+      reason: `invalid workspaceSessionId: ${JSON.stringify(request.workspaceSessionId)}`,
+    };
+  }
+  if (request.workspaceMode === 'reuse' && !request.workspaceSessionId) {
+    return {
+      ok: false,
+      reason: 'workspaceMode "reuse" requires workspaceSessionId',
+    };
+  }
   const chunks: Buffer[] = [
     encodeFrame('H', GUEST_EXEC_PROTOCOL, maxFrameBytes),
   ];
 
-  if (request.workspaceDir) {
+  const shouldUpload =
+    request.workspaceMode !== 'reuse' && Boolean(request.workspaceDir);
+  if (shouldUpload && request.workspaceDir) {
     const packed = packWorkspaceFiles(
       request.workspaceDir,
       request.packOptions,
@@ -457,6 +512,13 @@ export function buildOutgoingWireBuffer(
     network: request.kind === 'install' ? 'restricted' : 'none',
     timeoutMs: Math.max(1, Math.round(request.timeoutMs)),
     env: request.env,
+    ...(request.workspaceSessionId !== undefined
+      ? {
+          workspaceSessionId: request.workspaceSessionId,
+          workspaceMode:
+            request.workspaceMode ?? (shouldUpload ? 'replace' : 'reuse'),
+        }
+      : {}),
   });
   try {
     chunks.push(encodeFrame('X', execPayload, maxFrameBytes));
@@ -1024,42 +1086,128 @@ function readPidFromFile(
 interface ProcessIdentity {
   alive: boolean;
   state: string;
-  cmdline: string;
+  /** Basenames of the executable itself (`comm`, `argv[0]`, and Linux `/proc/<pid>/exe`) — never `argv[1..]`. */
+  executableNames: string[];
+}
+
+function normalizeExeBasename(raw: string): string | null {
+  const trimmed = raw.trim().replace(/^-+/, '');
+  if (!trimmed) return null;
+  const base = basename(trimmed).toLowerCase();
+  return base || null;
 }
 
 function inspectProcessIdentity(
   pid: number,
   psSpawn: typeof spawnSync,
 ): ProcessIdentity | null {
-  const probe = psSpawn('ps', ['-p', String(pid), '-o', 'state=,comm=,args='], {
+  const commProbe = psSpawn('ps', ['-p', String(pid), '-o', 'state=,comm='], {
     encoding: 'utf8',
     timeout: 5_000,
   });
-  if (probe.error) return null;
-  if (probe.status !== 0) {
-    return { alive: false, state: '', cmdline: '' };
+  if (commProbe.error) return null;
+  if (commProbe.status !== 0) {
+    return { alive: false, state: '', executableNames: [] };
   }
-  const line = String(probe.stdout ?? '').trim();
+  const line = String(commProbe.stdout ?? '').trim();
   if (!line) {
-    return { alive: false, state: '', cmdline: '' };
+    return { alive: false, state: '', executableNames: [] };
   }
-  const match = /^(\S+)\s+(.*)$/.exec(line);
+  const match = /^(\S+)\s+(.+)$/.exec(line);
   const state = match?.[1] ?? '';
-  const cmdline = match?.[2] ?? '';
+  const commRaw = match?.[2] ?? '';
   // Zombie ('Z') and dead ('X') processes are no longer executing.
   const firstState = state[0]?.toUpperCase() ?? '';
   if (firstState === 'Z' || firstState === 'X') {
-    return { alive: false, state, cmdline };
+    return { alive: false, state, executableNames: [] };
   }
-  return { alive: true, state, cmdline };
+
+  const names = new Set<string>();
+  const commBase = normalizeExeBasename(commRaw);
+  if (commBase) names.add(commBase);
+
+  // Also inspect argv[0] only (first whitespace-delimited token, never argv[1..]).
+  const argsProbe = psSpawn('ps', ['-p', String(pid), '-o', 'args='], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  });
+  if (!argsProbe.error && argsProbe.status === 0) {
+    const argv0 =
+      String(argsProbe.stdout ?? '')
+        .trim()
+        .split(/\s+/)[0] ?? '';
+    const argv0Base = normalizeExeBasename(argv0);
+    if (argv0Base) names.add(argv0Base);
+  }
+
+  // On Linux, also read the kernel's `/proc/<pid>/exe` target when readable.
+  if (process.platform === 'linux') {
+    try {
+      const exeBase = normalizeExeBasename(readlinkSync(`/proc/${pid}/exe`));
+      if (exeBase) names.add(exeBase);
+    } catch {
+      // Unreadable or non-procfs environment; fall back to `comm` + `argv[0]`.
+    }
+  }
+
+  return { alive: true, state, executableNames: [...names] };
+}
+
+function executableIdentityMatches(
+  executableNames: readonly string[],
+  expectedExeTokens: readonly string[],
+): boolean {
+  for (const rawToken of expectedExeTokens) {
+    const token = normalizeExeBasename(rawToken);
+    if (!token) continue;
+    for (const exe of executableNames) {
+      if (exe === token) return true;
+      // Linux TASK_COMM_LEN truncates `comm` to 15 bytes.
+      if (token.length > 15 && exe === token.slice(0, 15)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Best-effort cleanup frame asking the guest peer to delete a persisted
+ * `workspaceSessionId` directory once a review phase finishes.
+ */
+export function closeGuestSessionSync(
+  socketPath: string,
+  workspaceSessionId: string,
+  timeoutMs: number = 5_000,
+): boolean {
+  if (!validateWorkspaceSessionId(workspaceSessionId)) return false;
+  if (!validateBridgeSocketEndpoint(socketPath).ok) return false;
+  const wire = Buffer.concat([
+    encodeFrame('H', GUEST_EXEC_PROTOCOL),
+    encodeFrame('C', workspaceSessionId),
+  ]);
+  const r = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      RAW_UDS_PUMP_SCRIPT,
+      socketPath,
+      String(DEFAULT_MAX_FRAME_BYTES),
+    ],
+    {
+      input: wire,
+      maxBuffer: DEFAULT_MAX_FRAME_BYTES + 4096,
+      timeout: Math.max(1, Math.round(timeoutMs)),
+      killSignal: 'SIGKILL',
+    },
+  );
+  return !r.error && r.status === 0;
 }
 
 /**
  * Verifies executable identity of a VMM/bridge worker PID and terminates it
  * cleanly (`SIGTERM` -> bounded wait -> `SIGKILL` -> confirmed absence).
- * Mirrors `scripts/verify-pr-vm-lifecycle.mjs` so an unrelated process sharing
- * a recycled PID is never signalled and a surviving worker always reports
- * `status: 'failed'`.
+ * Matches ONLY executable names (`comm`, `argv[0]`, Linux `/proc/<pid>/exe`),
+ * never arbitrary command-line arguments.
  */
 export function reapVmWorker(opts: VmWorkerReapOptions): VmWorkerReapResult {
   const psSpawn = opts.psSpawn ?? spawnSync;
@@ -1109,15 +1257,13 @@ export function reapVmWorker(opts: VmWorkerReapOptions): VmWorkerReapResult {
     return { status: 'clean', pid };
   }
 
-  const lowerCmd = initial.cmdline.toLowerCase();
-  const matchesToken = opts.expectedExeTokens.some(
-    (t) => t.trim().length > 0 && lowerCmd.includes(t.trim().toLowerCase()),
-  );
-  if (!matchesToken) {
+  if (
+    !executableIdentityMatches(initial.executableNames, opts.expectedExeTokens)
+  ) {
     return {
       status: 'failed',
       pid,
-      detail: `worker pid ${pid} executable identity mismatch (${JSON.stringify(initial.cmdline)}); refusing to kill unrelated process`,
+      detail: `worker pid ${pid} executable identity mismatch (observed: ${JSON.stringify(initial.executableNames)}); refusing to kill unrelated process`,
     };
   }
 

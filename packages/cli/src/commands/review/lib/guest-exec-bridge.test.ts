@@ -8,9 +8,11 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -23,6 +25,7 @@ import {
   GUEST_EXEC_PROTOCOL,
   GuestExecFrameDecoder,
   LINUX_MAX_UDS_BYTES,
+  closeGuestSessionSync,
   encodeFrame,
   evaluateGuestResponseWire,
   executeViaGuestBridge,
@@ -33,6 +36,7 @@ import {
   validateBridgeSocketEndpoint,
   validateUdsPathLength,
   validateWorkspaceRelativePath,
+  validateWorkspaceSessionId,
 } from './guest-exec-bridge.js';
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import { runBuildTest } from '../build-test.js';
@@ -49,7 +53,7 @@ const IS_WINDOWS = process.platform === 'win32';
 const GUEST_AGENT_CHILD_SCRIPT = `
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 
@@ -67,11 +71,7 @@ const server = createServer((sock) => {
   let buf = Buffer.alloc(0);
   let curFile = null;
   let fileChunks = [];
-  const guestDir = mkdtempSync(join(scratchBase, 'guest-'));
-
-  const cleanup = () => {
-    try { rmSync(guestDir, { recursive: true, force: true }); } catch {}
-  };
+  const uploadedFiles = [];
 
   sock.on('data', (chunk) => {
     buf = Buffer.concat([buf, chunk]);
@@ -86,7 +86,6 @@ const server = createServer((sock) => {
         if (mode === 'bad-ack') {
           sock.write(enc('A', 'wrong-protocol'));
           sock.end();
-          cleanup();
           return;
         }
         sock.write(enc('A', payload.toString('utf8')));
@@ -101,16 +100,59 @@ const server = createServer((sock) => {
         if (!curFile || sha(content) !== expected) {
           sock.write(enc('R', 'file digest mismatch'));
           sock.end();
-          cleanup();
           return;
         }
-        const dest = join(guestDir, curFile.path);
-        mkdirSync(dirname(dest), { recursive: true });
-        writeFileSync(dest, content);
+        uploadedFiles.push({ path: curFile.path, content });
         curFile = null;
         fileChunks = [];
+      } else if (kind === 'C') {
+        const sid = payload.toString('utf8');
+        const sessionDir = join(scratchBase, 'session-' + sid);
+        try { rmSync(sessionDir, { recursive: true, force: true }); } catch {}
+        sock.write(enc('Z', JSON.stringify({
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdoutSha256: sha(Buffer.alloc(0)),
+          stderrSha256: sha(Buffer.alloc(0)),
+        })));
+        sock.end();
+        return;
       } else if (kind === 'X') {
         const req = JSON.parse(payload.toString('utf8'));
+        const isSession = typeof req.workspaceSessionId === 'string' && req.workspaceSessionId.length > 0;
+        const guestDir = isSession
+          ? join(scratchBase, 'session-' + req.workspaceSessionId)
+          : mkdtempSync(join(scratchBase, 'guest-'));
+        const cleanup = () => {
+          if (!isSession) {
+            try { rmSync(guestDir, { recursive: true, force: true }); } catch {}
+          }
+        };
+
+        if (isSession) {
+          const wsMode = req.workspaceMode || 'replace';
+          if (wsMode === 'replace') {
+            rmSync(guestDir, { recursive: true, force: true });
+            mkdirSync(guestDir, { recursive: true });
+          } else if (wsMode === 'sync') {
+            mkdirSync(guestDir, { recursive: true });
+            for (const entry of readdirSync(guestDir)) {
+              if (entry === 'node_modules') continue;
+              rmSync(join(guestDir, entry), { recursive: true, force: true });
+            }
+          } else if (!existsSync(guestDir)) {
+            mkdirSync(guestDir, { recursive: true });
+          }
+        }
+        if (req.workspaceMode !== 'reuse') {
+          for (const f of uploadedFiles) {
+            const dest = join(guestDir, f.path);
+            mkdirSync(dirname(dest), { recursive: true });
+            writeFileSync(dest, f.content);
+          }
+        }
+
         if (mode === 'truncate') {
           sock.write(enc('O', 'partial output before drop'));
           sock.end();
@@ -131,7 +173,6 @@ const server = createServer((sock) => {
           return;
         }
         if (mode === 'hang') {
-          // Intentionally ignore request until host deadline kills the bridge.
           return;
         }
         const child = spawn('/bin/sh', ['-c', req.command], {
@@ -141,9 +182,9 @@ const server = createServer((sock) => {
         });
         const outParts = [];
         const errParts = [];
-        const writeChunked = (kind, buf) => {
-          for (let off = 0; off < buf.length; off += 65536) {
-            sock.write(enc(kind, buf.subarray(off, Math.min(off + 65536, buf.length))));
+        const writeChunked = (k, b) => {
+          for (let off = 0; off < b.length; off += 65536) {
+            sock.write(enc(k, b.subarray(off, Math.min(off + 65536, b.length))));
           }
         };
         child.stdout.on('data', (d) => {
@@ -317,6 +358,53 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
     expect(evaluateGuestResponseWire(badEndWire).protocolError).toContain(
       'malformed guest-exec end frame',
     );
+
+    // Pin maxOutputBytes boundary (Finding 3 / M10): 5 bytes rejected, 4 bytes accepted.
+    const overOutputWire = Buffer.concat([
+      encodeFrame('A', GUEST_EXEC_PROTOCOL),
+      encodeFrame('O', '123'),
+      encodeFrame('E', '45'),
+      encodeFrame(
+        'Z',
+        JSON.stringify({
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdoutSha256: sha256Hex('123'),
+          stderrSha256: sha256Hex('45'),
+        }),
+      ),
+    ]);
+    const overOut = evaluateGuestResponseWire(overOutputWire, {
+      maxOutputBytes: 4,
+    });
+    expect(overOut.ok).toBe(false);
+    expect(overOut.protocolError).toContain('exceeded maxOutputBytes');
+
+    const exactOutputWire = Buffer.concat([
+      encodeFrame('A', GUEST_EXEC_PROTOCOL),
+      encodeFrame('O', '12'),
+      encodeFrame('E', '34'),
+      encodeFrame(
+        'Z',
+        JSON.stringify({
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdoutSha256: sha256Hex('12'),
+          stderrSha256: sha256Hex('34'),
+        }),
+      ),
+    ]);
+    expect(
+      evaluateGuestResponseWire(exactOutputWire, { maxOutputBytes: 4 }).ok,
+    ).toBe(true);
+
+    // Session ID validation rejects traversal/whitespace.
+    expect(validateWorkspaceSessionId('bt-1234abcd')).toBe(true);
+    expect(validateWorkspaceSessionId('../escape')).toBe(false);
+    expect(validateWorkspaceSessionId('bad id')).toBe(false);
+    expect(validateWorkspaceSessionId('..')).toBe(false);
   });
 
   it('packs regular workspace files by content while refusing symlinks, traversal, and over-budget trees', () => {
@@ -392,27 +480,31 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
   );
 
   it.skipIf(IS_WINDOWS)(
-    'reapVmWorker checks executable identity, kills TERM-ignoring live worker, and preserves unrelated canary',
+    'reapVmWorker matches executable identity only (never argv substrings), kills TERM-ignoring worker, and preserves canary',
     async () => {
       const dir = mkdtempSync(join('/tmp', 'qvm-reap-'));
       tmpDirs.push(dir);
 
-      const target = spawn(
+      // Decoy has "firecracker" ONLY in argv, not in its executable name.
+      const argvDecoy = spawn(
         '/bin/sh',
-        ['-c', 'trap "" TERM; sleep 60 # qvm-target-token'],
+        ['-c', 'sleep 60 # firecracker-decoy'],
         { stdio: 'ignore' },
       );
-      const canary = spawn(
-        '/bin/sh',
-        ['-c', 'sleep 60 # qvm-innocent-canary'],
-        { stdio: 'ignore' },
-      );
-      children.push(target, canary);
-      expect(target.pid).toBeGreaterThan(1);
-      expect(canary.pid).toBeGreaterThan(1);
+      const canary = spawn('/bin/sh', ['-c', 'sleep 60'], { stdio: 'ignore' });
+      children.push(argvDecoy, canary);
+      expect(argvDecoy.pid).toBeGreaterThan(1);
+
+      // Copy /bin/sleep to a uniquely named real binary so comm / argv[0] / /proc/exe carry its exact name.
+      const customBin = join(dir, 'qvm-reap-bin');
+      copyFileSync('/bin/sleep', customBin);
+      chmodSync(customBin, 0o755);
+      const namedTarget = spawn(customBin, ['60'], { stdio: 'ignore' });
+      children.push(namedTarget);
+      expect(namedTarget.pid).toBeGreaterThan(1);
 
       const pidFile = join(dir, 'worker.pid');
-      writeFileSync(pidFile, `${target.pid}\n`);
+      writeFileSync(pidFile, `${namedTarget.pid}\n`);
 
       // Self-PID must never be signalled.
       const selfRefused = reapVmWorker({
@@ -428,28 +520,42 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
       expect(
         reapVmWorker({
           pidFile: linkPidFile,
-          expectedExeTokens: ['qvm-target-token'],
+          expectedExeTokens: ['qvm-reap-bin'],
         }).status,
       ).toBe('failed');
 
-      // Mismatched executable identity must NOT kill the process.
-      const mismatch = reapVmWorker({
-        pidFile,
-        expectedExeTokens: ['firecracker-definitely-not-here'],
+      // Finding 4: token appearing ONLY in argv must NOT match executable identity.
+      const decoyRefused = reapVmWorker({
+        pid: argvDecoy.pid!,
+        expectedExeTokens: ['firecracker-decoy'],
       });
-      expect(mismatch.status).toBe('failed');
-      expect(mismatch.detail).toContain('identity mismatch');
-      expect(() => process.kill(target.pid!, 0)).not.toThrow();
+      expect(decoyRefused.status).toBe('failed');
+      expect(decoyRefused.detail).toContain('identity mismatch');
+      expect(() => process.kill(argvDecoy.pid!, 0)).not.toThrow();
 
-      // Matching identity escalates SIGTERM -> SIGKILL and verifies exit.
-      const reaped = reapVmWorker({
+      // Exact executable name matches and kills the real binary worker.
+      const reapedNamed = reapVmWorker({
         pidFile,
-        expectedExeTokens: ['qvm-target-token'],
+        expectedExeTokens: ['qvm-reap-bin'],
+        killWaitMs: 500,
+      });
+      expect(reapedNamed.status).toBe('clean');
+
+      // TERM-ignoring worker escalates SIGTERM -> SIGKILL when executable identity matches.
+      const termResistant = spawn('/bin/sh', ['-c', 'trap "" TERM; sleep 60'], {
+        stdio: 'ignore',
+      });
+      children.push(termResistant);
+      const reapedResistant = reapVmWorker({
+        pid: termResistant.pid!,
+        expectedExeTokens: ['sh'],
         killWaitMs: 150,
       });
-      expect(reaped.status).toBe('clean');
-      // Canary remains untouched.
+      expect(reapedResistant.status).toBe('clean');
+
+      // Unrelated canary & argv decoy remain untouched.
       expect(() => process.kill(canary.pid!, 0)).not.toThrow();
+      expect(() => process.kill(argvDecoy.pid!, 0)).not.toThrow();
     },
   );
 
@@ -538,6 +644,54 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
       });
       expect(hangRes.ok).toBe(false);
       expect(hangRes.timedOut).toBe(true);
+
+      // 5. Persistent workspaceSessionId carries files across replace -> reuse -> overlay -> sync (deletions) -> close.
+      const sid = 'sess-continuity-1';
+      writeFileSync(join(hostTree, 'src', 'added.txt'), 'pr-added-file\n');
+      const step1 = executeViaGuestBridgeSync(sockOk, {
+        command: 'mkdir -p node_modules && echo dep-ok > node_modules/dep.txt',
+        kind: 'install',
+        timeoutMs: 5_000,
+        env: {},
+        workspaceDir: hostTree,
+        workspaceSessionId: sid,
+        workspaceMode: 'replace',
+      });
+      expect(step1.ok).toBe(true);
+      const step2 = executeViaGuestBridgeSync(sockOk, {
+        command:
+          'cat node_modules/dep.txt && cat src/hello.txt && cat src/added.txt',
+        kind: 'test',
+        timeoutMs: 5_000,
+        env: {},
+        workspaceSessionId: sid,
+        workspaceMode: 'reuse',
+      });
+      expect(step2.ok).toBe(true);
+      expect(step2.stdout).toContain('dep-ok');
+      expect(step2.stdout).toContain('original-host-bytes');
+      expect(step2.stdout).toContain('pr-added-file');
+      // Delete src/added.txt on host and run `sync`: guest must remove src/added.txt while preserving node_modules.
+      rmSync(join(hostTree, 'src', 'added.txt'));
+      writeFileSync(join(hostTree, 'src', 'hello.txt'), 'synced-mutated\n');
+      const step3 = executeViaGuestBridgeSync(sockOk, {
+        command:
+          'cat node_modules/dep.txt && cat src/hello.txt && test ! -e src/added.txt && echo DELETED_IN_GUEST',
+        kind: 'test',
+        timeoutMs: 5_000,
+        env: {},
+        workspaceDir: hostTree,
+        workspaceSessionId: sid,
+        workspaceMode: 'sync',
+      });
+      expect(step3.ok).toBe(true);
+      expect(step3.stdout).toContain('dep-ok');
+      expect(step3.stdout).toContain('synced-mutated');
+      expect(step3.stdout).toContain('DELETED_IN_GUEST');
+      expect(closeGuestSessionSync(sockOk, sid)).toBe(true);
+      expect(readdirSync(scratch).some((d) => d === `session-${sid}`)).toBe(
+        false,
+      );
     },
   );
 
