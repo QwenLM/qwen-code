@@ -5182,7 +5182,6 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active?.promptId !== registration.promptId)
       return 'turn_mismatch';
     if (session.recoveredTurn !== undefined) return 'recovered_turn';
-    if (session.definition?.['lineage'] !== undefined) return 'lineage';
     if (
       session.stores?.supportsActionParking?.() !== true ||
       session.stores?.supportsWakeDispatch?.() !== true

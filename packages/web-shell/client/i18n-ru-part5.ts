@@ -844,8 +844,11 @@ export const RU_PART5: Record<
   'userMessage.showMore': 'Показать ещё',
   'userMessage.showLess': 'Свернуть',
   'userMessage.automatic.title': 'Автоматическое срабатывание',
-  'userMessage.sendFailed': 'Не удалось отправить',
-  'userMessage.retrySend': 'Повторить отправку сообщения',
+  'userMessage.retrySend': 'Отправить снова',
+  'userMessage.retryUncertain':
+    'Возможно, не доставлено — нажмите, чтобы отправить снова',
+  'userMessage.deliveryUncertain':
+    'Сообщение могло не дойти. Нажмите ! слева, чтобы отправить снова.',
   'userMessage.edit': 'Изменить сообщение',
   'message.moreActions': 'Другие действия с сообщением',
   'userMessage.editSubmit': 'Отправить',
