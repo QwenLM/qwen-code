@@ -6332,11 +6332,7 @@ export class LlmClient {
           };
         }
 
-        if (
-          goalPermit &&
-          (stopOutput?.isBlockingDecision() ||
-            stopOutput?.shouldStopExecution())
-        ) {
+        if (goalPermit && stopOutput?.isBlockingDecision()) {
           const continueReason = stopOutput.getEffectiveReason();
           const { iterationCount, reasons, cap, capped } =
             this.nextStopHookBlock(prompt_id, continueReason);
@@ -6421,12 +6417,9 @@ export class LlmClient {
           }
         }
 
-        // For Stop hooks, blocking/stop execution should force continuation
-        if (
-          !goalPermit &&
-          (stopOutput?.isBlockingDecision() ||
-            stopOutput?.shouldStopExecution())
-        ) {
+        // A blocking Stop hook forces continuation. `continue: false` without
+        // a block lets the turn end.
+        if (!goalPermit && stopOutput?.isBlockingDecision()) {
           // Check if aborted before continuing
           if (signal.aborted) {
             endCurrentInteraction('cancelled');
@@ -6535,6 +6528,13 @@ export class LlmClient {
           // ToolResult turn still needs to consume the recall result.
           normalCompletion = true;
           return hookTurn;
+        }
+
+        if (stopOutput?.shouldStopExecution() && stopOutput.stopReason) {
+          yield {
+            type: LlmEventType.HookSystemMessage,
+            value: stopOutput.stopReason,
+          };
         }
 
         // The stop was allowed, so this prompt is no longer hook-forced.

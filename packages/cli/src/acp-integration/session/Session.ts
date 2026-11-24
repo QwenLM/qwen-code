@@ -10375,15 +10375,15 @@ export class Session implements SessionContext {
           await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
         }
 
-        if (
-          stopOutput?.isBlockingDecision() ||
-          stopOutput?.shouldStopExecution()
-        ) {
+        if (stopOutput?.isBlockingDecision()) {
           externalReason = stopOutput.getEffectiveReason();
           stopHookIterationCount++;
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
         } else {
+          if (stopOutput?.shouldStopExecution() && stopOutput.stopReason) {
+            await this.messageEmitter.emitAgentMessage(stopOutput.stopReason);
+          }
           // Bounded: the guard's TODO_STOP_GUARD_MAX_ATTEMPTS caps total guard
           // continuations, and after exhaustion a non-blocking allow exits the
           // loop (!externalReason && !guardContinuation), so the reset cannot

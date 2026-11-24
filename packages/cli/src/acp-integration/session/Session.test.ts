@@ -51035,6 +51035,39 @@ describe('Session', () => {
           ]);
         });
 
+        it('ends the turn and shows stopReason when a Stop hook returns continue: false without a block', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { continue: false, stopReason: 'Build is red.' },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(agentMessageChunks()).toContain('Build is red.');
+        });
+
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
           const messageBus = {
             request: vi.fn().mockImplementation(async (request) => ({

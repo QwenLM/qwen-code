@@ -14337,6 +14337,41 @@ Other open files:
         });
       });
 
+      it.each([false, true])(
+        'ends the turn and shows stopReason when a Stop hook returns continue: false without a block (goal permit: %s)',
+        async (withGoal) => {
+          const goal = withGoal ? installGoalRuntime() : undefined;
+          installMessageBus(
+            vi.fn().mockResolvedValue({
+              output: { continue: false, stopReason: 'Build is red.' },
+              stopHookCount: 1,
+            }),
+            'Stop',
+          );
+          notDoneChat();
+          mockTurnRunFn.mockReturnValue(textTurn('not done'));
+
+          const events = await run(
+            [{ text: 'Hi' }],
+            'prompt-stop-continue-false',
+            goal
+              ? {
+                  type: SendMessageType.UserQuery,
+                  goalPermit: goal.permit,
+                  goalTurnKey: 'goal-runtime:turn-1',
+                }
+              : undefined,
+          );
+
+          expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
+          expect(events).not.toContainEqual(stopHookLoop);
+          expect(events).toContainEqual({
+            type: LlmEventType.HookSystemMessage,
+            value: 'Build is red.',
+          });
+        },
+      );
+
       it('gives a blocking Stop hook continuation a fresh per-turn tool-call budget', async () => {
         // First Stop check blocks (like a /goal "not met" verdict); the
         // second allows the loop to end.
