@@ -9,7 +9,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage;
@@ -51,8 +52,9 @@ public final class JdbcExternalWorkspaceOwnership {
         String storage = request.getStorageId();
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
         RegisteredExternalStorage registration;
-        try (var statement = connection.prepareStatement("SELECT * FROM ma_storage WHERE alias_key = ? FOR UPDATE")) {
-            statement.setString(1, RuntimeAdmissionFences.storageAliasKey(tenant, storage));
+        try (var statement = connection.prepareStatement("SELECT * FROM ma_storage WHERE tenant_id = ? AND storage_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenant);
+            JdbcRepositorySupport.setIdentity(statement, 2, storage);
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))
                         || !java.util.Set.of("EXTERNAL", "EPHEMERAL")
@@ -72,17 +74,17 @@ public final class JdbcExternalWorkspaceOwnership {
                                 && !tenant.equals(
                                         registration.ephemeralTenantId())
                         || !storage.equals(registration.tenantWorkspaceId())
-                        || !registration.ownerKey().equals(row.getString("physical_key"))
+                        || !registration.ownerKey().equals(ManagedSchemaRows.identity(row, "physical_id"))
                         || registration.registrationRevision() != row.getLong("registration_revision")) {
                     throw unavailable();
                 }
             }
         }
         requireBoot(binding, registration);
-        try (var statement = connection.prepareStatement("SELECT * FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
-            statement.setString(1, registration.ownerKey());
+        try (var statement = connection.prepareStatement("SELECT * FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, registration.ownerKey());
             try (var row = statement.executeQuery()) {
-                if (!row.next() || !registration.ownerKey().equals(row.getString("storage_key"))
+                if (!row.next() || !registration.ownerKey().equals(ManagedSchemaRows.identity(row, "physical_id"))
                         || !registration.storageKind().equals(
                                 row.getString("storage_kind"))
                         || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))
@@ -93,7 +95,7 @@ public final class JdbcExternalWorkspaceOwnership {
                     throw unavailable();
                 }
                 Long generation = row.getObject("runtime_generation") == null ? null : row.getLong("runtime_generation");
-                Owner owner = new Owner(registration, row.getString("holder_key"), row.getString("binding_id"),
+                Owner owner = new Owner(registration, ManagedSchemaRows.identity(row, "holder_id"), row.getString("binding_id"),
                         generation, row.getString("runtime_session_id"));
                 if (!owner.empty() && (owner.holder() == null || owner.bindingId() == null
                         || owner.generation() == null
@@ -217,7 +219,8 @@ public final class JdbcExternalWorkspaceOwnership {
         try (var statement = connection.prepareStatement("SELECT w.workspace_generation, w.storage_id FROM ma_workspace w"
                 + " JOIN ma_session s ON s.tenant_id = w.tenant_id AND s.workspace_id = w.workspace_id"
                 + " JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id"
-                + " AND a.actor_id = COALESCE(s.owner_actor_key, s.creator_actor_key) WHERE w.tenant_id = ? AND w.workspace_id = ?"
+                + " AND a.actor_id = COALESCE(s.owner_actor_key,"
+                + " s.creator_actor_key) WHERE w.tenant_id = ? AND w.workspace_id = ?"
                 + " AND s.session_id = ? AND w.state = 'ACTIVE' AND a.role IN ('OPERATOR', 'OWNER') FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());
@@ -261,10 +264,11 @@ public final class JdbcExternalWorkspaceOwnership {
                                 || session.getState() == RuntimeSessionRecord.State.READY && !"READY".equals(row.getString("session_state")))
                         || !acquiring && !java.util.Set.of("ACQUIRING", "READY", "RELEASING", "RELEASED").contains(row.getString("session_state"))
                         || row.getBoolean("is_rewind_pending")
-                        || row.getString("execution_storage_key") != null && !physical.equals(row.getString("execution_storage_key"))) {
+                        || ManagedSchemaRows.identity(row, "execution_storage_id") != null
+                                && !physical.equals(ManagedSchemaRows.identity(row, "execution_storage_id"))) {
                     throw unavailable();
                 }
-                return physical.equals(row.getString("execution_storage_key"));
+                return physical.equals(ManagedSchemaRows.identity(row, "execution_storage_id"));
             }
         }
     }
@@ -282,8 +286,8 @@ public final class JdbcExternalWorkspaceOwnership {
     private static void requireSoleMember(Connection connection, Owner owner, RuntimeBindingRecord binding,
             RuntimeSessionRecord session) throws SQLException {
         try (var statement = connection.prepareStatement("SELECT binding_id, runtime_generation, runtime_session_id"
-                + " FROM ma_runtime_session WHERE execution_storage_key = ? FOR UPDATE")) {
-            statement.setString(1, owner.registration().ownerKey());
+                + " FROM ma_runtime_session WHERE execution_storage_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, owner.registration().ownerKey());
             try (var row = statement.executeQuery()) {
                 while (row.next()) {
                     if (!binding.getBindingId().equals(row.getString("binding_id"))
@@ -303,9 +307,9 @@ public final class JdbcExternalWorkspaceOwnership {
             RuntimeSessionRecord session) throws SQLException {
         held(connection, owner, binding, session, true);
         if (owner.empty()) {
-            try (var statement = connection.prepareStatement("UPDATE ma_storage_owner SET holder_key = ?, binding_id = ?,"
-                    + " runtime_generation = ?, runtime_session_id = ? WHERE storage_key = ?")) {
-                statement.setString(1, holderKey(binding, session));
+            try (var statement = connection.prepareStatement("UPDATE ma_storage_owner SET holder_id = ?, binding_id = ?,"
+                    + " runtime_generation = ?, runtime_session_id = ? WHERE physical_id = ?")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, holderKey(binding, session));
                 JdbcRepositorySupport.setIdentity(statement, 2, binding.getBindingId());
                 statement.setLong(3, binding.getGeneration());
                 JdbcRepositorySupport.setIdentity(statement, 4,
@@ -313,15 +317,15 @@ public final class JdbcExternalWorkspaceOwnership {
                                 binding.getRequest())
                                         ? null
                                         : session.getRuntimeSessionId());
-                statement.setString(5, owner.registration().ownerKey());
+                JdbcRepositorySupport.setIdentity(statement, 5, owner.registration().ownerKey());
                 if (statement.executeUpdate() != 1) {
                     throw unavailable();
                 }
             }
         }
-        try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = ?"
+        try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_id = ?"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?")) {
-            statement.setString(1, owner.registration().ownerKey());
+            JdbcRepositorySupport.setIdentity(statement, 1, owner.registration().ownerKey());
             JdbcRepositorySupport.setIdentity(statement, 2, binding.getBindingId());
             statement.setLong(3, binding.getGeneration());
             JdbcRepositorySupport.setIdentity(statement, 4, session.getRuntimeSessionId());
@@ -332,10 +336,10 @@ public final class JdbcExternalWorkspaceOwnership {
     public static void releaseMember(Connection connection, Owner owner, RuntimeBindingRecord binding,
             RuntimeSessionRecord session) throws SQLException {
         held(connection, owner, binding, session, false);
-        try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " is_rewind_pending = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+        try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_id = NULL,"
+                + " is_rewind_pending = FALSE WHERE execution_storage_id = ? AND binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?")) {
-            statement.setString(1, owner.registration().ownerKey());
+            JdbcRepositorySupport.setIdentity(statement, 1, owner.registration().ownerKey());
             JdbcRepositorySupport.setIdentity(statement, 2, binding.getBindingId());
             statement.setLong(3, binding.getGeneration());
             JdbcRepositorySupport.setIdentity(statement, 4, session.getRuntimeSessionId());
@@ -363,12 +367,12 @@ public final class JdbcExternalWorkspaceOwnership {
         // and its row carries no Session id. A sole owner has exactly one member
         // (requireDrainMembers), so for it this is the same unconditional clear.
         if (!owner.empty() && (!shared || !hasMembers(connection, owner))) {
-            try (var statement = connection.prepareStatement("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
-                    + " runtime_generation = NULL, runtime_session_id = NULL WHERE storage_key = ? AND holder_key = ?"
+            try (var statement = connection.prepareStatement("UPDATE ma_storage_owner SET holder_id = NULL, binding_id = NULL,"
+                    + " runtime_generation = NULL, runtime_session_id = NULL WHERE physical_id = ? AND holder_id = ?"
                     + " AND binding_id = ? AND runtime_generation = ? AND runtime_session_id "
                     + (shared ? "IS NULL" : "= ?"))) {
-                statement.setString(1, owner.registration().ownerKey());
-                statement.setString(2, holderKey(current, session));
+                JdbcRepositorySupport.setIdentity(statement, 1, owner.registration().ownerKey());
+                JdbcRepositorySupport.setIdentity(statement, 2, holderKey(current, session));
                 JdbcRepositorySupport.setIdentity(statement, 3, current.getBindingId());
                 statement.setLong(4, current.getGeneration());
                 if (!shared) {
@@ -423,8 +427,8 @@ public final class JdbcExternalWorkspaceOwnership {
         if (binding == null) {
             return false;
         }
-        return jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
-                        String.class, RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId()))
+        return jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
+                        String.class, binding.getTenantId(), binding.getStorageId())
                 .stream()
                 .anyMatch(kind -> java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(kind));
     }
@@ -452,7 +456,8 @@ public final class JdbcExternalWorkspaceOwnership {
         String expected = HarnessOwnership.sharesRuntimeSessions(
                         binding.getRequest())
                 ? sharedHolderKey(binding)
-                : ManagedSchemaKeys.key("external-workspace-holder/1",
+                : ManagedIdentityRefs.ref(ManagedIdentityRefs.HOLDER_REF_BYTES,
+                        "external-workspace-holder/1",
                         binding.getBindingId(),
                         Long.toString(binding.getGeneration()),
                         owner.sessionId());
@@ -479,8 +484,8 @@ public final class JdbcExternalWorkspaceOwnership {
             held(connection, owner, binding, session, false);
         }
         try (var statement = connection.prepareStatement("SELECT binding_id, runtime_generation, runtime_session_id"
-                + " FROM ma_runtime_session WHERE execution_storage_key = ? FOR UPDATE")) {
-            statement.setString(1, owner.registration().ownerKey());
+                + " FROM ma_runtime_session WHERE execution_storage_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, owner.registration().ownerKey());
             try (var row = statement.executeQuery()) {
                 while (row.next()) {
                     if (owner.empty() || !binding.getBindingId().equals(row.getString("binding_id"))
@@ -496,8 +501,8 @@ public final class JdbcExternalWorkspaceOwnership {
     /** Whether any Session still holds membership of this physical storage. */
     private static boolean hasMembers(Connection connection, Owner owner) throws SQLException {
         try (var statement = connection.prepareStatement("SELECT binding_id FROM ma_runtime_session"
-                + " WHERE execution_storage_key = ? FOR UPDATE")) {
-            statement.setString(1, owner.registration().ownerKey());
+                + " WHERE execution_storage_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, owner.registration().ownerKey());
             try (var row = statement.executeQuery()) {
                 return row.next();
             }
@@ -508,12 +513,14 @@ public final class JdbcExternalWorkspaceOwnership {
         if (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
             return sharedHolderKey(binding);
         }
-        return ManagedSchemaKeys.key("external-workspace-holder/1", binding.getBindingId(),
+        return ManagedIdentityRefs.ref(ManagedIdentityRefs.HOLDER_REF_BYTES,
+                "external-workspace-holder/1", binding.getBindingId(),
                 Long.toString(binding.getGeneration()), session.getRuntimeSessionId());
     }
 
     private static String sharedHolderKey(RuntimeBindingRecord binding) {
-        return ManagedSchemaKeys.key("external-workspace-shared/1",
+        return ManagedIdentityRefs.ref(ManagedIdentityRefs.HOLDER_REF_BYTES,
+                "external-workspace-shared/1",
                 binding.getBindingId(),
                 Long.toString(binding.getGeneration()));
     }

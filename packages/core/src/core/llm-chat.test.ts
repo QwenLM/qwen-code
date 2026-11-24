@@ -14,6 +14,10 @@ import {
   getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import { HookSystem } from '../hooks/hookSystem.js';
 import { HookEventName, HookType } from '../hooks/types.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
@@ -74,6 +78,8 @@ import {
   getApiHistoryPromptId,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { buildCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
+import { postProcessSummary } from '../services/postCompactAttachments.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
@@ -111,7 +117,11 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { clampOutputTokensToWindow } from './tokenLimits.js';
-import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import {
+  EMPTY_AUTO_MEMORY_CATALOG,
+  findLatestAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import {
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
@@ -332,6 +342,33 @@ describe('LlmChat', async () => {
   let chat: LlmChat;
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
+
+  it('omits an inherited transcript hint in a chat without its recorder', () => {
+    const hint = buildCompactionTranscriptHint('/parent/session.jsonl');
+    const summary = postProcessSummary('Earlier summary', hint);
+    const parentHistory: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'Startup prelude' }, { text: summary }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: `This literal example should survive: ${hint}` }],
+      },
+    ];
+    const child = new LlmChat(mockConfig, {}, parentHistory);
+
+    expect(child.getHistory()[0].parts).toEqual([
+      { text: 'Startup prelude' },
+      { text: postProcessSummary('Earlier summary') },
+    ]);
+    expect(child.getHistory()[2]).toEqual(parentHistory[2]);
+    expect(parentHistory[0].parts?.[1].text).toBe(summary);
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -3437,6 +3474,34 @@ describe('LlmChat', async () => {
       expect(snapshots(requestAt(5).contents as Content[])).toHaveLength(1);
     });
 
+    it('omits the fresh empty catalog and updates restored sessions when entries change', async () => {
+      let catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const send = async (id: string) => {
+        mockStream(textStream('done'));
+        await sendDrain(id, id);
+        const calls = vi.mocked(mockContentGenerator.generateContentStream).mock
+          .calls;
+        return findLatestAutoMemorySnapshot(
+          calls.at(-1)?.[0].contents as Content[],
+        );
+      };
+
+      expect(await send('fresh')).toBeUndefined();
+      const entry = '- [Fresh entry](topic.md)';
+      catalog = entry;
+      expect((await send('one-entry'))?.text).toContain(entry);
+
+      catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      const empty = await send('deleted-last-entry');
+      expect(empty?.text).toContain(EMPTY_AUTO_MEMORY_CATALOG);
+      chat.setHistory(structuredClone(chat.getHistory()));
+      expect(await send('resume-while-empty')).toEqual(empty);
+
+      catalog = entry;
+      expect((await send('restored-entry'))?.text).toContain(entry);
+    });
+
     it('records a snapshot only after successful assembly and deduplicates later sends', async () => {
       mockConfig.getAutoMemoryContext = () => 'catalog';
       const recordMemoryCatalogSnapshot = vi.fn();
@@ -5016,6 +5081,42 @@ describe('LlmChat', async () => {
       expect(infoOf(events[0]).originalTokenCountIsEstimated).toBe(false);
       expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(events[1]).not.toHaveProperty('retryInfo');
+      expect(hasChunkText(events, 'answer after compact')).toBe(true);
+    });
+
+    it('reactively compresses and retries once after a Kimi longer-than-context-length error', async () => {
+      const compressedHistory = [
+        userText('summary'),
+        modelText('ack'),
+        userText('latest'),
+      ];
+      const expectedRequestContents = structuredClone(compressedHistory);
+      const compressSpy = reactiveCompaction(1_347_344, compressedHistory);
+      mockRequests(
+        new Error(
+          "400 The input (1347344 tokens) is longer than the model's context length (1048576 tokens).",
+        ),
+        textStream('answer after compact'),
+      );
+
+      const events = await sendCollect(
+        'latest',
+        'prompt-id-reactive-compact-kimi',
+      );
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      const reactiveOpts = compressSpy.mock.calls[1][1];
+      expect(reactiveOpts.force).toBe(true);
+      expect(reactiveOpts.trigger).toBe('auto');
+      expect(reactiveOpts.originalTokenCount).toBe(1_347_344);
+      expect(reactiveOpts.precomputedEffectiveTokens).toBe(1_347_344);
+      expect(reactiveOpts.observedServerCeiling).toBe(1_048_576);
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      expectStreamCalls(2);
+      expect(requestAt(1).contents).toEqual(expectedRequestContents);
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(infoOf(events[0]).originalTokenCountIsEstimated).toBe(false);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
     });
 
@@ -7580,6 +7681,14 @@ describe('LlmChat', async () => {
           parts: [nestedPart],
         },
       };
+      const topRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/top.output'],
+      };
+      const responseRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/response.output'],
+      };
+      setToolOutputRecovery(topLevelPart, topRecovery);
+      setToolOutputRecovery(functionResponsePart, responseRecovery);
       const entry = content('user', topLevelPart, functionResponsePart);
       chat.addHistory(entry);
       const structuredCloneSpy = forbidDeepClone();
@@ -7588,12 +7697,17 @@ describe('LlmChat', async () => {
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
       expect(history).toEqual([entry]);
+      expect(JSON.stringify(history)).not.toContain('/tmp/tool-results/');
       expect(history[0]).not.toBe(entry);
       expect(history[0]!.parts).not.toBe(entry.parts);
       expect(history[0]!.parts![0]).not.toBe(topLevelPart);
       expect(history[0]!.parts![0]!.inlineData).toBe(topInlineData);
+      expect(getToolOutputRecovery(history[0]!.parts![0]!)).toBe(topRecovery);
       const copiedFunctionResponsePart = history[0]!.parts![1]!;
       expect(copiedFunctionResponsePart).not.toBe(functionResponsePart);
+      expect(getToolOutputRecovery(copiedFunctionResponsePart)).toBe(
+        responseRecovery,
+      );
       expect(copiedFunctionResponsePart.functionResponse).not.toBe(
         functionResponsePart.functionResponse,
       );

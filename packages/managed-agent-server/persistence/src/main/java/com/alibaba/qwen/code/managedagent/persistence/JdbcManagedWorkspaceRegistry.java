@@ -7,7 +7,6 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -129,33 +128,31 @@ public class JdbcManagedWorkspaceRegistry
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return false;
         }
-        List<byte[]> creators = jdbc.queryForList(
+        List<String> creators = jdbc.queryForList(
                 "SELECT creator_actor_key FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                byte[].class, tenantId, sessionId);
-        return creators.size() == 1 && java.util.Arrays.equals(creators.getFirst(), key);
+                String.class, tenantId, sessionId);
+        return creators.size() == 1 && actorId.equals(creators.getFirst());
     }
 
     public boolean isSessionOwner(String tenantId, String actorId, String sessionId) {
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return false;
         }
-        List<byte[]> owners = jdbc.queryForList(
+        List<String> owners = jdbc.queryForList(
                 "SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                byte[].class, tenantId, sessionId);
-        return owners.size() == 1 && java.util.Arrays.equals(owners.getFirst(), key);
+                String.class, tenantId, sessionId);
+        return owners.size() == 1 && actorId.equals(owners.getFirst());
     }
 
     /**
@@ -167,9 +164,8 @@ public class JdbcManagedWorkspaceRegistry
         if (actorId == null || actorId.isEmpty()) {
             return WorkspaceAccess.NONE;
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return WorkspaceAccess.NONE;
         }
@@ -196,7 +192,7 @@ public class JdbcManagedWorkspaceRegistry
                         + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
                         + " 'OWNER')",
                 String.class, tenantId, workspaceId,
-                key);
+                actorId);
         // An out-of-enum stored value (only reachable by an out-of-band
         // write past V53's CHECK) fails closed exactly like a revoked
         // grant, never into valueOf's IllegalArgumentException.
@@ -212,21 +208,21 @@ public class JdbcManagedWorkspaceRegistry
 
     public List<WorkspaceSummary> listReadable(String tenantId,
             String actorId, String afterId, int limit) {
-        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
-        byte[] after = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(afterId == null ? "" : afterId);
+        ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        String after = afterId == null ? "" : afterId;
         List<WorkspaceRow> rows = jdbc.query("SELECT r.workspace_id, r.display_name, r.state, r.workspace_kind, r.workspace_generation,"
                         + " r.storage_id, r.config_ref, r.policy_ref, s.storage_kind, a.role FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id AND a.workspace_id = r.workspace_id"
                         + " LEFT JOIN ma_storage s ON s.tenant_id = r.tenant_id AND s.storage_id = r.storage_id"
                         + " WHERE r.tenant_id = ? AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
                         + " AND r.workspace_id > ? ORDER BY r.workspace_id LIMIT ?",
-                (result, row) -> workspaceRow(result), tenantId, key, after, limit);
+                (result, row) -> workspaceRow(result), tenantId, actorId, after, limit);
         return withDefaults(tenantId, summarize(tenantId, rows));
     }
 
     public WorkspaceSummary findReadable(String tenantId, String actorId,
             String workspaceId) {
-        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         List<WorkspaceRow> rows = jdbc.query(
                 "SELECT r.workspace_id, r.display_name, r.state,"
                         + " r.workspace_kind, r.workspace_generation, r.storage_id,"
@@ -238,7 +234,7 @@ public class JdbcManagedWorkspaceRegistry
                         + " WHERE r.tenant_id = ? AND r.workspace_id = ?"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
                         + " 'OPERATOR', 'OWNER')",
-                (result, row) -> workspaceRow(result), tenantId, workspaceId, key);
+                (result, row) -> workspaceRow(result), tenantId, workspaceId, actorId);
         return rows.isEmpty() ? null : findOneReadable(tenantId, rows.getFirst());
     }
 
@@ -254,14 +250,14 @@ public class JdbcManagedWorkspaceRegistry
         if (workspaceIds.isEmpty()) {
             return java.util.Map.of();
         }
-        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         String plain = String.join(", ", java.util.Collections.nCopies(
                 workspaceIds.size(), "?"));
         List<Object> arguments = new java.util.ArrayList<>(
                 workspaceIds.size() + 2);
         arguments.add(tenantId);
         arguments.addAll(workspaceIds);
-        arguments.add(key);
+        arguments.add(actorId);
         List<WorkspaceRow> rows = jdbc.query(
                 "SELECT r.workspace_id, r.workspace_generation,"
                         + " r.storage_id, r.state, r.config_ref, r.policy_ref,"
@@ -464,9 +460,8 @@ public class JdbcManagedWorkspaceRegistry
             throw new ManagedAgentException(401,
                     "actor_required", "A trusted actor is required.");
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             throw new ManagedAgentException(403,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
@@ -496,7 +491,7 @@ public class JdbcManagedWorkspaceRegistry
                         + " 'OWNER')" + (lock ? " FOR UPDATE" : ""),
                 (result, row) -> new AccessRow(WorkspaceAccess.valueOf(
                         result.getString("role"))), tenantId,
-                workspaceId, key);
+                workspaceId, actorId);
         if (access.isEmpty() || !access.getFirst().value().canRead()) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -528,8 +523,7 @@ public class JdbcManagedWorkspaceRegistry
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
         if (isExternal(binding)
-                && (!(externalFilesAvailable() || externalShellAvailable())
-                        || !externalBindingCurrent(binding)
+                && (!ExternalWorkspaceSessionPolicies.externalAllowedOrRefuse(this, binding)
                         || !".".equals(binding.getCwdRelative()))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace execution is unavailable.");
         }
@@ -538,8 +532,9 @@ public class JdbcManagedWorkspaceRegistry
     }
 
     void requireSshNodeAccess(String tenantId, String actorId, String storageId) {
-        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
-                String.class, RuntimeAdmissionFences.storageAliasKey(tenantId, storageId));
+        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'SSH_LOCAL'",
+                String.class, tenantId, storageId);
         if (!remote.isEmpty()) {
             boolean allowed = false;
             if (ssh != null && ssh.isEnabled()) {

@@ -6,6 +6,7 @@
 
 import { parse } from 'shell-quote';
 import { getErrorMessage } from './errors.js';
+import { hasByteValuedAnsiCEscape } from './shell-utils.js';
 
 const BRE_OPERATORS = new Set(['+', '?', '|', '(', ')', '{', '}']);
 const SIMPLE_REGEX_QUANTIFIERS = new Set(['*', '+', '?']);
@@ -22,6 +23,10 @@ export function parseSedEditCommand(command: string): SedEditInfo | null {
   const trimmed = command.trim();
   const sedMatch = trimmed.match(/^\s*sed\s+/);
   if (!sedMatch) return null;
+
+  // ANSI-C byte and Unicode escapes can parse to different path bytes than
+  // bash passes to sed. Fall back to the original shell command instead.
+  if (hasByteValuedAnsiCEscape(trimmed)) return null;
 
   let parsed: ReturnType<typeof parse>;
   try {

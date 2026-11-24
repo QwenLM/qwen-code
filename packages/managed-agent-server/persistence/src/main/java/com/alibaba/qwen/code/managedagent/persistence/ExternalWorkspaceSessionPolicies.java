@@ -36,6 +36,21 @@ final class ExternalWorkspaceSessionPolicies {
     }
 
     /**
+     * Workspace-resolution form, where the effective profile is not chosen yet:
+     * either external profile qualifies. Same refusal semantics as
+     * {@link #externalProfileAllowedOrRefuse}.
+     */
+    static boolean externalAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces,
+            ContextBinding binding) {
+        try {
+            return workspaces.externalFilesAllowed(binding)
+                    || workspaces.externalShellAllowed(binding);
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
+            return false;
+        }
+    }
+
+    /**
      * Resolve the revision and compile the stored definition before Workspace
      * resolution. External-profile eligibility and requested approval/plan
      * options are checked after the Workspace determines the effective profile.

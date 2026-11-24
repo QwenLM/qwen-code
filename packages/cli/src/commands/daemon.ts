@@ -655,6 +655,9 @@ const START_ENV_DROP = [
   'QWEN_CODE_PROMPT_ID',
   'QWEN_CODE_PROJECT_DIR',
   'QWEN_CODE_SERVE',
+  // A daemon started from inside a Managed session is a new independent
+  // daemon, not a Hosted Harness worker; it must not inherit the attribution.
+  'QWEN_CODE_MANAGED_RUNTIME',
   'QWEN_CODE_AGENT_ID',
   'QWEN_DAEMON_TOKEN',
   'QWEN_CODE_MESSAGING_TOKEN',

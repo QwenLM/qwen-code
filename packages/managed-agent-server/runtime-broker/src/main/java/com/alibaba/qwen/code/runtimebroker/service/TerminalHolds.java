@@ -86,7 +86,7 @@ final class TerminalHolds {
             String harnessSessionId, String terminalId) {
         requireOpen(closed);
         String harness = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
         String terminal = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
@@ -208,7 +208,7 @@ final class TerminalHolds {
     CompletionStage<Void> markPtyEstablished(String harnessSessionId, String terminalId) {
         requireOpen(closed);
         String harness = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
         String terminal = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
@@ -234,7 +234,7 @@ final class TerminalHolds {
             String harnessSessionId, String terminalId, String executionCallId) {
         requireOpen(closed);
         String harness = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
         String terminal = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");

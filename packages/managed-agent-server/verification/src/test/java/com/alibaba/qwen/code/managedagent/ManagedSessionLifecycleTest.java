@@ -840,7 +840,7 @@ class ManagedSessionLifecycleTest {
     }
 
     private String tenant() {
-        return "tenant-lifecycle-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 
     private String emptySession(String tenant) throws Exception {

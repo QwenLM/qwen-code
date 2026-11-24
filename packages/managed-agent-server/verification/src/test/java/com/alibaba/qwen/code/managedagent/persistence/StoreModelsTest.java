@@ -92,13 +92,27 @@ class StoreModelsTest {
         assertThat(command(principalStamp).admitsReplayBy("actor-b", null)).isFalse();
         assertThat(command(principalStamp).admitsReplayBy(null, null)).isFalse();
 
-        // Only the exact principal encoding admits; a raw caller never
-        // decodes a stamp whose user it does not name, and neither the
-        // raw stamp nor an arbitrary byte string decodes as a principal.
+        // de-hash（#18058）后的 stamp 编码：无 subject 的 principal 与 raw twin 完全
+        // 同形（raw userId 字节）；携带 subject 的 principal 写入 "p:" 定长摘要，
+        // 以适配 VARCHAR(36) 的 actor 列。摘要不可逆解——带 subject 的 replay 宽准入
+        // 由 ma_session_principal 所有权行承担，raw caller 本就无法通过其门禁。
+        assertThat(principalStamp).isEqualTo(rawStamp);
+        SessionPrincipal withSubject = SessionPrincipal.of("tenant", "actor-a", "subject-a");
+        byte[] digestStamp = withSubject.receiptActorKey();
+        assertThat(new String(digestStamp, java.nio.charset.StandardCharsets.US_ASCII))
+                .startsWith("p:").hasSize(34);
+        assertThat(command(digestStamp).admitsReplayBy(null, withSubject)).isTrue();
+        assertThat(command(digestStamp).admitsReplayBy("actor-a", null)).isFalse();
+
+        // 只有旧版 NUL 分隔的 principal 编码仍可反解 userId（滚动部署兼容）；
+        // raw stamp、摘要 stamp 与任意字节串都不是旧编码。
         assertThat(SessionPrincipal.replayUserId(null)).isNull();
         assertThat(SessionPrincipal.replayUserId(new byte[0])).isNull();
         assertThat(SessionPrincipal.replayUserId(rawStamp)).isNull();
-        assertThat(SessionPrincipal.replayUserId(principalStamp))
+        assertThat(SessionPrincipal.replayUserId(digestStamp)).isNull();
+        assertThat(SessionPrincipal.replayUserId(
+                ("actor-a\0" + "0" + "\0").getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8)))
                 .isEqualTo("actor-a");
     }
 

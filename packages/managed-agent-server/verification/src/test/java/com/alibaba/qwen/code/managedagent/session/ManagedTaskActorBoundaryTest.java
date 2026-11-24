@@ -127,7 +127,7 @@ class ManagedTaskActorBoundaryTest {
         when(records.findTask("tenant", "session", "task"))
                 .thenReturn(java.util.Optional.of(
                         new ManagedExtensionRecordStore.TaskRow("task",
-                                "child_agent", null, null)));
+                                "child_agent", null, null, null, null)));
         ManagedAgentException sentinel = new ManagedAgentException(409,
                 "probe_reached_write", "reached the operation write");
         when(store.beginTaskCancelOperation(org.mockito.ArgumentMatchers.eq("tenant"),
@@ -160,7 +160,7 @@ class ManagedTaskActorBoundaryTest {
         when(records.findTask("tenant", "session", "task"))
                 .thenReturn(java.util.Optional.of(
                         new ManagedExtensionRecordStore.TaskRow("task",
-                                "child_agent", null, null)));
+                                "child_agent", null, null, null, null)));
         SessionLifecycleStore store = mock(SessionLifecycleStore.class);
         SessionLifecycleService operations = mock(SessionLifecycleService.class);
         TaskCancelCoordinator coordinator = mock(TaskCancelCoordinator.class);

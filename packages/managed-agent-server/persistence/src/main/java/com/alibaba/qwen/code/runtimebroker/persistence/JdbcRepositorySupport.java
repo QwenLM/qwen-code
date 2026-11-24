@@ -18,7 +18,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
-public final class JdbcRepositorySupport {
+final class JdbcRepositorySupport {
     private JdbcRepositorySupport() {
     }
 
@@ -37,7 +37,7 @@ public final class JdbcRepositorySupport {
         return RuntimeRequestKeys.scopeKey(scope);
     }
 
-    public static String valueKey(String value) {
+    static String valueKey(String value) {
         return RuntimeRequestKeys.valueKey(value);
     }
 
@@ -169,9 +169,20 @@ public final class JdbcRepositorySupport {
         return false;
     }
 
-    public static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
-        statement.setBytes(index, value == null ? null
-                : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
+    static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
+        // Connector/J does not support ParameterMetaData by default; only H2
+        // needs the binary-column probe. MySQL binds text through the driver.
+        if ("H2".equals(statement.getConnection().getMetaData().getDatabaseProductName())) {
+            int type = statement.getParameterMetaData().getParameterType(index);
+            if (type == java.sql.Types.BINARY
+                    || type == java.sql.Types.VARBINARY
+                    || type == java.sql.Types.LONGVARBINARY) {
+                statement.setBytes(index, value == null ? null
+                        : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
+                return;
+            }
+        }
+        statement.setString(index, value);
     }
 
     static void setStringParameter(java.sql.PreparedStatement statement, int index, String value)

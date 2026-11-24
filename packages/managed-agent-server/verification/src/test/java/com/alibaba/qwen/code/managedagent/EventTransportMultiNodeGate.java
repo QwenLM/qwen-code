@@ -198,7 +198,7 @@ public class EventTransportMultiNodeGate {
 
     @BeforeEach
     public void prepareCase(TestInfo test) throws IOException {
-        tenant = "mq3-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         caseRoot = Path.of("target", "mq3-multi-node",
                 test.getTestMethod().orElseThrow().getName()).toAbsolutePath();
         deleteRecursively(caseRoot);
@@ -1092,13 +1092,13 @@ public class EventTransportMultiNodeGate {
     private long stream(String session, String column) {
         return jdbc.queryForObject("SELECT " + column + " FROM ma_event_stream WHERE"
                 + " tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION'"
-                + " AND stream_id = X''", Long.class, tenant, session);
+                + " AND stream_id = ''", Long.class, tenant, session);
     }
 
     private Long wakeWatermark(String session) {
         return jdbc.queryForObject("SELECT wake_covered_sequence FROM ma_event_stream"
                 + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION'"
-                + " AND stream_id = X''", Long.class, tenant, session);
+                + " AND stream_id = ''", Long.class, tenant, session);
     }
 
     private long writerGeneration(String session) {

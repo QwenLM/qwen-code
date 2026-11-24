@@ -242,8 +242,7 @@ public final class ExternalWorkspaceRetirementService {
         JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, request.tenantId(), 10);
         require(jdbc.queryForList("SELECT role FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?"
                 + " AND actor_id = ? FOR UPDATE", String.class, request.tenantId(), request.workspaceId(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
-                        request.tenantId(), request.ownerUserId()))
+                request.ownerUserId())
                 .equals(List.of("OWNER")));
     }
 
@@ -353,13 +352,14 @@ public final class ExternalWorkspaceRetirementService {
                 + " WHERE b.tenant_id = ? AND b.workspace_id = ? AND r.execution_state NOT IN ('SETTLED', 'ABANDONED')"
                 + " LIMIT 1 FOR UPDATE", request.tenantId(), request.workspaceId());
         var registered = storage.find(request.tenantId(), request.workspaceId()).orElseThrow(ExternalWorkspaceRetirementService::blocked);
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT holder_key, binding_id, runtime_generation, runtime_session_id,"
-                + " maintenance_id, maintenance_generation FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", registered.ownerKey());
+        // de-hash：ma_storage_owner 的业务键为 physical_id，holder 列为 holder_id。
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT holder_id, binding_id, runtime_generation, runtime_session_id,"
+                + " maintenance_id, maintenance_generation FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE", registered.ownerKey());
         require(owners.size() == 1);
         var owner = owners.getFirst();
-        boolean emptyOwner = owner.get("holder_key") == null && owner.get("binding_id") == null
+        boolean emptyOwner = owner.get("holder_id") == null && owner.get("binding_id") == null
                 && owner.get("runtime_generation") == null && owner.get("runtime_session_id") == null;
-        boolean exactOwner = owner.get("holder_key") != null
+        boolean exactOwner = owner.get("holder_id") != null
                 && request.bindingId().equals(owner.get("binding_id"))
                 && owner.get("runtime_generation") instanceof Number generation
                 && generation.longValue() == request.runtimeGeneration();

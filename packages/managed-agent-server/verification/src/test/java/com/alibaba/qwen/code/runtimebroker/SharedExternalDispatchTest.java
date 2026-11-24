@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -47,7 +46,7 @@ class SharedExternalDispatchTest {
                         + " isolation_class = ? WHERE binding_id = ?")) {
             statement.setString(1, "external-workspace");
             statement.setString(2, "workspace");
-            JdbcRepositorySupport.setIdentity(statement, 3, fixture.binding.getBindingId());
+            statement.setString(3, fixture.binding.getBindingId());
             statement.executeUpdate();
         }
         var lease = Duration.ofMinutes(1);
@@ -60,15 +59,15 @@ class SharedExternalDispatchTest {
         // writer and refused while a read runs on the same binding.
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement("UPDATE ma_tool_execution SET dispatch_lease_until = 1"
-                        + " WHERE execution_call_id_hash = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(second.getExecutionCallId()));
+                        + " WHERE execution_call_id = ?")) {
+            statement.setString(1, second.getExecutionCallId());
             statement.executeUpdate();
         }
         assertNotNull(executions.claimDispatch(second.getExecutionCallId(), "owner-takeover", lease));
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement("UPDATE ma_tool_execution SET execution_state = 'UNKNOWN'"
-                        + " WHERE execution_call_id_hash = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(first.getExecutionCallId()));
+                        + " WHERE execution_call_id = ?")) {
+            statement.setString(1, first.getExecutionCallId());
             statement.executeUpdate();
         }
         assertNull(executions.claimValidatedDispatch(third.getExecutionCallId(), "owner-c", lease, read));

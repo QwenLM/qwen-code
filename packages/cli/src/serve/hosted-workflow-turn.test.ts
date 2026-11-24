@@ -337,7 +337,12 @@ describe('runHostedWorkflowTurn', () => {
       sessionId: base.sessionId,
       sessionIdGenerated: true,
       chatRecording: false,
+      // The managed attribution fallback only fires for ACP-shaped argv
+      // without an explicit channel; a builder adding one would silently
+      // drop every Hosted turn out of the managed bucket.
+      acp: true,
     });
+    expect(loadCalls[0]![1]).not.toHaveProperty('channel');
     expect(loadCalls[0]).toHaveLength(10);
     expect((loadCalls[0]![1] as { safeMode?: boolean }).safeMode).toBe(true);
     // #13858: the agents' chats open without this Harness's cwd listing.

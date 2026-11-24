@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
@@ -181,14 +180,13 @@ public final class ManagedSessionPrincipal {
         // left-joined with the legacy-creation mark. A present row is the
         // sole authority; only a row-less Session consults the mark, so the
         // hot unbound read no longer pays a second round trip. The receipt
-        // subquery binds the hashed tenant key so idx_ma_receipt_session
-        // (namespace, tenant_key, session_id) is usable (R1-15).
-        String tenantKey = ManagedSchemaKeys.key(tenantId);
+        // subquery binds the raw tenant id so idx_ma_receipt_session
+        // (namespace, tenant_id, session_id) is usable (R1-15)。
         List<AuthorityRow> rows = jdbc.query(
                 "SELECT p.version, p.user_id, p.actor_present,"
                         + " p.actor_subject_id, (SELECT COUNT(*) FROM"
                         + " ma_request_receipt r WHERE r.namespace ="
-                        + " 'SESSION_COMMAND' AND r.tenant_key = ? AND"
+                        + " 'SESSION_COMMAND' AND r.tenant_id = ? AND"
                         + " r.session_id = ? AND r.operation ="
                         + " 'CREATE_SESSION' AND r.actor_id IS NOT NULL AND"
                         + " LENGTH(r.actor_id) > 0 AND"
@@ -205,7 +203,7 @@ public final class ManagedSessionPrincipal {
                                         result.getBoolean(3),
                                         result.getString(4)),
                         result.getInt(5)),
-                tenantKey, sessionId, tenantId, sessionId);
+                tenantId, sessionId, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 

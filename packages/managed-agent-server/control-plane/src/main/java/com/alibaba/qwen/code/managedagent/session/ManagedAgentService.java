@@ -2426,7 +2426,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 turn.createdAt() / 1000,
                 turn.completedAt() == null ? null
                         : turn.completedAt() / 1000,
-                turn.errorCode());
+                visibleErrorCode(turn));
     }
 
     private static WebShellTurn webShellTurn(TurnSummary turn) {
@@ -2434,7 +2434,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
                         && ("RUNNING".equals(turn.status()) || "ACCEPTED".equals(turn.status()))
                         ? "recovery_blocked" : turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
-                turn.completedAt(), turn.errorCode());
+                turn.completedAt(), visibleErrorCode(turn));
+    }
+
+    // An Action park is dispatch bookkeeping: the Turn still runs and its
+    // Action is still requested.
+    private static String visibleErrorCode(TurnSummary turn) {
+        return AgentStateStore.HARNESS_ACTION_PARKED.equals(turn.errorCode()) ? null : turn.errorCode();
     }
 
     PublicEvent publicEvent(EventRecord event) {

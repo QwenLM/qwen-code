@@ -65,9 +65,7 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
@@ -446,7 +444,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void migrationRefusalsDeclareTheActualErrorCodeAndRetryability() throws Exception {
-        String tenant = "contract-migration-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         var actor = actor(tenant);
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, display_name,"
                 + " workspace_generation, storage_id, config_ref, policy_ref, state)"
@@ -718,7 +716,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void archivedHistoryFiltersBeforePaginationAndBindsItsCursor() throws Exception {
-        String tenant = "tenant-filter-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         for (String state : List.of("ACTIVE", "ARCHIVED", "CLOSED", "ARCHIVED", "ACTIVE")) {
             String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").principal(actor(tenant)).header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
@@ -781,7 +779,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void titleSearchIsLiteralAndBindsBothApisToTheirFilters() throws Exception {
-        String tenant = "tenant-title-query-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         for (String title : List.of("Alpha_%", "Unrelated", "alpha_% next")) {
             String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").principal(actor(tenant)).header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
@@ -841,7 +839,7 @@ class ManagedAgentApiContractTest {
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
                         "titleQuery", "other", "cursor", cursor))))
                 .andExpect(status().isBadRequest());
-        JsonNode other = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant + "-other")
+        JsonNode other = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant.substring(0, 30) + "-other")
                 .param("title_query", "_%"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(other.path("data")).isEmpty();
@@ -849,7 +847,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void lifecycleCommandsEchoTraceIdentityAndExposeTheirOperation() throws Exception {
-        String tenant = "tenant-lifecycle-ui-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").principal(actor(tenant)).header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
                         "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
@@ -881,8 +879,8 @@ class ManagedAgentApiContractTest {
     @Test
     void routesAnswerWithTheirSchemas() throws Exception {
         Map<String, String> drift = new TreeMap<>();
-        String tenant = "tenant-contract-" + UUID.randomUUID();
-        String otherTenant = tenant + "-other";
+        String tenant = UUID.randomUUID().toString();
+        String otherTenant = UUID.randomUUID().toString();
 
         String sessionId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").principal(actor(tenant)).header(TENANT, tenant)
@@ -932,8 +930,8 @@ class ManagedAgentApiContractTest {
         String artifactSession = "session-contract-artifact";
         String resultId = "result-contract-artifact";
         String artifactId = "artifact_" + DigestUtils.sha256Hex("contract-artifact");
-        byte[] actorKey = new com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor(
-                tenant, "actor-a").getActorId().getBytes(StandardCharsets.UTF_8);
+        String actorKey = new com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor(
+                tenant, "actor-a").getActorId();
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, display_name,"
                 + " workspace_generation, storage_id, config_ref, policy_ref, state)"
                 + " VALUES (?, ?, 'Artifacts', 1, 'storage-artifacts', 'config', 'policy', 'ACTIVE')",
@@ -960,17 +958,18 @@ class ManagedAgentApiContractTest {
         source.set("outcomeRef", objectMapper.createObjectNode());
         source.set("resultRef", objectMapper.createObjectNode());
         source.set("resources", objectMapper.createArrayNode());
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id,"
-                + " operation_kind, tenant_id, session_id, workspace_id, target_kind, target_key,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id,"
+                + " operation_kind, tenant_id, session_id, workspace_id, target_kind, target_id,"
                 + " request_digest, request_json, state, phase, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, 'TOOL_RESULT', ?, ?, ?, 'READY',"
+                + " VALUES (?, 'SESSION', ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, 'TOOL_RESULT', ?, ?, ?, 'READY',"
                 + " 'COMPLETED', 1, 1)",
-                DigestUtils.sha256Hex("op-contract-artifact"),
-                ManagedToolResultStore.identity("s", tenant, artifactSession).substring(2),
-                resultId.getBytes(StandardCharsets.UTF_8), tenant.getBytes(StandardCharsets.UTF_8),
-                artifactSession.getBytes(StandardCharsets.UTF_8),
-                artifactWorkspace.getBytes(StandardCharsets.UTF_8),
-                DigestUtils.sha256Hex(resultId), "contract-digest", source.toString());
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.operationRef(
+                        "TOOL_RESULT_PROJECTION", tenant, "SESSION", artifactSession, "exec-contract", resultId),
+                artifactSession,
+                resultId.getBytes(StandardCharsets.UTF_8), tenant,
+                artifactSession,
+                artifactWorkspace,
+                resultId.getBytes(StandardCharsets.UTF_8), "contract-digest", source.toString());
         ObjectNode descriptor = objectMapper.createObjectNode()
                 .put("object", "agent.artifact")
                 .put("id", artifactId)
@@ -982,11 +981,13 @@ class ManagedAgentApiContractTest {
                 .put("sha256", DigestUtils.sha256Hex("contract-bytes"))
                 .put("media_type", "text/plain")
                 .put("created_at", 1);
-        jdbc.update("INSERT INTO ma_artifact (artifact_id, result_id, scope_key, descriptor_json,"
+        jdbc.update("INSERT INTO ma_artifact (artifact_id, result_id, scope_ref, descriptor_json,"
                 + " publication_id, binding_json, manifest_ref_json, stream_id, creation_sequence)"
                 + " VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, 1)",
                 artifactId.getBytes(StandardCharsets.UTF_8), resultId.getBytes(StandardCharsets.UTF_8),
-                ManagedToolResultStore.identity("s", tenant, artifactSession).substring(2),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.PUBLICATION_SCOPE_REF_BYTES,
+                        tenant, artifactSession),
                 descriptor.toString(), "publication-contract".getBytes(StandardCharsets.UTF_8),
                 "stdout".getBytes(StandardCharsets.UTF_8));
         boolean artifactsWereEnabled = properties.getArtifacts().isEnabled();
@@ -1621,7 +1622,7 @@ class ManagedAgentApiContractTest {
         checkStream(drift, "getSessionEvents", "PublicEvent", publicStream);
         checkStream(drift, "webShellStreamEvents", "WebShellEvent",
                 webShellStream);
-        String workspaceTenant = tenant + "-workspace";
+        String workspaceTenant = UUID.randomUUID().toString();
         AuthenticatedTenantActor actor = new AuthenticatedTenantActor() {
             @Override
             public String getName() {
@@ -2056,7 +2057,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void localPathContractRequiresExplicitImportCapability() throws Exception {
-        String tenant = "contract-local-import-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Map<String, String> drift = new TreeMap<>();
         assertThat(json(exchange(drift, "webShellCreateWorkspace", 409,
                 post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)),
@@ -2073,7 +2074,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void localWorkspaceCreationRejectsRemotePayloadsBeforeAdmission() throws Exception {
-        String tenant = "contract-local-remote-boundary-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Map<String, String> drift = new TreeMap<>();
         for (String extra : List.of(
                 ",\"nodeId\":\"mac\",\"path\":\"/work/project\"",
@@ -2093,7 +2094,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void sshRegistrationOperationsStayActorOwnedWhenNewAdmissionIsDisabled() throws Exception {
-        String tenant = "contract-registration-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         var operation = sshWorkspaces.begin(tenant, "actor-a", "original", "mac", "/work/project", "Project");
         var intent = sshWorkspaces.claim(tenant, "actor-a", operation.operationId(), "fixture");
         // D7-2: only a reserved registration parks recovery_blocked.
@@ -2108,7 +2109,7 @@ class ManagedAgentApiContractTest {
         assertThat(saved.path("replayed").asBoolean()).isTrue();
         for (var request : List.of(
                 post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant, "actor-b")),
-                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant + "-other").principal(actor(tenant + "-other")))) {
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant.substring(0, 30) + "-other").principal(actor(tenant.substring(0, 30) + "-other")))) {
             assertThat(json(exchange(drift, "webShellGetWorkspaceOperation", 404, request, body))
                     .at("/error/code").asText()).isEqualTo("operation_not_found");
         }
@@ -2162,7 +2163,7 @@ class ManagedAgentApiContractTest {
                 "{\"agent_id\":\"qwen-code\",\"input\":[]}")).path("id").asText();
         legacyState(tenant, session);
         jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
-                "actor-a".getBytes(StandardCharsets.UTF_8), tenant, session);
+                "actor-a", tenant, session);
         ActionJournal journal = new ActionJournal(sessionStore, tenant, session,
                 System.currentTimeMillis(), System.currentTimeMillis() + 600000);
         journal.change("requested", null);
@@ -2415,18 +2416,16 @@ class ManagedAgentApiContractTest {
     /** A committed record body for a synthetic child_run row. */
     private void childRunResource(String tenant, String sessionId,
             String resourceId, String json) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         byte[] body = json.getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key,"
-                + " tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256,"
                 + " storage_kind, inline_bytes, publish_command_id, state,"
-                + " gmt_create) VALUES (?, ?, 'workspace-contract', ?, ?,"
+                + " gmt_create) VALUES (?, 'workspace-contract', ?, ?,"
                 + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
                 + " 'command', 'REFERENCED', "
                 + com.alibaba.qwen.code.runtimebroker.managedschema
                         .ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), tenant, sessionId, resourceId, body.length,
+                tenant, sessionId, resourceId, body.length,
                 org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
                 body);
     }
@@ -2440,18 +2439,19 @@ class ManagedAgentApiContractTest {
     private void exchangeTaskCancels(Map<String, String> drift, String tenant,
             String otherTenant, String sessionId, String monitorTask)
             throws Exception {
-        String recordKey = "c".repeat(64);
+        String recordKey = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(sessionId, "child_run", "run-contract");
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, runtime_state,"
                         + " delivery_target, delivery_state, gmt_create,"
-                        + " started_at) VALUES (?, ?, 'workspace-contract',"
+                        + " started_at) VALUES (?, 'workspace-contract',"
                         + " ?, 'child_run', 'run-contract', ?, 1,"
                         + " 'resource-run-contract', 'child_agent', 'running',"
                         + " 'ready', 'session', 'planned', 1, 2)",
-                recordKey, tenant, sessionId, "d".repeat(64));
+                tenant, sessionId, "d".repeat(64));
         // #13746 F2: the run's committed record names its child Session,
         // and both task views carry that link inside their schemas.
         String childSession = UUID.randomUUID().toString();
@@ -2571,9 +2571,10 @@ class ManagedAgentApiContractTest {
 
         // H4f-b: a workflow task serves the same cancel on both surfaces,
         // and its view advertises the action.
-        String workflowKey = "e".repeat(64);
-        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
-                workflowKey, tenant, sessionId, "f".repeat(64));
+        String workflowKey = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(sessionId, "child_run", "run-contract-wf");
+        jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id, domain, record_id, operation_id, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
+                tenant, sessionId, "f".repeat(64));
         childRunResource(tenant, sessionId, "resource-run-contract-wf",
                 "{\"kind\":\"workflow\",\"childSessionId\":null}");
         String workflowTask = "task_" + workflowKey;
@@ -2623,13 +2624,14 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(workflowAdmitted.get("id").asText());
         assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
 
-        String automationKey = "1".repeat(64);
+        String automationKey = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(sessionId, "automation_run", "arun-contract");
         jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
                 + " WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_kind = 'TASK_CANCEL'"
                 + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
-        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
-                automationKey, tenant, sessionId, "2".repeat(64));
+        jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id, domain, record_id, operation_id, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
+                tenant, sessionId, "2".repeat(64));
         childRunResource(tenant, sessionId, "resource-automation-contract",
                 "{\"scheduleId\":\"asch_" + "1".repeat(32)
                         + "\",\"occurrenceKey\":\"manual:contract\"}");
@@ -2966,7 +2968,7 @@ class ManagedAgentApiContractTest {
      */
     private void exchangeChannels(Map<String, String> drift, String tenant,
             String otherTenant) throws Exception {
-        String channelTenant = tenant + "-channel";
+        String channelTenant = UUID.randomUUID().toString();
         AuthenticatedTenantActor reader = new AuthenticatedTenantActor() {
             @Override
             public String getName() {
@@ -3210,7 +3212,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void bothSurfacesReportTheSameSession() throws Exception {
-        String tenant = "tenant-parity-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = json(mvc.perform(post(WEB_SHELL + "/sessions/create").principal(actor(tenant))
                         .header(TENANT, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -3308,7 +3310,7 @@ class ManagedAgentApiContractTest {
             }
         }
 
-        String otherTenant = tenant + "-other";
+        String otherTenant = UUID.randomUUID().toString();
         for (MockHttpServletRequestBuilder foreign : List.of(
                 get("/v1/agents/sessions/{id}", sessionId)
                         .header(TENANT, otherTenant),
@@ -3366,7 +3368,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void thePublishedAggregateBudgetIsTheEnforcedOne() throws Exception {
-        String tenant = "tenant-contract-budget-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = json(mvc.perform(
                         post(WEB_SHELL + "/sessions/create").principal(actor(tenant))
                                 .header(TENANT, tenant)
@@ -3526,7 +3528,7 @@ class ManagedAgentApiContractTest {
 
     @Test
     void requestIdsAreEchoedOnlyWhenSafe() throws Exception {
-        String tenant = "tenant-request-id-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         MockHttpServletResponse traced = mvc.perform(get("/v1/agents/sessions")
                         .header(TENANT, tenant)
                         .header(RequestIdFilter.HEADER, "gateway-trace-1"))
@@ -3604,7 +3606,7 @@ class ManagedAgentApiContractTest {
     @Test
     void javaDurableAdmissionNamesTheOperationItsAdmissionSaved()
             throws Exception {
-        String tenant = "contract-durable-on-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Map<String, String> drift = new TreeMap<>();
         String sessionId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").principal(actor(tenant)).header(TENANT, tenant)

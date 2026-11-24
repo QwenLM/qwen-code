@@ -20,6 +20,7 @@ import { MANAGED_TASK_MESSAGES_RU } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_RU } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_RU } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_RU } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_RU } from './components/artifacts/workspace-artifact-library-messages.js';
 import { MANAGED_MCP_MESSAGES_RU } from './components/managed/managed-mcp-messages.js';
 // The Russian catalog is split so `--mode transcript` can stub these
 // modules (see vite.lib.config.ts). Exported HTML would otherwise ship a
@@ -54,6 +55,7 @@ export const RU: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_RU,
   ...WORKSPACE_REGISTRATION_MESSAGES_RU,
   ...ARTIFACT_LIBRARY_MESSAGES_RU,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_RU,
   ...MANAGED_MCP_MESSAGES_RU,
   ...TRAJECTORY_EXECUTION_MESSAGES_RU,
   ...TRAJECTORY_FILTER_MESSAGES_RU,

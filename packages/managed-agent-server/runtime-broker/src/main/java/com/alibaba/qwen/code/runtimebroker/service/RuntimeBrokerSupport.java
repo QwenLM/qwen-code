@@ -280,7 +280,7 @@ final class RuntimeBrokerSupport {
 
     static CompletionStage<HarnessSessionResolver.Capabilities> resolveCapabilities(
             HarnessSessionResolver sessionResolver, String harnessSessionId, RuntimeLifecycleAuthority authority) {
-        String id = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
+        String id = BrokerValues.requirePathSafe(BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
         return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
                 "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
                     if (value == null || value.scope() == null) {

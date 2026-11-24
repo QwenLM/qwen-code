@@ -377,7 +377,7 @@ class SubjectActorRouteOwnershipTest {
     }
 
     private static String tenant() {
-        return "subject-routes-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 
     private static AuthenticatedTenantActor actor(String tenant,

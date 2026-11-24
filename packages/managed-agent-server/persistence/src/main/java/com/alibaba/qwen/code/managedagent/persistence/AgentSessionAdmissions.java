@@ -98,7 +98,7 @@ final class AgentSessionAdmissions {
         this.createdRoots = createdRoots;
         this.childSessionAdmissions = new ChildSessionAdmissions(jdbc, clock,
                 storeRows, eventJournal, sessionCommands, configRecords,
-                modelConfigs, creationSkills, workspaceFilesEnabled);
+                modelConfigs, creationSkills, definitions, workspaceFilesEnabled);
     }
 
     ChildSessionAdmissions childSessionAdmissions() {
@@ -583,7 +583,7 @@ final class AgentSessionAdmissions {
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
                 workspace == null ? null : pin.toolProfile(),
-                actorKey, actorKey,
+                actorId, actorId,
                 workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",
                 planMode, planMode ? pin.approvalMode() : null, planMode ? 1 : 0, modelId, modelId == null ? 0 : 1);
         jdbc.update("INSERT INTO ma_event_stream"

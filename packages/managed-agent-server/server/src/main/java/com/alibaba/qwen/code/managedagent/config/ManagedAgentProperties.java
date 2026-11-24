@@ -380,6 +380,12 @@ public class ManagedAgentProperties
         applySessionStoreDefaults();
         applyClientFilesDefaults();
         applyHarnessCredentialsFile();
+        if (environment != null
+                && environment.getProperty("qwen.managed-agent.action-parking.enabled", Boolean.class, false)
+                && !environment.getProperty("qwen.managed-agent.wake-dispatch.enabled", Boolean.class, false)) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.action-parking.enabled requires qwen.managed-agent.wake-dispatch.enabled");
+        }
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.

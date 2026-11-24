@@ -51,16 +51,32 @@ public record SessionPrincipal(String tenantId, String userId,
     }
 
     /**
-     * The receipt actor stamp for a principal-carried entry: the user, the
-     * actor-present flag and the subject, NUL-separated. The replay
-     * comparison must use this same encoding, never the raw Workspace actor
-     * key, or a principal-encoded receipt could not answer its recorder.
+     * The receipt actor stamp for a principal-carried entry. 合并 main 的
+     * de-hash（#18058）后 stamp 必须适配 VARCHAR(36) 的 actor 列：
+     * 无 business actor 的 principal 与 raw twin 完全同形（raw userId 字节，
+     * 滚动部署下两种写入臂互相应答）；携带 subject 的 principal 写入
+     * "p:" + sha256 前 32 位 的定长摘要。携带 subject 的 replay 宽准入
+     * 不再从 stamp 反解 userId，而由 ma_session_principal 所有权行承担
+     * （行本就是唯一权威）；raw actor 与带 subject 的 principal 在所有权
+     * 门禁处本就不能互换，回执层无需再放行。
      */
     public byte[] receiptActorKey() {
-        String joined = userId
-                + "\0" + (actorPresent() ? "1" : "0")
-                + "\0" + (actorSubjectId == null ? "" : actorSubjectId);
-        return joined.getBytes(StandardCharsets.UTF_8);
+        if (!actorPresent()) {
+            return userId.getBytes(StandardCharsets.UTF_8);
+        }
+        String joined = userId + "\0" + "1" + "\0" + actorSubjectId;
+        return ("p:" + sha256Hex(joined).substring(0, 32))
+                .getBytes(StandardCharsets.US_ASCII);
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
     }
 
     /**
@@ -88,6 +104,10 @@ public record SessionPrincipal(String tenantId, String userId,
                 secondNul = index;
                 break;
             }
+        }
+        // 摘要 stamp（"p:" 前缀）不可逆解：带 subject 的宽准入由所有权行承担。
+        if (stamp.length >= 2 && stamp[0] == 'p' && stamp[1] == ':') {
+            return null;
         }
         if (firstNul <= 0 || secondNul < 0
                 || secondNul - firstNul != 2

@@ -16,7 +16,7 @@ final class AgentTurnProjectionGuard {
             + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4',"
             + " " + EXTERNAL_PROFILES_SQL + ")"
             + " AND (tool_profile NOT IN (" + EXTERNAL_PROFILES_SQL + ") OR"
-            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
+            + " (agent_id = 'qwen-code' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
 
     /** The external profiles project no plan flag of their own. */
     static final String PLAN_ENABLED = " CASE WHEN tool_profile IN (" + EXTERNAL_PROFILES_SQL + ")"

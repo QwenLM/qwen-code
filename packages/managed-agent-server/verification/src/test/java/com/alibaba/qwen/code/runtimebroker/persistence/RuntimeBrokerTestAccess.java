@@ -75,7 +75,7 @@ public final class RuntimeBrokerTestAccess {
      */
     public static ToolExecutionRecord insertExecution(DataSource source, ToolExecutionRecord record) {
         return JdbcRepositorySupport.transaction(source, connection -> {
-            ToolExecutionRows.insertExecution(connection, record);
+            JdbcToolExecutionRepository.insertExecution(connection, record);
             return record;
         });
     }
@@ -84,7 +84,7 @@ public final class RuntimeBrokerTestAccess {
     public static ToolExecutionRecord compareAndSet(DataSource source, ToolExecutionRecord expected,
             ToolExecutionRecord replacement, String owner, long dispatchGeneration) {
         return JdbcRepositorySupport.transaction(source, connection -> {
-            ToolExecutionRecord current = ToolExecutionRows.selectByExecutionId(
+            ToolExecutionRecord current = JdbcToolExecutionRepository.selectByExecutionId(
                     connection, expected.getExecutionCallId(), true);
             if (current == null
                     || !current.sameIdentity(expected)
@@ -99,7 +99,7 @@ public final class RuntimeBrokerTestAccess {
                 return null;
             }
             ToolExecutionRecord updated = replacement.withVersion(expected.getVersion() + 1);
-            ToolExecutionRows.updateExecution(connection, updated);
+            JdbcToolExecutionRepository.updateExecution(connection, updated);
             return updated;
         });
     }

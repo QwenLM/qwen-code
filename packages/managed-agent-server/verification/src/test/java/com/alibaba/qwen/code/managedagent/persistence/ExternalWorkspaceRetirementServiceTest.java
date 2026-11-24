@@ -28,7 +28,6 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -145,7 +144,7 @@ class ExternalWorkspaceRetirementServiceTest {
                 URI.create("http://127.0.0.1:19219"), seed.getToken(), seed.getLeaseId(), seed.getEpoch()),
                 otherHandle, Instant.now(), Instant.now()));
         other = bindings.releaseOperation(other.getBindingId(), "other", other.getOperationGeneration());
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'foreign', binding_id = ?, runtime_generation = ?, runtime_session_id = 'foreign-session'",
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'foreign', binding_id = ?, runtime_generation = ?, runtime_session_id = 'foreign-session'",
                 other.getBindingId(), other.getGeneration());
         var ownerBefore = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         var otherBefore = bindings.findById(other.getBindingId());
@@ -221,7 +220,7 @@ class ExternalWorkspaceRetirementServiceTest {
                     .hasMessage("Lost binding requires atomic recovery");
         }
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
-        assertThat(owner.get("holder_key")).isNotNull();
+        assertThat(owner.get("holder_id")).isNotNull();
         assertThat(owner.get("binding_id")).isEqualTo(original.getBindingId());
         assertThat(owner.get("runtime_generation")).isEqualTo(original.getGeneration());
 
@@ -234,13 +233,13 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(first.resumed()).isFalse();
         assertThat(bindings.findById(original.getBindingId()).getState())
                 .isEqualTo(RuntimeBindingRecord.State.RELEASED);
-        assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+        assertThat(jdbc.queryForMap("SELECT holder_id, binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_storage_owner").values()).containsOnlyNulls();
-        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, storage_key, mount_root, mount_revision"
+        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, physical_id, mount_root, mount_revision"
                 + " FROM ma_storage_owner")).isEqualTo(Map.of(
                         "tenant_id", owner.get("tenant_id"),
                         "storage_id", owner.get("storage_id"),
-                        "storage_key", owner.get("storage_key"),
+                        "physical_id", owner.get("physical_id"),
                         "mount_root", owner.get("mount_root"),
                         "mount_revision", owner.get("mount_revision")));
         assertThat(executions.findByIdempotencyKey("tool-key").getState())
@@ -469,9 +468,9 @@ class ExternalWorkspaceRetirementServiceTest {
             String order = switch (table) {
                 case "ma_workspace" -> "workspace_id";
                 case "ma_runtime_binding", "ma_runtime_session", "ma_storage_owner" -> "binding_id";
-                case "ma_runtime_slot" -> "request_key";
-                case "ma_tool_execution" -> "execution_call_id_hash";
-                case "ma_operation" -> "operation_key";
+                case "ma_runtime_slot" -> "request_id";
+                case "ma_tool_execution" -> "execution_call_id";
+                case "ma_operation" -> "operation_ref";
                 default -> throw new IllegalArgumentException(table);
             };
             result.put(table, WorkspaceOperations.rows(jdbc, "SELECT * FROM " + table + " ORDER BY " + order));
@@ -481,12 +480,12 @@ class ExternalWorkspaceRetirementServiceTest {
 
     @Test
     void terminalFailedOperationWithBlockedDeliveryDoesNotFenceRetirement() {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'FAILED', 'FAILED', 'BLOCKED', 1, 1)",
-                "a".repeat(64), "b".repeat(64), "turn-op".getBytes(),
-                "tenant".getBytes(), "c".repeat(64));
+                "turn-op-ref", "user-session", "turn-op",
+                "tenant", "c".repeat(64));
 
         var receipt = service.retire(request, this::terminated);
 
@@ -520,13 +519,13 @@ class ExternalWorkspaceRetirementServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"READY", "SUCCEEDED", "RETURNED", "SUPPRESSED", "REMOVED"})
     void permanentSuccessOperationDoesNotFenceRetirement(String state) {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', ?, ?, 'DONE', 1, 1)",
-                (state + "-key").repeat(10).substring(0, 64), "b".repeat(64),
-                (state + "-op").getBytes(StandardCharsets.UTF_8),
-                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), state, state);
+                state + "-op-ref", "user-session",
+                state + "-op",
+                "tenant", "c".repeat(64), state, state);
 
         var receipt = service.retire(request, this::terminated);
 
@@ -537,12 +536,12 @@ class ExternalWorkspaceRetirementServiceTest {
 
     @Test
     void aPendingOperationStillFencesRetirement() {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'PENDING', 'PENDING', 'PENDING', 1, 1)",
-                "d".repeat(64), "e".repeat(64), "pending-op".getBytes(StandardCharsets.UTF_8),
-                "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
+                "pending-op-ref", "user-session", "pending-op",
+                "tenant", "f".repeat(64));
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
                 .isInstanceOf(RuntimeBrokerException.class)
@@ -556,21 +555,18 @@ class ExternalWorkspaceRetirementServiceTest {
         // approval was decided. None of that is live work: the operation fence
         // proves the named operation terminal, so the head shape must not
         // fence retirement of the lost Worker.
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
-                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'RENAME', ?, 'user-session', 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'RENAME', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'SUPERSEDED', 'COMPLETED', 'BLOCKED', 1, 1)",
-                "d".repeat(64), "e".repeat(64), "settled-drain-op".getBytes(StandardCharsets.UTF_8),
-                "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
+                "settled-drain-op-ref", "user-session", "settled-drain-op",
+                "tenant", "f".repeat(64));
         jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id,"
                 + " head_kind, phase, operation_id, gmt_create, gmt_modified)"
-                + " VALUES (?, 'user-session', 'user-session', 'HARNESS', 'DRAINING', ?, 1, 1)",
-                "tenant".getBytes(StandardCharsets.UTF_8),
-                "settled-drain-op".getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, session_id,"
+                + " VALUES ('tenant', 'user-session', 'user-session', 'HARNESS', 'DRAINING', 'settled-drain-op', 1, 1)");
+        jdbc.update("INSERT INTO ma_session_record (tenant_id, session_id,"
                 + " domain, record_id, revision, gmt_create, record_kind, state, action_id, action_version, options_json)"
-                + " VALUES (?, ?, 'user-session', 'action', 'action', 1, 1, 'ACTION', 'decided', 'action', 1, '{}')",
-                "3".repeat(64), "tenant".getBytes(StandardCharsets.UTF_8));
+                + " VALUES ('tenant', 'user-session', 'action', 'action', 1, 1, 'ACTION', 'decided', 'action', 1, '{}')");
 
         var receipt = service.retire(request, this::terminated);
 
