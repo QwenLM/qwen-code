@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GIT_ENV_RESTORED_KEYS,
   LOADER_ALLOWED_ENVIRONMENT_KEYS,
@@ -15,6 +15,18 @@ import {
 import { GIT_METADATA_RESTORE_KEYS } from './git-branches.js';
 
 describe('loadSimpleGit', () => {
+  beforeEach(() => {
+    // The loader enumerates ambient indexed operator config
+    // (GIT_CONFIG_COUNT/KEY_n/VALUE_n/PARAMETERS) into every client's
+    // allowlist, so clear it: the exact-allowlist assertions must not
+    // depend on the runner's environment.
+    for (const key of Object.keys(process.env)) {
+      if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)$/i.test(key)) {
+        vi.stubEnv(key, undefined);
+      }
+    }
+  });
+
   afterEach(() => {
     vi.doUnmock('simple-git');
     vi.resetModules();
