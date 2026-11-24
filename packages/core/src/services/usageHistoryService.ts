@@ -1780,9 +1780,9 @@ async function rebuildFromSessionJsonl(
  *
  * Run-scoped records carry only their own run's spend, so disjoint windows are
  * separate runs and must all survive — collapsing them would silently drop
- * every run but the last. Overlapping windows still collapse to the last one,
- * keeping the #4994 protection for a run written twice. An ordinary cumulative
- * record loses to a run-scoped one. Transcript reconstructions have separate
+ * every run but the last. Coverage candidates are added only after both
+ * directions are considered, so a covered bridge cannot remain as an extra
+ * request. An ordinary cumulative record loses to a run-scoped one. Transcript reconstructions have separate
  * provenance: disjoint history survives, equal windows duplicate, and a
  * reconstruction that wholly covers a run's window and counters can replace
  * it without adding both. Partially overlapping reconstructions are dropped
@@ -1951,6 +1951,7 @@ export function dedupBySessionId(
     }
     const kept: UsageSummaryRecord[] = [];
     for (const r of runs) {
+      let candidateRun = r;
       let keepRun = true;
       for (let i = kept.length - 1; i >= 0; i--) {
         const k = kept[i]!;
@@ -1960,17 +1961,17 @@ export function dedupBySessionId(
           k.startTime === r.startTime && k.timestamp === r.timestamp;
         if ((overlaps || sameWindow) && requestIdsOverlap(k, r) !== false) {
           const partialOverlap = requestIdsPartiallyOverlap(k, r);
-          if (!partialOverlap || rebuildCoversRun(r, k, true)) {
-            kept.splice(i, 1, withCoveredRunSkills(r, k));
-            keepRun = false;
-          } else if (rebuildCoversRun(k, r, true)) {
-            kept[i] = withCoveredRunSkills(k, r);
+          if (!partialOverlap || rebuildCoversRun(candidateRun, k, true)) {
+            kept.splice(i, 1);
+            candidateRun = withCoveredRunSkills(candidateRun, k);
+          } else if (rebuildCoversRun(k, candidateRun, true)) {
+            kept[i] = withCoveredRunSkills(k, candidateRun);
             keepRun = false;
             break;
           }
         }
       }
-      if (keepRun) kept.push(r);
+      if (keepRun) kept.push(candidateRun);
     }
     const coveringSnapshots = [
       ...rebuilt,
@@ -2501,6 +2502,9 @@ function transcriptReplayScope(
       if (previous === undefined || record.timestamp > previous) {
         scope.afterMsBySession.set(key, record.timestamp);
       }
+    }
+    if (record.runScoped === true && Number.isFinite(record.timestamp)) {
+      // Execution IDs identify consumed responses even without a usable start.
       for (const id of Array.isArray(record.requestExecutionIds)
         ? record.requestExecutionIds
         : []) {

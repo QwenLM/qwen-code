@@ -3516,6 +3516,98 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     });
   });
 
+  it.each([
+    { includeIndependent: true, reverse: false },
+    { includeIndependent: true, reverse: true },
+    { includeIndependent: false, reverse: false },
+  ])(
+    'keeps owned responses singular and late independent responses (independent=$includeIndependent, reverse=$reverse)',
+    async ({ includeIndependent, reverse }) => {
+      const sessionId = 'unbounded-owned-supplement';
+      const project = '/future/unbounded-owned-supplement';
+      const futureRun = (id: string, startTime: string, endTime: string) => ({
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: Date.parse(startTime),
+        timestamp: Date.parse(endTime),
+        runScoped: true,
+        requestExecutionIds: [id],
+        successfulRequestExecutionIds: [id],
+      });
+      seedPersisted([
+        futureRun(
+          'bounded-future-run',
+          '2026-07-02T00:02:00.000Z',
+          '2026-07-02T00:06:00.000Z',
+        ),
+        {
+          ...futureRun(
+            'unbounded-future-run',
+            '2026-07-02T00:04:00.000Z',
+            '2026-07-02T00:10:00.000Z',
+          ),
+          startTime: Number.NaN,
+          durationMs: Number.NaN,
+        },
+      ]);
+      const file = writeTranscript('unbounded-owned-supplement', sessionId, {
+        cwd: project,
+        day: '2026-07-02',
+        durationMs: 100,
+      });
+      appendNativeResponse(
+        file,
+        sessionId,
+        '2026-07-02T00:02:30.000Z',
+        'bounded-future-run',
+        100,
+      );
+      const events = [
+        {
+          id: 'unbounded-future-run',
+          timestamp: '2026-07-02T00:07:00.000Z',
+          tokens: 100,
+        },
+        ...(includeIndependent
+          ? [
+              {
+                id: 'independent-unbounded-response',
+                timestamp: '2026-07-02T00:08:00.000Z',
+                tokens: 50,
+              },
+            ]
+          : []),
+      ];
+      if (reverse) events.reverse();
+      for (const event of events) {
+        appendNativeResponse(
+          file,
+          sessionId,
+          event.timestamp,
+          event.id,
+          event.tokens,
+        );
+      }
+
+      const records = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt: Date.parse('2026-07-02T00:02:30.000Z'),
+      });
+      expect(records).toHaveLength(2 + Number(includeIndependent));
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        totalRequests: 2 + Number(includeIndependent),
+        models: {
+          'qwen-max': { totalTokens: 200 + (includeIndependent ? 50 : 0) },
+        },
+      });
+      expect(
+        records
+          .filter((record) => record.transcriptSupplement === true)
+          .flatMap((record) => record.requestExecutionIds ?? []),
+      ).not.toContain('unbounded-future-run');
+    },
+  );
+
   it('replays a response after its future-owner snapshot is removed', async () => {
     const sessionId = 'future-owner-cache-removal';
     const project = '/future/owner-cache-removal';
@@ -5091,6 +5183,43 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
         totalCalls: 3,
         byName: { qreview: { count: 3 } },
       });
+    }
+  });
+
+  it('retains only the complete winner of a three-run covering chain', () => {
+    const first = {
+      ...runRec('three-run-chain', 300, t0, t0 + 100),
+      requestExecutionIds: ['a', 'b', 'c'],
+      models: { 'qwen-max': modelUsage(3, 300, 0, 300) },
+    };
+    const middle = {
+      ...runRec('three-run-chain', 100, t0 + 200, t0 + 300),
+      requestExecutionIds: ['c'],
+    };
+    const bridge = {
+      ...runRec('three-run-chain', 200, t0 + 50, t0 + 250),
+      requestExecutionIds: ['b', 'c'],
+      models: { 'qwen-max': modelUsage(2, 200, 0, 200) },
+      skills: {
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: { qreview: { count: 3, success: 2, fail: 1 } },
+      },
+    };
+
+    for (const records of [
+      [first, middle, bridge],
+      [bridge, middle, first],
+    ]) {
+      const reduced = dedupBySessionId(records);
+      expect(reduced).toHaveLength(1);
+      expect(aggregateUsage(reduced, 'all')).toMatchObject({
+        totalRequests: 3,
+        models: { 'qwen-max': { totalTokens: 300 } },
+        skills: { totalCalls: 3 },
+      });
+      expect(reduced[0]?.requestExecutionIds).toEqual(['a', 'b', 'c']);
     }
   });
 
