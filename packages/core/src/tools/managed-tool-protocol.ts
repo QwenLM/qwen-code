@@ -294,7 +294,7 @@ function identityFields(
   return {
     sessionId: sessionId.toLowerCase(),
     promptId: boundedId(input['promptId'], 128),
-    callId: boundedId(input['callId'], 512),
+    callId: boundedId(input['callId'], 128),
     capabilityDigest: digest(input['capabilityDigest']),
     policyRevision: boundedId(input['policyRevision'], 256),
   };

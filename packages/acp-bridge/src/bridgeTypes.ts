@@ -1305,6 +1305,12 @@ export interface BridgeSessionSummary {
   pendingInteractionCount?: number;
   /** True when the most recently completed turn failed. */
   hasTurnError?: boolean;
+  /**
+   * Persisted prompt-ledger evidence that the session's latest prompt was cut
+   * off mid-flight; a list-surface hint that opening the session can offer
+   * "Continue execution". Absent without ledger evidence; never `false`.
+   */
+  needsContinuation?: boolean;
   /** Present for live sessions in status and workspace-list responses. */
   turnError?: {
     message: string;
@@ -1472,12 +1478,17 @@ export interface CloseSessionOpts {
    */
   requireAgentClose?: boolean;
   /**
+   * Require a durable close acknowledgement before deleting session data.
+   * A timed-out caller leaves the close running on its original channel.
+   */
+  forDeletion?: boolean;
+  /**
    * Bound the agent-close round trip. The close notification is otherwise
    * unbounded (it only loses to transport close), which is correct for an
    * ordinary close but not when the caller already has reason to believe the
    * child cannot answer. A timeout lands in the same unknown-outcome recovery
-   * as any other non-definitive failure: the channel is killed, which is what
-   * unblocks callers waiting on the session to drain.
+   * as any other non-definitive failure. For deletion, it bounds the caller's
+   * wait while the pending close continues.
    */
   agentCloseTimeoutMs?: number;
 }
@@ -1927,6 +1938,21 @@ export interface BridgeTurnStatus {
   resultTruncated?: boolean;
   resultCode?: TurnResultCode;
   originatorClientId?: string;
+}
+
+/** A per-turn satisfied/not-satisfied mark bound for telemetry. */
+export interface BridgeSessionFeedbackRequest {
+  /** The turn's admitted prompt id — the daemon's per-turn identity. */
+  promptId: string;
+  rating: 'up' | 'down';
+}
+
+export interface BridgeSessionFeedbackResult {
+  /**
+   * False when the session workspace's `ui.enableUserFeedback` setting
+   * suppresses collection; true once the event reached `logUserFeedback`.
+   */
+  recorded: boolean;
 }
 
 export interface BridgeDaemonStatusLimits {
@@ -3106,6 +3132,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     row: { component: string; props: Record<string, unknown> },
     context?: BridgeClientRequestContext,
   ): Promise<BridgeModRowAnswer>;
+
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the owning
+   * session's telemetry pipeline. Thin pass-through to
+   * `qwen/control/session/feedback`: the ACP child maps the rating onto
+   * `UserFeedbackRating` and calls `logUserFeedback` with its own session
+   * Config, so model and approval mode come from the session's authority,
+   * not the caller. Throws `SessionNotFoundError` for unknown ids.
+   */
+  rateSessionTurn(
+    sessionId: string,
+    req: BridgeSessionFeedbackRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeSessionFeedbackResult>;
 
   /**
    * Run a stateless, tool-free text generation request in the ACP child and

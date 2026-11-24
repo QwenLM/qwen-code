@@ -18,7 +18,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegist
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -69,7 +68,7 @@ class WorkspaceSessionCloseTest {
 
     @Test
     void bothSurfacesReplayOneCloseAndWaitForDurableCleanupAfterRevocation() throws Exception {
-        String tenant = "close-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
         var close = runtime.results.computeIfAbsent(session, ignored -> new CompletableFuture<>());
         mvc.perform(get("/v1/agents/sessions/" + session).header(TenantContextFilter.HEADER, tenant)
@@ -106,7 +105,7 @@ class WorkspaceSessionCloseTest {
 
     @Test
     void readerCannotCloseAndActiveOrPendingApprovalTurnsRemainGated() throws Exception {
-        String tenant = "close-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
         grant(tenant, "reader");
         mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
@@ -135,7 +134,7 @@ class WorkspaceSessionCloseTest {
     @Test
     void expiredOrUndecidableApprovalDoesNotPreventClose() throws Exception {
         for (String options : java.util.List.of("{\"expiresAt\":1}", "{}")) {
-            String tenant = "close-expired-" + UUID.randomUUID();
+            String tenant = UUID.randomUUID().toString();
             String session = create(tenant);
             seedAction(tenant, session, options);
             mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
@@ -149,7 +148,7 @@ class WorkspaceSessionCloseTest {
 
     @Test
     void liveOriginalWriterPreventsCompletionUntilItSeals() throws Exception {
-        String tenant = "close-writer-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
         // D3: the original writer seals itself without lifecycle authority,
         // which is v1 single-phase behavior; external-files keeps protocol 1
@@ -172,7 +171,7 @@ class WorkspaceSessionCloseTest {
 
     @Test
     void uncertainStopIsObservableAndNeverCompletesUntilEvidenceArrives() throws Exception {
-        String tenant = "close-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
         runtime.results.put(session, CompletableFuture.failedFuture(new RuntimeBrokerException(409,
                 "workspace_close_identity_unverified", "Original identity unavailable", false)));
@@ -193,11 +192,9 @@ class WorkspaceSessionCloseTest {
 
     private void seedAction(String tenant, String session, String options) {
         String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,record_kind,"
                         + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
-                        + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,'requested',?,0,1)",
-                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "ACTION", action),
+                        + " VALUES (?,?,'ACTION','action',?,?,1,1,'requested',?,0,1)",
                 tenant, session, action, action, options);
     }
 

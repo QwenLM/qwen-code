@@ -82,6 +82,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RateSessionTurnResult,
   SetModelResult,
   SessionMetadataResult,
   DaemonSessionPrInfo,
@@ -1040,6 +1041,23 @@ export class DaemonSessionClient {
 
   setModel(modelId: string): Promise<SetModelResult> {
     return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
+  }
+
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Fire-and-forget callers should swallow failures: the mark is local UI
+   * state and never depends on this call's outcome.
+   */
+  rateSessionTurn(
+    promptId: string,
+    rating: 'up' | 'down',
+  ): Promise<RateSessionTurnResult> {
+    return this.client.rateSessionTurn(
+      this.sessionId,
+      promptId,
+      rating,
+      this.clientId,
+    );
   }
 
   setConfigOption(

@@ -15,7 +15,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -24,7 +23,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -332,7 +330,7 @@ class HostedWorkspaceToolTurnIT {
                     + mapper.writeValueAsString(cli.toString()) + ";\nawait import("
                     + mapper.writeValueAsString(cli.toUri().toString()) + ");\n");
         }
-        String tenant = "hosted-tools-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         List<Path> workspaces = new ArrayList<>();
         for (String name : cases) {
             workspaces.add(Files.createDirectory(temporary.resolve(name)));
@@ -702,13 +700,12 @@ class HostedWorkspaceToolTurnIT {
             }
         }
         String storageId = "storage-" + index;
-        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
-                + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
-                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
+        String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ?", String.class,
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
-                + " session_state, execution_storage_key, is_rewind_pending FROM ma_runtime_session"
+                + " session_state, execution_storage_id, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, session.get("sessionId"), report.path("promptId").asText());
         boolean released = storeFaults ? fault.equals("turn-reply")
@@ -723,7 +720,7 @@ class HostedWorkspaceToolTurnIT {
         // terminal drain (#16484), so release-before-forward ends RELEASED
         // like release; only the never-settled turns above stay READY.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
-        assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
+        assertThat(member.get("execution_storage_id")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
         assertThat(member.get("is_rewind_pending")).isEqualTo(false);
         if (retained) {
@@ -755,7 +752,7 @@ class HostedWorkspaceToolTurnIT {
                     + (fault.equals("await-runtime") ? "await_runtime" : "results_ready") + "')";
             default -> throw new IllegalArgumentException(fault);
         };
-        assertThat(tenant).matches("hosted-tools-[0-9a-f-]{36}");
+        assertThat(tenant).matches("[0-9a-f-]{36}");
         assertThat(session.get("sessionId").toString()).matches("[0-9a-f-]{36}");
         jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON " + table + " FOR EACH ROW BEGIN IF"
                 + " NEW.tenant_id = '" + tenant + "' AND NEW.session_id = '" + session.get("sessionId")
@@ -800,8 +797,8 @@ class HostedWorkspaceToolTurnIT {
         for (JsonNode resource : target.path("resources")) {
             // Led by the indexed session scope key, as in HostedGateTestSupport:
             // the raw tenant+session form scans the lane's accumulated ma_resource rows.
-            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                    ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
+            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    tenant, sessionId, resource.path("resourceId").asText(), tenant, sessionId);
             if (!applied) {
                 if (resource.has("bytesBase64")) {
                     assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -822,7 +819,7 @@ class HostedWorkspaceToolTurnIT {
             }
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref f"
-                + " LEFT JOIN ma_resource r ON r.session_scope_key = f.session_scope_key"
+                + " LEFT JOIN ma_resource r ON r.tenant_id = f.tenant_id AND r.session_id = f.session_id"
                 + " AND r.resource_id = f.resource_id LEFT JOIN ma_session_journal_tx t"
                 + " ON t.tenant_id = f.tenant_id AND t.session_id = f.session_id AND t.journal_revision = f.journal_revision"
                 + " WHERE f.owner_kind = 'JOURNAL' AND f.tenant_id = ? AND f.session_id = ?"
@@ -883,8 +880,8 @@ class HostedWorkspaceToolTurnIT {
         assertThat(head.get("last_commit_digest")).isEqualTo(digest);
         assertThat(head.get("latest_checkpoint_resource_id")).isEqualTo(checkpointId);
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
+                tenant, sessionId, checkpointId, tenant, sessionId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
         if (fault.startsWith("result-")) {
             assertThat(phase).isEqualTo("await_runtime");

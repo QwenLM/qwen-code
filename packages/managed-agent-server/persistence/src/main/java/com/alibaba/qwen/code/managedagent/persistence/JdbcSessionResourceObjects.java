@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -86,12 +85,11 @@ public class JdbcSessionResourceObjects {
     public ManagedSessionStoreModels.StoredResource readExternal(String tenantId,
             String workspaceId, String sessionId, String resourceId) {
         config();
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT kind, schema_version, byte_length, sha256, object_key FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ? AND storage_kind ="
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND storage_kind ="
                         + " 'OSS_OBJECT' AND state IN ('PUBLISHED', 'REFERENCED')",
-                scope, resourceId);
+                tenantId, sessionId, resourceId);
         if (rows.isEmpty()) {
             throw new ManagedAgentException(404, ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
                     "The Managed Session resource does not exist.");
@@ -116,7 +114,7 @@ public class JdbcSessionResourceObjects {
     @Transactional
     public Allocation allocate(String tenantId, String sessionId, AllocateRequest request) {
         ManagedAgentSettings.SessionResources config = config();
-        JournalStoreRows.validateStableId(request.resourceId(), "resourceId");
+        JournalStoreRows.validateStableId(request.resourceId(), "resourceId", 256);
         JournalStoreRows.validateStableId(request.kind(), "resource kind");
         JournalStoreRows.validateDigest(request.digest(), "resource digest", false);
         if (request.schemaVersion() < 1 || request.byteLength() < 0) {
@@ -130,11 +128,12 @@ public class JdbcSessionResourceObjects {
         if (request.byteLength() > ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES) {
             throw JournalStoreRows.payloadTooLarge("Resource exceeds its byte limit.");
         }
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        // The OSS object path below is scoped by tenant/Session; reads resolve
+        // the stored object_key, so this naming identity is not a schema key.
         List<Map<String, Object>> existing = jdbc.queryForList(
                 "SELECT storage_kind, state, object_key, byte_length, sha256 FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ? FOR UPDATE",
-                scope, request.resourceId());
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? FOR UPDATE",
+                tenantId, sessionId, request.resourceId());
         if (!existing.isEmpty()) {
             Map<String, Object> row = existing.getFirst();
             if ("OSS_OBJECT".equals(row.get("storage_kind"))
@@ -146,15 +145,14 @@ public class JdbcSessionResourceObjects {
             throw JournalStoreRows.conflict("managed_session_resource_conflict",
                     "A resourceId was reused with different content metadata.");
         }
-        String objectKey = config.getOssKeyPrefix() + scope + "/" + request.resourceId() + "/"
-                + UUID.randomUUID();
+        String objectKey = config.getOssKeyPrefix() + tenantId + "/" + sessionId + "/"
+                + request.resourceId() + "/" + UUID.randomUUID();
         long now = System.currentTimeMillis();
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, object_key, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OSS_OBJECT', ?, 'ALLOCATED', ?)",
-                ManagedSessionStore.resourceKey(scope, request.resourceId()), scope, tenantId,
-                request.workspaceId(), sessionId, request.resourceId(), request.kind(),
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OSS_OBJECT', ?, 'ALLOCATED', ?)",
+                tenantId, request.workspaceId(), sessionId, request.resourceId(), request.kind(),
                 request.schemaVersion(), request.byteLength(), request.digest(), objectKey, now);
         return new Allocation(request.resourceId(), objectKey, request.byteLength(),
                 request.digest());
@@ -201,9 +199,9 @@ public class JdbcSessionResourceObjects {
                 return true;
             }
             jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED', last_verified_at = ?"
-                            + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'ALLOCATED'",
+                            + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'ALLOCATED'",
                     System.currentTimeMillis(),
-                    ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId);
+                    tenantId, sessionId, resourceId);
             return false;
         }));
         if (mismatch) {
@@ -211,8 +209,8 @@ public class JdbcSessionResourceObjects {
             // fail-closed throw below (and the rollback of any surrounding transaction).
             quarantineTx.executeWithoutResult(status -> jdbc.update(
                     "UPDATE ma_resource SET quarantine_reason = 'digest_mismatch',"
-                            + " last_verified_at = ? WHERE session_scope_key = ? AND resource_id = ?",
-                    now, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId));
+                            + " last_verified_at = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                    now, tenantId, sessionId, resourceId));
             throw JournalStoreRows.conflict("managed_session_resource_conflict",
                     "The uploaded object does not match its allocated digest or length.");
         }
@@ -225,12 +223,11 @@ public class JdbcSessionResourceObjects {
 
     private Map<String, Object> lockAllocation(String tenantId, String sessionId,
             String resourceId) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT state, object_key, byte_length, sha256 FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ? AND storage_kind ="
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND storage_kind ="
                         + " 'OSS_OBJECT' FOR UPDATE",
-                scope, resourceId);
+                tenantId, sessionId, resourceId);
         if (rows.isEmpty()) {
             throw new ManagedAgentException(404, ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
                     "The Managed Session resource allocation does not exist.");

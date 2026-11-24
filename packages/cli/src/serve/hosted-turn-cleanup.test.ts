@@ -20,8 +20,10 @@ import {
   hostedRuntimeSessionId,
 } from './hosted-workspace-broker.js';
 import {
+  backgroundSuspensionCertificate,
   hasBlockingHostedCleanupDebt,
   hasHostedCleanupDebt,
+  hasHostedCleanupDebtExcluding,
   oweHostedTurnCleanup,
   reconcileHostedTurnCleanup,
 } from './hosted-turn-cleanup.js';
@@ -541,4 +543,84 @@ it('rejects a moving evidence view without releasing or admitting through it', a
   });
   expect(await hasBlockingHostedCleanupDebt(f.session, result.held)).toBe(true);
   expect(release).toHaveBeenCalledTimes(1);
+});
+
+// Phase 3b §4.8: only a verified background hold on a binding whose worker
+// owns the observation pull may be exempted from suspension eligibility and
+// certified at the seal. Everything else keeps the Session resident.
+it.each<BackgroundKind>(['shell', 'monitor'])(
+  'certifies a proved %s hold on an observation-capable binding',
+  async (kind) => {
+    const f = await fixture();
+    await f.background(kind);
+    await f.terminal();
+    expect(
+      await backgroundSuspensionCertificate(f.session, new Set(['binding@7'])),
+    ).toBe(true);
+  },
+);
+
+it('does not certify a hold whose worker never took over the capture', async () => {
+  const f = await fixture();
+  await f.background('shell');
+  await f.terminal();
+  expect(
+    await backgroundSuspensionCertificate(f.session, new Set(['binding@6'])),
+  ).toBe(false);
+  expect(await backgroundSuspensionCertificate(f.session, undefined)).toBe(
+    false,
+  );
+});
+
+it('does not certify a run that is not running attached', async () => {
+  const f = await fixture();
+  await f.background('shell', { attached: false });
+  await f.terminal();
+  expect(
+    await backgroundSuspensionCertificate(f.session, new Set(['binding@7'])),
+  ).toBe(false);
+});
+
+it('does not certify a Session with no unsettled background run', async () => {
+  const f = await fixture();
+  await f.terminal();
+  expect(
+    await backgroundSuspensionCertificate(f.session, new Set(['binding@7'])),
+  ).toBe(false);
+});
+
+it('exempts only the parked prompt from cleanup eligibility', async () => {
+  const f = await fixture();
+  expect(await hasHostedCleanupDebtExcluding(f.session, f.promptId)).toBe(
+    false,
+  );
+  expect(await hasHostedCleanupDebtExcluding(f.session, 'another-prompt')).toBe(
+    true,
+  );
+  expect(await hasHostedCleanupDebt(f.session)).toBe(true);
+});
+
+it('reports debt committed while cleanup descriptors are read', async () => {
+  const f = await fixture();
+  const read = f.session.resources.read.bind(f.session.resources);
+  let intercepted = false;
+  vi.spyOn(f.session.resources, 'read').mockImplementation(async (ref) => {
+    const bytes = await read(ref);
+    if (!intercepted && ref.kind === 'hosted-turn-cleanup') {
+      intercepted = true;
+      const broker = new HostedWorkspaceBroker(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        f.session.authority.sessionHeader.sessionKey,
+        hostedRuntimeSessionId('another-prompt'),
+      );
+      broker.runtime = {
+        bindingId: 'binding',
+        generation: '7',
+        workspaceGeneration: '3',
+      };
+      await oweHostedTurnCleanup(f.session, 'another-prompt', broker);
+    }
+    return bytes;
+  });
+  expect(await hasHostedCleanupDebtExcluding(f.session, f.promptId)).toBe(true);
 });

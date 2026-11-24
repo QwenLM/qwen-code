@@ -104,13 +104,13 @@ async function renderAndSettle() {
 }
 
 describe('useChangeOverview', () => {
-  it('assembles uncommitted, PR, and commit-fallback units', async () => {
+  it('assembles uncommitted, newest-bound-first PR, and commit-fallback units', async () => {
     await renderAndSettle();
     expect(output.gitAvailable).toBe(true);
     expect(output.units.map((unit) => unit.id)).toEqual([
       'uncommitted',
-      'pr:1',
       'pr:2',
+      'pr:1',
       'commit:c9',
     ]);
     const pr2 = output.units.find((unit) => unit.id === 'pr:2');
@@ -326,7 +326,7 @@ describe('useChangeOverview', () => {
       0,
       '/work/wt',
       'origin/main..HEAD',
-      { sessionId: 's1', excludeRefs: ['head1', 'head2', 'origin/main'] },
+      { sessionId: 's1', excludeRefs: ['head2', 'head1', 'origin/main'] },
     );
   });
 
@@ -533,7 +533,7 @@ describe('useChangeOverview', () => {
     const prIds = output.units
       .filter((unit) => unit.kind === 'pr')
       .map((unit) => unit.id);
-    expect(prIds).toEqual(['pr:1', 'pr:3']);
+    expect(prIds).toEqual(['pr:3', 'pr:1']);
   });
 
   it('still shows the commit fallback when the files capability is absent', async () => {
@@ -870,7 +870,7 @@ describe('useChangeOverview', () => {
       0,
       '/work/wt',
       'origin/main..HEAD',
-      { sessionId: 's1', excludeRefs: ['head1', 'head2', 'origin/main'] },
+      { sessionId: 's1', excludeRefs: ['head2', 'head1', 'origin/main'] },
     );
     expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
       2,

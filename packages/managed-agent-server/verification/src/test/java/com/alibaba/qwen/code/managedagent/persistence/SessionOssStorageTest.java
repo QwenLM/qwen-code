@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -87,7 +87,8 @@ class SessionOssStorageTest {
         var stored = resources.readExternal(TENANT, WORKSPACE, SESSION, "res-1");
         assertThat(stored.bytes()).isEqualTo(value);
         assertThat(stored.digest()).isEqualTo(JournalStoreRows.sha256(value));
-        assertThat(allocation.objectKey()).startsWith("test-resources/");
+        assertThat(allocation.objectKey())
+                .startsWith("test-resources/" + TENANT + "/" + SESSION + "/res-1/");
     }
 
     @Test
@@ -150,29 +151,25 @@ class SessionOssStorageTest {
     }
 
     private void insertHead(long journalRevision) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                 + " workspace_id, session_id, harness_session_id, head_kind, state,"
                 + " writer_generation, journal_revision, committed_sequence,"
                 + " last_commit_digest, activation_epoch, packed_through_revision, gmt_create,"
-                + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1,"
+                + " gmt_modified) VALUES (?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1,"
                 + " ?, ?, 'digest', 0, 0, 0, 0)",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(SESSION),
                 TENANT, WORKSPACE, SESSION, SESSION, journalRevision, journalRevision);
-        assertThat(scope).isNotBlank();
     }
 
     private void insertTransaction(long revision, byte[] value) {
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                + " journal_revision, transaction_id, operation, command_id, command_key_hash,"
+                + " journal_revision, transaction_id, operation, command_id, command_ref,"
                 + " content_digest, first_sequence, last_sequence, event_count, events_digest,"
                 + " commit_digest, writer_generation, writer_id, writer_token_hash,"
                 + " activation_epoch, record_encoding, record_bytes, byte_length, record_digest,"
                 + " gmt_create) VALUES (?, ?, ?, ?, ?, 'turn.start', ?, ?, 'content', ?, ?, 1,"
                 + " 'events', ?, 1, 'writer', 'hash', 0, 'identity', ?, ?, ?, 0)",
                 TENANT, WORKSPACE, SESSION, revision, "tx-" + revision, "cmd-" + revision,
-                "cmdkey-" + revision, revision, revision, "commit-" + revision, value,
+                ManagedIdentityRefs.commandRef("turn.start", "cmd-" + revision), revision, revision, "commit-" + revision, value,
                 value.length, JournalStoreRows.sha256(value));
     }
 
@@ -184,6 +181,10 @@ class SessionOssStorageTest {
         insertTransaction(1, first);
         insertTransaction(2, second);
         assertThat(packs.compactOnce(TENANT, WORKSPACE, SESSION)).isTrue();
+        assertThat(new String(jdbc.queryForObject("SELECT object_key FROM ma_journal_pack"
+                + " WHERE tenant_id = ? AND session_id = ?", byte[].class, TENANT, SESSION),
+                java.nio.charset.StandardCharsets.UTF_8))
+                .startsWith("test-resources/packs/" + TENANT + "/" + SESSION + "/pack-");
         assertThat(jdbc.queryForObject("SELECT packed_through_revision FROM ma_session_head"
                 + " WHERE tenant_id = ? AND session_id = ?", Long.class, TENANT, SESSION))
                 .isEqualTo(2L);

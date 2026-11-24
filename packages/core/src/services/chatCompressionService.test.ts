@@ -26,7 +26,8 @@ import type { Content, Part } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import type { LlmChat } from '../core/llm-chat.js';
+import { LlmChat } from '../core/llm-chat.js';
+import type { ChatRecordingService } from './chatRecordingService.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type {
@@ -37,6 +38,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
@@ -577,11 +579,15 @@ describe('ChatCompressionService', () => {
       force: true,
       trigger: 'auto', // keep the trailing fc (manual would strip it)
       originalTokenCount: 100_000,
+      getExistingTranscriptPath: async () => '/project/chat.jsonl',
     });
 
     expect(composeSpy).toHaveBeenCalled();
     // Degraded success — not an escape, not a compression failure.
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory?.[0].parts?.[0].text).toContain(
+      buildCompactionTranscriptHint('/project/chat.jsonl'),
+    );
     const last = result.newHistory![result.newHistory!.length - 1];
     expect(last.role).toBe('model');
     expect(last.parts?.some((p) => p.text)).toBe(true); // ack text
@@ -1669,6 +1675,27 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(request.promptCacheSharing).toBe(true);
     expect(result.info.warning).toContain('too small');
     expectCacheLog(config, true, true);
+  });
+
+  it('uses the cold path when removing a prior hint changes the warmed prefix', async () => {
+    const hint = buildCompactionTranscriptHint('/stale/session.jsonl');
+    const summary = postCompactModule.postProcessSummary(
+      'Earlier summary',
+      hint,
+    );
+    const history = turns(
+      summary,
+      'Got it. Thanks for the additional context!',
+      'next prompt',
+      'next reply',
+    );
+    const { coldSpy, config, result } = await expectCold({ history });
+
+    expectCompressed(result);
+    expectCacheLog(config, false, false);
+    expect(coldSpy.mock.calls[0]?.[1].contents?.[0].parts?.[0].text).toBe(
+      postCompactModule.postProcessSummary('Earlier summary'),
+    );
   });
 
   it('preserves the main system, tools, and summarized prefix before the compression directive', async () => {
@@ -2925,20 +2952,92 @@ describe('ChatCompressionService.compress — summary and retained operation', (
   });
 
   it('produces newHistory composed via composePostCompactHistory', async () => {
-    // newTokenCount = 180_000 - (170_000 - 1000) + 500 = 11_500 <= 180_000
     spySideQuery('SUM_TXT', usage(170_000, 500));
-
-    const result = await compressWith(
+    const withoutHint = await compressWith(
       fakeChat(turns('hi', 'hello', 'how are you', 'fine')),
       fakeConfig(),
       { trigger: 'manual' },
+    );
+    const path = '/project/chat.jsonl';
+    const hint = buildCompactionTranscriptHint(path);
+    const result = await compressWith(
+      fakeChat(turns('hi', 'hello', 'how are you', 'fine')),
+      fakeConfig(),
+      {
+        trigger: 'manual',
+        getExistingTranscriptPath: async () => path,
+      },
     );
 
     expect(result.newHistory).not.toBeNull();
     expect(result.newHistory![0].role).toBe('user');
     const firstPart = result.newHistory![0].parts?.[0] as { text?: string };
     expect(firstPart.text).toContain('SUM_TXT');
+    expect(firstPart.text).toContain(hint);
+    expect(result.info.newTokenCount).toBe(
+      withoutHint.info.newTokenCount + Math.ceil((hint.length + 2) / 4),
+    );
     expect(result.newHistory![1].role).toBe('model');
+  });
+
+  it('strips the prior hint from the real curated Summary parts before summarizing', async () => {
+    const stale = buildCompactionTranscriptHint('/stale/chat.jsonl');
+    const previousSummary = postCompactModule.postProcessSummary(
+      'Earlier summary',
+      stale,
+    );
+    const summarize = spySideQuery('SUM_TXT', usage(170_000, 500));
+    const config = fakeConfig();
+    const makeChat = (summary: string) =>
+      new LlmChat(
+        config,
+        {},
+        [
+          userText('startup prelude'),
+          ...turns(
+            summary,
+            'Got it. Thanks for the additional context!',
+            'new prompt',
+            'new reply',
+          ),
+        ],
+        {} as ChatRecordingService,
+      );
+    const chat = makeChat(previousSummary);
+    expect(chat.getHistoryShallow(true)[0].parts).toEqual([
+      { text: 'startup prelude' },
+      { text: previousSummary },
+    ]);
+
+    const result = await compressWith(chat, config, {
+      trigger: 'manual',
+      getExistingTranscriptPath: async () => '/current/chat.jsonl',
+    });
+
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(summarize.mock.calls)).not.toContain('/stale');
+    expect(JSON.stringify(summarize.mock.calls)).toContain('startup prelude');
+    expect(chat.getHistoryShallow(true)[0].parts?.[1].text).toBe(
+      previousSummary,
+    );
+    expect(result.newHistory?.[0].parts?.[0].text).toContain(
+      buildCompactionTranscriptHint('/current/chat.jsonl'),
+    );
+
+    const noPrior = makeChat(
+      postCompactModule.postProcessSummary('Earlier summary'),
+    );
+    const noPriorResult = await compressWith(noPrior, config, {
+      trigger: 'manual',
+      getExistingTranscriptPath: async () => '/current/chat.jsonl',
+    });
+    const oldHintTokens =
+      estimateContentTokens(chat.getHistoryShallow(true).slice(0, 2)) -
+      estimateContentTokens(noPrior.getHistoryShallow(true).slice(0, 2));
+    expect(oldHintTokens).toBeGreaterThan(0);
+    expect(result.info.newTokenCount).toBe(
+      noPriorResult.info.newTokenCount - oldHintTokens,
+    );
   });
 });
 

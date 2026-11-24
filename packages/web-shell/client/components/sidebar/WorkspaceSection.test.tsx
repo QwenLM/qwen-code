@@ -85,6 +85,9 @@ function makeClient(): DaemonClient {
 }
 
 const { I18nProvider } = await import('../../i18n');
+const { SidebarHoverSuppressionContext } = await import(
+  './sidebar-hover-suppression'
+);
 const { WorkspaceSection } = await import('./WorkspaceSection');
 const { readWorkspaceExpanded, writeWorkspaceExpanded } = await import(
   './workspaceExpansion'
@@ -164,55 +167,58 @@ function renderSection(
     onOpenGitDiff: (workspaceCwd: string) => void;
     onOpenCommit: (workspaceCwd: string) => void;
   }> = {},
+  hoverSuppressed = false,
 ): void {
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <WorkspaceSection
-          workspace={overrides.workspace ?? trustedWorkspace}
-          client={overrides.client ?? makeClient()}
-          reloadToken={overrides.reloadToken ?? 0}
-          expanded={overrides.expanded}
-          temporarilyCollapsed={overrides.temporarilyCollapsed}
-          expansionRequest={overrides.expansionRequest}
-          untrustedLabel="Untrusted"
-          readOnlyLabel="Read-only"
-          trustToOpenLabel="Trust to open"
-          noSessionsLabel="No sessions"
-          loadErrorLabel="Load failed"
-          untitledSessionLabel={overrides.untitledSessionLabel}
-          organizationEnabled={overrides.organizationEnabled ?? false}
-          sessionCatalogRequestsEnabled={
-            overrides.sessionCatalogRequestsEnabled
-          }
-          sessionGroupCatalog={overrides.sessionGroupCatalog}
-          sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
-          excludePinned={overrides.excludePinned}
-          limitSessions={overrides.limitSessions}
-          editingSessionId={overrides.editingSessionId}
-          searchQuery={overrides.searchQuery}
-          sourceType={overrides.sourceType}
-          channelGroupingEnabled={overrides.channelGroupingEnabled}
-          ungroupedLabel="Ungrouped"
-          renderSession={
-            overrides.renderSession ??
-            ((session: DaemonSessionSummary): ReactNode => (
-              <div key={session.sessionId}>{session.displayName}</div>
-            ))
-          }
-          overviewEnabled={overrides.overviewEnabled}
-          overviewMenuOpen={overrides.overviewMenuOpen}
-          renderHeader={overrides.renderHeader}
-          headerActions={overrides.headerActions}
-          sessionStats={overrides.sessionStats}
-          renderSessions={overrides.renderSessions}
-          gitBranchWanted={overrides.gitBranchWanted}
-          onOpenPathLocally={overrides.onOpenPathLocally}
-          onOpenTerminalLocally={overrides.onOpenTerminalLocally}
-          onOpenGitDiff={overrides.onOpenGitDiff}
-          onOpenCommit={overrides.onOpenCommit}
-        />
-      </I18nProvider>,
+      <SidebarHoverSuppressionContext.Provider value={hoverSuppressed}>
+        <I18nProvider language="en">
+          <WorkspaceSection
+            workspace={overrides.workspace ?? trustedWorkspace}
+            client={overrides.client ?? makeClient()}
+            reloadToken={overrides.reloadToken ?? 0}
+            expanded={overrides.expanded}
+            temporarilyCollapsed={overrides.temporarilyCollapsed}
+            expansionRequest={overrides.expansionRequest}
+            untrustedLabel="Untrusted"
+            readOnlyLabel="Read-only"
+            trustToOpenLabel="Trust to open"
+            noSessionsLabel="No sessions"
+            loadErrorLabel="Load failed"
+            untitledSessionLabel={overrides.untitledSessionLabel}
+            organizationEnabled={overrides.organizationEnabled ?? false}
+            sessionCatalogRequestsEnabled={
+              overrides.sessionCatalogRequestsEnabled
+            }
+            sessionGroupCatalog={overrides.sessionGroupCatalog}
+            sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
+            excludePinned={overrides.excludePinned}
+            limitSessions={overrides.limitSessions}
+            editingSessionId={overrides.editingSessionId}
+            searchQuery={overrides.searchQuery}
+            sourceType={overrides.sourceType}
+            channelGroupingEnabled={overrides.channelGroupingEnabled}
+            ungroupedLabel="Ungrouped"
+            renderSession={
+              overrides.renderSession ??
+              ((session: DaemonSessionSummary): ReactNode => (
+                <div key={session.sessionId}>{session.displayName}</div>
+              ))
+            }
+            overviewEnabled={overrides.overviewEnabled}
+            overviewMenuOpen={overrides.overviewMenuOpen}
+            renderHeader={overrides.renderHeader}
+            headerActions={overrides.headerActions}
+            sessionStats={overrides.sessionStats}
+            renderSessions={overrides.renderSessions}
+            gitBranchWanted={overrides.gitBranchWanted}
+            onOpenPathLocally={overrides.onOpenPathLocally}
+            onOpenTerminalLocally={overrides.onOpenTerminalLocally}
+            onOpenGitDiff={overrides.onOpenGitDiff}
+            onOpenCommit={overrides.onOpenCommit}
+          />
+        </I18nProvider>
+      </SidebarHoverSuppressionContext.Provider>,
     );
   });
 }
@@ -400,6 +406,51 @@ describe('WorkspaceSection label', () => {
     expect(tooltip?.textContent).toContain('danger');
     expect(tooltip?.querySelector('[title="/tmp/danger"]')).not.toBeNull();
     vi.useRealTimers();
+  });
+
+  it('suppresses queued and existing read-only hover details and restores them', async () => {
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+          sessions: [
+            {
+              sessionId: 'readonly-hover',
+              displayName: 'Read-only detail',
+              workspaceCwd: '/tmp/second',
+              createdAt: '2026-01-01T00:00:00.000Z',
+            } as DaemonSessionSummary,
+          ],
+        }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const overrides = {
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    };
+    renderSection(overrides, true);
+    await flush();
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    expect(row).not.toBeNull();
+    const hover = () => {
+      act(() => {
+        row!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+    };
+    vi.useFakeTimers();
+    hover();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    renderSection(overrides, false);
+    hover();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    renderSection(overrides, true);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    renderSection(overrides, false);
+    hover();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
   });
 
   it('restores and writes the workspace expansion preference', () => {

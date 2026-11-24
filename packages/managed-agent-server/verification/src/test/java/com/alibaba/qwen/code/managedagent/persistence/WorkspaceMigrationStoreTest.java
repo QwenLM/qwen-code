@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -12,7 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtecto
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -134,19 +133,18 @@ class WorkspaceMigrationStoreTest {
             String owner = index == 3 ? "other-binding" : "binding";
             long generation = index == 2 ? 1 : 2;
             if ("runtime".equals(kind)) {
-                jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
+                jdbc.update("INSERT INTO ma_runtime_session (scope_id, runtime_session_id, tenant_id, workspace_id,"
                         + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
                         + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at)"
                         + " VALUES (?, ?, 'tenant', 'workspace', '1', '/', 'digest', 'SHARED', 'session', 'TOOL', ?, ?, 'ACTIVE', 1, 1)",
                         WorkspaceOperations.hash(work), work, owner, generation);
             } else {
-                jdbc.update("INSERT INTO ma_tool_execution (execution_call_id_hash, execution_call_id, idempotency_key_hash,"
-                        + " idempotency_key, binding_id, runtime_generation, harness_session_id, runtime_session_id,"
-                        + " runtime_session_key, turn_id, tool_call_id, request_digest, reference_json, execution_state,"
+                jdbc.update("INSERT INTO ma_tool_execution (execution_call_id, idempotency_key,"
+                        + " binding_id, runtime_generation, harness_session_id, runtime_session_id,"
+                        + " turn_id, tool_call_id, request_digest, reference_json, execution_state,"
                         + " last_sequence, is_cancel_requested, dispatch_generation, record_version)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'session', 'runtime', ?, 'turn', ?, 'digest', '{}', 'RUNNING', 0, 0, 1, 1)",
-                        WorkspaceOperations.hash(work), work, WorkspaceOperations.hash(work), work, owner, generation,
-                        WorkspaceOperations.hash("runtime"), work);
+                        + " VALUES (?, ?, ?, ?, 'session', 'runtime', 'turn', ?, 'digest', '{}', 'RUNNING', 0, 0, 1, 1)",
+                        work, work, owner, generation, work);
             }
         }
         var operation = new WorkspaceMigrationStore(jdbc, manager,
@@ -174,16 +172,14 @@ class WorkspaceMigrationStoreTest {
         var operation = store(true);
         for (int index = 0; index < 34; index++) {
             String session = "approval-" + String.format(java.util.Locale.ROOT, "%02d", index);
-            String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
             jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, workspace_storage_id, gmt_create, gmt_modified,"
                     + " workspace_id, workspace_generation, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref)"
                     + " VALUES ('tenant', ?, 'agent', ?, 1, 1, 'workspace', 1, '.', ?, 1, ?, ?)",
                     session, index == 33 ? "other-storage" : "storage", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, session_id, domain,"
+            jdbc.update("INSERT INTO ma_session_record (tenant_id, session_id, domain,"
                     + " record_id, revision, record_kind, state, action_id, action_version, options_json, gmt_create)"
-                    + " VALUES (?, ?, 'tenant', ?, 'approval', ?, 1, 'ACTION', 'requested', ?, 1, ?, 1)",
-                    scope, WorkspaceOperations.hash(session), session, session, session,
+                    + " VALUES ('tenant', ?, 'approval', ?, 1, 'ACTION', 'requested', ?, 1, ?, 1)", session, session, session,
                     JSON.createObjectNode().put("expiresAt", index >= 32 ? Long.MAX_VALUE : 0).toString());
         }
         assertThatThrownBy(() -> operation.retire(mock(RuntimeBrokerService.class)))
@@ -373,7 +369,7 @@ class WorkspaceMigrationStoreTest {
                 assertThat(receipt.path("lastErrorCode").isNull()).isTrue();
                 assertThat(receipt.path("result_json").path("contentVerified").asBoolean()).isTrue();
                 assertThat(receipt.path("result_json").path("activation").asBoolean()).isFalse();
-                assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, RuntimeAdmissionFences.storageAliasKey("tenant", "storage")))
+                assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE physical_id = (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?)", Long.class, "tenant", "storage"))
                         .isEqualTo(promote ? 2 : 1);
                 operation.verify(promote);
                 assertThat(operation.inspect()).isEqualTo(receipt);
@@ -444,13 +440,15 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
-        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
-                WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
-                + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
-                WorkspaceOperations.hash("rename"), scope, scope, WorkspaceOperations.hash("session"), state, state);
+        // The idle gate joins ma_session on is_publication_retention_registered
+        // = 1; without registering the root the join is false for every state
+        // and the assertion below would hold vacuously.
+        jdbc.update("UPDATE ma_session SET is_publication_retention_registered = 1"
+                + " WHERE tenant_id = 'tenant' AND session_id = 'session'");
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, session_id,"
+                + " target_kind, target_id, request_digest, request_json, state, phase, delivery_state, available_at, gmt_create, gmt_modified)"
+                + " VALUES (?, 'SESSION', ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
+                ManagedIdentityRefs.operationRef("RENAME", "tenant", "SESSION", "session", "session", "rename:1"), "session", "session", state, state);
         assertThatThrownBy(() -> store(true)).hasMessageContaining("source_drift")
                 .hasMessageNotContaining("migration_work_unsettled");
     }
@@ -496,14 +494,13 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
-        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
-                WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
-                + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, failure_code, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'TASK_CANCEL', 'op_cancel', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', 'RECOVERY_BLOCKED',"
+        jdbc.update("UPDATE ma_session SET is_publication_retention_registered = 1"
+                + " WHERE tenant_id = 'tenant' AND session_id = 'session'");
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, session_id,"
+                + " target_kind, target_id, request_digest, request_json, state, phase, delivery_state, failure_code, available_at, gmt_create, gmt_modified)"
+                + " VALUES (?, 'SESSION', ?, 'TASK_CANCEL', 'op_cancel', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', 'RECOVERY_BLOCKED',"
                 + " 'RECOVERY_BLOCKED', 'BLOCKED', 'task_cancel_unconfirmed', 0, 1, 1)",
-                WorkspaceOperations.hash("cancel"), scope, scope, WorkspaceOperations.hash("session"));
+                ManagedIdentityRefs.operationRef("TASK_CANCEL", "tenant", "SESSION", "session", "session", "op_cancel"), "session", "session");
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
         // Settled, it no longer holds the move: the migration gets past its
@@ -623,7 +620,7 @@ class WorkspaceMigrationStoreTest {
         assertThat(Files.readAllBytes(target.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
         assertThat(Files.readString(source.resolve(".qwen-managed-storage.json"))).contains(source.toString());
         guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText());
-        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, RuntimeAdmissionFences.storageAliasKey("tenant", "storage"))).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE physical_id = (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?)", Long.class, "tenant", "storage")).isEqualTo(2);
         assertThatThrownBy(() -> guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText()));
     }
 }
