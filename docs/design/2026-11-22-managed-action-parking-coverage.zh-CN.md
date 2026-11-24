@@ -86,6 +86,7 @@
 - **资格细节。** 停靠资格接受的恰好是恢复臂能恢复的。来源必须是上面四种之一，判断用的是泵的恢复与停靠资格共用的同一个谓词。计划必须是原生的：wake Turn 上的 extension command step 保持常驻，因为泵不会恢复它。"未结算输入"这一项的形态有变化：wake 输入归泵所有，所以 Session 未结算的 prompt 输入里从不包含 wake Turn 自己的输入，对 wake Turn 而言它必须为空；第二条 wake 输入仍会在闸门处被拒，因为闸门读取全部待处理输入。
 - **以 Turn 行为依据的控制面读取。** 有两处读取把活跃的 `ma_turn` 行当作存在停靠 Turn 的标志，而 wake Turn 没有这一行。原生文件 Turn 在进入审批等待之前，就已把 Runtime 清理记为待偿。(1) 清理欠账扫描会跳过有活跃 Turn 行的 Session，否则就会对 wake 停靠的 Session 做仅清理加载，这会重新打开停靠，空闲一段时间后再次停靠，每轮扫描都如此。现在它也跳过当前 seal 带有停靠证书的 head，与已有的"seal 认证了后台持有就跳过"一致：恢复的 Turn 结算时会自己释放清理。(2) 恢复视图把这笔待偿清理算作未结算工作，又因为已 seal 的 Session 没有 Harness 证据，最终落到 `operator_required`。现在当前的 wake 所有停靠证书会像后台证书一样，认证停靠 Turn 自身的待偿义务，所以视图显示 `ready`，与带有延迟 wake 输入、由扫描在到期时加载的已 seal Session 一致。
 - **与 3a 的关系。** 若同一 Session 还有延迟的未尝试 wake 输入，首个增量仍不停靠，因为"唯一待处理输入"这一条件不变。
+- **S4b：channel 与 `pr_event` Turn。** 这两个来源加入泵的恢复与停靠资格共用的谓词，因此停靠和恢复方式与上面四种来源完全相同。证书、seal 规则、grant 能力位和那两处控制面读取都不看来源，wake 恢复扫描也早已统计这两个来源，所以控制面不变。不同的只有 Turn 之后的事。channel Turn 死在审批等待里时，原先交给 channel 漏斗处理，而漏斗不能再写一条用户记录：它让 Action 保持可决（`held`），Action 定局后推进等待，把 Turn 以 cancelled 结算且不回复，所以 Allow 从不会执行工具。现在泵先恢复这次等待，恢复后完成的 Turn 走普通的结算路径规划回复；结算与规划之间的崩溃仍由打开路径的对账覆盖。`pr_event` Turn 只在会话内部，不规划任何回复；它崩溃后原先走通用的崩溃善后。泵无法恢复的等待仍由 channel 漏斗结算。session-message Turn 的消费归消息中继所有，仍不纳入。
 - **改动面。** Harness 泵与停靠资格、Store 的 seal 校验、审批模式变更事务及其忙碌闸门证明、grant 能力位、清理欠账扫描与恢复视图。
 
 ### 4.5 S5：Hooks
@@ -156,7 +157,7 @@
 - **S1**：纯图片 Prompt 停靠、冷加载后 Allow，以及它的 Harness 在等待中死掉、由新的 Harness 接管后 Allow，两种情况下工具都只执行一次，恢复后的第一次模型调用都从空文字开始，历史里带着原图。
 - **S2**：停靠期间后台终态到达，解除停靠、Turn 恢复，通知在 Turn 结算后投递；工具与通知各恰好一次。覆盖在 seal 之前、在 seal 与 CAS 之间、在 CAS 之后暂存这三种顺序。
 - **S3**：child Session 的停靠时长超过 relay 的消息 Turn 等待时间，父 Session 仍能收敛；单问题的 child 批次在冷恢复后交还挂载（`questionChild`）。
-- **S4**：由 monitor 通知、loop 触发、automation 运行和 child 结果启动的 Turn，各自停靠后分别走决定、模式变更、到期，以及来源支持时的取消，不经协调器都能完成；清除证书后又崩溃的 writer 会把 head 留给扫描；泵不再按崩溃结算 `await_action` 的 wake 输入。wake 停靠 Turn 的待偿清理既不会进入清理欠账扫描，也不会让恢复视图变成 `operator_required`。
+- **S4**：由 monitor 通知、loop 触发、automation 运行和 child 结果启动的 Turn，各自停靠后分别走决定、模式变更、到期，以及来源支持时的取消，不经协调器都能完成；清除证书后又崩溃的 writer 会把 head 留给扫描；泵不再按崩溃结算 `await_action` 的 wake 输入。wake 停靠 Turn 的待偿清理既不会进入清理欠账扫描，也不会让恢复视图变成 `operator_required`。S4b：channel Turn 与 `pr_event` Turn 在停靠之后、以及其 Harness 在等待中死掉之后，都能经由决定完成；完成的 channel Turn 恰好规划一条回复。
 - **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发；另有单独用例覆盖 PreToolUse 的 `updatedInput`、PermissionRequest 的 `decision.updatedInput`，以及 Hooks 在第一个审批之前已为兄弟调用运行过的批次。
 - **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放；持有审批停靠证书的 owner 经过回收作业的空闲窗口扫描后仍保留原目录。
 - **真实进程与 MySQL 8.4**：每个切片至少一个"停靠 → 换代 Harness → 决定"用例进入必跑 CI 层级；H2 结果不能替代。
