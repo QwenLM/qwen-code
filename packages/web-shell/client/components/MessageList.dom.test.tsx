@@ -76,6 +76,7 @@ vi.mock('./MessageItem', async (importOriginal) => {
         isLocateFlashing,
         assistantTurnFooterInfo,
         sendFailed,
+        sendFailedStatus,
         onRetrySend,
         onEditUserMessage,
         assistantFeedbackPromptId,
@@ -95,6 +96,7 @@ vi.mock('./MessageItem', async (importOriginal) => {
           'data-feedback-prompt': assistantFeedbackPromptId,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
+          'data-send-failed-status': sendFailedStatus,
           'data-timestamp': message.timestamp,
           'data-message-content':
             'content' in message ? message.content : undefined,
@@ -412,6 +414,7 @@ function mount(
     compactMode?: boolean;
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
+    failedPromptStatus?: 'failed' | 'uncertain';
     onRetryFailedPrompt?: () => void;
     onEditUserMessage?: (turnIndex: number, content: string) => void;
   } = {},
@@ -454,6 +457,7 @@ function mount(
                 sourceSessionId={opts.sourceSessionId}
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
+                failedPromptStatus={opts.failedPromptStatus}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
                 onEditUserMessage={opts.onEditUserMessage}
               />
@@ -720,10 +724,11 @@ describe('MessageList — locate scroll timer lifecycle', () => {
 });
 
 describe('MessageList — failed prompt retry', () => {
-  it('marks only the matching user message and forwards retry', () => {
+  it('marks only the matching user message and forwards retry and status', () => {
     const onRetry = vi.fn();
     const container = mount([userMsg('u1'), userMsg('u2')], undefined, {
       failedPromptMessageId: 'u1',
+      failedPromptStatus: 'uncertain',
       onRetryFailedPrompt: onRetry,
     });
 
@@ -734,8 +739,18 @@ describe('MessageList — failed prompt retry', () => {
     ).toBe('true');
     expect(
       container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-send-failed-status'),
+    ).toBe('uncertain');
+    expect(
+      container
         .querySelector('[data-testid="msg-u2"]')
         ?.getAttribute('data-send-failed'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-send-failed-status'),
     ).toBeNull();
 
     act(() =>
