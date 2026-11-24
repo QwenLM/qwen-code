@@ -145,6 +145,7 @@ describe('translateDisplayText', () => {
     ],
     ['Mail a@b.example.', '发邮件到 a@b.example。'],
     ['See https://a.example.', '详见 https://a.example。'],
+    ['See the docs at https://例子.测试.', '文档详见 https://例子.测试。'],
   ])(
     'accepts a bare URL next to other punctuation in %s',
     async (original, translated) => {
@@ -283,6 +284,11 @@ describe('translateDisplayText', () => {
     ['Mail <mailto:a@b.example>.', '发邮件到 <mailto:a@b.example．ｃｎ>。'],
     ['Mail <mailto:a@b.example>.', '发邮件到 <mailto:a@evil.example>。'],
     ['Mail a@b.example.', '发邮件到 a@evil.example。'],
+    ['See https://a.example/文档.', '参见 https://a.example/资料。'],
+    [
+      'Visit https://a.example/docs, then run it.',
+      '请访问 https://a.example/docs，然后运行。',
+    ],
   ])(
     'keeps the original when a bare URL changes: %s -> %j',
     async (original, translated) => {

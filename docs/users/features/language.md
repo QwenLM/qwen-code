@@ -124,7 +124,7 @@ You can also set **Language: Display Translation** on the **User** tab in `/sett
 - **Some sessions turn it off.** Like installed Mods, it does not run with `disableAllHooks`, managed hooks, bare mode, safe mode, a sandbox, an execution environment or in a session run by a workspace agent.
 - **The thought translate button goes away.** In the Web Shell, a translated thought no longer shows its translate button.
 
-Display translation runs after any installed [Mods](../extension/mods.md) finish rewriting a reply or thought. A translation that changes any code, math, link target or image is discarded, and the whole block keeps its original text.
+Display translation runs after any installed [Mods](../extension/mods.md) finish rewriting a reply or thought. A translation that changes any code, math, inline HTML, link target or image is discarded, and the whole block keeps its original text.
 
 ## Configuration
 
