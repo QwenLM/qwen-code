@@ -12,6 +12,7 @@ import {
   createTranscriptExecutionLifecycleUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
@@ -7022,14 +7023,26 @@ export class Session implements SessionContext {
       }
       return completedResult;
     } catch (error) {
-      promptFailureMessage =
-        error instanceof Error ? error.message : String(error);
+      promptFailureMessage = getErrorMessage(error);
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
         });
       }
       rejectedByLoopProtection = isLoopDetectedTurnError(error);
+      // Preserve error.cause (e.g. UND_ERR_SOCKET: other side closed) across
+      // ACP JSON-RPC; raw Error instances lose their cause when the SDK maps
+      // them to Internal error with only error.message in data.details.
+      if (
+        !(error instanceof RequestError) &&
+        error instanceof Error &&
+        error.cause !== undefined &&
+        promptFailureMessage !== error.message
+      ) {
+        throw new RequestError(-32603, promptFailureMessage, {
+          details: promptFailureMessage,
+        });
+      }
       throw error;
     } finally {
       const proposalTurn = responseCapture.goalProposalTurn;
@@ -9497,6 +9510,7 @@ export class Session implements SessionContext {
             modelOverride: round.modelOverride,
             stopPolicies: round.stopPolicies,
             toolCallPreparations: true,
+            retractToolCallsOnRetry: true,
             ...round.options,
           },
         },
@@ -10027,7 +10041,7 @@ export class Session implements SessionContext {
     this.todoStopGuard.pauseForTrustedRetry();
 
     const errorStatus = getErrorStatus(error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getErrorMessage(error);
     const quota = subscriptionQuotaFromError(error);
     const hookSystem = this.config.getHookSystem?.();
     if (
@@ -11069,8 +11083,7 @@ export class Session implements SessionContext {
         }
         this.todoStopGuard.pauseForTrustedRetry();
         const errorStatus = getErrorStatus(error);
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+        const errorMessage = getErrorMessage(error);
         const errorType = classifyApiError({
           message: errorMessage,
           status: errorStatus,
@@ -11983,6 +11996,7 @@ export class Session implements SessionContext {
           // model-availability ledger like the LlmClient/Turn path. The
           // background-notification executor opts out (isSessionTurn: false).
           isSessionTurn: options.isSessionTurn ?? true,
+          retractToolCallsOnRetry: true,
           ...(ledgerTurnKey !== promptId ? { ledgerTurnKey } : {}),
           ...(historyPromptId !== undefined
             ? { promptId: historyPromptId }

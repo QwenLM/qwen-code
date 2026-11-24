@@ -12116,6 +12116,121 @@ describe('LlmChat', async () => {
         ).toHaveLength(0);
         expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
       });
+
+      it('replays a cut after thought and functionCall when retractToolCallsOnRetry is set', async () => {
+        vi.useFakeTimers();
+        const { record, target } = recording();
+        mockStreamsOnce(
+          cutAfter([
+            modelChunk([{ text: 'Choosing a tool…', thought: true }]),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+          streamOf(
+            modelChunk(
+              [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2')],
+              'STOP',
+            ),
+          ),
+        );
+        const stream = await target.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-replay',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        const retries = eventsOfType(events, StreamEventType.RETRY);
+        expect(retries).toEqual([
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+        ]);
+        expectStreamCalls(2);
+        // Only the recovered tool call survives in history and durable recording.
+        const modelTurns = target
+          .getHistory()
+          .filter((entry) => entry.role === 'model');
+        expect(modelTurns).toHaveLength(1);
+        expect(modelTurns[0].parts).toEqual([
+          fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2'),
+        ]);
+        expect(record).toHaveBeenCalledTimes(1);
+        expect(record.mock.calls[0][0].message).toEqual([
+          fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2'),
+        ]);
+        expectWarned('Transport stream retry scheduled', {
+          retryDecision: 'retry',
+        });
+      });
+
+      it('does not replay a cut with visible text plus functionCall under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        mockStream(
+          cutAfter([
+            textChunk('Let me check that file. '),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-visible-text',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        await expect(drain(stream)).rejects.toThrow('terminated');
+        expectStreamCalls(1);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'skipped_after_content',
+        });
+      });
+
+      it('exhausts replay budget and persists final partial tool call under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        const { record, target } = recording();
+        let seq = 0;
+        streamMock().mockImplementation(() =>
+          Promise.resolve(
+            cutAfter([
+              modelChunk([{ text: 'Thinking…', thought: true }]),
+              modelChunk([
+                fnCall('read_file', { path: '/tmp/a.ts' }, `call_${++seq}`),
+              ]),
+            ]),
+          ),
+        );
+        const stream = await target.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-exhausted',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeInstanceOf(Error);
+        expect((caughtError as Error).message).toContain('terminated');
+        expectStreamCalls(3);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'exhausted',
+        });
+        expect(record).toHaveBeenCalledTimes(1);
+        expect(
+          target
+            .getHistory()
+            .at(-1)
+            ?.parts?.some((part) => part.functionCall?.id === 'call_3'),
+        ).toBe(true);
+      });
     });
 
     it('falls back after yielding only tool preparation metadata', async () => {
