@@ -128,6 +128,23 @@ describe('createLoadAdmissionMonitor', () => {
     monitor.dispose();
   });
 
+  it('uses the documented one-second lag enter boundary', () => {
+    const monitor = makeMonitor();
+    signals = { loadRatio: 0.2, eventLoopLagP99Ms: 999 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 2);
+    expect(monitor.snapshot().overloaded).toBe(false);
+
+    signals = { loadRatio: 0.2, eventLoopLagP99Ms: 1000 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
+    expect(monitor.snapshot().overloaded).toBe(false);
+    tick(1);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'event_loop_lag',
+    });
+    monitor.dispose();
+  });
+
   it('ORs the two signals and prefers cpu_load when both are active', () => {
     const monitor = makeMonitor();
     signals = {
