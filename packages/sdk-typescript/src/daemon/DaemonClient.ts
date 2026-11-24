@@ -983,6 +983,8 @@ export interface PromptRequest {
   pinSkills?: boolean;
   /** Lowercase SHA-256 of the intended skill material. Requires pinSkills. */
   expectedSkillDigest?: string;
+  pinExtensions?: boolean;
+  expectedExtensionGeneration?: number;
   /** Identifies a REST admission retry in the current daemon session. */
   idempotencyKey?: string;
   /** Deliver the successful final answer directly through a channel worker. */
@@ -1014,6 +1016,7 @@ export interface NonBlockingPromptAccepted {
   promptId: string;
   /** The admitted skill-file digest, present when pinSkills was accepted. */
   skillDigest?: string;
+  extensionGeneration?: number;
   /** The same process-local admission receipt was returned for this key. */
   deduplicated?: boolean;
   lastEventId: number;
@@ -7565,6 +7568,8 @@ export class DaemonClient {
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
+    if (req.pinExtensions)
+      await this.requireCapability('turn_extension_store_lease');
     if (req.pinSkills) {
       await this.requireCapability('turn_skill_file_snapshot');
       signal?.throwIfAborted();
@@ -7585,6 +7590,14 @@ export class DaemonClient {
     ) {
       throw new Error('Daemon did not confirm the requested skill snapshot');
     }
+    if (
+      req.pinExtensions &&
+      (req.expectedExtensionGeneration === undefined ||
+        accepted.extensionGeneration !== req.expectedExtensionGeneration)
+    )
+      throw new Error(
+        'Daemon did not confirm the requested extension generation',
+      );
     return accepted;
   }
 

@@ -9,6 +9,7 @@ import type { TurnSkillSnapshotLease } from '@qwen-code/qwen-code-core';
 interface Reservation {
   sessionId: string;
   lease?: TurnSkillSnapshotLease;
+  drained?: () => boolean;
   state: 'preparing' | 'queued' | 'running' | 'settled';
 }
 
@@ -17,27 +18,16 @@ export class TurnSkillLeases {
   private readonly entries = new Map<string, Reservation>();
   private readonly sweeps = new Map<string, ReturnType<typeof setTimeout>>();
 
-  collectWhenDrained(sessionId: string, drained: () => boolean): void {
+  private scheduleCollection(sessionId: string, delay: number): void {
     if (this.sweeps.has(sessionId)) return;
-    const deadline = Date.now() + 5 * 60_000;
-    const schedule = (delay: number) => {
-      if (Date.now() >= deadline) return;
-      const timer = setTimeout(async () => {
-        this.sweeps.delete(sessionId);
-        try {
-          if (drained()) {
-            await this.collect(sessionId);
-            return;
-          }
-        } catch {
-          // Keep the reservation reachable for the next cleanup attempt.
-        }
-        schedule(5_000);
-      }, delay);
-      timer.unref();
-      this.sweeps.set(sessionId, timer);
-    };
-    schedule(0);
+    const timer = setTimeout(() => {
+      this.sweeps.delete(sessionId);
+      void this.collect(sessionId).catch(() => {
+        this.scheduleCollection(sessionId, 5_000);
+      });
+    }, delay);
+    timer.unref();
+    this.sweeps.set(sessionId, timer);
   }
 
   async prepare(
@@ -87,13 +77,24 @@ export class TurnSkillLeases {
     )
       return;
     this.entries.delete(key);
-    await entry.lease?.dispose();
+    if (entry.lease) {
+      try {
+        await entry.lease.dispose();
+      } catch (error) {
+        entry.state = 'settled';
+        this.entries.set(key, entry);
+        this.scheduleCollection(sessionId, 5_000);
+        throw error;
+      }
+    }
   }
 
-  settle(sessionId: string, key: string): void {
+  settle(sessionId: string, key: string, drained?: () => boolean): void {
     const entry = this.entries.get(key);
-    if (entry?.sessionId === sessionId && entry.state === 'running')
-      entry.state = 'settled';
+    if (entry?.sessionId !== sessionId || entry.state !== 'running') return;
+    entry.state = 'settled';
+    entry.drained = drained;
+    this.scheduleCollection(sessionId, 0);
   }
 
   async collect(sessionId: string, closed = false): Promise<void> {
@@ -104,14 +105,30 @@ export class TurnSkillLeases {
     for (const [key, entry] of this.entries) {
       if (
         entry.sessionId !== sessionId ||
+        entry.state === 'running' ||
         (!closed && entry.state !== 'settled')
       )
         continue;
+      if (entry.state === 'settled' && entry.drained) {
+        // Capture the original Session object. Reopening the same public id
+        // cannot clear a detached shell, workflow or subagent from its old turn.
+        let drained = false;
+        try {
+          drained = entry.drained();
+        } catch {
+          /* keep until verifiable */
+        }
+        if (!drained) {
+          this.scheduleCollection(sessionId, 5_000);
+          continue;
+        }
+      }
       this.entries.delete(key);
       if (entry.lease)
         discarded.push(
           entry.lease.dispose().catch((error) => {
             this.entries.set(key, { ...entry, state: 'settled' });
+            this.scheduleCollection(sessionId, 5_000);
             throw error;
           }),
         );

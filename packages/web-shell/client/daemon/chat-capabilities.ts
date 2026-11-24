@@ -31,6 +31,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   session_sub_session_send: [],
   session_prompt: [],
   turn_skill_file_snapshot: [],
+  turn_extension_store_lease: [],
   session_retire_if_idle: [],
   session_turn_status: [],
   // The marks gate on the capability directly in the app wiring; they are

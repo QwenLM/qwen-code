@@ -32,6 +32,7 @@ export interface AdvertiseFeatureToggles {
   hostedHarness?: boolean;
   requireAuth?: boolean;
   turnSkillFileSnapshotAvailable?: boolean;
+  turnExtensionStoreLeaseAvailable?: boolean;
   sessionRetireIfIdleAvailable?: boolean;
   /**
    * Whether the daemon is serving the workspace-agent collaboration routes
@@ -156,6 +157,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'turn_skill_file_snapshot',
     (toggles) => toggles.turnSkillFileSnapshotAvailable === true,
+  ],
+  [
+    'turn_extension_store_lease',
+    (toggles) => toggles.turnExtensionStoreLeaseAvailable === true,
   ],
   [
     'agent_collaboration_v1',

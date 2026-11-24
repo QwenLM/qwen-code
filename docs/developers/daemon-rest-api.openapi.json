@@ -3822,6 +3822,16 @@
             "x-qwen-capability": "turn_skill_file_snapshot",
             "description": "Retain the admitted turn's managed Skill files."
           },
+          "pinExtensions": {
+            "type": "boolean",
+            "x-qwen-capability": "turn_extension_store_lease",
+            "description": "With pinSkills and expectedExtensionGeneration, hold the managed extension store during this turn."
+          },
+          "expectedExtensionGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The verified workspace extension generation to reserve. Requires pinExtensions."
+          },
           "expectedSkillDigest": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$",
@@ -3898,6 +3908,11 @@
           },
           "eventEpoch": {
             "type": "string"
+          },
+          "extensionGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The extension store generation reserved before admission."
           },
           "skillDigest": {
             "type": "string",

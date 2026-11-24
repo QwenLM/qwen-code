@@ -15054,16 +15054,23 @@ export function createSessionControlPlane(
       }
     },
 
-    async updateTurnSkillLease(sessionId, key, action, expectedDigest) {
-      return requestSessionStatus<{ digest?: string }>(
-        sessionId,
-        TURN_SKILL_LEASE_METHOD,
-        {
-          key,
-          action,
-          expectedDigest,
-        },
-      );
+    supportsTurnExtensionStoreLease: true,
+    async updateTurnSkillLease(
+      sessionId,
+      key,
+      action,
+      expectedDigest,
+      expectedExtensionGeneration,
+    ) {
+      return requestSessionStatus<{
+        digest?: string;
+        extensionGeneration?: number;
+      }>(sessionId, TURN_SKILL_LEASE_METHOD, {
+        key,
+        action,
+        expectedDigest,
+        expectedExtensionGeneration,
+      });
     },
     async getSessionResourcesStatus(sessionId) {
       return requestSessionStatus<ServeSessionResourcesStatus>(

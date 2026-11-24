@@ -35,6 +35,30 @@ describe('prepared turn skill reservations', () => {
     expect(old.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('holds old work beyond five minutes even if the same session id is reopened', async () => {
+    vi.useFakeTimers();
+    try {
+      const leases = new TurnSkillLeases();
+      let drained = false;
+      const old = lease('old');
+      await leases.prepare('s', 'old', async () => old);
+      leases.claim('s', 'old');
+      await leases.collect('s', true);
+      expect(old.dispose).not.toHaveBeenCalled();
+      leases.settle('s', 'old', () => drained);
+      await vi.advanceTimersByTimeAsync(6 * 60_000);
+      await leases.prepare('s', 'new', async () => lease('new'));
+      await leases.collect('s');
+      expect(old.dispose).not.toHaveBeenCalled();
+      drained = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(old.dispose).toHaveBeenCalledOnce();
+      await leases.collect('s', true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('disposes a late preparation reply after close or rejection', async () => {
     const leases = new TurnSkillLeases();
     let resolveCapture!: (snapshot: TurnSkillSnapshotLease) => void;
@@ -58,8 +82,7 @@ describe('prepared turn skill reservations', () => {
       let drained = false;
       await leases.prepare('s', 'id', async () => initial);
       leases.claim('s', 'id');
-      leases.settle('s', 'id');
-      leases.collectWhenDrained('s', () => drained);
+      leases.settle('s', 'id', () => drained);
       await vi.advanceTimersByTimeAsync(5_001);
       expect(initial.dispose).not.toHaveBeenCalled();
       drained = true;

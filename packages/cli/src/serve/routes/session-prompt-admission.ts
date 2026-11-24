@@ -62,6 +62,7 @@ interface PromptReceipt {
   promptId: string;
   skillDigest?: string;
   skillPromptHash?: string;
+  extensionGeneration?: number;
 }
 const promptIdempotencyBySession = new Map<
   string,
@@ -278,10 +279,14 @@ export interface SessionPromptAdmissionInput {
   turnSkillLease?: string;
   skillDigest?: string;
   skillPromptHash?: string;
+  extensionGeneration?: number;
   onPromptAdmitted?: () => void;
 }
 
-export type SessionPromptAdmission = { skillDigest?: string } & (
+export type SessionPromptAdmission = {
+  skillDigest?: string;
+  extensionGeneration?: number;
+} & (
   | {
       deduplicated: true;
       promptId: string;
@@ -343,6 +348,7 @@ export function admitSessionPrompt(
         deduplicated: true,
         promptId: receipt.promptId,
         skillDigest: receipt.skillDigest,
+        extensionGeneration: receipt.extensionGeneration,
         lastEventId: ownerBridge.getSessionLastEventId(sessionId),
         eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
       };
@@ -461,6 +467,7 @@ export function admitSessionPrompt(
     rememberPromptIdempotencyKey(sessionId, idempotencyKey, {
       promptId,
       skillDigest: input.skillDigest,
+      extensionGeneration: input.extensionGeneration,
       skillPromptHash: input.skillPromptHash,
     });
   }
@@ -580,6 +587,7 @@ export function admitSessionPrompt(
     deduplicated: false,
     promptId,
     skillDigest: input.skillDigest,
+    extensionGeneration: input.extensionGeneration,
     lastEventId,
     eventEpoch,
     settled,

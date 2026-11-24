@@ -118,6 +118,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_retire_if_idle: NO_MANAGED_EQUIVALENT(
     'source-native retirement is available only on trusted local daemon sessions',
   ),
+  turn_extension_store_lease: NO_MANAGED_EQUIVALENT(
+    'A local Serve child holds an installed extension generation through its turn.',
+  ),
   turn_skill_file_snapshot: NO_MANAGED_EQUIVALENT(
     'optional snapshot support is restricted to trusted local daemon sessions',
   ),

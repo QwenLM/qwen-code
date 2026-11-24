@@ -5498,8 +5498,8 @@ export class Session implements SessionContext {
    * wider than anything reported from here (it covers prompts still waiting in
    * the FIFO, which the child cannot see).
    */
-  collectActiveWorkHolds(): ActiveWorkHoldV1[] {
-    if (this.disposed) return [];
+  collectActiveWorkHolds(includeDisposed = false): ActiveWorkHoldV1[] {
+    if (this.disposed && !includeDisposed) return [];
     const holds: ActiveWorkHoldV1[] = [];
     for (const agentId of this.config
       .getBackgroundTaskRegistry()

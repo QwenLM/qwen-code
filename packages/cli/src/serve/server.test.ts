@@ -922,7 +922,12 @@ const EXPECTED_REGISTERED_FEATURES = [
       ];
     }
     if (feature === 'workspace_file_upload') {
-      return [feature, 'turn_skill_file_snapshot', 'session_retire_if_idle'];
+      return [
+        feature,
+        'turn_skill_file_snapshot',
+        'turn_extension_store_lease',
+        'session_retire_if_idle',
+      ];
     }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
@@ -3760,6 +3765,13 @@ describe('createServeApp', () => {
               sessionRetireIfIdleAvailable: true,
             }),
           ).toContain(feature);
+          continue;
+        }
+        if (feature === 'turn_extension_store_lease') {
+          expect(predicate({ turnExtensionStoreLeaseAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
           continue;
         }
         if (feature === 'turn_skill_file_snapshot') {
@@ -21484,6 +21496,51 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(2);
       // The key is route-level admission metadata, never prompt content.
       expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
+    });
+
+    it('admits only a confirmed extension generation and binds retries to it', async () => {
+      const bridge = fakeBridge();
+      const digest = 'c'.repeat(64);
+      bridge.updateTurnSkillLease = vi.fn(
+        async (_session, _key, action, _digest, generation) =>
+          action === 'prepare' && generation === 7
+            ? { digest, extensionGeneration: 7 }
+            : {},
+      );
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const sid = 'session-A';
+      const submit = (generation: number, idempotencyKey: string) =>
+        request(app)
+          .post(`/session/${sid}/prompt`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'extension prompt' }],
+            pinSkills: true,
+            pinExtensions: true,
+            expectedExtensionGeneration: generation,
+            idempotencyKey,
+          });
+      const unavailable = await submit(6, 'not-admitted');
+      expect(unavailable.status).toBe(409);
+      expect(unavailable.body).toMatchObject({
+        code: 'turn_extension_generation_unavailable',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.promptCalls).toHaveLength(0);
+      const first = await submit(7, 'same');
+      expect(first.status).toBe(202);
+      expect(first.body.extensionGeneration).toBe(7);
+      expect((await submit(7, 'same')).body).toMatchObject({
+        extensionGeneration: 7,
+        promptId: first.body.promptId,
+        deduplicated: true,
+      });
+      expect((await submit(8, 'same')).status).toBe(409);
+      expect(bridge.promptCalls).toHaveLength(1);
     });
 
     it('pins one skill snapshot for concurrent retries and returns its original receipt', async () => {

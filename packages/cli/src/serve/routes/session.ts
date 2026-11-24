@@ -9869,6 +9869,29 @@ export function registerSessionRoutes(
         try {
           const pinSkills = body['pinSkills'];
           const expectedDigest = body['expectedSkillDigest'];
+          const pinExtensions = body['pinExtensions'];
+          const generation = body['expectedExtensionGeneration'];
+          if (
+            (pinExtensions !== undefined &&
+              typeof pinExtensions !== 'boolean') ||
+            (pinExtensions === true
+              ? pinSkills !== true ||
+                typeof generation !== 'number' ||
+                !Number.isSafeInteger(generation) ||
+                generation < 0
+              : generation !== undefined)
+          ) {
+            res.status(400).json({
+              code: 'invalid_turn_extension_options',
+              error:
+                'pinExtensions requires pinSkills and a nonnegative safe expectedExtensionGeneration',
+            });
+            return;
+          }
+          const extensionGeneration =
+            typeof generation === 'number' ? generation : undefined;
+          delete forwardedBody['pinExtensions'];
+          delete forwardedBody['expectedExtensionGeneration'];
           if (
             (pinSkills !== undefined && typeof pinSkills !== 'boolean') ||
             (expectedDigest !== undefined &&
@@ -9926,6 +9949,7 @@ export function registerSessionRoutes(
               !previous ||
               (pinSkills !== true && previous.skillDigest === undefined) ||
               (previous.skillDigest !== undefined &&
+                previous.extensionGeneration === extensionGeneration &&
                 previous.skillPromptHash === skillPromptHash &&
                 (expectedDigest === undefined ||
                   expectedDigest === previous.skillDigest))
@@ -9956,11 +9980,34 @@ export function registerSessionRoutes(
               return;
             }
             turnSkillLease = crypto.randomUUID();
-            const receipt = await runtime.bridge.updateTurnSkillLease(
-              sessionId,
-              turnSkillLease,
-              'prepare',
-            );
+            const receipt =
+              extensionGeneration === undefined
+                ? await runtime.bridge.updateTurnSkillLease(
+                    sessionId,
+                    turnSkillLease,
+                    'prepare',
+                  )
+                : await runtime.bridge.updateTurnSkillLease(
+                    sessionId,
+                    turnSkillLease,
+                    'prepare',
+                    undefined,
+                    extensionGeneration,
+                  );
+            if (
+              extensionGeneration !== undefined &&
+              receipt.extensionGeneration !== extensionGeneration
+            ) {
+              await releaseLease().catch(() => {});
+              res.status(409).json({
+                code: 'turn_extension_generation_unavailable',
+                sessionId,
+                definitivelyNotStarted: true,
+                error:
+                  'The session could not reserve the requested extension generation',
+              });
+              return;
+            }
             skillDigest = receipt.digest;
             if (
               !skillDigest ||
@@ -9996,6 +10043,7 @@ export function registerSessionRoutes(
               turnSkillLease,
               skillDigest,
               skillPromptHash,
+              extensionGeneration,
               classification,
               idempotencyKey,
               requestDeadlineMs,
@@ -10032,11 +10080,13 @@ export function registerSessionRoutes(
             eventEpoch: admission.eventEpoch,
             deduplicated: true,
             skillDigest: admission.skillDigest,
+            extensionGeneration: admission.extensionGeneration,
           });
           return;
         }
         res.status(202).json({
           skillDigest: admission.skillDigest,
+          extensionGeneration: admission.extensionGeneration,
           promptId: admission.promptId,
           lastEventId: admission.lastEventId,
           eventEpoch: admission.eventEpoch,

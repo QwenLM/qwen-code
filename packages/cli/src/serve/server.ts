@@ -1245,6 +1245,16 @@ export function createServeApp(
               !runtime.routeFileSystemFactory.sshWorkspace &&
               typeof runtime.bridge.updateTurnSkillLease === 'function',
           ),
+      turnExtensionStoreLeaseAvailable: () =>
+        (process.platform === 'linux' || process.platform === 'darwin') &&
+        workspaceRegistry
+          .listAll()
+          .some(
+            (runtime) =>
+              runtime.trusted &&
+              !runtime.routeFileSystemFactory.sshWorkspace &&
+              runtime.bridge.supportsTurnExtensionStoreLease === true,
+          ),
       userSkillActivationAvailable:
         deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:

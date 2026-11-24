@@ -7608,10 +7608,10 @@ class QwenAgent implements Agent {
       try {
         return await runWithTurnSkillSnapshot(lease.snapshot, execute);
       } finally {
-        this.turnSkillLeases.settle(sessionId, skillLeaseKey);
-        this.turnSkillLeases.collectWhenDrained(
+        this.turnSkillLeases.settle(
           sessionId,
-          () => session.collectActiveWorkHolds().length === 0,
+          skillLeaseKey,
+          () => session.collectActiveWorkHolds(true).length === 0,
         );
       }
     } finally {
@@ -10444,42 +10444,88 @@ class QwenAgent implements Agent {
               undefined,
               'Invalid expected skill digest',
             );
-          const digest = await this.turnSkillLeases.prepare(
-            sessionId,
-            key,
-            async () => {
-              const manager = sessionConfig.getSkillManager();
-              if (!manager) throw new Error('Skill manager unavailable');
-              const skills = await manager.listSkills({ force: true });
-              if (manager.hasDiscoveryReadErrors())
-                throw new Error('Skill discovery incomplete');
-              const enabled = skills.filter(
-                (skill) =>
-                  skill.level !== 'bundled' &&
-                  sessionConfig.isSkillEnabled(skill),
-              );
-              if (
-                !sessionConfig.isWorkspaceAgentSession() &&
-                enabled.some(
-                  (skill) =>
-                    canApplySkillSideEffects(skill, sessionConfig) &&
-                    (skill.allowedTools?.length ||
-                      Object.keys(skill.hooks ?? {}).length),
-                )
-              ) {
-                throw RequestError.invalidParams(
-                  undefined,
-                  'Skill hooks or allow rules cannot be pinned',
-                );
-              }
-              return prepareTurnSkillSnapshot(enabled, {
-                baseDirectory: sessionConfig.storage.getProjectTempDir(),
-                skillManager: manager,
-                expectedDigest,
-              });
-            },
-          );
-          return { digest };
+          const expectedGeneration = params['expectedExtensionGeneration'];
+          if (
+            expectedGeneration !== undefined &&
+            (typeof expectedGeneration !== 'number' ||
+              !Number.isSafeInteger(expectedGeneration) ||
+              expectedGeneration < 0)
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected extension generation',
+            );
+          }
+          let unavailable = false;
+          try {
+            const digest = await this.turnSkillLeases.prepare(
+              sessionId,
+              key,
+              async () => {
+                let releaseExtensions: (() => Promise<void>) | undefined;
+                if (typeof expectedGeneration === 'number') {
+                  try {
+                    releaseExtensions = await sessionConfig
+                      .getExtensionManager()
+                      .acquireTurnExtensionLease(expectedGeneration);
+                  } catch (error) {
+                    unavailable = true;
+                    throw error;
+                  }
+                }
+                try {
+                  const manager = sessionConfig.getSkillManager();
+                  if (!manager) throw new Error('Skill manager unavailable');
+                  const skills = await manager.listSkills({ force: true });
+                  if (manager.hasDiscoveryReadErrors())
+                    throw new Error('Skill discovery incomplete');
+                  const enabled = skills.filter(
+                    (skill) =>
+                      skill.level !== 'bundled' &&
+                      sessionConfig.isSkillEnabled(skill),
+                  );
+                  if (
+                    !sessionConfig.isWorkspaceAgentSession() &&
+                    enabled.some(
+                      (skill) =>
+                        canApplySkillSideEffects(skill, sessionConfig) &&
+                        (skill.allowedTools?.length ||
+                          Object.keys(skill.hooks ?? {}).length),
+                    )
+                  ) {
+                    throw RequestError.invalidParams(
+                      undefined,
+                      'Skill hooks or allow rules cannot be pinned',
+                    );
+                  }
+                  const lease = await prepareTurnSkillSnapshot(enabled, {
+                    baseDirectory: sessionConfig.storage.getProjectTempDir(),
+                    skillManager: manager,
+                    expectedDigest,
+                  });
+                  if (!releaseExtensions) return lease;
+                  const releaseStore = releaseExtensions;
+                  return {
+                    snapshot: lease.snapshot,
+                    dispose: async () => {
+                      try {
+                        await lease.dispose();
+                      } finally {
+                        await releaseStore();
+                      }
+                    },
+                  };
+                } catch (error) {
+                  await releaseExtensions?.();
+                  throw error;
+                }
+              },
+            );
+            return { digest, extensionGeneration: expectedGeneration };
+          } catch (error) {
+            if (unavailable) return {};
+            throw error;
+          }
         } else
           throw RequestError.invalidParams(
             undefined,

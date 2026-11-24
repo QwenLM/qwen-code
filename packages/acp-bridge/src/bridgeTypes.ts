@@ -2885,13 +2885,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context: { clientId: string },
   ): Promise<McpAppToolResult>;
 
-  /** Reserve or release native skill files before prompt admission. */
+  readonly supportsTurnExtensionStoreLease?: true;
+  /** Reserve or release native skill files and optional extension generation before prompt admission. */
   updateTurnSkillLease?(
     sessionId: string,
     key: string,
     action: 'prepare' | 'release',
     expectedDigest?: string,
-  ): Promise<{ digest?: string }>;
+    expectedExtensionGeneration?: number,
+  ): Promise<{ digest?: string; extensionGeneration?: number }>;
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,
