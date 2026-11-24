@@ -2215,7 +2215,10 @@ function persistedNotificationAgent(agent: AgentIdentity): {
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   channelWorkflowOrigin?: ChannelWorkflowOrigin;
   continuesTodoStopGuardWorkChain: boolean;
-  persisted?: true;
+  // Read as "already recorded, do not write again" by the delivery sites; a
+  // rolled-back close clears the mark on flush-landed reports so the warm
+  // re-delivery records (R9-1).
+  persisted?: boolean;
   /**
    * Set once a no-recorder landing has counted this report as lost. The queue
    * is landed again by `dispose()` after the pre-close flush, so without the
@@ -2967,6 +2970,15 @@ export class Session implements SessionContext {
    * terminals start, so a late arrival is neither drained nor durable.
    */
   private peerNotificationsSealed = false;
+  /**
+   * The peer reports the pre-close flush landed cold. A rolled-back close
+   * re-drains them warm, so the release clears their `persisted` mark —
+   * otherwise the delivery sites skip the warm record and the transcript's
+   * only entry for a turn the model *was* asked is the cold copy whose own
+   * semantics are "the model was never asked" (R9-1).
+   */
+  private readonly peerItemsLandedByFlush =
+    new Set<QueuedBackgroundNotification>();
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   /** Releases {@link ChatRecordingService.withholdTurnRecords} on rollback. */
   private releaseTurnRecordWithholding: (() => void) | undefined;
@@ -5568,6 +5580,19 @@ export class Session implements SessionContext {
       // the leader — while its mailbox row is already marked read. The
       // irreversible managed-shutdown path never runs this closure.
       this.peerNotificationsSealed = false;
+      // The close path pauses notification intake via cancelPendingPrompt
+      // before the gate; a rolled-back close is live again, and with the
+      // pause still latched the re-drain below returns without delivering —
+      // the reports would sit in the queue until dispose (R9-2).
+      this.notificationsPaused = false;
+      // The flush landed these reports cold but left them queued; the
+      // re-drain below delivers them warm, and a still-set persisted mark
+      // would suppress the warm record, leaving the cold "model never asked"
+      // copy as the only transcript entry for a delivered turn (R9-1).
+      for (const landed of this.peerItemsLandedByFlush) {
+        landed.persisted = false;
+      }
+      this.peerItemsLandedByFlush.clear();
       // Un-sealing is not enough: the pre-close flush also stopped the
       // leader-inbox poll, and nothing else restarts it, so the reports would
       // still never arrive. Resuming is idempotent and a no-op once the team is
@@ -5751,6 +5776,13 @@ export class Session implements SessionContext {
   async flushPendingPeerNotifications(): Promise<void> {
     await this.config.getTeamManager()?.quiesceLeaderInbox?.();
     this.peerNotificationsSealed = true;
+    // Remember what the landing marks persisted: a rolled-back close clears
+    // the mark so the re-drain's warm record is not suppressed (R9-1).
+    for (const item of this.notificationQueue) {
+      if (item.kind === 'peer' && !item.persisted) {
+        this.peerItemsLandedByFlush.add(item);
+      }
+    }
     this.#landUndrainedPeerNotifications();
     // A landing with no recorder (hidden workspace) can only tally the loss,
     // and `dispose()` clears the tally. Emit here, while the client connection
@@ -6763,11 +6795,14 @@ export class Session implements SessionContext {
     const pendingSend = goalTurn?.controller ?? new AbortController();
     if (turnRecording) turnRecording.abortController = pendingSend;
     const recordCancellation = () => {
-      if (
-        turnRecording &&
-        pendingSend.signal.reason === USER_CANCEL_ABORT_REASON
-      ) {
-        turnRecording.cancelledAt ??= Date.now();
+      // A user cancel folded into the close gate's disposal reason keeps the
+      // signal's reason but retains the human intent in
+      // `userPromptCancellations`; read both or a daemon turn's cancelled
+      // record loses its `cancelledAt` and a resume re-runs the turn the
+      // user cancelled (R8-1).
+      if (turnRecording && this.#isUserPromptCancellation(pendingSend.signal)) {
+        turnRecording.cancelledAt ??=
+          this.userPromptCancellations.get(pendingSend.signal) ?? Date.now();
       }
     };
     pendingSend.signal.addEventListener('abort', recordCancellation, {

@@ -1398,10 +1398,20 @@ describe('Session', () => {
         })() as unknown as AsyncGenerator<core.StreamEvent>,
       );
 
-      const prompt = session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'hello' }],
-      });
+      const prompt = session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        },
+        // A trusted invocation context gives the turn a turnRecording, so the
+        // assertion below exercises the settlement path that used to read only
+        // the folded signal reason and never the retained marker (R8-1).
+        {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'prompt-user-cancel-in-gate',
+        },
+      );
       await consumed;
       // session/cd and session/load hold this gate as a mutex while the turn
       // settles; a session/cancel in that window is the user's, not the
@@ -1413,7 +1423,9 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
 
       releaseStream();
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      // The resolved prompt now carries the cancellation metadata the
+      // settlement recorded — exactly the marker the retained intent feeds.
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
       expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
         expect.objectContaining({ state: 'cancelled', cancelReason: 'user' }),
         expect.any(String),
@@ -2320,6 +2332,69 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordNotification,
       ).not.toHaveBeenCalled();
+      session.dispose();
+    });
+
+    it('re-delivers a flush-landed report warm when a rolled-back close lifts the close-time pause', async () => {
+      // R9-1 + R9-2, production-faithful: the stored-session close runs
+      // `cancelPendingPrompt` (which latches `notificationsPaused`) before the
+      // gate, then the flush lands the queued report cold and leaves it
+      // queued. A rollback whose release only un-seals would re-drain into the
+      // latched pause and deliver nothing; one that drains without clearing
+      // the persisted mark would deliver the report while recording no warm
+      // copy — the transcript's only entry for a turn the model *was* asked
+      // would be the cold copy whose semantics are "the model was never
+      // asked".
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      manager.leaderCallback?.('queued report', 'queued report', ['security']);
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordBackgroundTaskCompleted,
+        ).toHaveBeenCalled(),
+      );
+
+      const releaseClose = session.beginClose();
+      // The production close runs cancelPendingPrompt before the gate, and
+      // with a turn in flight that latches `notificationsPaused`; set the
+      // latched state directly so the release must lift it.
+      (
+        session as unknown as { notificationsPaused: boolean }
+      ).notificationsPaused = true;
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      await session.flushPendingPeerNotifications();
+      // The flush writes the cold copy exactly once.
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        1,
+      );
+
+      releaseClose();
+
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => expect(sendMessageStream).toHaveBeenCalled());
+      const prompted = sendMessageStream.mock.calls
+        .map((call) =>
+          ((call[1] as { message?: Array<{ text?: string }> }).message ?? [])
+            .map((part) => part.text ?? '')
+            .join('\n'),
+        )
+        .join('\n');
+      // Delivered warm, and the delivery wrote the warm record too.
+      expect(prompted).toContain('queued report');
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        2,
+      );
       session.dispose();
     });
 
