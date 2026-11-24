@@ -488,7 +488,7 @@ pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL �
 
 ### actor 列
 
-- raw actor（≤36 code points）授权/幂等键列统一 `VARCHAR(36)`：ma_user_message、
+- raw actor（≤36 个 UTF-16 单元）授权/幂等键列统一 `VARCHAR(36)`：ma_user_message、
   ma_user_message_command、ma_workspace_access、ma_schedule、ma_client_files_binding，
   以及既有 ma_session.creator/owner_actor_key、ma_operation、ma_session_record、
   extension、delivery、memory_store、session_worktree。
@@ -506,9 +506,9 @@ pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL �
 
 ### 跨引擎注意
 
-- H2 2.3.232 的 `VARCHAR(n)` 按 UTF-16 unit 计长，MySQL 按 code point 计长；36 code point
-  的补充平面字符（emoji）在 H2 会超 36 unit。actor 边界测试用 BMP 字符（CJK）覆盖
-  36 code point 预算；生产目标 MySQL 按 code point 计。
+- H2 2.3.232 的 `VARCHAR(n)` 按 UTF-16 单元计长，MySQL 按码点计长。actor 准入上限为
+  36 个 UTF-16 单元，确保值可存入两种数据库。边界测试验证 36 个 BMP 字符或 18 个补充平面字符
+  可以通过，两种情况各多一个字符都会被拒绝。
 
 ### 仍未完成
 
@@ -549,9 +549,6 @@ MySQL 比较 `VARCHAR` 与 `VARBINARY` 操作数时按二进制串比较。用�
   `ma_runtime_stage`（单独的去哈希跟进）、receipt、Session 记录与工具执行中的
   `turn_id`，以及 checkpoint/admission/terminal/side query 输入的资源 id。转换最后
   一组还需要收紧准入上限。
-- actor 准入按 code point 计数，与 36 code point 预算及 MySQL 的 `VARCHAR(36)` 一致；
-  此前的 UTF-16 检查会拒绝合法的补充平面 actor。最宽的可接受 actor 编码后的
-  actor scope ref 为 549 字节，在 `ACTOR_SCOPE_REF_BYTES`（550）以内。
 - 列与参数之间的 `CAST(column AS BINARY(n))` 比较是 PAD SPACE 下的字节精确保护，
   不是类型转换，予以保留。每个被保护的列还需要一个普通等值条件，索引才能生效。
   Runtime retention guard 中的 settled child run 检查丢失了 `record_key` 查找，

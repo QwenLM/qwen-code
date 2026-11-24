@@ -6,7 +6,7 @@ import java.util.regex.Pattern;
 
 public final class WorkspaceValues {
     public static final int MAXIMUM_TEXT_CODE_POINTS = 512;
-    private static final int MAXIMUM_ACTOR_CODE_POINTS = 36;
+    private static final int MAXIMUM_ACTOR_UTF16_UNITS = 36;
 
     private static final Pattern IDENTIFIER = Pattern.compile(
             "[A-Za-z0-9._:-]{1,128}");
@@ -35,20 +35,19 @@ public final class WorkspaceValues {
     }
 
     /**
-     * An actor identity stored in a VARCHAR(36) column, which MySQL measures
-     * in code points. H2 measures UTF-16 units, so a test that stores an
-     * actor must stay within 36 units there.
+     * An actor identity stored in a VARCHAR(36) column. MySQL counts code
+     * points and H2 counts UTF-16 units, so the UTF-16 length bounds both.
      * PAD SPACE collations fold trailing spaces, so two distinct actors would
      * compare equal; the boundary refuses them rather than relying on the
      * column to preserve exactness.
      */
     static String requireActor(String value, String name) {
         String actor = requireText(value, name);
-        if (actor.codePointCount(0, actor.length()) > MAXIMUM_ACTOR_CODE_POINTS
+        if (actor.length() > MAXIMUM_ACTOR_UTF16_UNITS
                 || Character.isWhitespace(
                         actor.codePointBefore(actor.length()))) {
             throw new IllegalArgumentException(name + " must be 1 to "
-                    + MAXIMUM_ACTOR_CODE_POINTS
+                    + MAXIMUM_ACTOR_UTF16_UNITS
                     + " characters without trailing spaces");
         }
         return actor;

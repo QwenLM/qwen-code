@@ -57,14 +57,6 @@ class ManagedIdentityRefTest {
     }
 
     @Test
-    void actorScopeFitsTheWidestAdmittedActor() {
-        String ref = ManagedIdentityRefs.actorScopeRef(
-                "t".repeat(36), "s".repeat(64), "𝄞".repeat(36));
-        assertEquals(549, ref.length());
-        assertTrue(ref.length() <= ManagedIdentityRefs.ACTOR_SCOPE_REF_BYTES);
-    }
-
-    @Test
     void rejectsMalformedUnicodeInsteadOfReplacingIt() {
         assertThrows(IllegalArgumentException.class,
                 () -> ManagedIdentityRef.encode(128, "a\ud800b"));

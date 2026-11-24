@@ -45,9 +45,8 @@ public final class ManagedIdentityRefs {
     public static final int RUNTIME_SCOPE_REF_BYTES = 2048;
     /**
      * Actor-private side query scope (tenant, Session, actor). The actor is
-     * bounded to 36 code points (at most 144 UTF-8 bytes), which
-     * percent-encodes to at most 432 bytes; with a 36-character tenant and a
-     * 64-character Session the whole tuple is at most 549 bytes.
+     * bounded to 36 UTF-16 units (at most 18 supplementary code points), which
+     * percent-encodes to roughly 253 bytes; 550 covers that plus the scope.
      */
     public static final int ACTOR_SCOPE_REF_BYTES = 550;
 

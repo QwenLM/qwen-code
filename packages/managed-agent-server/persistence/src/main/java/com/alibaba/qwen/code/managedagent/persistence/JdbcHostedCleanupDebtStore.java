@@ -48,11 +48,14 @@ public class JdbcHostedCleanupDebtStore implements HostedCleanupDebtStore {
                     + " AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING'))"
                     // A seal that certified this debt as a background hold owns
                     // its discharge: the drain-only wake settles it, so a
-                    // cleanup-only load here would only race that wake.
+                    // cleanup-only load here would only race that wake. A seal
+                    // that parked a Turn owns that Turn's own debt the same way:
+                    // the resumed Turn releases it when it settles, and a load
+                    // here would only reopen the park.
                     + " AND NOT EXISTS (SELECT 1 FROM ma_session_head h"
                     + " WHERE h.head_kind = 'MANAGED_SESSION' AND h.tenant_id = r.tenant_id"
                     + " AND h.session_id = r.session_id AND h.state = 'SEALED'"
-                    + " AND h.wake_seal_background = 1"
+                    + " AND (h.wake_seal_background = 1 OR h.wake_seal_parked_prompt_id IS NOT NULL)"
                     + " AND h.wake_seal_revision = h.journal_revision)"
                     + " ORDER BY r.gmt_create, r.owner_ref LIMIT ?";
 

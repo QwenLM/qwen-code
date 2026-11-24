@@ -612,7 +612,7 @@ equality" proposal above, and the interim decision to keep actor columns at
 
 ### Actor columns
 
-- Raw-actor (≤36 code points) authorization/idempotency key columns are uniformly
+- Raw-actor (≤36 UTF-16 units) authorization/idempotency key columns are uniformly
   `VARCHAR(36)`: ma_user_message, ma_user_message_command, ma_workspace_access,
   ma_schedule, ma_client_files_binding, plus the existing
   ma_session.creator/owner_actor_key, ma_operation, ma_session_record, extension,
@@ -634,10 +634,10 @@ equality" proposal above, and the interim decision to keep actor columns at
 
 ### Cross-engine note
 
-- H2 2.3.232 measures `VARCHAR(n)` in UTF-16 units while MySQL measures code
-  points; 36 code points of supplementary-plane characters (emoji) exceed 36
-  units on H2. Actor boundary tests use BMP characters (CJK) to exercise the
-  36-code-point budget; the production target MySQL counts code points.
+- H2 2.3.232 measures `VARCHAR(n)` in UTF-16 units, while MySQL measures code
+  points. Actor admission caps the length at 36 UTF-16 units so the value fits
+  both engines. Boundary tests accept 36 BMP characters or 18 supplementary-plane
+  characters and reject one more of either.
 
 ### Still outstanding
 
@@ -686,10 +686,6 @@ Decisions:
   follow-up), `turn_id` in receipts, Session records and tool executions, and the
   checkpoint/admission/terminal/side-query input resource ids. Converting the last
   group would also need tighter admission bounds.
-- Actor admission counts code points, matching the 36-code-point budget and
-  MySQL's `VARCHAR(36)`; the earlier UTF-16 check rejected valid supplementary-plane
-  actors. The widest admitted actor encodes to a 549-byte actor scope ref, inside
-  `ACTOR_SCOPE_REF_BYTES` (550).
 - A `CAST(column AS BINARY(n))` comparison against a parameter is a byte-exact
   guard under PAD SPACE, not a type conversion, and stays. Each guarded column also
   needs a plain equality so the index applies. The settled-child-run check in the
