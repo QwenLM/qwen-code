@@ -61,6 +61,7 @@ const PROMPT_IDEMPOTENCY_MAX_SESSIONS = 1024;
 interface PromptReceipt {
   promptId: string;
   skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
   skillPromptHash?: string;
   extensionGeneration?: number;
 }
@@ -278,6 +279,7 @@ export interface SessionPromptAdmissionInput {
   onPromptId?: (promptId: string) => void;
   turnSkillLease?: string;
   skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
   skillPromptHash?: string;
   extensionGeneration?: number;
   onPromptAdmitted?: () => void;
@@ -285,6 +287,7 @@ export interface SessionPromptAdmissionInput {
 
 export type SessionPromptAdmission = {
   skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
   extensionGeneration?: number;
 } & (
   | {
@@ -348,6 +351,7 @@ export function admitSessionPrompt(
         deduplicated: true,
         promptId: receipt.promptId,
         skillDigest: receipt.skillDigest,
+        sessionSkillEffectsChecked: receipt.sessionSkillEffectsChecked,
         extensionGeneration: receipt.extensionGeneration,
         lastEventId: ownerBridge.getSessionLastEventId(sessionId),
         eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
@@ -467,6 +471,7 @@ export function admitSessionPrompt(
     rememberPromptIdempotencyKey(sessionId, idempotencyKey, {
       promptId,
       skillDigest: input.skillDigest,
+      sessionSkillEffectsChecked: input.sessionSkillEffectsChecked,
       extensionGeneration: input.extensionGeneration,
       skillPromptHash: input.skillPromptHash,
     });
@@ -587,6 +592,7 @@ export function admitSessionPrompt(
     deduplicated: false,
     promptId,
     skillDigest: input.skillDigest,
+    sessionSkillEffectsChecked: input.sessionSkillEffectsChecked,
     extensionGeneration: input.extensionGeneration,
     lastEventId,
     eventEpoch,

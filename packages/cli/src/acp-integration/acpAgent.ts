@@ -10461,6 +10461,7 @@ class QwenAgent implements Agent {
           }
           let unavailable = false;
           let unsupportedComponent = false;
+          let sessionSkillEffectsCompatible: boolean | undefined;
           try {
             const digest = await this.turnSkillLeases.prepare(
               sessionId,
@@ -10495,6 +10496,13 @@ class QwenAgent implements Agent {
                     skillManager: manager,
                     expectedDigest,
                   });
+                  // Check the material actually reserved by this admission. Trust
+                  // can change while a turn waits for permission.
+                  sessionSkillEffectsCompatible = lease.snapshot.skills.every(
+                    (skill) =>
+                      !skill.allowedTools?.length &&
+                      !Object.keys(skill.hooks ?? {}).length,
+                  );
                   if (!releaseExtensions) return lease;
                   const releaseStore = releaseExtensions;
                   return {
@@ -10513,7 +10521,11 @@ class QwenAgent implements Agent {
                 }
               },
             );
-            return { digest, extensionGeneration: expectedGeneration };
+            return {
+              digest,
+              extensionGeneration: expectedGeneration,
+              sessionSkillEffectsCompatible,
+            };
           } catch (error) {
             if (unavailable)
               return unsupportedComponent

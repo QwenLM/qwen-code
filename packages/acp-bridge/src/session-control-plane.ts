@@ -15091,6 +15091,7 @@ export function createSessionControlPlane(
         digest?: string;
         extensionGeneration?: number;
         unsupportedExtensionComponent?: true;
+        sessionSkillEffectsCompatible?: boolean;
       }>(sessionId, TURN_SKILL_LEASE_METHOD, {
         key,
         action,

@@ -981,6 +981,8 @@ export interface PromptRequest {
   prompt: PromptContentBlock[];
   /** Opt in when the daemon advertises `turn_skill_file_snapshot`. */
   pinSkills?: boolean;
+  /** Decline before admission if a captured skill could require unsupported session effects. Requires pinSkills. */
+  requireSessionSkillEffects?: boolean;
   /** Lowercase SHA-256 of the intended skill material. Requires pinSkills. */
   expectedSkillDigest?: string;
   pinExtensions?: boolean;
@@ -1016,6 +1018,7 @@ export interface NonBlockingPromptAccepted {
   promptId: string;
   /** The admitted skill-file digest, present when pinSkills was accepted. */
   skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
   extensionGeneration?: number;
   /** The same process-local admission receipt was returned for this key. */
   deduplicated?: boolean;
@@ -7568,6 +7571,11 @@ export class DaemonClient {
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
+    if (req.requireSessionSkillEffects) {
+      if (!req.pinSkills)
+        throw new Error('requireSessionSkillEffects requires pinSkills');
+      await this.requireCapability('turn_skill_session_effects_check');
+    }
     if (req.pinExtensions)
       await this.requireCapability('turn_extension_store_lease');
     if (req.pinSkills) {
@@ -7581,6 +7589,13 @@ export class DaemonClient {
     req: PromptRequest,
   ): Promise<NonBlockingPromptAccepted> {
     const accepted = (await res.json()) as NonBlockingPromptAccepted;
+    if (
+      req.requireSessionSkillEffects &&
+      accepted.sessionSkillEffectsChecked !== true
+    )
+      throw new Error(
+        'Daemon did not confirm the requested skill session effects check',
+      );
     if (
       req.pinSkills &&
       (typeof accepted.skillDigest !== 'string' ||

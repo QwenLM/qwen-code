@@ -9868,6 +9868,7 @@ export function registerSessionRoutes(
         };
         try {
           const pinSkills = body['pinSkills'];
+          const requireSessionSkillEffects = body['requireSessionSkillEffects'];
           const expectedDigest = body['expectedSkillDigest'];
           const pinExtensions = body['pinExtensions'];
           const generation = body['expectedExtensionGeneration'];
@@ -9894,6 +9895,9 @@ export function registerSessionRoutes(
           delete forwardedBody['expectedExtensionGeneration'];
           if (
             (pinSkills !== undefined && typeof pinSkills !== 'boolean') ||
+            (requireSessionSkillEffects !== undefined &&
+              (typeof requireSessionSkillEffects !== 'boolean' ||
+                (requireSessionSkillEffects && pinSkills !== true))) ||
             (expectedDigest !== undefined &&
               (pinSkills !== true ||
                 typeof expectedDigest !== 'string' ||
@@ -9901,12 +9905,13 @@ export function registerSessionRoutes(
           ) {
             res.status(400).json({
               error:
-                'Use a boolean pinSkills and an optional SHA-256 expectedSkillDigest with pinSkills enabled',
+                'pinSkills must be boolean. Enable pinSkills for a SHA-256 expectedSkillDigest or requireSessionSkillEffects: true.',
               code: 'invalid_turn_skill_options',
             });
             return;
           }
           delete forwardedBody['pinSkills'];
+          delete forwardedBody['requireSessionSkillEffects'];
           delete forwardedBody['expectedSkillDigest'];
           const skillPromptHash =
             pinSkills === true && idempotencyKey !== undefined
@@ -9950,6 +9955,8 @@ export function registerSessionRoutes(
               (pinSkills !== true && previous.skillDigest === undefined) ||
               (previous.skillDigest !== undefined &&
                 previous.extensionGeneration === extensionGeneration &&
+                (previous.sessionSkillEffectsChecked === true) ===
+                  (requireSessionSkillEffects === true) &&
                 previous.skillPromptHash === skillPromptHash &&
                 (expectedDigest === undefined ||
                   expectedDigest === previous.skillDigest))
@@ -10010,6 +10017,22 @@ export function registerSessionRoutes(
               });
               return;
             }
+            if (
+              requireSessionSkillEffects === true &&
+              receipt.sessionSkillEffectsCompatible !== true
+            ) {
+              await releaseLease().catch(() => {});
+              res.status(409).json({
+                code: 'turn_skill_session_effects_unavailable',
+                sessionId,
+                definitivelyNotStarted: true,
+                error:
+                  receipt.sessionSkillEffectsCompatible === false
+                    ? 'A captured skill declares session hooks or allow rules that cannot run in a pinned turn'
+                    : 'The runtime did not verify session effects for the captured skills',
+              });
+              return;
+            }
             skillDigest = receipt.digest;
             if (
               !skillDigest ||
@@ -10045,6 +10068,8 @@ export function registerSessionRoutes(
               turnSkillLease,
               skillDigest,
               skillPromptHash,
+              sessionSkillEffectsChecked:
+                requireSessionSkillEffects === true ? true : undefined,
               extensionGeneration,
               classification,
               idempotencyKey,
@@ -10082,12 +10107,14 @@ export function registerSessionRoutes(
             eventEpoch: admission.eventEpoch,
             deduplicated: true,
             skillDigest: admission.skillDigest,
+            sessionSkillEffectsChecked: admission.sessionSkillEffectsChecked,
             extensionGeneration: admission.extensionGeneration,
           });
           return;
         }
         res.status(202).json({
           skillDigest: admission.skillDigest,
+          sessionSkillEffectsChecked: admission.sessionSkillEffectsChecked,
           extensionGeneration: admission.extensionGeneration,
           promptId: admission.promptId,
           lastEventId: admission.lastEventId,

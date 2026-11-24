@@ -925,6 +925,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [
         feature,
         'turn_skill_file_snapshot',
+        'turn_skill_session_effects_check',
         'turn_extension_store_lease',
         'session_retire_if_idle',
       ];
@@ -3774,7 +3775,10 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           continue;
         }
-        if (feature === 'turn_skill_file_snapshot') {
+        if (
+          feature === 'turn_skill_file_snapshot' ||
+          feature === 'turn_skill_session_effects_check'
+        ) {
           expect(predicate({ turnSkillFileSnapshotAvailable: true })).toBe(
             true,
           );
@@ -21496,6 +21500,40 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(2);
       // The key is route-level admission metadata, never prompt content.
       expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
+    });
+
+    it('requires proof from the admission runtime before accepting the skill effects check', async () => {
+      const bridge = fakeBridge();
+      bridge.updateTurnSkillLease = vi.fn(async () => ({
+        digest: 'd'.repeat(64),
+      }));
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const submit = (pinSkills: boolean) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'guarded' }],
+            pinSkills,
+            requireSessionSkillEffects: true,
+          });
+      expect((await submit(false)).status).toBe(400);
+      const declined = await submit(true);
+      expect(declined.status).toBe(409);
+      expect(declined.body).toMatchObject({
+        code: 'turn_skill_session_effects_unavailable',
+        sessionId: 'session-A',
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.updateTurnSkillLease).toHaveBeenLastCalledWith(
+        'session-A',
+        expect.any(String),
+        'release',
+      );
+      expect(bridge.promptCalls).toHaveLength(0);
     });
 
     it('admits only a confirmed extension generation and binds retries to it', async () => {

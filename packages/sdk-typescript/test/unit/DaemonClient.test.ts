@@ -5460,6 +5460,44 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('checks native skill session effects capability before sending and verifies its receipt', async () => {
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'guarded' }],
+        pinSkills: true,
+        requireSessionSkillEffects: true,
+      };
+      let capable = false;
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              features: capable
+                ? [
+                    'turn_skill_session_effects_check',
+                    'turn_skill_file_snapshot',
+                  ]
+                : ['turn_skill_file_snapshot'],
+            })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 0,
+              skillDigest: 'a'.repeat(64),
+            }),
+      );
+      const client = () =>
+        new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client().promptNonBlocking('s-1', body),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+      capable = true;
+      await expect(client().promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm the requested skill session effects',
+      );
+      expect(
+        calls.filter((call) => call.url.endsWith('/session/s-1/prompt')),
+      ).toHaveLength(1);
+    });
+
     it('maps invalid client id responses on non-blocking prompts', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/s-1/prompt')) {

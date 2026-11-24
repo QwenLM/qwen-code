@@ -4222,6 +4222,20 @@ digest. A configured Skill with the same name takes precedence as usual.
 Path references to files outside those directories, session-scoped hooks and permission grants,
 process-wide tool registrations, MCP server processes, and external executable
 dependencies have their existing behavior. An unused skill that declares session-level hooks or allow rules does not block admission. If invoked, a pinned skill requiring such side effects fails at the tool boundary with `turn_skill_session_effects_unavailable` before applying either its hooks or grants. This keeps its security behavior intact.
+Hosts that need every managed skill in the turn to be usable can negotiate
+`turn_skill_session_effects_check` and send `"requireSessionSkillEffects": true`
+alongside `"pinSkills": true`. The runtime checks the same immutable files it
+reserves for this prompt. A skill declaring a session hook or allow rule
+produces HTTP 409 with `code: "turn_skill_session_effects_unavailable"`,
+`sessionId` and `definitivelyNotStarted: true`, even if the prompt might never
+invoke that skill. A negotiated daemon backed by an older native child that
+cannot verify the files also declines. Older daemons may ignore unknown fields;
+callers must check the advertised capability before posting.
+A successful 202 includes `sessionSkillEffectsChecked: true`; retries with the
+same key must request the same guarantee. Hosts can use an explicitly safe
+alternative only after a confirmed pre-admission decline. A lost receipt or a
+tool failure in an accepted turn must never trigger a replay on another runtime.
+
 Requests without `pinSkills` keep the ordinary prompt contract.
 
 #### Managed extension generations

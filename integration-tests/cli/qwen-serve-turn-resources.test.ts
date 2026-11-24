@@ -232,10 +232,9 @@ describe.skipIf(
     );
   }
 
-  it('holds the first skill and companion through approval while another session and the next prompt use the new files', async () => {
-    writeSkill(1);
+  function writeSessionSkill() {
     const unused = path.join(workspace, '.qwen', 'skills', 'unused');
-    mkdirSync(unused);
+    mkdirSync(unused, { recursive: true });
     writeFileSync(
       path.join(unused, 'SKILL.md'),
       `---
@@ -252,6 +251,70 @@ hooks:
 Unrelated skill.
 `,
     );
+  }
+
+  it('checks session effects on the reserved material before returning a native receipt', async () => {
+    writeSkill(1);
+    writeSessionSkill();
+    await start();
+    const id = await session('yolo');
+    const tag = 'RESOURCE_PROBE_skill_guard';
+    const body = {
+      prompt: [{ type: 'text' as const, text: tag }],
+      idempotencyKey: tag,
+      pinSkills: true,
+      requireSessionSkillEffects: true,
+    };
+    const post = (params: typeof body) =>
+      fetch(daemon!.base + '/session/' + id + '/prompt', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + daemon!.token,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params),
+      });
+    const declined = await post(body);
+    expect(declined.status).toBe(409);
+    expect(await declined.json()).toMatchObject({
+      code: 'turn_skill_session_effects_unavailable',
+      sessionId: id,
+      definitivelyNotStarted: true,
+    });
+    expect(results.has(tag)).toBe(false);
+
+    rmSync(path.join(workspace, '.qwen', 'skills', 'unused'), {
+      recursive: true,
+    });
+    const accepted = await daemon!.client.promptNonBlocking(id, body);
+    if (!isNonBlockingAccepted(accepted))
+      throw new Error('expected native receipt');
+    expect(accepted.sessionSkillEffectsChecked).toBe(true);
+    await complete(id, accepted.promptId);
+    expect(results.get(tag)).toContainEqual(
+      expect.stringContaining('SCRIPT_v1'),
+    );
+
+    writeSessionSkill();
+    const retry = await daemon!.client.promptNonBlocking(id, body);
+    expect(retry).toMatchObject({
+      promptId: accepted.promptId,
+      sessionSkillEffectsChecked: true,
+      deduplicated: true,
+    });
+    const incompatible = await post({
+      ...body,
+      requireSessionSkillEffects: false,
+    });
+    expect(incompatible.status).toBe(409);
+    expect(await incompatible.json()).toMatchObject({
+      code: 'turn_skill_receipt_conflict',
+    });
+  }, 120_000);
+
+  it('holds the first skill and companion through approval while another session and the next prompt use the new files', async () => {
+    writeSkill(1);
+    writeSessionSkill();
     await start();
     const a = await session('default');
     const first = await prompt(a, 'RESOURCE_PROBE_skill_first');

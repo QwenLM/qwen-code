@@ -2902,6 +2902,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     digest?: string;
     extensionGeneration?: number;
     unsupportedExtensionComponent?: true;
+    sessionSkillEffectsCompatible?: boolean;
   }>;
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(

@@ -159,6 +159,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.turnSkillFileSnapshotAvailable === true,
   ],
   [
+    'turn_skill_session_effects_check',
+    (toggles) => toggles.turnSkillFileSnapshotAvailable === true,
+  ],
+  [
     'turn_extension_store_lease',
     (toggles) => toggles.turnExtensionStoreLeaseAvailable === true,
   ],
