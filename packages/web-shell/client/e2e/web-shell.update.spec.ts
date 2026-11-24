@@ -77,7 +77,7 @@ test('downloads silently, shows an update action in More and restarts in place @
   await entry.click();
   await expect(entry).toHaveAccessibleName('重启中…');
   await expect(entry).toBeDisabled();
-  expect(restarts).toBe(1);
+  await expect.poll(() => restarts).toBe(1);
   await page.keyboard.press('Escape');
   await expect(entry).toHaveCount(0);
   status = { state: 'up-to-date', currentVersion: '0.24.6', canInstall: false };
