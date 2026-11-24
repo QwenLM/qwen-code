@@ -4216,6 +4216,10 @@ digest differs receives `409 turn_skill_digest_mismatch`, and an unsupported
 runtime responds with `409 turn_skill_snapshot_unavailable`. These receipts
 do not promise recovery across a daemon restart.
 
+Skill copies use a private temporary directory. The owning runtime removes
+the directory after the turn and tracked work release it. An abrupt process
+exit can leave files behind until the host cleans its temporary directory.
+
 The snapshot covers each selected `SKILL.md` and regular files under its skill
 directory, including skills provided by extensions. Bundled system Skills
 resolve through their existing installed definitions and do not affect this

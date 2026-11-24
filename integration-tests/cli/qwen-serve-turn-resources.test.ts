@@ -12,6 +12,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { isNonBlockingAccepted } from '@qwen-code/sdk/daemon';
@@ -120,10 +121,30 @@ describe.skipIf(
           );
         }
       } else {
-        if (outputs.length === 0)
+        const asksFirst = tag === 'RESOURCE_PROBE_skill_question';
+        if (asksFirst && outputs.length === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('ask_user_question', {
+                questions: [
+                  {
+                    header: 'Version probe',
+                    question: 'Which report should I run?',
+                    options: [
+                      { label: 'Sales', description: 'Sales report' },
+                      { label: 'Revenue', description: 'Revenue report' },
+                    ],
+                  },
+                ],
+              }),
+            ],
+          };
+        }
+        const skillOutputs = asksFirst ? outputs.slice(1) : outputs;
+        if (skillOutputs.length === 0)
           return { toolCalls: [fakeToolCall('skill', { skill: 'review' })] };
-        if (outputs.length === 1) {
-          const dir = outputs[0].match(
+        if (skillOutputs.length === 1) {
+          const dir = skillOutputs[0].match(
             /Base directory for this skill: ([^\n]+)/,
           )?.[1];
           if (dir)
@@ -339,6 +360,59 @@ Unrelated skill.
         expect.stringContaining('SCRIPT_v' + rev),
       ]);
     }
+  }, 120_000);
+
+  it('answers an outstanding question on v1 after a second session has completed on v2', async () => {
+    writeSkill(1);
+    await start();
+    const { client } = daemon!;
+    const a = await session('yolo');
+    const tag = 'RESOURCE_PROBE_skill_question';
+    const turn = await prompt(a, tag);
+    const question = async () =>
+      (await client.sessionStatus(a)).pendingInteractions?.find(
+        (item) => item.kind === 'user_question',
+      );
+    await expect.poll(question, poll).toMatchObject({
+      questions: [{ question: 'Which report should I run?' }],
+    });
+    const pending = (await question())!;
+
+    writeSkill(2);
+    const b = await session('yolo');
+    expect(b).not.toBe(a);
+    const parallel = 'RESOURCE_PROBE_skill_question_parallel';
+    await complete(b, await prompt(b, parallel));
+    expect(results.get(parallel)).toEqual([
+      expect.stringContaining('BODY_v2'),
+      expect.stringContaining('SCRIPT_v2'),
+    ]);
+    expect((await question())?.requestId).toBe(pending.requestId);
+
+    const answer = 'report-' + randomUUID();
+    const allow = pending.options.find(
+      (option) => option.kind === 'allow_once',
+    );
+    expect(allow).toBeDefined();
+    expect(
+      await client.respondToPermission(pending.requestId, {
+        outcome: { outcome: 'selected', optionId: allow!.optionId },
+        answers: { [pending.questions[0]!.answerKey]: answer },
+      }),
+    ).toBe(true);
+    await complete(a, turn);
+    expect(results.get(tag)).toEqual([
+      expect.stringContaining(answer),
+      expect.stringContaining('BODY_v1'),
+      expect.stringContaining('SCRIPT_v1'),
+    ]);
+
+    const next = 'RESOURCE_PROBE_skill_question_next';
+    await complete(a, await prompt(a, next));
+    expect(results.get(next)).toEqual([
+      expect.stringContaining('BODY_v2'),
+      expect.stringContaining('SCRIPT_v2'),
+    ]);
   }, 120_000);
 
   function writeExtension(version: number) {
