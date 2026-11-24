@@ -2531,6 +2531,15 @@ describe('Gemini Client (client.ts)', () => {
       expect(enableSpy).toHaveBeenCalledTimes(2);
     });
 
+    it('enables effective permission snapshots on fresh and rebuilt main chats', async () => {
+      const enableSpy = vi.spyOn(LlmChat.prototype, 'enablePermissionContext');
+      await client.startChat();
+      await client.startChat([userText('resumed')], SessionStartSource.Resume);
+      await client.startChat([userText('summary')], SessionStartSource.Compact);
+      await client.startChat(undefined, SessionStartSource.Clear);
+      expect(enableSpy).toHaveBeenCalledTimes(4);
+    });
+
     it('clears trusted user answers when a chat is rebuilt', async () => {
       client.recordTrustedUserAnswers('ask-1', [{ question: 'Continue?' }], {
         '0': 'No',
