@@ -3098,8 +3098,9 @@ jobs:
           # makes this comment's claim false. What the bot-author and
           # creation-time clauses rule out is silence with NO review at all.
           #
-          # The account is not this pipeline's alone: automated approval jobs
-          # also post under it. Excluding those bodies by name cannot be finished — it
+          # The account is not this pipeline's alone: finalize-release.yml,
+          # qwen-triage-finalize.yml, and the triage skill all post approvals
+          # under it. Excluding those bodies by name cannot be finished — it
           # shipped missing one ("LGTM, looks ready to ship. ✅"), and any
           # producer rewording fails in the dangerous direction: a foreign
           # LGTM buys silence for a genuinely dead run. So the filter matches
@@ -3634,8 +3635,9 @@ jobs:
           # makes this comment's claim false. What the bot-author and
           # creation-time clauses rule out is silence with NO review at all.
           #
-          # The account is not this pipeline's alone: automated approval jobs
-          # also post under it. Excluding those bodies by name cannot be finished — it
+          # The account is not this pipeline's alone: finalize-release.yml,
+          # qwen-triage-finalize.yml, and the triage skill all post approvals
+          # under it. Excluding those bodies by name cannot be finished — it
           # shipped missing one ("LGTM, looks ready to ship. ✅"), and any
           # producer rewording fails in the dangerous direction: a foreign
           # LGTM buys silence for a genuinely dead run. So the filter matches

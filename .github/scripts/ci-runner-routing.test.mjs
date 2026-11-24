@@ -2199,11 +2199,7 @@ describe('control-plane jobs moved off the hosted queue', () => {
       'delay-automatic-review',
       ['pull_request_target'],
     ],
-    [
-      'assign-issue-owner.yml',
-      'assign',
-      ['issues', 'workflow_dispatch', 'workflow_call'],
-    ],
+    ['assign-issue-owner.yml', 'assign', ['issues', 'workflow_dispatch']],
     [
       'auto-minimize-spam.yml',
       'minimize',

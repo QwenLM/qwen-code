@@ -297,7 +297,7 @@ case "$*" in
       printf '%s' '{"state":"OPEN","labels":[{"name":"category/core"},{"name":"need-discussion"}],"assignees":[]}'
     fi
     ;;
-  *'api graphql -f '*'collaborators\(query: \"wenshao"'*) printf '%s' '{"data":{"repository":{"collaborators":{"nodes":[{"login":"wenshao"}],"edges":[{"permission":"WRITE"}]}}}}' ;;
+  *"/collaborators/"*"/permission"*) printf '%s' 'write' ;;
   *"--assignee wenshao"*"--json number"*) printf '%s' '0' ;;
   *"issue list"*"--json number"*) printf '%s' '5' ;;
 esac
@@ -326,7 +326,7 @@ esac
 describe('assign-issue-owner: apply boundary', () => {
   it('verifies push access before assigning', () => {
     const { log } = runAssign(false);
-    assert.match(log, /collaborators\(query: "wenshao"/);
+    assert.match(log, /collaborators\/wenshao\/permission/);
   });
 
   it('performs no mutation in dry-run mode', () => {
@@ -428,10 +428,5 @@ describe('assign-issue-owner: workflow invariants', () => {
       'assign-issue-owner-${{ github.event.issue.number || inputs.number }}',
     );
     assert.equal(doc.concurrency['cancel-in-progress'], false);
-  });
-
-  it('accepts trusted workflow calls for GITHUB_TOKEN-authored labels', () => {
-    assert.equal(doc.on.workflow_call.inputs.number.required, true);
-    assert.equal(doc.on.workflow_call.inputs.number.type, 'string');
   });
 });

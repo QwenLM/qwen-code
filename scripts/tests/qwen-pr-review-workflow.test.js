@@ -4638,7 +4638,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
 
   // The bot account posts more than this pipeline's reviews:
   // finalize-release.yml approves release PRs under the same CI_BOT_PAT,
-  // automated jobs post their own APPROVE reviews. In-window approvals like
+  // qwen-triage-finalize.yml posts a deferred APPROVE under
+  // QWEN_CODE_BOT_TOKEN || CI_BOT_PAT, and the triage skill posts its own
+  // commit-pinned APPROVE through the reviews API. In-window approvals like
   // these must not buy the silence that only THIS pipeline's own review
   // earns.
   const FOREIGN_APPROVAL_BODIES = [
@@ -4741,7 +4743,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       () => {
         // The guard's author + window clauses match ANY review the account
         // posts, and the account also approves release PRs (finalize-release
-        // .yml) and other automated jobs post approvals. None of
+        // .yml), posts deferred triage approvals (qwen-triage-finalize.yml),
+        // and approves through the triage skill's reviews-API call. None of
         // these bodies carries a composed-review marker, so none may silence
         // the fallback while THIS pipeline's review is absent — the LGTM
         // would mask a dead run.
