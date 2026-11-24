@@ -1221,87 +1221,29 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
   };
 }
 
-// CommonMark 0.31.2 §4.6 HTML block start patterns (types 6 and 7).
-const HTML_BLOCK_TYPE6_START =
-  /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>]|\/?>|$)/i;
-const HTML_BLOCK_TYPE7_START =
-  /^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*\/?>|<\/[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$/;
-
+// Extract column-0 approval markers using a fail-closed rule rather than
+// replicating CommonMark's full block/container grammar: an approval comment
+// must not be preceded by any code-fence delimiter (``` / ~~~) or raw HTML
+// block/tag opener (including inside list items or blockquotes). Without
+// preceding fences or HTML blocks, a column-0 single-line HTML comment is
+// guaranteed by CommonMark 0.31.2 to be a top-level HTML comment, never text
+// inside a fenced code block, indented code block, blockquote, list item, or
+// HTML block (types 1–7).
 function directApprovalMarkers(body) {
   const markers = [];
-  let fence = null;
-  let htmlEnd = null;
   for (const line of body.replace(/\r\n?/g, '\n').split('\n')) {
-    if (htmlEnd) {
-      if (htmlEnd === 'blank') {
-        if (/^[ \t]*$/.test(line)) htmlEnd = null;
-      } else if (htmlEnd.test(line)) {
-        htmlEnd = null;
-      }
-      continue;
-    }
-    const run = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (fence) {
-      // CommonMark §4.5: closing code fences may be followed only by ASCII
-      // spaces or tabs, never non-ASCII whitespace or control characters.
-      if (
-        run &&
-        run[1][0] === fence.char &&
-        run[1].length >= fence.length &&
-        /^[ \t]*$/.test(run[2])
-      ) {
-        fence = null;
-      }
-      continue;
-    }
-    if (run) {
-      // CommonMark §4.5: backtick fence info strings cannot contain backticks;
-      // a line like ```tag``` prose is inline code, not a fence opener.
-      if (run[1][0] !== '`' || !run[2].includes('`')) {
-        fence = { char: run[1][0], length: run[1].length };
-        continue;
-      }
-    }
-    // CommonMark 0.31.2 §4.6 HTML blocks (all types 1–7): lines inside any
-    // HTML block must neither open/flip code fences nor supply an approval
-    // marker. Type 1 strictly allows ASCII space/tab/>/EOL (not Unicode \s).
-    if (/^ {0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)/i.test(line)) {
-      if (!/<\/(?:pre|script|style|textarea)>/i.test(line)) {
-        htmlEnd = /<\/(?:pre|script|style|textarea)>/i;
-      }
-      continue;
-    }
-    if (/^ {0,3}<!--/.test(line)) {
-      // Only a direct, full-line HTML comment at column 0 without an extra
-      // embedded closing token is an instruction.
-      const match = /^<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->$/.exec(
-        line,
-      );
-      if (match && !match[1].includes('-->')) {
-        markers.push(match[1]);
-      } else if (!line.includes('-->')) {
-        htmlEnd = /-->/;
-      }
-      continue;
-    }
-    if (/^ {0,3}<\?/.test(line)) {
-      if (!line.includes('?>')) htmlEnd = /\?>/;
-      continue;
-    }
-    if (/^ {0,3}<![A-Za-z]/.test(line)) {
-      if (!line.includes('>')) htmlEnd = />/;
-      continue;
-    }
-    if (/^ {0,3}<!\[CDATA\[/.test(line)) {
-      if (!line.includes(']]>')) htmlEnd = /\]\]>/;
+    const match = /^<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->$/.exec(
+      line,
+    );
+    if (match && !match[1].includes('-->')) {
+      markers.push(match[1]);
       continue;
     }
     if (
-      HTML_BLOCK_TYPE6_START.test(line) ||
-      HTML_BLOCK_TYPE7_START.test(line)
+      /`{3,}|~{3,}/.test(line) ||
+      /^(?:[ \t>*+-]|\d+[.)])*<(?:!|\?|[A-Za-z/])/.test(line)
     ) {
-      htmlEnd = 'blank';
-      continue;
+      break;
     }
   }
   return markers;

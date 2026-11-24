@@ -4926,6 +4926,115 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
       ]);
       expect(caseRecRes.status).toBe(1);
       expect(caseRecRes.stderr).toMatch(/must not point inside/);
+
+      // Uppercase TMP on a symlinked <clone>/tmp -> <external-box> still encloses clone.
+      const upperTmpRes = run([
+        '--context',
+        cloneRootCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        join(symlinkedClone, 'TMP', basename(symRoundDir)),
+      ]);
+      expect(upperTmpRes.status).toBe(1);
+      expect(upperTmpRes.stderr).toMatch(/must not point inside/);
+    }
+
+    // 8o. Trailing "/.", intermediate "sub/..", and "/evidence/.." cannot evade
+    // tmp-container trust root derivation on a symlinked <clone>/tmp.
+    mkdirSync(join(externalArtifacts, 'sub'), { recursive: true });
+    for (const [label, trickyDir] of [
+      ['trailing dot', `${symRoundDir}/.`],
+      [
+        'intermediate sub/..',
+        join(symlinkedClone, 'tmp', 'sub', '..', basename(symRoundDir)),
+      ],
+      ['trailing evidence/..', `${symRoundDir}/evidence/..`],
+      ['nested alias trailing dot', `${nestedRoundDir}/.`],
+    ]) {
+      const res = run([
+        '--context',
+        cloneRootCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        trickyDir,
+      ]);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // 8p. Legitimate cross-depth symlink/.. path resolves consistently under OS
+    // semantics without lexical path.join/resolve split-brain.
+    const deepBase = join(base, 'deep-tree');
+    const deepSub = join(deepBase, 'sub');
+    const deepRealRound = join(
+      deepBase,
+      'real',
+      'pr17185-verify-20261124-033000',
+    );
+    mkdirSync(deepSub, { recursive: true });
+    mkdirSync(join(deepRealRound, 'evidence'), { recursive: true });
+    writeFileSync(join(deepRealRound, 'report.md'), validFiles().report);
+    writeFileSync(join(deepRealRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(deepRealRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(deepRealRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(deepRealRound, 'evidence', '01-ab-cells.png'), 'png');
+    const crossLink = join(base, 'cross-depth-link');
+    symlinkSync(deepSub, crossLink);
+    const crossDepthRes = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${crossLink}/../real/${basename(deepRealRound)}`,
+    ]);
+    expect(
+      crossDepthRes.status,
+      crossDepthRes.stdout + crossDepthRes.stderr,
+    ).toBe(0);
+
+    // 8q. Host executionApproval also contradicts microvm and provider-vm modes.
+    for (const [label, boundary] of [
+      ['microvm', { mode: 'microvm', backend: 'firecracker' }],
+      ['provider-vm', { mode: 'vm', backend: 'provider-vm' }],
+    ]) {
+      expect(
+        executionApprovalErrors(
+          JSON.stringify(boundary),
+          {
+            headRefOid: HEAD,
+            executionApproval: {
+              mode: 'waived',
+              source: 'local-trust',
+              basis: 'own-pr',
+              by: 'wenshao',
+              permission: 'admin',
+              head: HEAD,
+              round: 1,
+              reason: 'host round',
+            },
+          },
+          { contextProvided: true, contextDigestVerified: true },
+        ).join('\n'),
+        label,
+      ).toMatch(/contradicts boundary\.json mode/);
     }
   });
 });

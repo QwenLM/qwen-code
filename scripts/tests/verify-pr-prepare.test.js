@@ -2408,6 +2408,27 @@ describe.skipIf(process.platform === 'win32')(
           (line) => `<!doctype html\n\`\`\`\n>\n\n\`\`\`\n${line}\n\`\`\``,
         ],
         [
+          'paragraph followed by <br> and fenced example cannot leak marker',
+          (line) =>
+            `Please do NOT paste:\n<br>\n\`\`\`markdown\nExample\n\n${line}\n\`\`\``,
+        ],
+        [
+          'paragraph followed by <x-note> and fenced example cannot leak marker',
+          (line) => `Some prose\n<x-note>\n\`\`\`\n\n${line}\n\`\`\``,
+        ],
+        [
+          'list-item fenced block cannot flip fence parity for a later fenced example',
+          (line) => `- \`\`\`\n  hello\n  \`\`\`\n\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          'list-item <pre> HTML block cannot flip fence parity',
+          (line) => `- <pre>\n  \`\`\`\n  </pre>\n\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          'NBSP in unquoted HTML attribute cannot flip fence parity',
+          (line) => `<x-note a=1\u00a02>\n\`\`\`\n\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
           'tilde-fenced marker with a longer close is only an example',
           (line) => `~~~text\n${line}\nDo not approve this example.\n~~~~`,
         ],
