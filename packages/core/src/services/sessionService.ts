@@ -2498,6 +2498,7 @@ export class SessionService {
     records: ChatRecord[],
     tailBuffer?: Buffer,
     knownManaged?: boolean,
+    catalogTailSource?: CatalogTranscriptMetadata['source'],
   ): {
     parentSessionId?: string;
     sourceType?: string;
@@ -2506,7 +2507,8 @@ export class SessionService {
     const metadata = this.extractCreationMetadataFromRecords(records);
     if (metadata.sourceType !== undefined) return metadata;
 
-    const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer);
+    const tailSource =
+      catalogTailSource ?? this.readSessionSourceFromTail(filePath, tailBuffer);
     if (tailSource.sourceType === undefined) {
       const managedSource =
         knownManaged === false
@@ -2529,10 +2531,11 @@ export class SessionService {
   private readSessionSourceFromTail(
     filePath: string,
     scratchBuffer?: Buffer,
+    verifiedFile?: { fd: number; size: number },
   ): { sourceType?: string; sourceId?: string } {
-    let fd: number | undefined;
+    let fd = verifiedFile?.fd;
     try {
-      const fileSize = fs.statSync(filePath).size;
+      const fileSize = verifiedFile?.size ?? fs.statSync(filePath).size;
       if (fileSize === 0) return {};
       const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
       const readLength = Math.min(fileSize, TAIL_READ_SIZE);
@@ -2541,7 +2544,7 @@ export class SessionService {
           ? scratchBuffer
           : Buffer.alloc(readLength);
 
-      fd = fs.openSync(filePath, 'r');
+      fd ??= fs.openSync(filePath, 'r');
       const bytesRead = fs.readSync(fd, buffer, 0, readLength, readStart);
       let firstSegmentIsPartial = false;
       if (readStart > 0) {
@@ -2557,7 +2560,7 @@ export class SessionService {
     } catch {
       return {};
     } finally {
-      if (fd !== undefined) {
+      if (fd !== undefined && verifiedFile === undefined) {
         try {
           fs.closeSync(fd);
         } catch {
@@ -3136,6 +3139,46 @@ export class SessionService {
     }
   }
 
+  private async readCatalogTranscriptFallback(
+    filePath: string,
+    tailBuffer: Buffer,
+    signal?: AbortSignal,
+  ): Promise<
+    | {
+        records: ChatRecord[];
+        complete: boolean;
+        tailSource: CatalogTranscriptMetadata['source'];
+      }
+    | undefined
+  > {
+    let handle: FileHandle | undefined;
+    try {
+      signal?.throwIfAborted();
+      handle = await openNoFollow(filePath, { nonBlocking: true });
+      const stat = await handle.stat();
+      signal?.throwIfAborted();
+      if (!stat.isFile()) return undefined;
+      const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer, {
+        fd: handle.fd,
+        size: stat.size,
+      });
+      const stream = handle.createReadStream();
+      // The line reader closes the stream and its handle.
+      handle = undefined;
+      const result = await jsonl.readLinesWithIntegrity<ChatRecord>(
+        filePath,
+        MAX_PROMPT_SCAN_LINES,
+        { signal, stream },
+      );
+      return { ...result, tailSource };
+    } catch {
+      signal?.throwIfAborted();
+      return undefined;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
   /**
    * Lists sessions for the current project with pagination.
    *
@@ -3264,10 +3307,22 @@ export class SessionService {
         : undefined;
       signal?.throwIfAborted();
       if (catalog === null) continue;
-      if (forCatalog && catalog === undefined) catalogReadFallbacks++;
-      const readResult = catalog
-        ? { records: catalog.records, complete: true }
-        : signal
+      let readResult;
+      let tailSource: CatalogTranscriptMetadata['source'] | undefined;
+      if (catalog) {
+        readResult = { records: catalog.records, complete: true };
+      } else if (forCatalog) {
+        catalogReadFallbacks++;
+        const fallback = await this.readCatalogTranscriptFallback(
+          filePath,
+          tailBuffer,
+          signal,
+        );
+        if (fallback === undefined) continue;
+        readResult = fallback;
+        tailSource = fallback.tailSource;
+      } else {
+        readResult = signal
           ? await jsonl.readLinesWithIntegrity<ChatRecord>(
               filePath,
               MAX_PROMPT_SCAN_LINES,
@@ -3277,6 +3332,7 @@ export class SessionService {
               filePath,
               MAX_PROMPT_SCAN_LINES,
             );
+      }
       const records = readResult.records.slice(0, MAX_PROMPT_SCAN_LINES);
       signal?.throwIfAborted();
 
@@ -3302,6 +3358,7 @@ export class SessionService {
           records,
           tailBuffer,
           knownManaged,
+          tailSource,
         );
       if (
         excludeSourceTypes !== undefined &&

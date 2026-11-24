@@ -107,7 +107,9 @@ merged rows before slicing the page. On a cold cache, each member scans up to
 50,000 persisted summaries. The catalog reader opens an ordinary transcript
 once to share bounded head and tail reads across the prompt, source and title.
 Short files share a single read. Managed, ambiguous or concurrently modified
-transcripts use the existing compatible reader. The legacy paginated reader and
+transcripts use the existing compatible reader. The catalog reopens those
+transcripts safely and uses the verified descriptor for the JSONL stream and
+the legacy source scan. The legacy paginated reader and
 its transcript-derived title fallback retain their existing behavior.
 The catalog reader skips non-regular files and entries whose identity cannot be
 verified by the safe open helper, including symlinks.

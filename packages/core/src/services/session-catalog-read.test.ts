@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -160,7 +161,13 @@ describe('SessionService catalog transcript reads', () => {
   it.each([
     [
       'a long first record',
-      () => [prompt('字'.repeat(30_000)), title('long')].join('\n'),
+      () =>
+        [
+          prompt('字'.repeat(30_000)),
+          ...Array(10).fill(line('assistant')),
+          source('channel'),
+          title('long'),
+        ].join('\n'),
     ],
     ['malformed joined lines', () => prompt() + title('recovered')],
     [
@@ -175,8 +182,46 @@ describe('SessionService catalog transcript reads', () => {
     fs.writeFileSync(transcript, contents());
     const baseline = await service.listSessions();
     expect(baseline.items).toHaveLength(1);
+    const realOpen = fs.promises.open.bind(fs.promises);
+    const stream = vi.spyOn(fs, 'createReadStream');
+    const openSync = vi.spyOn(fs, 'openSync');
+    const openedStreams = vi.fn();
+    vi.spyOn(fs.promises, 'open').mockImplementation(async (...args) => {
+      const handle = await realOpen(...args);
+      if (args[0] === transcript) {
+        const createStream = handle.createReadStream.bind(handle);
+        vi.spyOn(handle, 'createReadStream').mockImplementation((options) => {
+          openedStreams();
+          return createStream(options);
+        });
+      }
+      return handle;
+    });
     expect(await service.listSessions({ forCatalog: true })).toEqual({
       ...baseline,
+      catalogReadFallbacks: 1,
+    });
+    expect(stream.mock.calls.some(([file]) => file === transcript)).toBe(false);
+    expect(
+      openSync.mock.calls.some(
+        ([file, flags]) => file === transcript && flags === 'r',
+      ),
+    ).toBe(false);
+    expect(openedStreams).toHaveBeenCalledOnce();
+  });
+
+  it('skips legacy fallback if its safe open is refused', async () => {
+    fs.writeFileSync(transcript, prompt('字'.repeat(30_000)));
+    const realOpen = fs.promises.open.bind(fs.promises);
+    vi.spyOn(fs.promises, 'open')
+      .mockImplementationOnce(realOpen)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Cannot verify file identity'), {
+          code: 'EUNVERIFIABLE',
+        }),
+      );
+    expect(await service.listSessions({ forCatalog: true })).toMatchObject({
+      items: [],
       catalogReadFallbacks: 1,
     });
   });
@@ -226,6 +271,37 @@ describe('SessionService catalog transcript reads', () => {
       service.listSessions({ forCatalog: true, signal: controller.signal }),
     ).rejects.toBe(reason);
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('closes the verified fallback stream when a catalog read is canceled', async () => {
+    fs.writeFileSync(transcript, prompt('字'.repeat(30_000)));
+    const controller = new AbortController();
+    const reason = new Error('catalog canceled during fallback');
+    const realOpen = fs.promises.open.bind(fs.promises);
+    const handles: FileHandle[] = [];
+    let streamDestroyedOnAbort = false;
+    vi.spyOn(fs.promises, 'open').mockImplementation(async (...args) => {
+      const handle = await realOpen(...args);
+      handles.push(handle);
+      const createStream = handle.createReadStream.bind(handle);
+      vi.spyOn(handle, 'createReadStream').mockImplementation((options) => {
+        const stream = createStream(options);
+        stream.once('data', () => {
+          controller.abort(reason);
+          streamDestroyedOnAbort = stream.destroyed;
+        });
+        return stream;
+      });
+      return handle;
+    });
+
+    await expect(
+      service.listSessions({ forCatalog: true, signal: controller.signal }),
+    ).rejects.toBe(reason);
+    expect(streamDestroyedOnAbort).toBe(true);
+    await vi.waitFor(() =>
+      expect(handles.map((handle) => handle.fd)).toEqual([-1, -1]),
+    );
   });
 
   it.skipIf(process.platform === 'win32')(
