@@ -690,6 +690,55 @@ describe('WorkspaceDetailsTooltip menu suppression', () => {
     });
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
   });
+
+  it('does not hand focus back to the row when suppression closes the card under a focused facet', async () => {
+    const content = (suppressed: boolean) => (
+      <SidebarHoverSuppressionContext.Provider value={suppressed}>
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="qwen-code"
+            cwd="/work/qwen-code"
+            overview={snapshot}
+            items={['mcp']}
+            onOpenOverviewItem={() => {}}
+            manageableItems={new Set(['mcp'])}
+          >
+            <div>
+              <button type="button">qwen-code</button>
+            </div>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>
+      </SidebarHoverSuppressionContext.Provider>
+    );
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(content(false));
+    });
+    const trigger = container.querySelector<HTMLButtonElement>('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+    });
+    const facet = facetRow(
+      document.querySelector<HTMLElement>('[role="dialog"]')!,
+      'mcp',
+    )!;
+    await act(async () => {
+      facet.focus();
+    });
+    expect(document.activeElement).toBe(facet);
+
+    await act(async () => {
+      root.render(content(true));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    // The focused facet unmounts with the card. Suppression owns the close,
+    // so it must not pull focus onto the row beneath the menu that took over.
+    expect(document.activeElement).not.toBe(trigger);
+    expect(document.activeElement).toBe(document.body);
+  });
 });
 
 describe('WorkspaceDetailsTooltip git branch row', () => {

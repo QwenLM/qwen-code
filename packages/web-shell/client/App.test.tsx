@@ -52309,7 +52309,7 @@ describe('App session callbacks', () => {
     });
   });
 
-  it('routes every plugin and channel management selection to its clicked workspace', async () => {
+  it('routes every workspace management selection to its clicked workspace', async () => {
     mockWorkspace.workspaceCwd = '/work/primary';
     mockConnection.workspaceCwd = '/work/primary';
     mockConnection.sessionContext = {
@@ -52372,6 +52372,35 @@ describe('App session callbacks', () => {
       navigationRequest: 1,
       sessionWorkspaceCwd: '/work/primary',
     });
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('settings', '/work/secondary');
+    });
+    await flush();
+    expect(
+      (
+        testState.latestSettingsWorkspaceControl as React.ReactElement<{
+          value: string;
+        }>
+      ).props.value,
+    ).toBe('/work/secondary');
+
+    const dialogTitles = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>('[data-dialog-title]'),
+      ).map((node) => node.getAttribute('data-dialog-title'));
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('context', '/work/secondary');
+    });
+    await flush();
+    expect(dialogTitles()).toContain('Memory · secondary');
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('hooks', '/work/secondary');
+    });
+    await flush();
+    expect(dialogTitles()).toContain('Hooks · secondary');
   });
 
   it('maps a Chinese UI language choice to the daemon language code', async () => {
