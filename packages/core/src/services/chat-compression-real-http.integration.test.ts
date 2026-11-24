@@ -365,6 +365,96 @@ describe('ChatCompressionService real local HTTP/SSE integration', () => {
     );
   });
 
+  it('retries once over real HTTP/SSE when the clamped budget is cut inside a started <state_snapshot>', async () => {
+    const model = 'custom-partial-snapshot-model';
+    const { baseUrl, requests } = await startMockGateway((req, res, idx) => {
+      const maxTokens = Number(req.body['max_tokens']);
+      if (idx === 0) {
+        writeSse(res, [
+          sseDeltaChunk(
+            model,
+            {
+              role: 'assistant',
+              content:
+                '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
+            },
+            'length',
+          ),
+          sseUsageChunk(model, {
+            prompt_tokens: 54_000,
+            completion_tokens: maxTokens,
+            total_tokens: 54_000 + maxTokens,
+          }),
+        ]);
+        return;
+      }
+      writeSse(res, [
+        sseDeltaChunk(
+          model,
+          {
+            role: 'assistant',
+            content:
+              '<state_snapshot><overall_goal>recovered after partial-snapshot retry</overall_goal></state_snapshot>',
+          },
+          'stop',
+        ),
+        sseUsageChunk(model, {
+          prompt_tokens: 18_000,
+          completion_tokens: 550,
+          total_tokens: 18_550,
+        }),
+      ]);
+    });
+
+    const { config, service } = createRealRuntime({
+      baseUrl,
+      model,
+      contextWindowSize: 65_536,
+    });
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'investigate build failure' }] },
+    ];
+    for (let i = 0; i < 12; i++) {
+      history.push({
+        role: 'model',
+        parts: [{ functionCall: { id: `c${i}`, name: 'run', args: {} } }],
+      });
+      history.push({
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: `c${i}`,
+              name: 'run',
+              response: { output: `tool-${i}-` + 'z'.repeat(17_500) },
+            },
+          },
+        ],
+      });
+    }
+    history.push({ role: 'model', parts: [{ text: 'analysis complete' }] });
+
+    const result = await service.compress(createFakeChat(history), {
+      promptId: 'real-http-p5',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 54_000,
+      signal: new AbortController().signal,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(requests).toHaveLength(2);
+    const firstBudget = Number(requests[0]!.body['max_tokens']);
+    const secondBudget = Number(requests[1]!.body['max_tokens']);
+    expect(firstBudget).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(secondBudget).toBeGreaterThan(firstBudget);
+    expect(JSON.stringify(result.newHistory)).toContain(
+      'recovered after partial-snapshot retry',
+    );
+  });
+
   it('reports OUTPUT_TRUNCATED over real HTTP/SSE when budget is exhausted in reasoning_content alone', async () => {
     const model = 'custom-reasoning-exhaust-model';
     const { baseUrl, requests } = await startMockGateway((req, res) => {

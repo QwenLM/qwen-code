@@ -1473,30 +1473,38 @@ export class ChatCompressionService {
                 `context window; retrying once with a smaller ` +
                 `${sameInput ? 'output budget' : 'request'}: ${String(error)}`,
             );
-          if (!sameInput) {
-            coldInputReduced = true;
-            coldTextReduced = true;
-          }
+          if (!sameInput) coldInputReduced = true;
           coldHistory = retry.history;
           coldSizing = retry.sizing;
           continue;
         }
-        // When a clamped output budget was completely exhausted inside
-        // thinking or an unclosed <analysis> block, retrying once with the
-        // reduced input frees headroom up to the full output reserve instead
-        // of deadlocking at the same clamped cap on every /compress attempt.
+        // When a clamped output budget was exhausted before the model could
+        // finish its summary — inside thinking, an unclosed <analysis> block,
+        // or a started <state_snapshot> — retrying once with the reduced input
+        // frees headroom up to the full output reserve instead of deadlocking
+        // at the same clamped cap on every /compress attempt. `coldTextReduced`
+        // is set when this fires, so it runs at most once; the budget-growth
+        // guard below also blocks it after a same-input overflow retry, whose
+        // smaller window leaves no extra room to free.
         if (
-          attempt === 0 &&
           !coldTextReduced &&
           coldOutputBudget < compactionOutputReserve(coldWindow)
         ) {
           const candidateText = summaryResult.text;
-          const candidateEmpty =
-            !candidateText ||
-            stripAnalysisBlock(candidateText).trim().length === 0;
+          const candidateVisible = candidateText
+            ? stripAnalysisBlock(candidateText).trim()
+            : '';
+          // The same incompleteness predicates the truncation guard below
+          // applies: an empty visible body, an opened-but-unclosed snapshot,
+          // or a cut inside a tag all mean the summary was cut, not finished.
+          const candidateIncomplete =
+            candidateVisible.length === 0 ||
+            hasUnclosedStateSnapshot(candidateVisible) ||
+            endsInsideSnapshotOpening(candidateVisible) ||
+            endsInsideTag(candidateVisible);
           const spent = computeReportedOutputSpent(summaryResult.usage);
           if (
-            candidateEmpty &&
+            candidateIncomplete &&
             typeof spent === 'number' &&
             spent >= coldOutputBudget
           ) {

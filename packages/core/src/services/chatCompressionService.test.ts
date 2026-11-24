@@ -5432,4 +5432,108 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       );
     },
   );
+
+  it('retries once when the clamped budget is cut inside a started <state_snapshot>', async () => {
+    // The visible summary is non-empty but incomplete: the model opened the
+    // snapshot and ran out of the clamped budget mid-content. The retry must
+    // fire for this shape too, not only for an empty-after-strip body.
+    configureWindow(65_536);
+    const budgets: number[] = [];
+    const generateText = vi.fn().mockImplementation(async (args) => {
+      const maxOut = args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+      budgets.push(maxOut);
+      if (budgets.length === 1) {
+        return {
+          text: '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
+          usage: {
+            promptTokenCount: 54_000,
+            candidatesTokenCount: maxOut,
+            totalTokenCount: 54_000 + maxOut,
+          },
+        };
+      }
+      return {
+        text: '<state_snapshot><overall_goal>recovered after partial-snapshot retry</overall_goal></state_snapshot>',
+        usage: {
+          promptTokenCount: 18_000,
+          candidatesTokenCount: 600,
+          totalTokenCount: 18_600,
+        },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(toolSession(12, 17_500), 54_000);
+
+    expectCompressed(result);
+    expect(budgets).toHaveLength(2);
+    expect(budgets[0]!).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(budgets[1]!).toBeGreaterThan(budgets[0]!);
+    expect(JSON.stringify(result.newHistory)).toContain(
+      'recovered after partial-snapshot retry',
+    );
+  });
+
+  it('strips unsigned thoughts from the reduced retry payload (combined oversized-text + thought fixture)', async () => {
+    // getColdInput strips the thoughts so the first budget is clamped but
+    // sendable; reduceColdInput must strip them again on the retry, otherwise
+    // the reduced estimate stays large and the retry never frees headroom.
+    configureWindow(65_536);
+    const history: Content[] = [userText('original request: port the parser')];
+    for (let i = 0; i < 12; i++) {
+      history.push({
+        role: 'model',
+        parts: [
+          { text: 'q'.repeat(16_000), thought: true },
+          fnCall('read_file', { i }, `c${i}`),
+        ],
+      });
+      history.push(
+        content(
+          'user',
+          fnResponse('read_file', { output: 'r'.repeat(17_500) }, `c${i}`),
+        ),
+      );
+    }
+    history.push(modelText('done'));
+
+    const budgets: number[] = [];
+    const retryContents: Content[][] = [];
+    const generateText = vi.fn().mockImplementation(async (args) => {
+      const maxOut = args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+      budgets.push(maxOut);
+      retryContents.push(args.contents as Content[]);
+      if (budgets.length === 1) {
+        return {
+          text: '',
+          usage: {
+            promptTokenCount: 53_000,
+            candidatesTokenCount: maxOut,
+            totalTokenCount: 53_000 + maxOut,
+          },
+        };
+      }
+      return {
+        text: '<state_snapshot><overall_goal>combined fixture recovered</overall_goal></state_snapshot>',
+        usage: {
+          promptTokenCount: 12_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 12_500,
+        },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await compressHistory(history, 53_000);
+
+    expectCompressed(result);
+    expect(budgets).toHaveLength(2);
+    expect(budgets[1]!).toBeGreaterThan(budgets[0]!);
+    expect(textOf(retryContents[1]!)).not.toContain('q'.repeat(100));
+    expect(textOf(retryContents[1]!)).not.toContain('r'.repeat(5_000));
+  });
 });
