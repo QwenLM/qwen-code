@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtecto
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -229,20 +228,17 @@ class ExecutionControlTenantGuardsTest {
 
     /** A session-class fixture; {@code root} adds the managed Session root of its harness Session. */
     protected RuntimeRecoveryContract.Fixture sessionFixture(boolean root) throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         if (root) {
             String session = tenant + "-harness";
             try (Connection connection = source.getConnection(); var insert = connection.prepareStatement(
-                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key,"
-                            + " session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?)")) {
+                    "INSERT INTO ma_session (tenant_id, session_id, session_kind,"
+                            + " gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?)")) {
                 long now = System.currentTimeMillis();
-                insert.setBytes(1, ManagedSchemaKeys.identity(tenant));
-                insert.setBytes(2, ManagedSchemaKeys.identity(session));
-                insert.setString(3, ManagedSchemaKeys.key(tenant));
-                insert.setString(4, ManagedSchemaKeys.key(session));
-                insert.setString(5, ManagedSchemaKeys.key(tenant, session));
-                insert.setLong(6, now);
-                insert.setLong(7, now);
+                insert.setString(1, tenant);
+                insert.setString(2, session);
+                insert.setLong(3, now);
+                insert.setLong(4, now);
                 insert.executeUpdate();
             }
         }
@@ -259,8 +255,8 @@ class ExecutionControlTenantGuardsTest {
                     connection.setAutoCommit(false);
                     try (var lock = connection.prepareStatement(
                             "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
-                        lock.setBytes(1, ManagedSchemaKeys.identity(tenant));
-                        lock.setBytes(2, ManagedSchemaKeys.identity(session));
+                        lock.setString(1, tenant);
+                        lock.setString(2, session);
                         lock.executeQuery().close();
                     }
                     held.countDown();

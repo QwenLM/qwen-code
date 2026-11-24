@@ -156,7 +156,7 @@ class HostedChannelFaultGatesIT {
                 "fg7-cases", letter);
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
-        String tenant = "hosted-channel-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         start(tenant);
         for (String fault : cases) {
             try {

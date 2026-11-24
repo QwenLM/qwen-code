@@ -85,7 +85,7 @@ class HostedTeamLeadMySqlIT {
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
-    private final String tenant = "h4eb1-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     // WAIT replies after release; HOLD ends after cancellation without replying.
