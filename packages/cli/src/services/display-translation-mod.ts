@@ -38,6 +38,16 @@ export function drawsTranslatedRows(sites: readonly ModRenderSite[]): boolean {
   return sites.some((site) => SITES.includes(site));
 }
 
+// A browser reads full-width dots and letters in a host as ASCII.
+function sameHost(url: string, kept: string): boolean {
+  try {
+    const host = (value: string) => new URL(value).hostname.replace(/\.$/, '');
+    return host(url) === host(kept);
+  } catch {
+    return false;
+  }
+}
+
 async function inspectMarkdown(text: string) {
   const { parseMarkdown, walkMarkdown } = await import(
     '../ui/utils/export/markdown-document-policy.js'
@@ -67,11 +77,9 @@ async function inspectMarkdown(text: string) {
         shown !== undefined &&
         /^(?:https?|mailto):/i.test(url) &&
         [shown, `mailto:${shown}`, `http://${shown}`].includes(url);
-      // Full-width letters and digits map to ASCII in a browser's URL.
       const tail = bare ? /[^\x21-\x7e]+$/u.exec(url)?.[0] : undefined;
-      spans.push(
-        `url:${tail && !/[a-z0-9]/i.test(tail.normalize('NFKC')) ? url.slice(0, -tail.length) : url}`,
-      );
+      const kept = tail ? url.slice(0, -tail.length) : url;
+      spans.push(`url:${sameHost(url, kept) ? kept : url}`);
     }
   });
   return { prose: words.join(' '), code: { fences, spans: spans.sort() } };

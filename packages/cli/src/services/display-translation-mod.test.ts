@@ -143,6 +143,7 @@ describe('translateDisplayText', () => {
       'See https://a.example/docs for details.',
     ],
     ['Mail a@b.example.', '发邮件到 a@b.example。'],
+    ['See https://a.example.', '详见 https://a.example。'],
   ])(
     'accepts a bare URL next to other punctuation in %s',
     async (original, translated) => {
@@ -201,6 +202,8 @@ describe('translateDisplayText', () => {
       'See https://github.com for the docs.',
       '文档见 https://github.com．ｅｖｉｌ．ｃｏｍ',
     ],
+    ['See https://github.com for the docs.', '文档见 https://github.com。公司'],
+    ['See https://github.com for the docs.', '文档见 https://github.com．公司'],
     ['Run this.\n\n    npm test', '运行这个。\n\n    npm run build'],
     ['Run this.\n\n> ~~~sh\n> npm test\n> ~~~', '运行这个。'],
     ['Run the command.', '运行命令。\n\n~~~sh\nnpm run build\n~~~'],
