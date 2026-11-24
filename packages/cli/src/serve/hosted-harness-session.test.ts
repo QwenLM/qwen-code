@@ -47814,6 +47814,232 @@ describe('idle suspension', () => {
   it('keeps a monitor wake approval resident without the wake parking bit', () =>
     parkMonitorWakeApproval(false));
 
+  // S4b (#18149): a channel or pr_event Turn's approval wait parks like any
+  // wake Turn's, and after its Harness dies in the wait the pump resumes it
+  // instead of the channel funnel settling it without a reply. Allow runs
+  // the tool once, and a completed channel Turn plans its one reply.
+  async function resumePumpOwnedWakeApproval(
+    source: 'channel' | 'pr_event',
+    interruption: 'park' | 'death',
+  ) {
+    const parks = interruption === 'park';
+    state.wakeDispatch = parks;
+    state.actionParking = parks;
+    state.wakeActionParking = parks;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const turnId =
+      source === 'channel' ? 'chin-approval' : `prw-${'c'.repeat(64)}:input`;
+    mockApprovalTurn(turnId);
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const read = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+    const resident = () =>
+      (
+        wakeDeps.last as {
+          session: {
+            managed: ManagedSession;
+            monitorWake?: { kick(): void; close(): void };
+            channels?: HostedChannelSession;
+          };
+        }
+      ).session;
+    try {
+      const original = parks
+        ? await app(true, undefined, true, { idleSuspendMs: 150 })
+        : await app(true);
+      const created = await headers(supertest(original).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      await headers(
+        supertest(original).post(`/session/${SESSION_ID}/channels/operations`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send(
+          source === 'channel'
+            ? {
+                operationId: randomUUID(),
+                kind: 'submit_input',
+                inputId: turnId,
+                channelInstanceId: 'mail-1',
+                accountId: 'agent@example.com',
+                accountGeneration: 1,
+                platformEventId: '1700:90',
+                semanticRevision: 1,
+                senderId: 'alice@example.com',
+                chatId: 'alice@example.com',
+                threadId: 'thread-1',
+                subject: 'Notes',
+                text: 'write notes',
+                attachments: [],
+                replyContext: { parent: '<a@example.com>', references: [] },
+                scope: {
+                  kind: 'chat_thread',
+                  senderId: null,
+                  chatId: 'alice@example.com',
+                  threadId: 'thread-1',
+                },
+                policy: {
+                  adapter: 'email',
+                  senderPolicy: 'allowlist',
+                  allowedSenders: ['alice@example.com'],
+                  dispatchMode: 'followup',
+                },
+              }
+            : {
+                operationId: randomUUID(),
+                kind: 'submit_pr_event_input',
+                inputId: turnId,
+                owner: 'Owner',
+                repo: 'Repo',
+                prNumber: 7,
+                transition: 'ci_failure',
+                headSha: 'a'.repeat(40),
+                evidence: 'Failed checks: build.',
+                text: 'write notes',
+                episode: 1,
+              },
+        )
+        .expect(202);
+      resident().monitorWake?.kick();
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      if (parks) {
+        await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+          timeout: 5000,
+        });
+        expect(state.wakeStamps[0]).toMatchObject({
+          pending: true,
+          parkedTurn: { promptId: turnId, owner: 'wake' },
+        });
+        await vi.waitFor(
+          async () => {
+            expect(
+              (await statusOf(original, created.body.clientId as string))
+                .status,
+            ).toBe(404);
+          },
+          { timeout: 5000 },
+        );
+      } else {
+        // The generation dies at the wait point, exactly as after a SIGKILL.
+        resident().monitorWake?.close();
+        await resident().managed.close();
+      }
+      // A Harness that does not idle out takes the Session over, so the
+      // reply plan never races a suspension of the resumed Session.
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          passiveManagedRuntimeRecovery: true,
+        })
+        .expect(200);
+      const clientId = loaded.body.clientId as string;
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).body).toMatchObject({
+            hasActivePrompt: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      const requestId = (await read()).events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await read()).events.find(
+              (event) =>
+                event.kind === 'turn.settled' &&
+                event.payload['turnId'] === turnId,
+            )?.payload,
+          ).toMatchObject({ outcome: 'completed' });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(
+        (await read()).events.some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            isHostedWakeContinuationId(String(event.payload['turnId'])),
+        ),
+      ).toBe(false);
+      await vi.waitFor(
+        () =>
+          expect(
+            resident()
+              .channels!.pendingDeliveries()
+              .filter((delivery) => delivery.sourceTurnId === turnId),
+          ).toHaveLength(source === 'channel' ? 1 : 0),
+        { timeout: 5000 },
+      );
+      // The Turn holds its slot past its settle until its cleanup confirms.
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).body).toMatchObject({
+            hasActivePrompt: false,
+          });
+        },
+        { timeout: 5000 },
+      );
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+    } finally {
+      waiting.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.wakeActionParking = false;
+      state.approvalSelections.clear();
+    }
+  }
+
+  it.each([
+    ['channel', 'park'],
+    ['channel', 'death'],
+    ['pr_event', 'park'],
+    ['pr_event', 'death'],
+  ] as const)('resumes a %s wake approval after a %s', (source, interruption) =>
+    resumePumpOwnedWakeApproval(source, interruption),
+  );
+
   it('resumes a monitor wake approval after its Harness dies in the wait', () =>
     resumeMonitorWakeAfterDeath(false));
 
