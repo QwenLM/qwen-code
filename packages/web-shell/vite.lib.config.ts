@@ -17,6 +17,9 @@ const COMPONENT_ROOT_SCOPE =
 function scopeComponentCss(root: Root): void {
   const scopeNode = selectorParser().astSync(COMPONENT_SCOPE).first.first;
   if (!scopeNode) throw new Error('Invalid WebShell component CSS scope');
+  const rootScope = selectorParser().processSync(COMPONENT_ROOT_SCOPE, {
+    lossless: false,
+  });
   const keyframeNames = new Map<string, string>();
   const propertyNames = new Map<string, string>();
 
@@ -73,6 +76,15 @@ function scopeComponentCss(root: Root): void {
     rule.selector = selectorParser((selectors) => {
       selectors.each((selector) => {
         const first = selector.first;
+        if (
+          first?.type === 'pseudo' &&
+          first.value === ':is' &&
+          selectorParser().processSync(first.toString(), {
+            lossless: false,
+          }) === rootScope
+        ) {
+          return;
+        }
         if (first?.type === 'tag' || first?.type === 'universal') {
           selector.insertAfter(first, scopeNode.clone());
         } else {
