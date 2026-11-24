@@ -26,6 +26,10 @@ import {
   resolveProjectMemoryTarget,
   runWithMemoryProjectOwner,
 } from './paths.js';
+import {
+  getProjectMemoryWriteRoot,
+  projectMemoryIndexWriteError,
+} from './project-write.js';
 
 let root: string;
 let runtime: string;
@@ -159,6 +163,29 @@ it('prefers existing canonical storage before binding and ignores working-file e
   clearAutoMemoryRootCache();
   expect(getAutoMemoryRoot(main)).toBe(canonical);
   expect(getAutoMemoryRoot(linked)).toBe(canonical);
+});
+
+it('recognizes hosted writes to the canonical memory root under the pinned base', () => {
+  vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', undefined);
+  const main = makeMain();
+  const linked = addWorktree(main, 'linked');
+  const memoryBaseDir = path.join(root, 'project-owner-runtime');
+
+  Storage.runWithResolvedRuntimeBaseDir(runtime, () =>
+    runWithMemoryProjectOwner({ cwd: main, memoryBaseDir }, () => {
+      const memory = getAutoMemoryRoot(linked);
+      expect(
+        getProjectMemoryWriteRoot(linked, path.join(memory, 'topic.md'), false),
+      ).toBe(memory);
+      expect(
+        projectMemoryIndexWriteError(
+          linked,
+          path.join(memory, 'MEMORY.md'),
+          false,
+        ),
+      ).toContain('generated automatically');
+    }),
+  );
 });
 
 it.skipIf(process.platform === 'win32')(

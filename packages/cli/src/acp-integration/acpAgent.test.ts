@@ -40,6 +40,9 @@ import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '@qwen-code/qwen-code-core/q
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { BTW_STREAM_TIMEOUT_MS } from './btw-generation.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
+import { resolveProjectMemoryTarget } from '@qwen-code/qwen-code-core/memory/paths.js';
+
+vi.mock('@qwen-code/qwen-code-core/memory/paths.js', { spy: true });
 
 const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
 vi.mock(
@@ -22400,17 +22403,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         enableTeamMemorySync: false,
       },
     });
+    const projectRoot = '/tmp/qwen-memory-root-test';
+    const memoryRoot = '/tmp/qwen-resolved-project-memory';
+    vi.mocked(resolveProjectMemoryTarget).mockReturnValueOnce({
+      owner: projectRoot,
+      scope: 'git-root',
+      memoryRoot,
+    });
     await expect(
       agent.extMethod('qwen/settings/getMemoryPaths', {
         cwd: '/tmp/qwen-memory-cwd-test',
-        projectRoot: '/tmp/qwen-memory-root-test',
+        projectRoot,
       }),
     ).resolves.toEqual({
       paths: {
         userMemoryFile: path.join('/tmp/qwen-global-test', 'QWEN.md'),
         projectMemoryFile: path.join('/tmp/qwen-memory-cwd-test', 'QWEN.md'),
-        autoMemoryDir: '/tmp/qwen-memory-root-test/.qwen/memory',
+        autoMemoryDir: memoryRoot,
       },
+    });
+    expect(resolveProjectMemoryTarget).toHaveBeenCalledWith(projectRoot, {
+      readOnly: true,
     });
     await expect(
       agent.extMethod('qwen/settings/setMemory', {

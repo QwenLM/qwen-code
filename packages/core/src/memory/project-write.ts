@@ -21,7 +21,8 @@ import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_DIRNAME,
   getAutoMemoryRoot,
-  getMemoryBaseDir,
+  getAutoMemoryTrustedAnchor,
+  getMemoryProjectOwner,
   getMemoryRootTrustedAnchor,
 } from './paths.js';
 import {
@@ -40,12 +41,16 @@ export function getProjectMemoryWriteRoot(
   filePath: string,
   followAliases = true,
 ): string | undefined {
-  if (
-    !followAliases &&
-    !isSubpath(path.join(getMemoryBaseDir(), 'projects'), filePath) &&
-    !isSubpath(path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME), filePath)
-  ) {
-    return undefined;
+  if (!followAliases) {
+    const anchor = getAutoMemoryTrustedAnchor(projectRoot);
+    const owner = getMemoryProjectOwner(projectRoot);
+    if (
+      !isSubpath(path.join(anchor, 'projects'), filePath) &&
+      !isSubpath(path.join(anchor, 'project-memory'), filePath) &&
+      !isSubpath(path.join(owner, QWEN_DIR, AUTO_MEMORY_DIRNAME), filePath)
+    ) {
+      return undefined;
+    }
   }
   const root = getAutoMemoryRoot(projectRoot);
   if (
