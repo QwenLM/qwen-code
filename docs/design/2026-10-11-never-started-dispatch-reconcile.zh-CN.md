@@ -246,7 +246,7 @@ execution: 'not_started_proven'} }`，`valid: true` —— 由现有 TS 与
   非阻塞 unknown 非法）；含糊家族由既有强制规则
   （`outcome_unknown|corrupt` ⇒ `recovery_blocked`）覆盖。
 
-接线（`hosted-harness-session.test.ts`）：
+接线（`hosted-harness-session.lifecycle.test.ts`）：
 
 - 带搁死记录的会话 load 会以构建好的会话调用该 reconcile（模块
   mock；**hook 被移除即红**），且 open 的应答被扣住直到 reconcile
@@ -261,7 +261,7 @@ execution: 'not_started_proven'} }`，`valid: true` —— 由现有 TS 与
 | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                  | 回合内后备取证           |
 | `packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`                             | 进程缺失与不确定结果见证 |
 | `packages/cli/src/serve/hosted-harness-session.ts`                                      | open 时调用 arm（很小）  |
-| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | 接线见证                 |
+| `packages/cli/src/serve/hosted-harness-session.lifecycle.test.ts`                       | 接线见证                 |
 | `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 组后继对              |
 | `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | 本文档                   |
 

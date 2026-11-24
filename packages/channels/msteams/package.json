@@ -32,8 +32,8 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@microsoft/agents-hosting": "1.9.1",
-    "@microsoft/agents-activity": "1.9.1"
+    "@microsoft/agents-hosting": "1.10.2",
+    "@microsoft/agents-activity": "1.10.2"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

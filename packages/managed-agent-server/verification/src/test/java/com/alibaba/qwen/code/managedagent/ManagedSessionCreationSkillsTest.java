@@ -91,7 +91,7 @@ class ManagedSessionCreationSkillsTest {
 
     @BeforeEach
     void setup() {
-        tenant = "skills-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         sessionSkillsSupported = true;
         sessionExtensionsSupported = true;
         mcpLifecycleSupported = false;

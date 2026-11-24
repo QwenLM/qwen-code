@@ -63,7 +63,7 @@ class ManagedMemoryStoreTest {
         settings.getSessionStore().setEnabled(true);
         sessions = VerificationFixtures.managedSessionStore(jdbc);
         memory = repository();
-        tenant = "memory-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         session = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,creator_actor_key,owner_actor_key,gmt_create,gmt_modified)"
                         + " VALUES (?,?,'qwen-code',?,?,1,1)", tenant, session,
@@ -93,7 +93,7 @@ class ManagedMemoryStoreTest {
         assertThat(memory.create(tenant, "owner").id()).isEqualTo(personal);
         String foreign = memory.create(tenant, "other").id();
         assertThat(foreign).isNotEqualTo(personal);
-        assertThat(memory.create("other-" + tenant, "owner").id()).isNotEqualTo(personal);
+        assertThat(memory.create(UUID.randomUUID().toString(), "owner").id()).isNotEqualTo(personal);
         assertThat(memory.list(tenant, "owner")).extracting("id").containsExactly(personal);
         var service = new ManagedMemoryService(memory, (scope, request) -> { throw new AssertionError("Unexpected provider call"); });
         assertThat(service.query(tenant, session, token, new Query("ws", "writer", 1, "binding", null,
