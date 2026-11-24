@@ -42,6 +42,9 @@ import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
+// The status sidecar is scanned on every session-list read (#17819); bound
+// the embedded command the same way the model-facing notification does.
+const MAX_SIDECAR_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
 
 function stripOutputControlChars(text: string): string {
@@ -368,17 +371,23 @@ export class BackgroundShellRegistry {
     // is the turn that ends up waiting for it.
     entry.sourceTurnId =
       getInvocationContext()?.promptId ?? promptIdContext.getStore();
-    // Capture the process identity token while the fresh child is
-    // guaranteed alive. This is the only moment that can observe it:
+    // Capture the process identity tokens while the fresh child is
+    // guaranteed alive. This is the only moment that can observe them:
     // later status writes happen at exit, when the pid is already gone.
     // Both spawn paths set `pid` before `register()`, so a running
-    // sidecar left behind by a hard kill always carries the token on
-    // Linux; the daemon's liveness probe relies on it (#17819).
+    // sidecar left behind by a hard kill always carries the tokens on
+    // Linux; the daemon's liveness probe relies on them (#17819).
     if (entry.pid !== undefined) {
       const procStart = readProcStartToken(entry.pid);
-      if (procStart !== null) entry.procStart = procStart;
-      const pidNs = readPidNamespaceId();
-      if (pidNs !== null) entry.pidNs = pidNs;
+      if (procStart !== null) {
+        entry.procStart = procStart;
+        // The namespace claim is only meaningful when paired with the start
+        // token: a reader cannot settle a tokenless record against any host,
+        // so the token gates the namespace claim, never the reverse
+        // (#17819).
+        const pidNs = readPidNamespaceId();
+        if (pidNs !== null) entry.pidNs = pidNs;
+      }
     }
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
@@ -507,7 +516,13 @@ export class BackgroundShellRegistry {
     const payload: Record<string, unknown> = {
       id: entry.id,
       status: entry.status,
-      command: entry.command,
+      // Identity fields (pid/procStart/pidNs) are always written verbatim;
+      // only the human-readable command is bounded, since every catalog
+      // read may scan these files (#17819).
+      command:
+        entry.command.length > MAX_SIDECAR_COMMAND_LENGTH
+          ? `${entry.command.slice(0, MAX_SIDECAR_COMMAND_LENGTH - 3)}...`
+          : entry.command,
       cwd: entry.cwd,
       startTime: new Date(entry.startTime).toISOString(),
       updatedAt: new Date().toISOString(),

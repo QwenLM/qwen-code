@@ -146,7 +146,7 @@ and deleting it looks like harmless cleanup while a shell is still running
 
 The daemon resolves the signal best-effort while building the catalog:
 
-- The session list probes each persisted-only row's
+- The session list probes each persisted row's
   `<projectTempDir>/background-shells/<sessionId>/shell-*.status` sidecars
   (`detached-work-liveness.ts` in the serve layer). A `running` or `cancelled`
   claim, or a `failed` claim with a process token, reads as running when the
@@ -156,13 +156,15 @@ The daemon resolves the signal best-effort while building the catalog:
   unsupported probes read as `unknown`.
 - The verdict lands on the summary as `detachedBackgroundWork`: `'running'`,
   `'unknown'`, or absent (no sidecars, or every running claim disproven).
-  Live entries never carry it: the in-memory `hasRunningBackgroundTasks` is
-  authoritative for a session this daemon owns, and the live merge drops the
-  persisted signal.
+  For a reopened session, the list uses the live entry's creation time to
+  exclude sidecars from its current lifetime. A live update can change
+  `hasRunningBackgroundTasks` while an older shell is still running, so the
+  client preserves the detached observation until the catalog refreshes it.
 - Probe results are cached for 45 s (absent verdicts included). Each request
   checks up to 100 uncached sessions, 128 directory entries per session, and
-  16 KiB per file. An open catalog with persisted rows reconciles every 60 s
-  even when the live catalog version has not changed.
+  16 KiB per file. An open catalog with non-live rows or live rows carrying
+  a detached observation reconciles every 60 s even when the live catalog
+  version has not changed.
 
 The client treats the two grades differently, mirroring the existing
 `unknown` policy:
@@ -241,10 +243,11 @@ The client treats the two grades differently, mirroring the existing
 - The busy marker shares the meta slot's trailing position with the branch /
   worktree icon, so a background-only row now shows the spinner instead of that
   icon — the same tradeoff a row with a running turn already makes.
-- The detached extension adds two keys in English and Simplified Chinese:
-  `background.detachedUnknown` (the hollow dot's tooltip) and
-  `delete.mayStillBeRunning` (the delete dialog's advisory). Other locales
-  fall back to the English strings, as with any untranslated key.
+- The detached extension adds three keys — `background.detachedUnknown` (the
+  hollow dot's tooltip), `delete.mayStillBeRunning` (the delete dialog's
+  advisory), and `delete.detachedRunningDisabled` (the blocked-delete refusal)
+  — translated in all four dictionaries (English, Simplified Chinese,
+  Traditional Chinese, and Russian).
 
 ## Validation
 
@@ -327,11 +330,11 @@ row. No page errors.
    hollow unknown marker, keeps delete offered everywhere, and names the
    unknown status in the delete dialog's hint while an unknown row is selected.
    The hint expires once the grade clears or the last unknown row is deselected.
-9. A live session never carries `detachedBackgroundWork`, even when stale
-   sidecars exist on disk.
+9. Opening a session preserves the running marker and delete guard for its
+   older shell. The guard survives a new background task starting and ending.
 10. After a detached shell exits, a Web Shell left open clears the running
     marker on its next slow catalog reconciliation after the probe cache
-    expires.
+    expires. An otherwise idle session can then be deleted.
 
 ## Open questions / follow-ups
 

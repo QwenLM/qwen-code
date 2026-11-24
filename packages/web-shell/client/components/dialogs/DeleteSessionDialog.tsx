@@ -322,10 +322,10 @@ export function DeleteSessionDialog({
   // paint, so without this the hint could assert a rule the row no longer meets.
   const refusalText =
     refusedRow && blocksDelete(refusedRow)
-      ? refusedRow.sessionId === currentSessionId
-        ? t('delete.cannotCurrent')
-        : refusedRow.detachedBackgroundWork === 'running'
-          ? t('delete.detachedRunningDisabled')
+      ? refusedRow.detachedBackgroundWork === 'running'
+        ? t('delete.detachedRunningDisabled')
+        : refusedRow.sessionId === currentSessionId
+          ? t('delete.cannotCurrent')
           : t('sidebar.deleteRunningDisabled')
       : null;
   const advisoryText = filtered.some(

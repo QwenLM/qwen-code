@@ -46,7 +46,6 @@ import { laterActivityTimestamp } from './activity-timestamp.js';
 import {
   projectTempDirFor,
   resolveDetachedBackgroundWork,
-  type DetachedBackgroundWork,
 } from './detached-work-liveness.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
@@ -647,7 +646,6 @@ async function enrichGoalSidecars(
 }
 
 /**
-/**
  * Teardown flush codes: `flushPromptTerminals` publishes an `error` terminal
  * with one of these codes for every still-pending prompt when the daemon
  * shuts down, the agent channel exits, or the session is closed/killed. The
@@ -715,44 +713,33 @@ async function enrichPromptContinuation(
   }
 }
 
-/**
- * Attaches settled detached-work verdicts to their rows; rows with no signal
- * stay untouched. Shared by the whole-list and catalog-page paths.
- */
-function applyDetachedVerdicts<T extends { sessionId: string }>(
-  rows: Map<string, T>,
-  verdicts: ReadonlyMap<string, DetachedBackgroundWork>,
-): void {
-  for (const [sessionId, detachedBackgroundWork] of verdicts) {
-    const row = rows.get(sessionId);
-    if (row) {
-      rows.set(sessionId, { ...row, detachedBackgroundWork });
-    }
-  }
-}
-
-/**
- * Attaches the detached background-shell signal (#17819) to persisted-only
- * summaries — sessions with no live entry, whose owning runtime cannot be
- * asked about its background work anymore. Best-effort: the resolver
- * degrades every probe failure to "no signal".
- */
 async function enrichDetachedBackgroundWork(
   bySessionId: Map<string, BridgeSessionSummary>,
-  liveSessionIds: ReadonlySet<string>,
+  liveRows: readonly BridgeSessionSummary[],
   workspaceCwd: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const candidates = [...bySessionId.keys()].filter(
-    (sessionId) => !liveSessionIds.has(sessionId),
-  );
-  if (candidates.length === 0) return;
+  if (bySessionId.size === 0) return;
+  // The raw live summary timestamps the current registration. A merged row
+  // carries the original transcript timestamp, which would hide older shells.
+  const liveSince = new Map<string, number>();
+  for (const row of liveRows) {
+    if (!bySessionId.has(row.sessionId)) continue;
+    const createdAt = Date.parse(row.createdAt);
+    if (Number.isFinite(createdAt)) liveSince.set(row.sessionId, createdAt);
+  }
   const verdicts = await resolveDetachedBackgroundWork({
-    sessionIds: candidates,
+    sessionIds: [...bySessionId.keys()],
     projectTempDir: projectTempDirFor(workspaceCwd),
+    liveSince,
     signal,
   });
-  applyDetachedVerdicts(bySessionId, verdicts);
+  for (const [sessionId, detachedBackgroundWork] of verdicts) {
+    const row = bySessionId.get(sessionId);
+    if (row) {
+      bySessionId.set(sessionId, { ...row, detachedBackgroundWork });
+    }
+  }
 }
 
 function toSummary(item: {
@@ -828,11 +815,6 @@ function mergeLiveSessionSummary(
   ) {
     delete merged.needsContinuation;
   }
-  // A live entry means this daemon owns the session, so the in-memory
-  // `hasRunningBackgroundTasks` is authoritative for its background work;
-  // the persisted sidecar's detached-shell signal (if any was attached
-  // before the merge) would double-report and must not survive.
-  delete merged.detachedBackgroundWork;
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history. The sidecar is
   // the append-only binding-time record (last = latest — the order the badge
@@ -1041,7 +1023,6 @@ async function enrichCatalogPage(
   signal?: AbortSignal,
 ): Promise<void> {
   const selectedIds = new Set(page.map((session) => session.sessionId));
-  const liveIds = new Set(liveRows.map((live) => live.sessionId));
   const detailsById = new Map<string, BridgeSessionSummary>();
   for (const { sessionId } of page) {
     const stored = persistedById.get(sessionId);
@@ -1054,21 +1035,12 @@ async function enrichCatalogPage(
       );
     }
   }
-  // Detached-shell signal for persisted rows this page shows without a live
-  // entry (#17819). TTL-cached and probe-capped in the resolver, so repeated
-  // page fetches stay cheap; live rows are excluded — for them the in-memory
-  // signal is authoritative and the replayed merge below drops the field.
-  const detachedVerdicts = await resolveDetachedBackgroundWork({
-    sessionIds: page
-      .filter(
-        (session) =>
-          !liveIds.has(session.sessionId) && detailsById.has(session.sessionId),
-      )
-      .map((session) => session.sessionId),
-    projectTempDir: projectTempDirFor(workspaceCwd),
+  await enrichDetachedBackgroundWork(
+    detailsById,
+    liveRows,
+    workspaceCwd,
     signal,
-  });
-  applyDetachedVerdicts(detailsById, detachedVerdicts);
+  );
   // Replay live merges on the enriched rows. The selected summaries keep
   // their organization, sort keys, and cursor identity.
   for (const live of liveRows) {
@@ -2032,10 +2004,6 @@ async function listWorkspaceSessionsForResponseInRuntime(
     archiveState,
     readOptions.signal,
   );
-  // Live ids are known before the probe: live rows never need the detached
-  // signal (their in-memory state is authoritative), so skip probing them
-  // entirely. The merge below still drops the field as a race backstop for
-  // rows that turn live between this snapshot and the merge (#17819).
   const mergingLive =
     archiveState !== 'archived' && readOptions.mergeLive !== false;
   const preProbeLive = mergingLive
@@ -2045,7 +2013,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     : [];
   await enrichDetachedBackgroundWork(
     bySessionId,
-    new Set(preProbeLive.map((session) => session.sessionId)),
+    preProbeLive,
     workspaceCwd,
     readOptions.signal,
   );
@@ -2058,9 +2026,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return { sessions, nextCursor };
   }
 
-  // Re-read after the probe await: a session that turned live while the
-  // disk probe was in flight must still merge into its fresh authoritative
-  // state instead of keeping a probe-settled field (#17819).
+  // Re-read after the probe await so the response uses the latest live state.
   const liveSessions = bridge
     .listWorkspaceSessions(workspaceCwd)
     .filter((session) => !isHiddenCatalogSource(session.sourceType));

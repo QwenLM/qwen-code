@@ -386,16 +386,15 @@ export function useWorkspaceSessionLiveState(
       const bypassReconcileRetry =
         bypassRetry || state.interactiveRefreshRequested;
       state.interactiveRefreshRequested = false;
-      // Detached shell observations come from the catalog and can change
-      // without a catalog version bump. Check only subscribed history at a
-      // slower cadence, including rows not probed by the last catalog read.
-      const persistedSessionRefreshDue =
+      // Detached shell observations can change without a catalog version bump,
+      // including after a session with an outstanding observation goes live.
+      const detachedWorkRefreshDue =
         Date.now() - state.lastReconcileAt >= PERSISTED_SESSION_REFRESH_MS &&
-        catalogStore.hasSubscribedPersistedSessions(state.workspaceCwd);
+        catalogStore.hasSubscribedDetachedWorkCandidates(state.workspaceCwd);
       if (
         !state.reconcileRequested &&
         !state.invalidationRequested &&
-        !persistedSessionRefreshDue &&
+        !detachedWorkRefreshDue &&
         versionsEqual(state.acceptedVersion, live.catalogVersion)
       ) {
         finish();

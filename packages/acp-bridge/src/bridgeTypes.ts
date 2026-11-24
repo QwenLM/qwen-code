@@ -1298,12 +1298,9 @@ export interface BridgeSessionSummary {
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   /**
-   * Detached-shell observation for a persisted-only summary, derived from the
-   * session's background-shell status sidecars on disk (see
-   * `detached-work-liveness.ts` in the serve layer). Never set on live
-   * entries — the in-memory `hasRunningBackgroundTasks` is authoritative for
-   * a session this daemon owns, and the merge drops the persisted-sidecar
-   * signal when a live entry exists.
+   * Detached-shell observation from the session's on-disk status sidecars.
+   * A restored session can carry this alongside `hasRunningBackgroundTasks`
+   * because its live runtime can report work it started after restoration.
    */
   detachedBackgroundWork?: 'running' | 'unknown';
   /** True while a non-question permission request awaits a response. */

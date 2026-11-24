@@ -9,7 +9,7 @@
 
 每个 workspace 的所有会话由同一个运行时（ACP bridge 子进程）承载；后台 shell 是它 spawn 的孙进程。运行时一旦死亡——daemon 重启、bridge 崩溃、被硬杀——相关会话就变成 persisted-only：磁盘上有 transcript，但注册表里没有 live 条目，没有任何人可以回答"它的后台工作还在跑吗"。
 
-后台 shell 会在 `<projectTempDir>/background-shells/<sessionId>/` 下写 `shell-*.status` 侧车文件。注册表只在优雅退出时把 sidecar 结算成终态（`settleAsCancelled`），硬杀会留下过期的 `running` 声明。在本次修改之前，`.status` 侧车文件是"只写不读"的：没有任何代码会把它读回来。
+后台 shell 会在 `<projectTempDir>/background-shells/<sessionId>/` 下写 `shell-*.status` 侧车文件。注册表只在优雅退出时把 sidecar 结算成终态（`settleAsCancelled`），硬杀会留下过期的 `running` 声明。在本次修改之前，没有任何 daemon 侧代码会读它——唯一的读者是模型本身，按 `shell.ts` 中每次启动时给出的状态文件指引（`statusFileGuidance`）去读取。
 
 ## 问题
 
@@ -17,7 +17,7 @@ daemon 会话列表只从 live 注册表条目读取 `hasRunningBackgroundTasks`
 
 ## 目标
 
-- 对 persisted-only 会话，从磁盘证据 + 操作系统级进程验证恢复 detached 后台 shell 的存活信号。
+- 通过磁盘和操作系统进程验证恢复 detached shell 的存活信号，覆盖重新打开会话后的场景。
 - 信号端到端贯通：daemon 会话列表 → SDK/bridge 类型 → Web Shell store → 侧栏指示、tooltip、删除弹窗。
 - 对确认仍在运行的 detached 工作拦截删除；对无法确认的状态给出提示而非拦截。
 - 保证列表响应路径安全：探测尽力而为、单次请求工作量有界、结果有缓存。
@@ -26,7 +26,7 @@ daemon 会话列表只从 live 注册表条目读取 `hasRunningBackgroundTasks`
 
 - `deleteDaemonSessions` 内的服务端删除时复查（后续项，见[删除时复查](#删除时复查后续项)）。
 - 恢复或重新接管 detached shell；信号只做观察。
-- Windows 进程身份令牌（本迭代仅 Linux procfs，见[平台限制](#平台限制)）。
+- Windows 与 macOS 进程身份令牌（本迭代仅 Linux procfs，见[平台限制](#平台限制)）。
 
 ## 设计
 
@@ -36,17 +36,19 @@ sidecar `.status` 文件是声明，不是事实。它只被当作候选指针�
 
 单会话裁决矩阵（任一 sidecar 都可以决定整个会话）：
 
-| 磁盘声明                                     | 进程探测                                                    | 对结论的贡献                 |
-| -------------------------------------------- | ----------------------------------------------------------- | ---------------------------- |
-| `running` / `cancelled` / `failed`（带令牌） | 身份验证存活                                                | 会话为 `running`（短路返回） |
-| 同上                                         | 命名空间声明无法确认（未记录声明，或 Linux 读 procfs 失败） | 会话为 `unknown`             |
-| 同上                                         | 命名空间声明已确认后的 pid 无归属（`ESRCH`）                | 声明被证伪——不贡献           |
-| 同上                                         | 进程活着但身份无法验证                                      | 会话为 `unknown`             |
-| `completed` / 无令牌的 `failed`              | 跳过                                                        | 终态，无需进程检查           |
-| 文件不可读 / 格式非法 / 超 16 KiB            | —                                                           | 会话为 `unknown`             |
-| 无 sidecar 目录                              | —                                                           | 无信号（字段缺省）           |
+| 磁盘声明                                   | 进程探测                                                                                      | 对结论的贡献                       |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `running` / `cancelled` / `failed` 带令牌  | 令牌与存活且非僵尸的进程吻合                                                                  | 会话为 `running`（短路返回）       |
+| 同上                                       | 声明被证伪——落定的命名空间声明下 `ESRCH`，或启动时间片不匹配 / 僵尸进程                       | 声明被证伪——不贡献                 |
+| 同上                                       | 身份无法确认——bootId 不匹配、外部或无配对的命名空间声明、procfs 读取失败、非 `ESRCH` 探测错误 | 会话为 `unknown`                   |
+| `running` / `cancelled` 无令牌（非 Linux） | 无 pid namespace 概念，本机 pid 表可信                                                        | `ESRCH` 证伪声明；其余为 `unknown` |
+| `running` / `cancelled` 无令牌（Linux）    | 没有任何可确认的命名空间声明能把记录锚定到本机                                                | 会话为 `unknown`                   |
+| 无令牌的 `failed`                          | 跳过                                                                                          | 终态，无需进程检查                 |
+| `completed`                                | 跳过                                                                                          | 终态，无需进程检查                 |
+| 文件不可读 / 格式非法 / 超 16 KiB          | —                                                                                             | 会话为 `unknown`                   |
+| 无 sidecar 目录                            | —                                                                                             | 无信号（字段缺省）                 |
 
-`cancelled` 声明仍然会被探测：`settleAsCancelled` 先写文件再发取消请求，标签不能证明进程已退。
+`cancelled` 声明与带令牌的 `failed` 声明仍会被探测：`settleAsCancelled` 先写文件再发取消请求，传输错误也在退出前落盘，终态标签不能证明进程已退。
 
 ### 身份验证
 
@@ -60,18 +62,18 @@ sidecar `.status` 文件是声明，不是事实。它只被当作候选指针�
 
 ### 平台限制
 
-身份令牌只在 Linux 落地（procfs）。其他平台写不出令牌；没有令牌时，"活着的 pid"无法与"复用的 pid"区分，探测返回 `alive-unverified` → 会话 `unknown`。`ESRCH` 只在本机 pid 表可信时才能判定死亡：无 pid namespace 概念的平台，或记录的 namespace 已确认与本域一致。在 Linux 上读取 `/proc/self/ns/pid` 失败不代表"没有 namespace"——共享运行目录的兄弟容器让本机 pid 表失去意义——这类记录保持 `unknown`。补 Windows 身份令牌（进程创建时间）属于后续项。
+身份令牌只在 Linux 落地（procfs）。其他平台写不出令牌；没有令牌时，"活着的 pid"无法与"复用的 pid"区分，探测返回 `alive-unverified` → 会话 `unknown`。`ESRCH` 只在本机 pid 表可信时才能判定死亡：无 pid namespace 概念的平台，或记录的 namespace 已确认与本域一致。在 Linux 上读取 `/proc/self/ns/pid` 失败不代表"没有 namespace"——共享运行目录的兄弟容器让本机 pid 表失去意义——这类记录保持 `unknown`。后台 shell 在 POSIX 上以 detached 方式 spawn，macOS 上硬杀 daemon 同样会留下存活的 shell；那里写不出令牌，存活者读作 `unknown`，死亡者由本机 `ESRCH` 证伪（macOS 没有 pid namespace 概念）。补 Windows 与 macOS 身份令牌（进程创建时间）属于后续项。
 
 ### 接入点
 
-- `session-list.ts`：两个入口（整列表与分页目录）只对 persisted-only 会话调用探测；`mergeLiveSessionSummary` 在存在 live 条目时丢弃该字段——live 状态是唯一权威，两条通道绝不允许双报。
+- `session-list.ts` 的两条列表路径都探测当前页的持久化记录。对于 live 行，探测器用 live 条目的创建时间排除本次会话运行期间启动的 shell。上一次运行留下的 shell 可以和当前运行时管理的工作同时存在。
 - 传输格式：会话摘要上的 `detachedBackgroundWork?: 'running' | 'unknown'`。缺省 = 未观察到 detached 工作；刻意不引入 `not_running`（缺省已经承载了这个含义）。
-- 客户端：catalog store 只在非 live 行保留该字段；`hasLiveWork`/`sessionBlocksDelete` 将 `'running'` 视为拦截；`'unknown'` 渲染为空心、无脉冲的指示点，并在删除弹窗中显示提示行——是提示，不是拦截。把所有无法验证的行都拦掉，会让没有身份令牌平台上那些安静的历史会话永远删不掉。
-- 对被订阅的 persisted 行做 60 秒慢刷新重新探测：裁决会自行变化但不触发目录版本号变化，版本号门控的 reconcile 因此永远不会主动刷新它们，需要这个兜底。
+- 客户端应用 live 状态时会保留目录里的 detached shell 观测。已确认运行的 detached 工作和 live 后台工作都能拦截删除。两者同时存在时，界面只显示一个运行指示。detached 状态未知时仍显示提示。
+- 60 秒慢速目录刷新覆盖已订阅的非 live 行和带 detached shell 观测的 live 行。孤儿 shell 退出时，目录版本可能保持原值。
 
 ### 预算与缓存
 
-- 结果按（项目临时目录、会话）缓存 45 秒，"无信号"结论同样缓存，同时约束磁盘扫描与 pid 探测。
+- 结果按项目临时目录和会话缓存 45 秒，包含「无信号」结果。复用缓存要求 live 条目的时间分界相同。
 - 单次调用最多探测 100 个未缓存会话，其余留给后续刷新。探测发生在分页之后，绝不扫全量目录。
 - 任何探测失败都降级为 `unknown` 或"无信号"——绝不抛错——因为它跑在列表响应路径里。
 
@@ -88,15 +90,15 @@ sidecar `.status` 文件是声明，不是事实。它只被当作候选指针�
 ## 测试
 
 - `detached-work-liveness.test.ts`：裁决矩阵、缓存、预算滚动、PID 复用、ESRCH 降级、非法 sidecar。
-- `session-list.test.ts`：live 合并丢字段、分页预算、persisted-only 筛选。
+- `session-list.test.ts` 覆盖重新打开后还能查到旧 shell，包括当前运行时还有其他任务的情况。
 - `backgroundShellRegistry.test.ts`：身份令牌随 sidecar 落盘。
-- 客户端测试：策略谓词、快照合成、指示点渲染、弹窗提示。
-- 手工验证：Linux 上 daemon 重启且 detached shell 存活时，该行有 running 指示且删除被拦；shell 退出后指示消失、删除放行。Windows 上硬杀 daemon 会带走整棵进程树，残留的 `running` 声明经 `ESRCH` 判定为"无信号"。
+- 客户端测试覆盖新任务开始和结束时保留旧 shell 的观测，以及旧 shell 退出后在目录版本原值下慢刷新解除删除拦截。
+- 手工验证：Linux 上 daemon 重启且 detached shell 存活时，该行有 running 指示且删除被拦；shell 退出后指示消失、删除放行。Windows 上硬杀 daemon 会带走整棵进程树，残留的 `running` 声明经 `ESRCH` 判定为"无信号"。macOS 上存活的 detached shell 读作 `unknown`，死亡声明的结算方式相同。
 
 ## 验收标准
 
 1. persisted-only 会话存在已验证运行的 detached shell 时，显示 running 指示且无法从弹窗删除。
 2. persisted-only 会话的 detached shell 在无 namespace 概念的平台（或 namespace 已确认一致）全部死亡时，无指示且可删除；命名空间声明无法确认的场景降级为第 3 条的 `unknown` 处理。
 3. persisted-only 会话存在无法验证的声明时，显示 unknown 指示与弹窗提示；删除仍然可用。
-4. live 会话永远不带该字段，重新接管后字段消失。
+4. 重新打开会话并完成一个新后台任务后，只要旧 shell 还在运行，删除就继续被拦截。新的探测确认旧 shell 退出且 live 会话空闲后，可以删除。
 5. 列表响应路径保持有界：命中缓存或预算滚动，绝不无界扫描。

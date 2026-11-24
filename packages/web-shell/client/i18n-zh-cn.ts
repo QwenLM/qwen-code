@@ -1857,7 +1857,7 @@ export const ZH: Messages = {
   'delete.cannotCurrent': '当前会话正在运行，无法删除。',
   'delete.mayStillBeRunning': '该会话可能仍有后台任务在运行，状态未知。',
   'delete.detachedRunningDisabled':
-    '该会话仍有分离的后台任务在运行，请等待其退出或先手动取消后再删除。',
+    '该会话仍有分离的后台任务在运行，请等它退出后再删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',
   'delete.deletedCount': (v) => `已删除 ${v?.count ?? 0} 个会话。`,

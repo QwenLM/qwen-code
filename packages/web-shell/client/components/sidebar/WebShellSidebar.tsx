@@ -5966,21 +5966,21 @@ export function WebShellSidebar({
       const running = hasLiveWork(session);
       // Detached grades (#17819): a persisted session whose shell sidecars
       // report a verified-running shell reads like background work; an
-      // unverifiable one gets its own muted marker and blocks nothing.
-      const detachedBackgroundRunning =
-        !session.hasActivePrompt &&
+      // unverifiable one gets its own muted marker and blocks nothing. The
+      // unread completion outranks the muted marker, mirroring the dot
+      // precedence; the verified-running grade survives it.
+      const backgroundTasks =
+        session.hasRunningBackgroundTasks === true ||
         session.detachedBackgroundWork === 'running';
       const detachedBackgroundUnknown =
         !session.hasActivePrompt &&
         session.detachedBackgroundWork === 'unknown' &&
-        !session.hasRunningBackgroundTasks;
-      const backgroundRunning =
-        (!session.hasActivePrompt && session.hasRunningBackgroundTasks) ||
-        detachedBackgroundRunning;
+        !session.hasRunningBackgroundTasks &&
+        !completedUnread;
+      const backgroundRunning = !session.hasActivePrompt && backgroundTasks;
       // The status dot is prompt-gated, so a turn in flight hides the background
       // dot. The busy marker must not be: it is the only place left that can
       // still say this row is running background work.
-      const backgroundTasks = session.hasRunningBackgroundTasks === true;
       const busyLabel = backgroundRunning
         ? t('background.running')
         : sessionWorkActive
@@ -6050,15 +6050,13 @@ export function WebShellSidebar({
       const deleteDisabled = busy || currentStandalone || deleteBlocked;
       const deleteDisabledTitle = currentStandalone
         ? t('sidebar.currentStandaloneDeleteDisabled')
-        : isCurrent && running
-          ? t('sidebar.currentDeleteDisabled')
-          : deleteBlocked
-            ? // Detached work outlives the delete path: removal would not
-              // stop it, so the tooltip must not claim it would (#17819).
-              session.detachedBackgroundWork === 'running'
-              ? t('delete.detachedRunningDisabled')
-              : t('sidebar.deleteRunningDisabled')
-            : undefined;
+        : session.detachedBackgroundWork === 'running'
+          ? t('delete.detachedRunningDisabled')
+          : isCurrent && running
+            ? t('sidebar.currentDeleteDisabled')
+            : deleteBlocked
+              ? t('sidebar.deleteRunningDisabled')
+              : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       // Archived sessions cannot load into a split pane (they leave an empty
       // pane), so the sidebar withholds the split action for them.

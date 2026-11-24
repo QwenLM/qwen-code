@@ -283,7 +283,7 @@ export class SessionCatalogStore {
     return this.getOrCreateEntry(query).snapshot;
   }
 
-  hasSubscribedPersistedSessions(workspaceCwd: string): boolean {
+  hasSubscribedDetachedWorkCandidates(workspaceCwd: string): boolean {
     const liveSessions = this.liveSessionsByWorkspace.get(workspaceCwd);
     for (const entry of this.entries.values()) {
       if (
@@ -292,7 +292,8 @@ export class SessionCatalogStore {
         entry.snapshot.page?.sessions.some(
           (session) =>
             (!session.workspaceCwd || session.workspaceCwd === workspaceCwd) &&
-            !liveSessions?.has(session.sessionId),
+            (session.detachedBackgroundWork !== undefined ||
+              !liveSessions?.has(session.sessionId)),
         )
       ) {
         return true;
@@ -906,9 +907,6 @@ export class SessionCatalogStore {
         const clientCount = live?.clientCount ?? 0;
         const hasActivePrompt = live?.hasActivePrompt ?? false;
         const activeWorkState = live?.activeWorkState;
-        const detachedBackgroundWork = live
-          ? undefined
-          : session.detachedBackgroundWork;
         const isWaitingForPermission = live?.isWaitingForPermission ?? false;
         const isWaitingForUserQuestion =
           live?.isWaitingForUserQuestion ?? false;
@@ -942,7 +940,6 @@ export class SessionCatalogStore {
           session.activeWorkState === activeWorkState &&
           session.hasRunningBackgroundTasks ===
             live?.hasRunningBackgroundTasks &&
-          session.detachedBackgroundWork === detachedBackgroundWork &&
           JSON.stringify(session.backgroundTurn) ===
             JSON.stringify(live?.backgroundTurn) &&
           session.isWaitingForPermission === isWaitingForPermission &&
@@ -962,7 +959,6 @@ export class SessionCatalogStore {
           activeWorkState,
           backgroundTurn: live?.backgroundTurn,
           hasRunningBackgroundTasks: live?.hasRunningBackgroundTasks,
-          detachedBackgroundWork,
           isWaitingForPermission,
           isWaitingForUserQuestion,
           hasTurnError,

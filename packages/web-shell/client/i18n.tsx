@@ -1867,7 +1867,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'delete.mayStillBeRunning':
     'This session may still have background tasks running — status unknown.',
   'delete.detachedRunningDisabled':
-    'Detached background work is still running for this session — wait for it to exit or cancel it before deleting.',
+    'Detached background work is still running for this session. Wait for it to exit before deleting.',
   'delete.action': 'Delete',
   'delete.deleted': 'Session deleted.',
   'delete.deletedCount': (v) => `${v?.count ?? 0} session(s) deleted.`,

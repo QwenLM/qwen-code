@@ -1965,23 +1965,23 @@ describe('detached background-shell enrichment (#17819)', () => {
     expect(row?.detachedBackgroundWork).toBe('running');
   });
 
-  it('keeps a live session free of the detached signal', async () => {
-    // The session is both persisted and live in this daemon: the in-memory
-    // signal is authoritative and the sidecar-derived verdict must be
-    // dropped by the merge, not stacked on top of it.
+  it('does not report a shell started by the live session as detached', async () => {
     const sessionId = sessionIdFor(1);
     await persistSession(sessionId);
-    await writeShellSidecar(sessionId, runningSidecar());
+    await writeShellSidecar(sessionId, {
+      ...runningSidecar(),
+      startTime: '2026-01-02T00:00:01.000Z',
+    });
     detachedHarness.inspector = () => 'alive-verified';
     const bridge = {
       listWorkspaceSessions: vi.fn(() => [
         {
           sessionId,
           workspaceCwd,
-          createdAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+          createdAt: '2026-01-02T00:00:00.000Z',
           clientCount: 1,
           hasActivePrompt: false,
-          hasRunningBackgroundTasks: false,
+          hasRunningBackgroundTasks: true,
         } as BridgeSessionSummary,
       ]),
     } as unknown as AcpSessionBridge;
@@ -1995,8 +1995,60 @@ describe('detached background-shell enrichment (#17819)', () => {
 
     const row = result.sessions.find((s) => s.sessionId === sessionId);
     expect(row?.detachedBackgroundWork).toBeUndefined();
-    expect(row?.hasRunningBackgroundTasks).toBe(false);
+    expect(row?.hasRunningBackgroundTasks).toBe(true);
   });
+
+  it.each([undefined, 'organized'] as const)(
+    'keeps an older shell observable across new live tasks (view %s)',
+    async (view) => {
+      const sessionId = sessionIdFor(1);
+      await persistSession(sessionId);
+      await writeShellSidecar(sessionId, runningSidecar());
+      detachedHarness.inspector = () => 'alive-verified';
+      let hasRunningBackgroundTasks = true;
+      const bridge = {
+        listWorkspaceSessions: vi.fn(() => [
+          {
+            sessionId,
+            workspaceCwd,
+            createdAt: '2026-01-02T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            hasRunningBackgroundTasks,
+          } as BridgeSessionSummary,
+        ]),
+      } as unknown as AcpSessionBridge;
+
+      const list = () =>
+        listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { view },
+          { runtimeBaseDir },
+        );
+      expect(
+        (await list()).sessions.find((s) => s.sessionId === sessionId),
+      ).toMatchObject({
+        detachedBackgroundWork: 'running',
+        hasRunningBackgroundTasks: true,
+      });
+
+      hasRunningBackgroundTasks = false;
+      expect(
+        (await list()).sessions.find((s) => s.sessionId === sessionId),
+      ).toMatchObject({
+        detachedBackgroundWork: 'running',
+        hasRunningBackgroundTasks: false,
+      });
+
+      resetDetachedWorkProbeCache();
+      detachedHarness.inspector = () => 'dead';
+      expect(
+        (await list()).sessions.find((s) => s.sessionId === sessionId)
+          ?.detachedBackgroundWork,
+      ).toBeUndefined();
+    },
+  );
 
   it('stays silent when every running pid is provably dead', async () => {
     const sessionId = sessionIdFor(1);

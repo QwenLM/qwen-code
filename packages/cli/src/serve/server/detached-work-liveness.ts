@@ -70,6 +70,13 @@ const defaultInspector: ProcessInspector = (pid, procStart, pidNs) => {
     if (!pidNamespacesUnsupported && pidNs === undefined) {
       return 'alive-unverified';
     }
+    // A namespace claim without its paired start token cannot anchor the
+    // shell to any host: the record may have been written by a machine
+    // sharing this runtime directory, so a local ESRCH proves nothing
+    // (#17819).
+    if (pidNs !== undefined) {
+      return 'alive-unverified';
+    }
     try {
       process.kill(pid, 0);
     } catch (error) {
@@ -113,6 +120,7 @@ const defaultInspector: ProcessInspector = (pid, procStart, pidNs) => {
 interface DetachedWorkProbeOptions {
   sessionIds: readonly string[];
   projectTempDir: string;
+  liveSince?: ReadonlyMap<string, number>;
   signal?: AbortSignal;
   inspector?: ProcessInspector;
   now?: number;
@@ -121,6 +129,7 @@ interface DetachedWorkProbeOptions {
 }
 
 interface CacheEntry {
+  liveSince: number | undefined;
   verdict: DetachedBackgroundWork | undefined;
   expiresAt: number;
 }
@@ -175,6 +184,7 @@ async function readStatusFile(
 async function probeSession(
   sessionId: string,
   projectTempDir: string,
+  liveSince: number | undefined,
   inspector: ProcessInspector,
   signal?: AbortSignal,
 ): Promise<DetachedBackgroundWork | undefined> {
@@ -193,13 +203,26 @@ async function probeSession(
   try {
     for await (const entry of entries) {
       signal?.throwIfAborted();
-      if (++count > MAX_DIRECTORY_ENTRIES) return 'unknown';
+      // The cap bounds matched status files, not directory noise: unrelated
+      // entries (output files, temp droppings) must not push a real verdict
+      // to `unknown` (#17819).
       if (!SHELL_STATUS_PATTERN.test(entry.name)) continue;
+      if (++count > MAX_DIRECTORY_ENTRIES) return 'unknown';
       const sidecar = entry.isFile()
         ? await readStatusFile(path.join(directory, entry.name)).catch(
             () => undefined,
           )
         : undefined;
+      const startTime = sidecar?.['startTime'];
+      // A shell started in the current live session is already tracked by
+      // its registry. A missing or unreadable timestamp proves no ownership.
+      if (
+        liveSince !== undefined &&
+        typeof startTime === 'string' &&
+        Date.parse(startTime) >= liveSince
+      ) {
+        continue;
+      }
       const status = sidecar?.['status'];
       const procStart = sidecar?.['procStart'];
       if (
@@ -259,28 +282,32 @@ export async function resolveDetachedBackgroundWork(
   }
 
   const results = new Map<string, DetachedBackgroundWork>();
-  const pending: string[] = [];
+  const pending: Array<{ sessionId: string; liveSince: number | undefined }> =
+    [];
   for (const sessionId of options.sessionIds) {
+    const liveSince = options.liveSince?.get(sessionId);
     const cached = probeCache.get(`${options.projectTempDir}\0${sessionId}`);
-    if (cached) {
+    if (cached && cached.liveSince === liveSince) {
       if (cached.verdict !== undefined) {
         results.set(sessionId, cached.verdict);
       }
     } else {
-      pending.push(sessionId);
+      pending.push({ sessionId, liveSince });
     }
   }
 
-  for (const sessionId of pending.slice(0, cap)) {
+  for (const { sessionId, liveSince } of pending.slice(0, cap)) {
     options.signal?.throwIfAborted();
     const verdict = await probeSession(
       sessionId,
       options.projectTempDir,
+      liveSince,
       inspector,
       options.signal,
     );
     options.signal?.throwIfAborted();
     probeCache.set(`${options.projectTempDir}\0${sessionId}`, {
+      liveSince,
       verdict,
       expiresAt: now + ttl,
     });

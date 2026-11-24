@@ -113,19 +113,20 @@ unread 圆点优先于 running 与 active-work 圆点（回合进行中时门控
 
 daemon 在构建目录时尽力而为地解析该信号：
 
-- 会话列表探查每个仅持久化行的
+- 会话列表探查当前页持久化行的
   `<projectTempDir>/background-shells/<sessionId>/shell-*.status` sidecar
   （serve 层的 `detached-work-liveness.ts`）。对于 `running`、`cancelled` 或带进程
   令牌的 `failed` 记录，Linux PID 命名空间和启动令牌匹配且进程仍存活，才返回运行中。确认退出或
   同一命名空间内 PID 已归属其他进程时清除该状态。缺少身份的旧文件、不可读或损坏的
   记录，以及不支持的探查均返回 `unknown`。
 - 结果以 `detachedBackgroundWork` 落在会话摘要上：`'running'`、`'unknown'`，
-  或缺省（无 sidecar，或所有 running 声明均被证伪）。live 条目永远不带它：对本
-  daemon 拥有的会话，内存态 `hasRunningBackgroundTasks` 才是权威，live 合并会
-  丢弃持久化侧的信号。
+  或缺省（无 sidecar，或所有 running 声明均被证伪）。重新打开会话后，列表用
+  live 条目的创建时间排除本次运行期间启动的 shell。旧 shell 还在运行时，
+  `hasRunningBackgroundTasks` 仍可能变化，因此客户端保留 detached 观测，
+  由目录刷新更新该状态。
 - 探查结果缓存 45 秒（含「无信号」结果）。每次请求最多检查 100 个未缓存会话，
-  每个会话最多读取 128 个目录条目，每个文件最多 16 KiB。包含历史会话的开放目录
-  每 60 秒协调刷新一次，即使 live 目录版本没有变化。
+  每个会话最多读取 128 个目录条目，每个文件最多 16 KiB。打开的目录包含非 live
+  行或带 detached 观测的 live 行时，每 60 秒协调刷新一次，即使 live 目录版本没有变化。
 
 客户端对两个等级区别对待，沿用既有 `unknown` 策略：
 
@@ -183,9 +184,10 @@ daemon 在构建目录时尽力而为地解析该信号：
   隐藏任何标记。
 - 忙标记与分支 / worktree 图标共用 meta 槽的尾位，因此 bg-only 行现在显示 spinner
   而不是该图标 —— 这与回合在跑的行本来就在做的取舍相同。
-- detached 扩展新增两个键，补齐英文与简体中文：`background.detachedUnknown`
-  （空心圆点的 tooltip）与 `delete.mayStillBeRunning`（删除弹窗的提示）。其他
-  语言与其他未翻译键一样回退到英文文案。
+- detached 扩展新增三个键：`background.detachedUnknown`（空心圆点的
+  tooltip）、`delete.mayStillBeRunning`（删除弹窗的提示）与
+  `delete.detachedRunningDisabled`（拦截删除的拒绝文案），四个词典（英文、
+  简体中文、繁体中文、俄语）均已翻译。
 
 ## 验证
 
@@ -249,9 +251,10 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
 8. 仅持久化、detached shell 无法验证的行，显示空心 unknown 标记，处处保留
    删除。删除弹窗在选中项有未知行时显示提示。等级清除或最后一条未知行取消勾选后，
    提示消失。
-9. live 会话永远不带 `detachedBackgroundWork`，即使磁盘上存在过期 sidecar。
+9. 重新打开会话后，旧 shell 的运行标记和删除保护继续生效。启动并结束新后台任务
+   也会保留这份保护。
 10. detached shell 退出后，保持 Web Shell 打开，探查缓存过期后的下一次慢速目录
-    刷新会移除运行标记。
+    刷新会移除运行标记。会话空闲时可以删除。
 
 ## 待决问题 / 后续
 

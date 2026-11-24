@@ -278,7 +278,12 @@ describe('resolveDetachedBackgroundWork', () => {
     ).toBe('unknown');
   });
 
-  it('settles dead within a matching namespace even without a start token', async () => {
+  it('stays unknown for a namespace claim without its paired start token', async () => {
+    // The registry writes pidNs only alongside procStart, so a tokenless
+    // namespace record comes from a foreign writer or an older schema; it
+    // cannot anchor the shell to this host, and the sidecar may have been
+    // written by a machine sharing this runtime directory — a local ESRCH
+    // settles nothing (#17819).
     vi.spyOn(processLiveness, 'readPidNamespaceId').mockReturnValue(123);
     writeShellSidecar('s1', 'bg_a1', {
       ...RUNNING(123),
@@ -294,7 +299,7 @@ describe('resolveDetachedBackgroundWork', () => {
           projectTempDir: tempRoot,
         })
       ).get('s1'),
-    ).toBeUndefined();
+    ).toBe('unknown');
   });
 
   it('uses the recorded OS identity even when the background registration time differs', async () => {
@@ -352,6 +357,36 @@ describe('resolveDetachedBackgroundWork', () => {
     expect((await resolve(['s1'], verified)).get('s1')).toBeUndefined();
   });
 
+  it('caps matched status files, not directory entries', async () => {
+    // Dead verdicts force a full scan past every sidecar, so the entry cap
+    // is observable: noise files must not consume the budget, and only the
+    // 129th matched status file pushes the verdict to `unknown` (#17819).
+    const noisy = path.join(tempRoot, 'background-shells', 'noisy');
+    fs.mkdirSync(noisy, { recursive: true });
+    for (let i = 0; i < 40; i += 1) {
+      fs.writeFileSync(path.join(noisy, `noise-${i}.output`), '');
+    }
+    for (let i = 0; i < 128; i += 1) {
+      writeShellSidecar(
+        'noisy',
+        `bg_${String(i).padStart(3, '0')}`,
+        RUNNING(123),
+      );
+    }
+    expect((await resolve(['noisy'], dead)).get('noisy')).toBeUndefined();
+
+    const crowded = path.join(tempRoot, 'background-shells', 'crowded');
+    fs.mkdirSync(crowded, { recursive: true });
+    for (let i = 0; i < 129; i += 1) {
+      writeShellSidecar(
+        'crowded',
+        `bg_${String(i).padStart(3, '0')}`,
+        RUNNING(123),
+      );
+    }
+    expect((await resolve(['crowded'], dead)).get('crowded')).toBe('unknown');
+  });
+
   it('serves repeat probes from the TTL cache', async () => {
     writeShellSidecar('s1', 'bg_a1', RUNNING(123));
     let calls = 0;
@@ -364,6 +399,30 @@ describe('resolveDetachedBackgroundWork', () => {
     expect(first.get('s1')).toBe('running');
     expect(second.get('s1')).toBe('running');
     expect(calls).toBe(1);
+  });
+
+  it('rechecks a cached shell when the live session changes', async () => {
+    const startedAt = Date.parse('2026-01-01T00:00:00Z');
+    writeShellSidecar('s1', 'bg_a1', {
+      ...RUNNING(123),
+      startTime: new Date(startedAt).toISOString(),
+    });
+    const opts = {
+      projectTempDir: tempRoot,
+      sessionIds: ['s1'],
+      inspector: verified,
+    };
+    const probe = (liveSince?: number) =>
+      resolveDetachedBackgroundWork({
+        ...opts,
+        ...(liveSince === undefined
+          ? {}
+          : { liveSince: new Map([['s1', liveSince]]) }),
+      });
+
+    expect((await probe()).get('s1')).toBe('running');
+    expect((await probe(startedAt - 1)).get('s1')).toBeUndefined();
+    expect((await probe(startedAt + 1)).get('s1')).toBe('running');
   });
 
   it('negative results are cached too, until the TTL expires', async () => {

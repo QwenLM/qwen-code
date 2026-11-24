@@ -17,6 +17,7 @@ import {
   getSessionCatalogStore,
   type SessionCatalogQuery,
 } from './session-catalog-store';
+import { sessionBlocksDelete } from './session-live-work';
 import {
   SESSION_LIVE_STATE_ERROR_RETRY_MS,
   SESSION_LIVE_STATE_POLL_MS,
@@ -289,27 +290,40 @@ describe('useWorkspaceSessionLiveState', () => {
     ).toBeUndefined();
   });
 
-  it('lets a newly live session supersede a retained detached work observation', async () => {
+  it('rechecks a restored live row for detached work at an unchanged catalog version', async () => {
     getLiveState.mockResolvedValue({ ...liveState(1), sessions: [] });
-    listSessions.mockResolvedValue({
+    listSessions.mockResolvedValueOnce({
       sessions: [
         { ...sessionPage().sessions[0]!, detachedBackgroundWork: 'running' },
       ],
     } satisfies DaemonSessionListPage);
     await renderProbe();
     const store = getSessionCatalogStore(client);
-    expect(
-      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
-    ).toBe('running');
+    const row = () => store.getSnapshot(query).page!.sessions[0]!;
+    expect(row().detachedBackgroundWork).toBe('running');
+    expect(sessionBlocksDelete(row(), false)).toBe(true);
 
-    getLiveState.mockResolvedValue(liveState(1));
+    const restoredLiveState = liveState(1);
+    restoredLiveState.sessions[0]!.hasRunningBackgroundTasks = false;
+    getLiveState.mockResolvedValue(restoredLiveState);
     await act(async () =>
       vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS),
     );
+    expect(row().clientCount).toBe(1);
+    expect(row().detachedBackgroundWork).toBe('running');
+    expect(sessionBlocksDelete(row(), true)).toBe(true);
+
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(59_999 - SESSION_LIVE_STATE_POLL_MS),
+    );
     expect(listSessions).toHaveBeenCalledTimes(1);
-    expect(
-      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
-    ).toBeUndefined();
+    expect(sessionBlocksDelete(row(), true)).toBe(true);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(row().clientCount).toBe(1);
+    expect(row().detachedBackgroundWork).toBeUndefined();
+    expect(sessionBlocksDelete(row(), true)).toBe(false);
   });
 
   it('does not rescan the catalog for prompt admission, and rate-limits unusable-watermark completions', async () => {

@@ -88,7 +88,15 @@ describe('SessionDetailsTooltip', () => {
         hasRunningBackgroundTasks: false,
         detachedBackgroundWork: 'running' as const,
       },
-      'Running',
+      'Running · Background tasks running',
+    ],
+    [
+      {
+        hasActivePrompt: true,
+        hasRunningBackgroundTasks: true,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Running · Background tasks running',
     ],
     [
       { isWaitingForPermission: true, hasRunningBackgroundTasks: true },
@@ -138,10 +146,20 @@ describe('SessionDetailsTooltip', () => {
         const details = document.querySelector('[role="dialog"]');
         expect(details?.textContent).toContain(expected);
         expect(details?.textContent).not.toContain('Idle');
-        if (expected !== 'Running')
+        if (!flags.hasActivePrompt)
           expect(details?.textContent).not.toContain('Running');
-        if (flags.hasRunningBackgroundTasks === false)
+        if (
+          flags.hasRunningBackgroundTasks === false &&
+          !flags.detachedBackgroundWork
+        )
           expect(details?.textContent).not.toContain('Background');
+        if (
+          flags.hasRunningBackgroundTasks &&
+          flags.detachedBackgroundWork === 'running'
+        )
+          expect(
+            details?.textContent?.match(/Background tasks running/g),
+          ).toHaveLength(1);
       } finally {
         act(() => root.unmount());
       }

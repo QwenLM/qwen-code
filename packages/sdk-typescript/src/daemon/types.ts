@@ -1912,13 +1912,11 @@ export interface DaemonSessionSummary {
   backgroundTurn?: DaemonBackgroundTurn;
   hasRunningBackgroundTasks?: boolean;
   /**
-   * Detached-shell observation for a persisted session with no live entry,
-   * derived from its background-shell status sidecars on disk. `running`
-   * means at least one sidecar claims a running shell whose pid is alive;
-   * `unknown` means a sidecar claims a running shell whose liveness could
-   * not be verified. Absent when the session is live (the in-memory
-   * `hasRunningBackgroundTasks` is authoritative), when it has no shell
-   * sidecars, or when every sidecar is terminal. Absent on older daemons.
+   * Detached-shell observation from the session's on-disk status sidecars.
+   * `running` requires a verified live process identity. `unknown` indicates
+   * an inconclusive observation. A restored session can carry this alongside
+   * `hasRunningBackgroundTasks`. Absent when no detached work was observed
+   * or on older daemons.
    */
   detachedBackgroundWork?: 'running' | 'unknown';
   isWaitingForPermission?: boolean;

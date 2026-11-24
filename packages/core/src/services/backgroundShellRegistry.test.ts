@@ -30,6 +30,7 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
+import * as processLiveness from '../utils/process-liveness.js';
 import { escapeXml } from '../utils/xml.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
@@ -988,6 +989,36 @@ describe('BackgroundShellRegistry', () => {
       expect(status['pid']).toBeUndefined();
       expect(status['procStart']).toBeUndefined();
       expect(status['pidNs']).toBeUndefined();
+    });
+
+    it('writes no namespace claim when the start token cannot be captured', () => {
+      // The two tokens are written as a pair: a namespace claim without a
+      // start token could never be settled by the daemon's probe, so the
+      // token gates the claim (#17819).
+      vi.mocked(processLiveness.readProcStartToken).mockReturnValueOnce(null);
+      const e = makeDirEntry({ shellId: 'unpaired', pid: 4242 });
+      reg.register(e);
+      const status = readStatus(e.statusPath);
+      expect(status['procStart']).toBeUndefined();
+      expect(status['pidNs']).toBeUndefined();
+    });
+
+    it('keeps the identity tokens across terminal status rewrites', () => {
+      const e = makeDirEntry({ shellId: 'keepident', pid: 4242 });
+      reg.register(e);
+      reg.complete('keepident', 0, 2000);
+      const status = readStatus(e.statusPath);
+      expect(status['status']).toBe('completed');
+      expect(status['procStart']).toBe('boot-x:42420');
+      expect(status['pidNs']).toBe(4026532501);
+    });
+
+    it('truncates an over-long command in the sidecar', () => {
+      const long = `run-${'x'.repeat(600)}`;
+      const e = makeDirEntry({ shellId: 'longcmd', command: long });
+      reg.register(e);
+      const status = readStatus(e.statusPath);
+      expect(status['command']).toBe(`${long.slice(0, 497)}...`);
     });
 
     it.each<[string, (r: BackgroundShellRegistry) => void, object]>([

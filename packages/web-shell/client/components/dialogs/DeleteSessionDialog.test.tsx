@@ -430,7 +430,7 @@ describe('DeleteSessionDialog selection', () => {
     // The detached hint names what is protected: deletion would not stop the
     // detached shell, so the copy differs from the live-running refusal.
     expect(hint()).toBe(
-      'Detached background work is still running for this session — wait for it to exit or cancel it before deleting.',
+      'Detached background work is still running for this session. Wait for it to exit before deleting.',
     );
   });
 
