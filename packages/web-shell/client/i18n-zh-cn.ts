@@ -326,7 +326,6 @@ export const ZH: Messages = {
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
-  'managed.question.title': '请回答以下问题',
   'managed.actions.title': '待处理请求',
   'managed.actions.root': '当前会话',
   'managed.actions.child': (v) => `子会话 · ${v?.session}`,

@@ -4421,35 +4421,58 @@ describe('ManagedSessionsPage', () => {
     await act(async () => flush());
     const card = container.querySelector('[data-testid="managed-approval"]')!;
     expect(card.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(card.querySelector('[data-web-shell-ask-panel]')).not.toBeNull();
+    expect(card.querySelector('form')).toBeNull();
     expect(card.textContent).not.toContain('Yes, allow once');
     expect(card.textContent).not.toContain('Tool arguments are unavailable');
-    await act(async () => {
-      for (const [index, input] of card
-        .querySelectorAll('textarea')
-        .entries()) {
+    expect(
+      Array.from(card.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Ignore',
+      ),
+    ).toBeUndefined();
+    const askOptions = () =>
+      card.querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const submitButton = () =>
+      card.querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
+    const fillCustom = async (value: string) => {
+      await act(async () => {
+        askOptions()[2]!.click();
+      });
+      const input = card.querySelector<HTMLInputElement>(
+        '[data-web-shell-ask-panel] input',
+      )!;
+      await act(async () => {
         Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
+          HTMLInputElement.prototype,
           'value',
-        )!.set!.call(input, `Custom answer ${index}`);
+        )!.set!.call(input, value);
         input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    });
-    const submitQuestion = () =>
-      card
-        .querySelector('form')!
-        .dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
+      });
+    };
+    await fillCustom('Custom answer 0');
     await act(async () => {
-      submitQuestion();
+      nextQuestion().click();
+    });
+    await fillCustom('Custom answer 1');
+    await act(async () => {
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
     await act(async () => flush());
-    expect(card.querySelector('textarea')?.value).toBe('Custom answer 0');
+    expect(
+      card.querySelector<HTMLInputElement>('[data-web-shell-ask-panel] input')
+        ?.value,
+    ).toBe('Custom answer 1');
     expect(container.textContent).toContain('Retry the same answers');
     await act(async () => {
-      submitQuestion();
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
@@ -4496,6 +4519,16 @@ describe('ManagedSessionsPage', () => {
       container.querySelector('[data-testid="managed-approval"]')!;
     const selector = () =>
       card().querySelector('[aria-label="Pending requests"]')!;
+    const askOptions = () =>
+      card().querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const submitButton = () =>
+      card().querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
     const choose = async (text: string) => {
       await act(async () => {
         [...selector().querySelectorAll('button')]
@@ -4503,11 +4536,16 @@ describe('ManagedSessionsPage', () => {
           .click();
       });
     };
-    const fill = async (index: number, text: string) => {
+    const fillCustom = async (text: string) => {
       await act(async () => {
-        const input = card().querySelectorAll('textarea')[index]!;
+        askOptions()[2]!.click();
+      });
+      const input = card().querySelector<HTMLInputElement>(
+        '[data-web-shell-ask-panel] input',
+      )!;
+      await act(async () => {
         Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
+          HTMLInputElement.prototype,
           'value',
         )!.set!.call(input, text);
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -4523,23 +4561,22 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    await fill(0, 'Keep child A');
+    await fillCustom('Keep child A');
     await choose('child-b');
-    expect(card().querySelector('textarea')?.value).toBe('');
-    await fill(0, 'Child B answer');
-    await fill(1, 'Child B details');
+    expect(askOptions()[2]!.textContent).toBe('Other answer');
+    await fillCustom('Child B answer');
+    await act(async () => {
+      nextQuestion().click();
+    });
+    await fillCustom('Child B details');
     await choose('This session');
     expect(card().querySelector('[role="alertdialog"]')).not.toBeNull();
     await choose('child-a');
-    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A');
     await choose('child-b');
-    expect(card().querySelector('textarea')?.value).toBe('Child B answer');
+    expect(askOptions()[2]!.textContent).toBe('Child B answer');
     await act(async () => {
-      card()
-        .querySelector('form')!
-        .dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
@@ -4561,7 +4598,224 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A');
+  });
+
+  it('preserves option order, untrimmed text, draft across cloned refreshes, 32 KiB guard, duplicate-submit fencing, and live expiry on shared AskUserQuestion', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    let triggerActionUpdate!: () => void;
+    const actionUpdated = new Promise<void>((resolve) => {
+      triggerActionUpdate = resolve;
+    });
+    mocks.client.subscribeEvents.mockImplementation(async function* (
+      id: string,
+      opts: { signal: AbortSignal },
+    ) {
+      if (id === 's1') {
+        await actionUpdated;
+        if (opts.signal.aborted) return;
+        yield {
+          id: 5,
+          at: 5,
+          type: 'action_updated',
+          sessionId: 's1',
+          data: {},
+        };
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal.aborted) resolve();
+        else
+          opts.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+      });
+    });
+    let currentQuestion = { ...pendingQuestion(), sessionId: 's1' };
+    let resolveRespond!: () => void;
+    const respond = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRespond = resolve;
+        }),
+    );
+    const listPending = vi.fn().mockImplementation(async () => [
+      {
+        ...currentQuestion,
+        questions: structuredClone(currentQuestion.questions),
+      },
+    ]);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const askOptions = () =>
+      card().querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const prevQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'previous',
+      )!;
+    const submitButton = () =>
+      card().querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
+    const fillCustom = async (value: string) => {
+      await act(async () => {
+        askOptions()[2]!.click();
+      });
+      const input = card().querySelector<HTMLInputElement>(
+        '[data-web-shell-ask-panel] input',
+      )!;
+      expect(input.maxLength).toBe(8192);
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+
+    // 32 KiB UTF-8 byte cap disables Submit while keeping input editable.
+    await fillCustom('界'.repeat(8192));
+    await act(async () => nextQuestion().click());
+    await fillCustom('界'.repeat(8192));
+    expect(card().querySelector('[role="alert"]')?.textContent).toContain(
+      '32 KiB',
+    );
+    expect(submitButton().disabled).toBe(true);
+    expect(
+      card().querySelector<HTMLInputElement>(
+        '[data-web-shell-ask-panel] input',
+      )!.disabled,
+    ).toBe(false);
+
+    // Replace with valid multi-select (clicked in reverse order) + untrimmed custom text.
+    await act(async () => {
+      askOptions()[1]!.click();
+      askOptions()[0]!.click();
+    });
+    const q2Input = card().querySelector<HTMLInputElement>(
+      '[data-web-shell-ask-panel] input',
+    );
+    if (q2Input) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(q2Input, '  also: review, publish  ');
+        q2Input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    } else {
+      await fillCustom('  also: review, publish  ');
+    }
+    // Sliding expiresAt + cloned questions refresh while on Q2 must NOT reset step or draft.
+    const readsBefore = listPending.mock.calls.length;
+    currentQuestion = {
+      ...currentQuestion,
+      expiresAt: currentQuestion.expiresAt + 120_000,
+    };
+    await act(async () => {
+      triggerActionUpdate();
+      await flush();
+    });
+    await vi.waitFor(() =>
+      expect(listPending.mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+    await act(async () => flush());
+    expect(card().textContent).toContain('2/2 questions');
+    expect(
+      card().querySelector<HTMLInputElement>('[data-web-shell-ask-panel] input')
+        ?.value ?? askOptions()[2]?.textContent,
+    ).toBe('  also: review, publish  ');
+    await act(async () => prevQuestion().click());
+    // Selecting duplicate-label option 1 on Q1 clears custom text.
+    await act(async () => askOptions()[1]!.click());
+    expect(card().querySelector('[role="alert"]')).toBeNull();
+    expect(submitButton().disabled).toBe(false);
+
+    // Trigger duplicate submit while in flight: fenced to 1 call, canonicalized option order.
+    await act(async () => {
+      submitButton().click();
+      submitButton().click();
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(submitButton().disabled).toBe(true);
+    expect(respond.mock.calls[0][1]).toEqual({
+      kind: 'question',
+      answers: [
+        { questionId: 'q1', optionIds: ['q1o2'] },
+        {
+          questionId: 'q2',
+          optionIds: ['q2o1', 'q2o2'],
+          text: '  also: review, publish  ',
+        },
+      ],
+    });
+    await act(async () => {
+      resolveRespond();
+      await flush();
+    });
+
+    // Expired question shows role="status" expired notice and disables controls.
+    currentQuestion = {
+      ...pendingQuestion(),
+      actionId: 'expired-q',
+      sessionId: 's2',
+      expiresAt: Date.now() - 1,
+    };
+    respond.mockClear();
+    await render('s2');
+    await act(async () => flush());
+    expect(card().querySelector('[role="status"]')?.textContent).toContain(
+      'expired',
+    );
+    expect(submitButton().disabled).toBe(true);
+    expect(askOptions()[0]!.disabled).toBe(true);
+    await act(async () => {
+      submitButton().click();
+      await flush();
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    // Live expiry timer flips an open question to expired without a reload.
+    vi.useFakeTimers();
+    try {
+      currentQuestion = {
+        ...pendingQuestion(),
+        actionId: 'live-expiring-q',
+        sessionId: 's3',
+        expiresAt: Date.now() + 250,
+      };
+      await render('s3');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(card().querySelector('[role="status"]')).toBeNull();
+      expect(askOptions()[0]!.disabled).toBe(false);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(card().querySelector('[role="status"]')?.textContent).toContain(
+        'expired',
+      );
+      expect(askOptions()[0]!.disabled).toBe(true);
+      expect(submitButton().disabled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([

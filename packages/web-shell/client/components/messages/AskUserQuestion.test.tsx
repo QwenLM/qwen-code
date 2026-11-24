@@ -6,11 +6,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
-import { AskUserQuestion } from './AskUserQuestion';
+import { AskUserQuestion, type AskUserQuestionDraft } from './AskUserQuestion';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -2037,6 +2037,167 @@ describe('managed question contract parity', () => {
     expect(nextButton().disabled).toBe(false);
     act(() => nextButton().click());
     expect(container!.textContent).toContain('Pick a size');
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('hydrates initialDraft without auto-selecting option 0 over custom text and emits onDraftChange only after user edits', () => {
+    const req: PermissionRequest = {
+      id: 'req-draft',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Choose the library',
+            header: 'q1',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            options: [
+              { id: 'q1o1', label: 'Same, label', description: 'First' },
+              { id: 'q1o2', label: 'Same, label', description: 'Second' },
+            ],
+          },
+          {
+            id: 'q2',
+            question: 'Choose features',
+            header: 'q2',
+            required: true,
+            multiSelect: true,
+            allowText: true,
+            options: [
+              { id: 'q2o1', label: 'Read, write', description: '' },
+              { id: 'q2o2', label: 'Search', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    const drafts: AskUserQuestionDraft[] = [];
+    const initialDraft: AskUserQuestionDraft = {
+      q1: { optionIds: [], text: '  A different library  ' },
+      q2: { optionIds: ['q2o2', 'unknown-id', 'q2o1'], text: 'also: extra' },
+    };
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderWithDraft = (inlineDraft?: AskUserQuestionDraft) => {
+      act(() =>
+        root!.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <AskUserQuestion
+                request={req}
+                onConfirm={onConfirm}
+                onError={onError}
+                keyboardActive={false}
+                initialDraft={inlineDraft}
+                onDraftChange={(next) => drafts.push(next)}
+              />
+            </I18nProvider>
+          </StrictMode>,
+        ),
+      );
+    };
+    renderWithDraft(initialDraft);
+    // Passive mount must NOT emit onDraftChange (even with inline callback).
+    expect(drafts).toEqual([]);
+    // Hydrated custom text suppresses auto-select of option 0 on required single-select.
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[2]!.getAttribute('aria-checked')).toBe('true');
+    expect(optionButtons()[2]!.textContent).toBe('  A different library  ');
+    // Both questions are already answered by the hydrated draft -> Submit enabled.
+    expect(submitButton()!.disabled).toBe(false);
+
+    // Inline callback rerender with no user edits must stay silent.
+    renderWithDraft(initialDraft);
+    expect(drafts).toEqual([]);
+
+    // User selects option 1 on Q1 -> clears custom text and emits updated draft.
+    act(() => optionButtons()[1]!.click());
+    expect(drafts.at(-1)).toEqual({
+      q1: { optionIds: ['q1o2'], text: '' },
+      q2: { optionIds: ['q2o1', 'q2o2'], text: 'also: extra' },
+    });
+
+    // Submitting emits exact restored + edited structured answers.
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-draft',
+      'submit',
+      { '0': 'Same, label', '1': 'Search, Read, write, also: extra' },
+      [
+        { questionId: 'q1', value: 'Same, label', optionIds: ['q1o2'] },
+        {
+          questionId: 'q2',
+          value: 'Search, Read, write, also: extra',
+          optionIds: ['q2o2', 'q2o1'],
+          text: 'also: extra',
+        },
+      ],
+    );
+  });
+
+  it('blocks only submission when submitDisabled is true while keeping options and custom input editable', () => {
+    const req: PermissionRequest = {
+      id: 'req-submit-blocked',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Write a note',
+            header: 'q1',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            options: [{ id: 'a', label: 'Alpha', description: '' }],
+          },
+        ],
+      },
+    };
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <AskUserQuestion
+            request={req}
+            onConfirm={onConfirm}
+            onError={onError}
+            submitDisabled
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(submitButton()!.disabled).toBe(true);
+    // Options and custom row remain editable so user can shorten over-limit text.
+    expect(optionButtons()[0]!.disabled).toBe(false);
+    expect(optionButtons()[1]!.disabled).toBe(false);
+
+    // Ctrl+Enter and Enter on final question must not submit while submitDisabled.
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    pressKey(panel, 'Enter', { ctrlKey: true, cancelable: true });
+    pressKey(optionButtons()[0]!, 'Enter', { cancelable: true });
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Opening and editing the custom input still works while submitDisabled.
+    act(() => optionButtons()[1]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    expect(input).not.toBeNull();
+    expect(input.disabled).toBe(false);
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Shortened');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(input.value).toBe('Shortened');
     expect(onConfirm).not.toHaveBeenCalled();
   });
 });
