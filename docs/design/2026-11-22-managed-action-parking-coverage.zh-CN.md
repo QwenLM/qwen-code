@@ -142,7 +142,8 @@
   - **Broker 不需要新增语义（已确认）。** Tool v3 的 Shell reservation 以 `dispatch = false` 做 prepare（`RuntimeBrokerService.java:995`）。用同一个 key 和 reference 再次 prepare，返回原来的 reservation，不会派发。同一个 key 下 `publicationId` 或 payload 摘要变了，会以 `runtime_idempotency_conflict` 拒绝（`:1654`）。执行结算之后，同一个 key 返回它原来的记录。
   - **public children Session 已经覆盖（已确认）。** 从 #15171 起，`publicChildAgentsVersion = 1` 的 Session 会捕获派发前的 Shell。生产者对它跳过 `shell_profile` 拒绝（`hosted-workspace-tool-turn.ts:4532`），并记录每个 Shell 调用的 `publicationId`（`:4620`）。`resumeSavedNativeBatch` 校验这个身份，再通过 `prepareV3` 用保存的 `runtimeCallId`、摘要和 `publicationId` 重新 prepare（`:4435`、`:6081`）。停靠资格里没有 Shell 相关的条件，所以这类等待今天已经能停靠。测试停靠了一个这样的等待，冷加载后 Allow，观察到一次带保存身份的 `prepareV3` 和一次执行。
   - **这条路径在经过自己的 G3 审查之前就已经能停靠（决策 8）。** #15171 为崩溃恢复建了它，#18115 让它变成可停靠，但还没有设计按 G3 的用例核对过它。S8a 的 G3 扩展设计把它当作待验证的现有证据，而不是新工作。它在 §7 中的用例必须在任何部署打开 `action-parking.enabled` 之前通过，并且不必等 S8a 的其余部分。
-  - **S8a 仍要覆盖的范围。** 没有 public children 的 Shell profile Session 仍以 `shell_profile` 拒绝。读取端只有在保存的计划带 `publicChildModel` 时才把它当作 Shell 计划（`hosted-approval-continuation.ts:248`、`:288`），而只有 public children 会记录这个字段（`hosted-workspace-tool-turn.ts:4627`），所以这类计划需要另一种识别方式。仍待验证：实际有哪些 Session 落在这里，以及后台 Shell（`is_background`），测试没有覆盖它。
+  - **门槛的单元用例已通过（已确认）。** 四种结局在停靠之后和 Harness 死亡之后都按 §7 的要求完成。后台 Shell 的审批同样能停靠并恢复：Allow 之后，所有 `child_run` 记录都属于预留的那一次执行，所以不会启动第二个进程。打开开关之前，§7 要求的 MySQL 8.4 真实进程用例仍待补上。
+  - **S8a 仍要覆盖的范围。** 没有 public children 的 Shell profile Session 仍以 `shell_profile` 拒绝。读取端只有在保存的计划带 `publicChildModel` 时才把它当作 Shell 计划（`hosted-approval-continuation.ts:248`、`:288`），而只有 public children 会记录这个字段（`hosted-workspace-tool-turn.ts:4627`），所以这类计划需要另一种识别方式。仍待验证：实际有哪些 Session 落在这里。
   - 本切片仍然扩展 G3 契约，实现前要单独写一份 G3 扩展设计；它扩展的是现有证据，而不是新增 Broker 语义。已派发的 Shell 继续拒绝。
 - **超过 64 KiB 的计划。** 暂不支持。P0 的拒绝计数会显示它的出现率；只有出现率可观时，才考虑把计划改存为非 inline 资源。
 - **仍然排除。** `todo` 批次、没有 Runtime 的批次、不支持的工具和未计算摘要的调用都保持拒绝；S8 只覆盖派发前的 Shell 和超大计划。
