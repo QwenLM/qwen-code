@@ -2775,7 +2775,7 @@ describe('Hosted Harness model boundary', () => {
     ).toEqual([false]);
   });
 
-  it.each(['decision', 'continue'] as const)(
+  it.each(['decision', 'stopReason'] as const)(
     'uses durable model attempt identities and restores a Stop %s block chain across a tool restart',
     async (kind) => {
       const hooks = hostedHooks();
@@ -3053,7 +3053,7 @@ describe('Hosted Harness model boundary', () => {
   );
 });
 
-it.each(['decision', 'continue'] as const)(
+it.each(['decision', 'stopReason'] as const)(
   'consumes recovered tool results before Stop %s continuation without consuming them twice',
   async (kind) => {
     const model = config([{ type: LlmEventType.Finished }]);

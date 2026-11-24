@@ -2947,7 +2947,7 @@ it('preserves the original Session message snapshot when a function occurrence i
 });
 
 it.each(['decision', 'continue'] as const)(
-  'restores a Stop %s continuation only for the originating prompt after Session reopen',
+  'restores a Stop %s outcome only for the originating prompt after Session reopen',
   async (kind) => {
     catalog = {
       ...catalog,
@@ -2982,7 +2982,7 @@ it.each(['decision', 'continue'] as const)(
       activationLeaseDurationMs: 60_000,
     });
     const restored = new HostedHookSession(options, session, pin);
-    expect(await restored.wasStopBlocked('prompt-1')).toBe(true);
+    expect(await restored.wasStopBlocked('prompt-1')).toBe(kind === 'decision');
     expect(await restored.wasStopBlocked('prompt-2')).toBe(false);
   },
 );

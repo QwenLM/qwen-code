@@ -856,8 +856,7 @@ export class HostedHookSession {
       const result = await this.read<{ output?: HookOutput }>(record.resultRef);
       const output =
         result.output && createHookOutput(HookEventName.Stop, result.output);
-      if (output?.isBlockingDecision() || output?.shouldStopExecution())
-        return true;
+      if (output?.isBlockingDecision()) return true;
     }
     return false;
   }

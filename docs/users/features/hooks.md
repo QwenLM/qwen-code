@@ -998,7 +998,7 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 **Output Options**:
 
-- `decision`: `"block"` or `"deny"` keeps Qwen working, and so does exit code 2. Any other value lets the turn end
+- `decision`: `"block"` or `"deny"` keeps Qwen working, and so does exit code 2 with plain-text stderr. Any other value lets the turn end
 - `reason`: the instruction Qwen continues with when the hook blocks
 - `continue`: `false` ends the turn. When the hook also blocks, the block wins and Qwen keeps working
 - `stopReason`: with `continue: false` and no block, shown to the user as the turn ends; when the hook blocks, it is used instead of `reason`
@@ -1125,8 +1125,9 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 **Output Options**:
 
-- `decision`: `"block"` or `"deny"` keeps the subagent working, and so does exit code 2. Any other value lets it stop
+- `decision`: `"block"` or `"deny"` keeps the subagent working, and so does exit code 2 with plain-text stderr. Any other value lets it stop
 - `reason`: the instruction the subagent continues with when the hook blocks
+- `stopReason`: when the hook blocks, used instead of `reason`
 - `continue`: `false` without a block lets the subagent stop
 
 **Example Output**:
