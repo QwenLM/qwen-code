@@ -18,7 +18,10 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
-import { getToolCallRuntime } from './tool-call-runtime.js';
+import {
+  getCurrentToolCallSource,
+  getToolCallRuntime,
+} from './tool-call-runtime.js';
 import {
   Kind,
   ToolConfirmationOutcome,
@@ -37,6 +40,14 @@ const pngPart = () => ({
   inlineData: { mimeType: 'image/png', data: TINY_PNG_BASE64 },
 });
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 // A CodeModeOnly scheduler whose registry holds ExecTool (unless `exec` is
 // false) followed by `tools`; `configure` runs before the registry is built.
 function setup(
@@ -45,6 +56,7 @@ function setup(
     params?: Partial<ConfigParameters>;
     configure?: (config: Config) => void;
     exec?: boolean;
+    waitForNestedToolSettlement?: boolean;
     onToolCallsUpdate?: (calls: ToolCall[]) => void;
   } = {},
 ) {
@@ -64,6 +76,7 @@ function setup(
   const completed = vi.fn();
   const scheduler = new CoreToolScheduler({
     config,
+    waitForNestedToolSettlement: opts.waitForNestedToolSettlement,
     onAllToolCallsComplete: async (calls) => completed(calls),
     onToolCallsUpdate: opts.onToolCallsUpdate ?? vi.fn(),
     getPreferredEditor: () => undefined,
@@ -524,6 +537,254 @@ describe('CodeModeOnly scheduler dispatch', () => {
     }
     await scheduled;
   }, 40_000);
+
+  it.each([
+    { waitForNestedToolSettlement: true, cancel: true },
+    { waitForNestedToolSettlement: true, cancel: false },
+    { waitForNestedToolSettlement: false, cancel: true },
+  ])(
+    'settles the parent and its nested tools (wait=$waitForNestedToolSettlement, cancel=$cancel)',
+    async ({ waitForNestedToolSettlement, cancel }) => {
+      const turn = new AbortController();
+      const child = new AbortController();
+      let exitGuest!: () => void;
+      const guestExit = new Promise<void>((resolve) => {
+        exitGuest = resolve;
+      });
+      let releaseChild!: () => void;
+      const childExit = new Promise<void>((resolve) => {
+        releaseChild = resolve;
+      });
+      const executeChild = vi.fn(async () => {
+        await childExit;
+        return { llmContent: 'child', returnDisplay: 'child' };
+      });
+      let oldChild: Promise<unknown> | undefined;
+      const onOldChildResult = vi.fn();
+      const { run, completed, call } = setup(
+        [
+          new MockTool({
+            name: ToolNames.EXEC,
+            execute: async () => {
+              oldChild = getToolCallRuntime()!
+                .dispatch('pending_child', {}, child.signal, onOldChildResult)
+                .catch(() => {});
+              await guestExit;
+              child.abort();
+              turn.signal.throwIfAborted();
+              return { llmContent: 'parent', returnDisplay: 'parent' };
+            },
+          }),
+          new MockTool({ name: 'pending_child', execute: executeChild }),
+        ],
+        { exec: false, waitForNestedToolSettlement },
+      );
+      const scheduled = run('parent', 'prompt', '', {}, turn.signal);
+      try {
+        await vi.waitFor(() => expect(executeChild).toHaveBeenCalledOnce());
+        if (cancel) turn.abort();
+        exitGuest();
+        await scheduled;
+        if (cancel && waitForNestedToolSettlement) {
+          expect(completed).not.toHaveBeenCalled();
+        } else {
+          await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+        }
+      } finally {
+        exitGuest();
+        releaseChild();
+        await oldChild;
+      }
+
+      await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+      expect(call().status).toBe(cancel ? 'cancelled' : 'success');
+      if (!cancel) expect(onOldChildResult).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps a cancelled batch’s successful results when an earlier child is still running', async () => {
+    const oldChildStarted = deferred();
+    const oldChildExit = deferred();
+    const firstGuestExit = deferred();
+    const secondGuestStarted = deferred();
+    const secondGuestExit = deferred();
+    const oldChildController = new AbortController();
+    const secondBatch = new AbortController();
+    const onOldChildResult = vi.fn();
+    let oldChild: Promise<unknown> | undefined;
+    const { run, scheduler, completed } = setup(
+      [
+        new MockTool({
+          name: ToolNames.EXEC,
+          execute: async ({ source }) => {
+            const runtime = getToolCallRuntime()!;
+            if (source === 'first') {
+              oldChild = runtime
+                .dispatch(
+                  'old_child',
+                  {},
+                  oldChildController.signal,
+                  onOldChildResult,
+                )
+                .catch(() => {});
+              await firstGuestExit.promise;
+              oldChildController.abort();
+            }
+            if (source === 'cancel me') {
+              secondGuestStarted.resolve();
+              await secondGuestExit.promise;
+              secondBatch.signal.throwIfAborted();
+            }
+            const output =
+              source === 'next'
+                ? (
+                    await runtime.dispatch(
+                      'next_child',
+                      {},
+                      new AbortController().signal,
+                    )
+                  ).output
+                : String(source);
+            return { llmContent: output, returnDisplay: output };
+          },
+        }),
+        new MockTool({
+          name: 'old_child',
+          execute: async () => {
+            oldChildStarted.resolve();
+            await oldChildExit.promise;
+            return { llmContent: 'old child', returnDisplay: 'old child' };
+          },
+        }),
+        new MockTool({
+          name: 'next_child',
+          execute: async () => ({
+            llmContent: 'next child',
+            returnDisplay: 'next child',
+          }),
+        }),
+      ],
+      { exec: false, waitForNestedToolSettlement: true },
+    );
+    try {
+      const first = run('first', 'prompt', 'first');
+      await oldChildStarted.promise;
+      firstGuestExit.resolve();
+      await first;
+      await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+
+      const second = scheduler.schedule(
+        ['success', 'cancel me'].map((source) => ({
+          callId: source,
+          name: ToolNames.EXEC,
+          args: { source },
+          isClientInitiated: false,
+          prompt_id: 'prompt',
+        })),
+        secondBatch.signal,
+      );
+      await secondGuestStarted.promise;
+      secondBatch.abort();
+      secondGuestExit.resolve();
+      await second;
+      await vi.waitFor(() =>
+        expect(completed).toHaveBeenNthCalledWith(2, [
+          expect.objectContaining({
+            status: 'success',
+            response: expect.objectContaining({ resultDisplay: 'success' }),
+          }),
+          expect.objectContaining({ status: 'cancelled' }),
+        ]),
+      );
+
+      await run('next', 'next prompt', 'next');
+      await vi.waitFor(() =>
+        expect(completed).toHaveBeenNthCalledWith(3, [
+          expect.objectContaining({
+            status: 'success',
+            response: expect.objectContaining({ resultDisplay: 'next child' }),
+          }),
+        ]),
+      );
+    } finally {
+      firstGuestExit.resolve();
+      secondGuestExit.resolve();
+      oldChildExit.resolve();
+      await oldChild;
+    }
+    expect(onOldChildResult).not.toHaveBeenCalled();
+  });
+
+  it('forwards guest cancellation while a nested PostToolBatch hook is pending', async () => {
+    const guestExit = deferred();
+    const hookStarted = deferred();
+    const hookExit = deferred();
+    const childController = new AbortController();
+    let childSignal: AbortSignal | undefined;
+    let child: Promise<unknown> | undefined;
+    const bus = {
+      request: async (request: {
+        eventName: string;
+        input?: { tool_calls?: Array<{ tool_name: string }> };
+      }) => {
+        if (
+          request.eventName === 'PostToolBatch' &&
+          request.input?.tool_calls?.[0]?.tool_name === 'hook_child'
+        ) {
+          hookStarted.resolve();
+          await hookExit.promise;
+        }
+        return {
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'nested-batch-hook',
+          success: true,
+          output: {},
+        };
+      },
+    };
+    const { run, completed } = setup(
+      [
+        new MockTool({
+          name: ToolNames.EXEC,
+          execute: async () => {
+            child = getToolCallRuntime()!
+              .dispatch('hook_child', {}, childController.signal)
+              .catch(() => {});
+            await guestExit.promise;
+            childController.abort();
+            return { llmContent: 'parent', returnDisplay: 'parent' };
+          },
+        }),
+        new MockTool({
+          name: 'hook_child',
+          execute: async () => {
+            childSignal = getCurrentToolCallSource()?.signal;
+            return { llmContent: 'child', returnDisplay: 'child' };
+          },
+        }),
+      ],
+      {
+        exec: false,
+        configure: (config) => {
+          config.setMessageBus(bus as unknown as MessageBus);
+          vi.spyOn(config, 'hasHooksForEvent').mockReturnValue(true);
+        },
+      },
+    );
+    const scheduled = run('parent', 'prompt', '');
+    try {
+      await hookStarted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      guestExit.resolve();
+      await scheduled;
+      await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+      expect(childSignal?.aborted).toBe(true);
+    } finally {
+      guestExit.resolve();
+      hookExit.resolve();
+      await child;
+    }
+  });
 
   it('applies nested tool permission denial before execution', async () => {
     const nestedExecute = vi.fn();
