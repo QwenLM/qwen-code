@@ -35294,6 +35294,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       resumedConversation: { messages },
     });
     const oneMiBChunk = 'a'.repeat(1024 * 1024);
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        for (let index = 0; index < 63; index += 1) {
+          await context.sendUpdate({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: oneMiBChunk },
+          });
+        }
+      },
+    );
     const replayRecords = Array.from({ length: 63 }, (_, index) => ({
       uuid: `cold-${index}`,
       parentUuid: index === 0 ? null : `cold-${index - 1}`,
