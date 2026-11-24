@@ -68,7 +68,7 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 1. 环境变量，当它指向该入口时；
 2. 显式设置（`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`），当它被设置时；
-3. 该入口的内置默认值——共享 loop 在 headless、ACP、两个 TUI 和 AgentCore 默认为 `true`。内核在 headless 默认为 `true`。每个开关在其余入口默认为 `false`。每个灰度 PR 只翻转一个入口的默认值。
+3. 该入口的内置默认值——共享 loop 在 headless、ACP、两个 TUI 和 AgentCore 默认为 `true`。内核在 headless 和 Ink TUI 默认为 `true`。每个开关在其余入口默认为 `false`。每个灰度 PR 只翻转一个入口的默认值。
 
 **入口标识符。** `headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`，Hosted Harness 是 `hosted`——它只开启模型轮，其 journal 化工具派发仍留在 `hosted-harness-model.ts`。
 
@@ -116,7 +116,7 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 - loop 契约（`AgentLoopHost`、`runAgentLoop` 选项）同一时间只有一个负责人（#17045 C 块）；切片 2 改的是 Config getter，不是契约，但 getter 签名与 #17029（speculation）共享——协调落地顺序。
 - 与 PR 17048 的强制关闭分工对顺序敏感：其 `current` 腿钉住必须在第一个入口默认值翻转之前落地，其 `true`/`false` 拼写在 rebase 到按入口 resolver 时必须保持仅整值。本切片不翻转任何默认值、整值只接受 `1`/`0`，因此两种落地顺序下都安全。
-- 内核组每晚跑内核路径；K 块的取消与有界收尾已经合入（#17145）。headless 默认运行在内核上，因此 Linux 内核组上 headless 的失败就是它默认路径的回归，按回归处理。这个组把内核变量对所有入口都设为 `1`，所以它是 headless 默认路径的替身，而不是实际发布的组合：没有哪个组让 headless 运行在内核上、同时它的子代理（AgentCore）留在过程式路径；headless 可见性测试在两个开关都未设置时运行，只检查 headless 走内核。对内核仍默认关闭的入口，内核路径失败不是其默认路径的回归：它让该入口在内核默认开启之前的晚数重新计算，除非失败的测试与 loop 无关、且在 main 上关闭开关时也以同样方式失败。无论哪种情况，都不得阻塞其他组（`fail-fast: false` 已经保证）。
+- 内核组每晚跑内核路径；K 块的取消与有界收尾已经合入（#17145）。headless 和 Ink TUI 默认运行在内核上，因此 Linux 内核组上二者任一的失败就是其默认路径的回归，按回归处理。这个组把内核变量对所有入口都设为 `1`，所以它是二者默认路径的替身，而不是实际发布的组合：没有哪个组让它们运行在内核上、同时它们的子代理（AgentCore）留在过程式路径；headless 可见性测试在两个开关都未设置时运行，只检查 headless 走内核。对内核仍默认关闭的入口，内核路径失败不是其默认路径的回归：它让该入口在内核默认开启之前的晚数重新计算，除非失败的测试与 loop 无关、且在 main 上关闭开关时也以同样方式失败。无论哪种情况，都不得阻塞其他组（`fail-fast: false` 已经保证）。
 - schema 默认值保留到第一个入口默认值翻转：更早移除会改变设置对话框的第一次切换行为（`nextBooleanSettingValue`），超出切片 2 的范围。headless 默认值翻转时连同对话框的处理一起移除它。
 - workflow 体积棘轮：`e2e.yml` 增长超过 4096 字节容差需要同 PR 更新基线。
 

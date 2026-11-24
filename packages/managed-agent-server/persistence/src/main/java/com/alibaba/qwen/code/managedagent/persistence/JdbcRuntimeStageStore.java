@@ -348,17 +348,24 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
             }
 
             if (batchWakeWorthy && headState.headPresent()) {
+                // A park certificate stays, but falls due now, so a park CAS
+                // still to come releases the Turn for immediate dispatch.
                 jdbc.update(
                         "UPDATE ma_session_head SET is_wake_pending = 1,"
                                 + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
                                 + " THEN ? ELSE wake_retry_at END,"
+                                + " wake_seal_parked_until = CASE WHEN wake_seal_parked_until > ?"
+                                + " THEN ? ELSE wake_seal_parked_until END,"
                                 + " gmt_modified = ?"
                                 + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         nowMs,
                         nowMs,
                         nowMs,
+                        nowMs,
+                        nowMs,
                         request.tenantId(),
                         request.harnessSessionId());
+                AgentActionParking.unparkActionTurns(jdbc, request.tenantId(), request.harnessSessionId(), nowMs);
             }
             return new StageOutcome(true, stagedThrough, terminalSettled, batchWakeWorthy, hardCapReached);
         });

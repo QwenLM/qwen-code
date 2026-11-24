@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import request from 'supertest';
 import * as path from 'node:path';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
@@ -48,6 +49,30 @@ function makeBridge(
       return sessionCount;
     },
     getSessionSummary,
+    getDaemonStatusSnapshot: () => ({
+      limits: {
+        maxSessions: 20,
+        maxPendingPromptsPerSession: 5,
+        eventRingSize: 8_000,
+        eventRingMaxBytes: 8 * 1024 * 1024,
+        compactedReplayMaxBytes: 4 * 1024 * 1024,
+        maxJournalEvents: 10_000,
+        maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
+        channelIdleTimeoutMs: 0,
+        sessionIdleTimeoutMs: 1_800_000,
+        sessionPromptSettledCloseGraceMs: 0,
+      },
+      sessionCount,
+      pendingPermissionCount: 0,
+      channelLive: true,
+      permissionPolicy: 'first-responder',
+      sessions: [],
+    }),
+    activePromptCount: 0,
+    lastActivityAt: null,
+    isChannelLive: () => true,
+    spawnOrAttach: vi.fn(),
     async shutdown() {},
     killAllSync() {},
   } as unknown as AcpSessionBridge;
@@ -427,6 +452,69 @@ describe('createServeApp default bridge wiring', () => {
     });
   });
 
+  it('reports disabled load admission on the default-bridge path when opted out', async () => {
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const { DISABLED_LOAD_ADMISSION_SNAPSHOT } = await import(
+      './load-admission.js'
+    );
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+        loadAdmission: false,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
+  });
+
+  it('enables load admission by default on the default-bridge path', async () => {
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toMatchObject({
+      enabled: true,
+      overloaded: false,
+    });
+  });
+
   it('wires the effective restore timeout into the direct bridge', async () => {
     const bridgeOptions: BridgeOptions[] = [];
     vi.doMock('./acp-session-bridge.js', async () => {
@@ -606,5 +694,132 @@ describe('createServeApp default bridge wiring', () => {
       }),
     ).rejects.toMatchObject({ code: 'workspace_generation_closed' });
     expect(restoreSessionCore).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('createServeApp load admission factory injection', () => {
+  it('uses the injected monitor factory and wires its verdict into admission', async () => {
+    const factory = vi.fn(() => ({
+      snapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load' as const,
+        loadRatio: 3,
+        eventLoopLagP99Ms: 1,
+        sampledAtMs: 1,
+      }),
+      dispose: vi.fn(),
+    }));
+    let captured: Record<string, unknown> | undefined;
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: Record<string, unknown>) => {
+          captured = opts;
+          return makeBridge();
+        }),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { createLoadAdmissionMonitor: factory },
+    );
+    expect(factory).toHaveBeenCalledTimes(1);
+
+    const admission = captured?.['freshSessionAdmission'] as
+      | ((ctx: { operation: string; workspaceCwd: string }) => unknown)
+      | undefined;
+    expect(admission).toBeTypeOf('function');
+    expect(() =>
+      admission!({ operation: 'spawn', workspaceCwd: WS_BOUND }),
+    ).toThrow('System overloaded');
+
+    // The fake bridge does not enforce admission internally, so the HTTP
+    // refusal is pinned by the real-bridge E2E rig; here the status verdict
+    // proves the injected monitor reaches the app's status projection.
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toMatchObject({
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+    });
+  });
+});
+
+describe('createServeApp load admission with injected workspace registry', () => {
+  it('never builds a monitor and reports disabled when a registry is injected', async () => {
+    const factory = vi.fn(() => ({
+      snapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load' as const,
+        loadRatio: 3,
+        eventLoopLagP99Ms: 1,
+        sampledAtMs: 1,
+      }),
+      dispose: vi.fn(),
+    }));
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const { createWorkspaceRegistry } = await import('./workspace-registry.js');
+    const { ClientMcpSenderRegistry } = await import(
+      './acp-http/client-mcp-sender-registry.js'
+    );
+    const { DISABLED_LOAD_ADMISSION_SNAPSHOT } = await import(
+      './load-admission.js'
+    );
+    const registry = createWorkspaceRegistry([
+      {
+        workspaceId: 'primary',
+        workspaceCwd: WS_BOUND,
+        sessionRuntimeBaseDir: '/tmp/wiring-registry-runtime',
+        primary: true,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: makeBridge(),
+        workspaceService: {} as never,
+        routeFileSystemFactory: {} as never,
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+      } as never,
+    ]);
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { createLoadAdmissionMonitor: factory, workspaceRegistry: registry },
+    );
+    expect(factory).not.toHaveBeenCalled();
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
   });
 });

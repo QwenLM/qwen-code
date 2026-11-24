@@ -146,6 +146,25 @@ class HostedCleanupDebtStoreTest {
                 .satisfies(debt -> assertThat(debt.promptId()).isEqualTo(prompt));
     }
 
+    // S4 (#18149): a parked Turn owes its own cleanup through the wait; a
+    // wake-started Turn has no Turn row to keep the scan away, so the park
+    // certificate does.
+    @Test
+    void skipsADebtWhoseSealParkedItsTurn() {
+        String session = session("parked");
+        String prompt = UUID.randomUUID().toString();
+        owed(TENANT, WORKSPACE, session, prompt, null);
+        certifiedHead(session, 0, 3);
+        jdbc.update("UPDATE ma_session_head SET wake_seal_parked_prompt_id = ?, wake_seal_parked_owner = 'wake'"
+                + " WHERE session_id = ?", prompt, session);
+
+        assertThat(store.findOwed(10, -1, "").debts()).isEmpty();
+
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 2 WHERE session_id = ?", session);
+        assertThat(store.findOwed(10, -1, "").debts()).singleElement()
+                .satisfies(debt -> assertThat(debt.promptId()).isEqualTo(prompt));
+    }
+
     private void certifiedHead(String session, int background, long revision) {
         jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                 + " workspace_id, session_id, harness_session_id, head_kind, state,"
