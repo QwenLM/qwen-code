@@ -42,6 +42,10 @@ describe('bundled loop skill', () => {
       'Call LoopWakeup only if continued follow-up is useful.',
     );
     expect(body).toContain('`prompt`: `/loop ${original prompt}`');
+    expect(body).toContain(
+      'If the user tells you to stop the loop in a normal message',
+    );
+    expect(body).toContain('CronDelete reports it was not found');
     // Drives the second-resolution wakeup engine — seconds, not minutes.
     expect(body).toContain('`delaySeconds`');
     expect(body).not.toContain('delayMinutes');
