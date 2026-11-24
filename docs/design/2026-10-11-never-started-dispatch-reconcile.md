@@ -279,7 +279,7 @@ execution: 'not_started_proven'} }`, `valid: true` — replayed by the
   forcing rule (`outcome_unknown|corrupt` ⇒ `recovery_blocked`) already
   commits the ambiguity family elsewhere.
 
-Hook wiring (`hosted-harness-session.test.ts`):
+Hook wiring (`hosted-harness-session.lifecycle.test.ts`):
 
 - A load on a Session with a stranded record invokes the reconcile with the
   built session (module mock; **fails if the hook is removed**), and the
@@ -295,7 +295,7 @@ Hook wiring (`hosted-harness-session.test.ts`):
 | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                  | in-turn proof fallback                 |
 | `packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`                             | absent and ambiguous process witnesses |
 | `packages/cli/src/serve/hosted-harness-session.ts`                                      | call the arm on open (~small)          |
-| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | wiring witness                         |
+| `packages/cli/src/serve/hosted-harness-session.lifecycle.test.ts`                       | wiring witness                         |
 | `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 successor pair                      |
 | `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | this doc                               |
 

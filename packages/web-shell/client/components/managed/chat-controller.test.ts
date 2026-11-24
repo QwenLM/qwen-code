@@ -877,6 +877,39 @@ describe('createManagedChatController', () => {
     );
   });
 
+  it('preserves rendering identity for expiry-only updates without reviving expired or reappeared actions', () => {
+    let nowMs = 10_000;
+    const h = createHarness({ now: () => nowMs });
+    const initialActions: readonly ManagedAgentPendingAction[] = [
+      permissionAction({ expiresAt: 20_000 }),
+      questionAction({ expiresAt: 20_000 }),
+    ];
+    h.setPendingActions(initialActions);
+    const approvals = h.controller.pendingApprovals;
+    const questions = h.controller.pendingQuestions;
+    const permission = approvals[0]!.request;
+    const question = questions[0]!.request;
+    const rawInput = question.rawInput;
+
+    h.setPendingActions(
+      initialActions.map((action) => ({ ...action, expiresAt: 30_000 })),
+    );
+    const extendedApprovals = h.controller.pendingApprovals;
+    const extendedQuestions = h.controller.pendingQuestions;
+    expect(extendedApprovals).toBe(approvals);
+    expect(extendedQuestions).toBe(questions);
+    expect(extendedApprovals[0]!.request).toBe(permission);
+    expect(extendedQuestions[0]!.request).toBe(question);
+    expect(extendedQuestions[0]!.request.rawInput).toBe(rawInput);
+
+    h.setPendingActions([]);
+    h.setPendingActions([questionAction({ expiresAt: 40_000 })]);
+    expect(h.controller.pendingQuestions).not.toBe(extendedQuestions);
+
+    nowMs = 40_000;
+    expect(h.controller.pendingQuestions).toHaveLength(0);
+  });
+
   it('separates submit admission from establishment and settles on authoritative evidence', async () => {
     const h = createHarness();
     const d = deferred<ManagedTransportAdmission>();
@@ -1574,6 +1607,36 @@ describe('createManagedChatController', () => {
     await h.controller.submit({ text: 'pending while another tab cancels' });
     h.setPhase('cancelling');
     expect(h.controller.phase).toBe('cancelling');
+  });
+
+  it('does not re-buffer a replayed settlement for an already-terminal operation while another dispatch is in flight', async () => {
+    const h = createHarness();
+    h.submitPrompt.mockResolvedValueOnce({
+      admission: 'accepted',
+      operationId: 'op-replayed',
+      turnId: 't-1',
+    });
+    await h.controller.submit({ text: 'first' });
+    h.emitOperation({ operationId: 'op-replayed', status: 'completed' });
+    expect(h.controller.operations[0]?.state).toBe('established');
+
+    const inflight = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(inflight.promise);
+    const second = h.controller.submit({ text: 'second' });
+    // Replaying a failure against the already-terminal operation id must match
+    // the terminal row (no-op via applyState) rather than buffering for the
+    // unrelated in-flight dispatch.
+    h.emitOperation({ operationId: 'op-replayed', status: 'failed' });
+    inflight.resolve({
+      admission: 'accepted',
+      operationId: 'op-replayed',
+      turnId: 't-2',
+    });
+    const res = await second;
+    expect(res.outcome).toBe('unsettled');
+    expect(h.controller.operations.map((operation) => operation.state)).toEqual(
+      ['running', 'established'],
+    );
   });
 
   it('releases settlement subscriptions on AbortSignal abort and skips subscribing when already aborted', () => {
