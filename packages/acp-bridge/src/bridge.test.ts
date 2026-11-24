@@ -36127,6 +36127,41 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not call freshSessionAdmission for a warm re-attach on a live session', async () => {
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return { release: () => {} };
+        },
+      });
+
+      const live = await bridge.loadSession({
+        sessionId: 'warm-1',
+        workspaceCwd: WS_A,
+      });
+      expect(live.attached).toBe(false);
+      expect(contexts).toHaveLength(1);
+      contexts.length = 0;
+
+      // Re-attaching to the already-live session via loadSession or
+      // resumeSession must bypass admission (no new child is spawned).
+      const reattachedLoad = await bridge.loadSession({
+        sessionId: 'warm-1',
+        workspaceCwd: WS_A,
+      });
+      expect(reattachedLoad.attached).toBe(true);
+
+      const reattachedResume = await bridge.resumeSession({
+        sessionId: 'warm-1',
+        workspaceCwd: WS_A,
+      });
+      expect(reattachedResume.attached).toBe(true);
+      expect(contexts).toEqual([]);
+      await bridge.shutdown();
+    });
+
     it('does not reserve live capacity for a persisted branch', async () => {
       const contexts: Array<{
         operation: string;
