@@ -690,9 +690,8 @@ final class AgentTurnExecution {
             return false;
         }
         // The locked, fenced writer cannot admit a late HTTP request. Even an
-        // idle journal may contain this prompt's completed admission: replay
-        // its real result instead of replacing it with cancellation. Owed
-        // cleanup stays protected and does not prevent cancelling an unadmitted turn.
+        // idle journal may contain this prompt's completed admission; replay its
+        // real result, not cancellation. Keep owed cleanup protected, without blocking cancellation.
         java.util.Set<String> accepted;
         try {
             accepted = JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
