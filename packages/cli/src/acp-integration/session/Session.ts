@@ -19109,6 +19109,7 @@ export class Session implements SessionContext {
             }
           };
 
+          let approvedHookPermissionUpdates: unknown[] | undefined;
           if (
             !autoModeAllowed &&
             needsConfirmation(
@@ -19239,13 +19240,6 @@ export class Session implements SessionContext {
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
-                  if (hookResult.updatedPermissions) {
-                    await applyPermissionRequestHookUpdates(
-                      hookResult.updatedPermissions,
-                      this.config.getOnPersistPermissionRule?.(),
-                      this.config.getPermissionManager?.(),
-                    );
-                  }
                   if (planShellDecision.classification !== 'not-applicable') {
                     const approval = await validatePlanModeShellApproval({
                       config: this.config,
@@ -19514,6 +19508,10 @@ export class Session implements SessionContext {
                         ToolConfirmationOutcome.ProceedOnce,
                       );
                     }
+                  }
+                  if (hookHandled) {
+                    approvedHookPermissionUpdates =
+                      hookResult.updatedPermissions;
                   }
                 } else {
                   return earlyErrorResponse(
@@ -19992,6 +19990,16 @@ export class Session implements SessionContext {
           }
           const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
           if (staleTodoPlanApproval) return staleTodoPlanApproval;
+          if (approvedHookPermissionUpdates?.length) {
+            await applyPermissionRequestHookUpdates(
+              approvedHookPermissionUpdates,
+              this.config,
+              activeToolAbortSignal,
+            );
+            const persistenceCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (persistenceCancellation) return persistenceCancellation;
+          }
 
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&

@@ -48157,96 +48157,143 @@ describe('Session', () => {
       );
     });
 
-    it('adds the rules a PermissionRequest hook returns with its allow', async () => {
-      const hookSpy = vi
-        .spyOn(core, 'firePermissionRequestHook')
-        .mockResolvedValue({
-          hasDecision: true,
-          shouldAllow: true,
-          updatedPermissions: [
-            {
+    it.each(['ordinary', 'standalone'] as const)(
+      'adds permitted rules from a PermissionRequest hook in a %s session',
+      async (sourceType) => {
+        if (sourceType === 'standalone') {
+          session.dispose();
+          vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+            'standalone',
+          );
+          vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+          const expectation = {
+            canonicalSessionId: 'test-session-id',
+            root: { canonicalPath: '/managed', device: 1, inode: 2 },
+            child: {
+              name: 'child',
+              canonicalPath: '/managed/child',
+              device: 1,
+              inode: 3,
+            },
+          };
+          session.installPendingManagedConversationBinding(
+            expectation,
+            vi.fn().mockResolvedValue(undefined),
+          );
+          await session.commitManagedConversationBinding(expectation);
+          await session.releaseManagedConversationBinding(expectation);
+        }
+        const hookSpy = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: true,
+            updatedPermissions: [
+              'projectSettings',
+              'localSettings',
+              'userSettings',
+            ].map((destination) => ({
               type: 'addRules',
               rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
               behavior: 'allow',
-              destination: 'projectSettings',
-            },
-          ],
+              destination,
+            })),
+          });
+        const persistRule = vi.fn().mockResolvedValue(undefined);
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
         });
-      const persistRule = vi.fn().mockResolvedValue(undefined);
-      const executeSpy = vi.fn().mockResolvedValue({
-        llmContent: 'ok',
-        returnDisplay: 'ok',
-      });
-      const invocation = {
-        params: { command: 'npm test' },
-        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
-        getConfirmationDetails: vi.fn().mockResolvedValue({
-          type: 'exec',
-          title: 'Confirm shell',
-          command: 'npm test',
-          rootCommand: 'npm',
-          onConfirm: vi.fn().mockResolvedValue(undefined),
-        }),
-        getDescription: vi.fn().mockReturnValue('npm test'),
-        toolLocations: vi.fn().mockReturnValue([]),
-        execute: executeSpy,
-      };
-      mockToolRegistry.getTool.mockReturnValue({
-        name: core.ToolNames.SHELL,
-        kind: core.Kind.Execute,
-        build: vi.fn().mockReturnValue(invocation),
-      });
-      mockConfig.getApprovalMode = vi
-        .fn()
-        .mockReturnValue(ApprovalMode.DEFAULT);
-      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
-      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
-      mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
-      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        createStreamWithChunks([
-          {
-            type: core.StreamEventType.CHUNK,
-            value: {
-              functionCalls: [
-                {
-                  id: 'call-hook-permission-updates',
-                  name: core.ToolNames.SHELL,
-                  args: { command: 'npm test' },
-                },
+        const invocation = {
+          params: { command: 'npm test' },
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: 'npm test',
+            rootCommand: 'npm',
+            onConfirm: vi.fn().mockResolvedValue(undefined),
+          }),
+          getDescription: vi.fn().mockReturnValue('npm test'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.SHELL,
+          kind: core.Kind.Execute,
+          build: vi.fn().mockReturnValue(invocation),
+        });
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-hook-permission-updates',
+                    name: core.ToolNames.SHELL,
+                    args: { command: 'npm test' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'run the tests' }],
+          });
+        } finally {
+          hookSpy.mockRestore();
+        }
+
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(persistRule.mock.calls).toEqual(
+          sourceType === 'standalone'
+            ? [['user', 'allow', 'Bash(npm test)']]
+            : [
+                ['project', 'allow', 'Bash(npm test)'],
+                ['project', 'allow', 'Bash(npm test)'],
+                ['user', 'allow', 'Bash(npm test)'],
               ],
-            },
-          },
-        ]),
-      );
-
-      try {
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'run the tests' }],
-        });
-      } finally {
-        hookSpy.mockRestore();
-      }
-
-      expect(mockClient.requestPermission).not.toHaveBeenCalled();
-      expect(persistRule).toHaveBeenCalledWith(
-        'project',
-        'allow',
-        'Bash(npm test)',
-      );
-      expect(executeSpy).toHaveBeenCalledOnce();
-    });
+        );
+        expect(executeSpy).toHaveBeenCalledOnce();
+      },
+    );
 
     it('rejects permission-hook rewrites of unknown Plan shell commands', async () => {
       const rawCommand = "python -c 'print(1)'";
+      const persistRule = vi.fn().mockResolvedValue(undefined);
       const hookSpy = vi
         .spyOn(core, 'firePermissionRequestHook')
         .mockResolvedValue({
           hasDecision: true,
           shouldAllow: true,
           updatedInput: { command: 'touch changed.txt' },
+          updatedPermissions: [
+            {
+              type: 'addRules',
+              rules: [{ toolName: 'WebFetch' }],
+              behavior: 'allow',
+              destination: 'userSettings',
+            },
+          ],
         });
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const executeSpy = vi.fn();
@@ -48272,6 +48319,7 @@ describe('Session', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
@@ -48308,6 +48356,7 @@ describe('Session', () => {
         }),
       );
       expect(executeSpy).not.toHaveBeenCalled();
+      expect(persistRule).not.toHaveBeenCalled();
     });
 
     it('rejects ACP shell args mutated while building the invocation', async () => {

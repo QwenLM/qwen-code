@@ -13,6 +13,7 @@
  */
 
 import * as path from 'node:path';
+import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from '../permissions/types.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
@@ -271,15 +272,16 @@ const HOOK_RULE_SCOPES = new Map<unknown, 'session' | 'project' | 'user'>([
  */
 export async function applyPermissionRequestHookUpdates(
   updates: readonly unknown[],
-  persistFn:
-    | ((
-        scope: 'project' | 'user',
-        ruleType: HookRuleBehavior,
-        rule: string,
-      ) => Promise<void>)
-    | undefined,
-  pm: PermissionManager | null | undefined,
+  config: Pick<
+    Config,
+    | 'getOnPersistPermissionRule'
+    | 'getPermissionManager'
+    | 'getSessionSourceType'
+  >,
+  signal: AbortSignal,
 ): Promise<void> {
+  const persistFn = config.getOnPersistPermissionRule?.();
+  const pm = config.getPermissionManager?.();
   for (const update of updates) {
     const entry = (update ?? {}) as Record<string, unknown>;
     const behavior = entry['behavior'] as HookRuleBehavior;
@@ -295,13 +297,27 @@ export async function applyPermissionRequestHookUpdates(
       );
       continue;
     }
+    if (
+      scope === 'project' &&
+      config.getSessionSourceType?.() === 'standalone'
+    ) {
+      continue;
+    }
     for (const rule of entry['rules'] as unknown[]) {
+      if (signal.aborted) return;
       const { toolName, ruleContent } = (rule ?? {}) as Record<string, unknown>;
-      if (typeof toolName !== 'string' || !toolName.trim()) continue;
+      if (
+        typeof toolName !== 'string' ||
+        !toolName.trim() ||
+        /[()]/.test(toolName) ||
+        (ruleContent !== undefined &&
+          (typeof ruleContent !== 'string' || !ruleContent.trim()))
+      ) {
+        debugLogger.warn('Skipping malformed PermissionRequest hook rule.');
+        continue;
+      }
       const raw =
-        typeof ruleContent === 'string' && ruleContent !== ''
-          ? `${toolName}(${ruleContent})`
-          : toolName;
+        ruleContent === undefined ? toolName : `${toolName}(${ruleContent})`;
       if (scope === 'session') {
         if (behavior === 'allow') pm?.addSessionAllowRule(raw);
         else if (behavior === 'deny') pm?.addSessionDenyRule(raw);
@@ -316,6 +332,7 @@ export async function applyPermissionRequestHookUpdates(
         );
         continue;
       }
+      if (signal.aborted) return;
       pm?.addPersistentRule(raw, behavior);
     }
   }

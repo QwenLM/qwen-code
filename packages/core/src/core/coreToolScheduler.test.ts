@@ -1331,6 +1331,7 @@ describe('CoreToolScheduler', () => {
     approvalMode?: ApprovalMode;
     getApprovalMode?: () => ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
+    persistPermissionRule?: ReturnType<typeof vi.fn>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     hookSystem?: { runtimeId?: string; firePermissionDeniedEvent: Mock };
     disableHooks?: boolean;
@@ -1418,6 +1419,7 @@ describe('CoreToolScheduler', () => {
           setApprovalMode: options.setApprovalMode ?? vi.fn(),
           getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
           getPermissionManager: () => options.permissionManager,
+          getOnPersistPermissionRule: () => options.persistPermissionRule,
           getEffectiveInputModalities: () =>
             options.visionBridge || options.visionAgent ? {} : { image: true },
           getDefaultVisionBridgeModel: () =>
@@ -5821,24 +5823,37 @@ describe('CoreToolScheduler', () => {
         ['an allow', { behavior: 'allow' }, { value: 'a' }],
         [
           'an allow with a replacement',
-          { behavior: 'allow', updatedInput: { value: 'c' } },
+          {
+            behavior: 'allow',
+            updatedInput: { value: 'c' },
+            updatedPermissions: [
+              {
+                type: 'addRules',
+                rules: [{ toolName: 'WebFetch' }],
+                behavior: 'allow',
+                destination: 'projectSettings',
+              },
+            ],
+          },
           { value: 'c' },
         ],
       ])(
         'still asks the user after %s',
         async (_label, decision, expectedArgs) => {
           const execute = vi.fn().mockResolvedValue(textResult('ran'));
+          const persistPermissionRule = vi.fn().mockResolvedValue(undefined);
           const messageBus = rewriteHookBus(ask, decision);
           const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
             askTool(execute),
             messageBus,
             { value: 'a' },
-            { approvalMode: ApprovalMode.YOLO },
+            { approvalMode: ApprovalMode.YOLO, persistPermissionRule },
           );
 
           const waiting = await waitForApproval(onToolCallsUpdate);
           expect(waiting.request.args).toEqual(expectedArgs);
           expect(execute).not.toHaveBeenCalled();
+          expect(persistPermissionRule).not.toHaveBeenCalled();
           await waiting.confirmationDetails.onConfirm(
             ToolConfirmationOutcome.ProceedOnce,
           );
@@ -5847,6 +5862,7 @@ describe('CoreToolScheduler', () => {
             'success',
           );
           expect(execute.mock.calls).toEqual([[expectedArgs]]);
+          expect(persistPermissionRule).not.toHaveBeenCalled();
           expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
           expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
         },
@@ -6845,56 +6861,62 @@ describe('CoreToolScheduler', () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
-  it('adds the rules a PermissionRequest hook returns with its allow', async () => {
-    const addSessionAllowRule = vi.fn();
-    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+  it.each([false, true])(
+    'adds the rules a PermissionRequest hook returns with its allow (replacement: %s)',
+    async (replaceInput) => {
+      const addSessionAllowRule = vi.fn();
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
 
-    await scheduleAndSettle(
-      createSchedulerForLegacyToolTests({
-        toolsByName: toolMap(
-          askingTool({
-            kind: Kind.Execute,
-            getConfirmationDetails: vi
-              .fn()
-              .mockResolvedValue(
-                execDetails(
-                  'Run command',
-                  'npm test',
-                  'npm',
-                  vi.fn().mockResolvedValue(undefined),
+      await scheduleAndSettle(
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(
+            askingTool({
+              kind: Kind.Execute,
+              getConfirmationDetails: vi
+                .fn()
+                .mockResolvedValue(
+                  execDetails(
+                    'Run command',
+                    'npm test',
+                    'npm',
+                    vi.fn().mockResolvedValue(undefined),
+                  ),
                 ),
-              ),
-            execute,
+              execute,
+            }),
+          ),
+          approvalMode: ApprovalMode.DEFAULT,
+          permissionManager: {
+            isToolEnabled: vi.fn().mockResolvedValue(true),
+            findMatchingDenyRule: () => undefined,
+            hasRelevantRules: () => false,
+            evaluate: vi.fn().mockResolvedValue('default'),
+            hasMatchingAskRule: () => false,
+            addSessionAllowRule,
+          },
+          messageBus: permissionRequestHookBus({
+            behavior: 'allow',
+            ...(replaceInput && { updatedInput: { command: 'npm test' } }),
+            updatedPermissions: [
+              {
+                type: 'addRules',
+                rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+                behavior: 'allow',
+                destination: 'session',
+              },
+            ],
           }),
-        ),
-        approvalMode: ApprovalMode.DEFAULT,
-        permissionManager: {
-          isToolEnabled: vi.fn().mockResolvedValue(true),
-          findMatchingDenyRule: () => undefined,
-          hasRelevantRules: () => false,
-          evaluate: vi.fn().mockResolvedValue('default'),
-          hasMatchingAskRule: () => false,
-          addSessionAllowRule,
-        },
-        messageBus: permissionRequestHookBus({
-          behavior: 'allow',
-          updatedPermissions: [
-            {
-              type: 'addRules',
-              rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
-              behavior: 'allow',
-              destination: 'session',
-            },
-          ],
+          disableHooks: false,
         }),
-        disableHooks: false,
-      }),
-      shellRequest('hook-permission-updates', 'npm test'),
-    );
+        shellRequest('hook-permission-updates', 'npm test'),
+      );
 
-    expect(addSessionAllowRule).toHaveBeenCalledWith('Bash(npm test)');
-    expect(execute).toHaveBeenCalledOnce();
-  });
+      expect(addSessionAllowRule).toHaveBeenCalledExactlyOnceWith(
+        'Bash(npm test)',
+      );
+      expect(execute).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each(['permission-request', 'execution-guard'] as const)(
     'blocks a current-workspace ask added at %s',
@@ -11011,6 +11033,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
     interactive?: boolean;
     ideMode?: boolean;
     permissionManager?: unknown;
+    persistPermissionRule?: ReturnType<typeof vi.fn>;
     messageBus?: MessageBus;
     disableHooks?: boolean;
     avoidPermissionPrompts?: boolean;
@@ -11048,7 +11071,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
           getDisableAllHooks: () => options.disableHooks ?? true,
           getShouldAvoidPermissionPrompts: () =>
             options.avoidPermissionPrompts ?? false,
-          getOnPersistPermissionRule: () => undefined,
+          getOnPersistPermissionRule: () => options.persistPermissionRule,
           getToolInvocationGuard: () => options.toolInvocationGuard,
         },
       ),
@@ -11585,6 +11608,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
   it('rejects PermissionRequest hook parameter rewrites', async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     const execute = vi.fn();
+    const persistPermissionRule = vi.fn().mockResolvedValue(undefined);
     const messageBus = {
       request: vi.fn().mockResolvedValue(
         hookResponse('permission-hook', {
@@ -11592,6 +11616,14 @@ describe('CoreToolScheduler Plan shell routing', () => {
             decision: {
               behavior: 'allow',
               updatedInput: { command: 'touch changed.txt' },
+              updatedPermissions: [
+                {
+                  type: 'addRules',
+                  rules: [{ toolName: 'WebFetch' }],
+                  behavior: 'allow',
+                  destination: 'projectSettings',
+                },
+              ],
             },
           },
         }) satisfies HookExecutionResponse,
@@ -11604,6 +11636,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
         ],
         messageBus,
         disableHooks: false,
+        persistPermissionRule,
       },
       request('hook-rewrite', PYTHON),
     );
@@ -11613,6 +11646,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       expect.stringContaining('exact invocation changed'),
     );
     expect(execute).not.toHaveBeenCalled();
+    expect(persistPermissionRule).not.toHaveBeenCalled();
   });
 
   it('revalidates Plan shell context after a pending permission hook', async () => {

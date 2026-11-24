@@ -1302,10 +1302,10 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 }
 ```
 
-- `rules`: each `{ toolName, ruleContent }` becomes the permission rule `toolName(ruleContent)`, or `toolName` when `ruleContent` is omitted. Tool names follow the same rules as `permissions` settings, so `Bash` and `run_shell_command` both work.
+- `rules`: each `{ toolName, ruleContent }` becomes the permission rule `toolName(ruleContent)`, or `toolName` when `ruleContent` is omitted. If present, `ruleContent` must be a non-blank string. Tool names follow the same rules as `permissions` settings, so `Bash` and `run_shell_command` both work.
 - `behavior`: `"allow"`, `"deny"` or `"ask"`.
-- `destination`: `"session"` keeps the rules in memory for this session. `"projectSettings"` and `"localSettings"` write them to the project's `.qwen/settings.json`, and `"userSettings"` to `~/.qwen/settings.json`.
-- Entries are applied only when the merged decision is `allow` and that allow decides the call; when the call still needs a person's confirmation, they are not applied. Other entry types, such as `setMode` or `replaceRules`, are not supported yet and are skipped.
+- `destination`: `"session"` keeps the rules in memory for this session. `"projectSettings"` and `"localSettings"` write them to the project's `.qwen/settings.json`, and `"userSettings"` to `~/.qwen/settings.json`. Standalone sessions skip both project destinations.
+- Entries apply when the merged hook decision grants the final tool input and the call passes its pre-execution checks. A call that requires human approval does not apply hook permission updates. Unsupported entry types such as `setMode` or `replaceRules` are skipped.
 
 #### PermissionDenied
 

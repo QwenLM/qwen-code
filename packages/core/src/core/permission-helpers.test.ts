@@ -195,7 +195,7 @@ describe('persistPermissionOutcome', () => {
 });
 
 describe('applyPermissionRequestHookUpdates', () => {
-  const setup = () => {
+  const setup = (sourceType?: string) => {
     const persist = vi.fn().mockResolvedValue(undefined);
     const pm = {
       addSessionAllowRule: vi.fn(),
@@ -203,11 +203,15 @@ describe('applyPermissionRequestHookUpdates', () => {
       addSessionAskRule: vi.fn(),
       addPersistentRule: vi.fn(),
     };
-    const apply = (updates: unknown[]) =>
+    const apply = (updates: unknown[], signal = new AbortController().signal) =>
       applyPermissionRequestHookUpdates(
         updates,
-        persist,
-        pm as unknown as PermissionManager,
+        {
+          getOnPersistPermissionRule: () => persist,
+          getPermissionManager: () => pm as unknown as PermissionManager,
+          getSessionSourceType: () => sourceType,
+        },
+        signal,
       );
     return { persist, pm, apply };
   };
@@ -255,6 +259,58 @@ describe('applyPermissionRequestHookUpdates', () => {
     expect(pm.addSessionAllowRule).not.toHaveBeenCalled();
     expect(pm.addSessionAskRule).not.toHaveBeenCalled();
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('skips malformed rule content without granting access to a whole tool', async () => {
+    const { persist, pm, apply } = setup();
+    const malformedRules = [
+      { toolName: 'WebFetch', ruleContent: false },
+      { toolName: 'WebFetch', ruleContent: null },
+      { toolName: 'WebFetch', ruleContent: ' ' },
+      { toolName: 'WebFetch', ruleContent: '' },
+    ];
+    await apply([
+      addRules('allow', 'session', malformedRules),
+      addRules('allow', 'userSettings', malformedRules),
+    ]);
+    expect(pm.addSessionAllowRule).not.toHaveBeenCalled();
+    expect(pm.addPersistentRule).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('allows only user and session rule destinations in standalone sessions', async () => {
+    const { persist, pm, apply } = setup('standalone');
+    await apply([
+      addRules('allow', 'projectSettings'),
+      addRules('deny', 'localSettings'),
+      addRules('ask', 'userSettings'),
+      addRules('allow', 'session'),
+    ]);
+    expect(persist).toHaveBeenCalledExactlyOnceWith(
+      'user',
+      'ask',
+      'Bash(npm test)',
+    );
+    expect(pm.addPersistentRule).toHaveBeenCalledExactlyOnceWith(
+      'Bash(npm test)',
+      'ask',
+    );
+    expect(pm.addSessionAllowRule).toHaveBeenCalledExactlyOnceWith(
+      'Bash(npm test)',
+    );
+  });
+
+  it('stops applying rules when the tool call is cancelled during a write', async () => {
+    const { persist, pm, apply } = setup();
+    const controller = new AbortController();
+    persist.mockImplementationOnce(async () => controller.abort());
+    await apply(
+      [addRules('allow', 'projectSettings'), addRules('allow', 'session')],
+      controller.signal,
+    );
+    expect(persist).toHaveBeenCalledOnce();
+    expect(pm.addPersistentRule).not.toHaveBeenCalled();
+    expect(pm.addSessionAllowRule).not.toHaveBeenCalled();
   });
 
   it('keeps going when a rule cannot be persisted', async () => {
