@@ -1974,7 +1974,9 @@ function main(argv) {
     );
     return 1;
   }
-  const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(canonicalDir))?.[1];
+  const dirPrNumber = /^pr(\d+)-verify-/.exec(
+    normalizeFsPath(basename(canonicalDir)),
+  )?.[1];
 
   // Walk the raw OS path once without lexically collapsing symlink/.. so we
   // observe: (1) whether any symlink along the path resolved directly to
@@ -1986,6 +1988,7 @@ function main(argv) {
     try {
       const roots = new Set([canonicalDir]);
       const canonicalParent = dirname(canonicalDir);
+      const normCanonicalDir = normalizeFsPath(canonicalDir);
       const normCanonicalParent = normalizeFsPath(canonicalParent);
       const isTmpName = (p) => normalizeFsPath(basename(p)) === 'tmp';
       const isSystemTmpDir = (p) => {
@@ -2028,7 +2031,10 @@ function main(argv) {
       let cur = rawSpec.root;
       let linkHops = 0;
       const anchorPaths = [];
-      let hitRootSystemTmp = false;
+      const matchesDirectSystemTmp = (resolved) => {
+        const norm = normalizeFsPath(resolved);
+        return norm === normCanonicalParent || norm === normCanonicalDir;
+      };
       const encloseInnermostTmp = (startPath) => {
         let probe = startPath;
         while (probe && !isFilesystemRoot(probe)) {
@@ -2055,8 +2061,7 @@ function main(argv) {
               } catch {
                 return;
               }
-              if (normalizeFsPath(sysReal) === normCanonicalParent) {
-                hitRootSystemTmp = true;
+              if (matchesDirectSystemTmp(sysReal)) {
                 roots.add(parse(sysReal).root);
                 roots.add(sysReal);
               }
@@ -2070,8 +2075,7 @@ function main(argv) {
               const tmpReal = realPath(probe);
               if (!isSystemTmpDir(tmpReal)) {
                 roots.add(tmpReal);
-              } else if (normalizeFsPath(tmpReal) === normCanonicalParent) {
-                hitRootSystemTmp = true;
+              } else if (matchesDirectSystemTmp(tmpReal)) {
                 roots.add(parse(tmpReal).root);
                 roots.add(tmpReal);
               }
@@ -2095,7 +2099,7 @@ function main(argv) {
         } else {
           cur = /[\\/]$/.test(cur) ? `${cur}${part}` : `${cur}${sep}${part}`;
         }
-        if (/^pr(\d+)-verify-/.test(basename(cur))) {
+        if (/^pr(\d+)-verify-/.test(normalizeFsPath(basename(cur)))) {
           sawVerifyRoundSegment = true;
         }
         const st = lstatSync(cur);
@@ -2132,12 +2136,10 @@ function main(argv) {
       }
 
       if (sawVerifyRoundSegment) {
-        encloseInnermostTmp(canonicalParent);
+        encloseInnermostTmp(canonicalDir);
         for (const anchor of anchorPaths) {
           encloseInnermostTmp(anchor);
         }
-      } else if (hitRootSystemTmp) {
-        return { roots: [canonicalDir], leafSymlink };
       }
       return { roots: [...roots], leafSymlink };
     } catch (error) {

@@ -5561,5 +5561,84 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         rmSync(r9SysSub, { recursive: true, force: true });
       }
     }
+
+    // 8z. Zero-symlink "<clone>/tmp/pr*/.." landing on <clone>/tmp itself
+    // still encloses <clone>, and uppercase PR<N>-verify-* cannot evade
+    // cross-PR or clone trust-root checks on case-insensitive filesystems.
+    const r10Clone = join(base, 'r10-tmpself-clone');
+    const r10Tmp = join(r10Clone, 'tmp');
+    const r10Child = join(r10Tmp, 'pr17185-verify-20261124-042000');
+    mkdirSync(join(r10Tmp, 'evidence'), { recursive: true });
+    mkdirSync(r10Child, { recursive: true });
+    writeFileSync(join(r10Tmp, 'report.md'), validFiles().report);
+    writeFileSync(join(r10Tmp, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(join(r10Tmp, 'assertions.json'), validFiles().assertions);
+    writeFileSync(
+      join(r10Tmp, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(r10Tmp, 'evidence', '01-ab-cells.png'), 'png');
+    const r10CloneCtx = join(r10Clone, 'forged-ctx.json');
+    writeFileSync(r10CloneCtx, ctxText);
+    const r10SelfRes = run([
+      '--context',
+      r10CloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${r10Child}/..`,
+    ]);
+    expect(r10SelfRes.status).toBe(1);
+    expect(r10SelfRes.stderr).toMatch(/must not point inside/);
+
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      const upperRound = join(
+        r10Clone,
+        'tmp',
+        'PR99999-verify-20261124-042500',
+      );
+      mkdirSync(join(upperRound, 'evidence'), { recursive: true });
+      writeFileSync(join(upperRound, 'report.md'), validFiles().report);
+      writeFileSync(join(upperRound, 'verdict.txt'), validFiles().verdict);
+      writeFileSync(
+        join(upperRound, 'assertions.json'),
+        validFiles().assertions,
+      );
+      writeFileSync(
+        join(upperRound, 'boundary.json'),
+        JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+      );
+      writeFileSync(join(upperRound, 'evidence', '01-ab-cells.png'), 'png');
+      const upperCrossPrRes = run([
+        '--context',
+        hostCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        upperRound,
+      ]);
+      expect(upperCrossPrRes.status).toBe(1);
+      expect(upperCrossPrRes.stdout).toMatch(/names PR 99999/);
+
+      const upperTrustRes = run([
+        '--context',
+        r10CloneCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        upperRound,
+      ]);
+      expect(upperTrustRes.status).toBe(1);
+      expect(upperTrustRes.stderr).toMatch(/must not point inside/);
+    }
   });
 });
