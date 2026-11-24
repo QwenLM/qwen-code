@@ -2382,7 +2382,7 @@ describe('SessionTranscriptReader', () => {
       const out = createWriteStream(target);
       let parent: string | null = null;
       const payload = 'dense-payload-' + 'x'.repeat(240);
-      for (let i = 0; i < 200000; i++) {
+      for (let i = 0; i < 260000; i++) {
         const uuid = 'dense-' + String(i).padStart(7, '0');
         const rec = {
           uuid,
@@ -2422,6 +2422,7 @@ describe('SessionTranscriptReader', () => {
       for (const name of Object.keys(cleanEnv)) {
         if (name.startsWith('QWEN_')) delete cleanEnv[name];
       }
+      delete cleanEnv['NODE_OPTIONS'];
       const child = spawnSync(
         process.execPath,
         ['--max-old-space-size=256', '--input-type=module', '-e', probe],
@@ -2448,7 +2449,7 @@ describe('SessionTranscriptReader', () => {
       });
       expect(outcome.maxBytes).toBeLessThan(512 * 1024 * 1024);
       expect(outcome.memorySamples).toBeGreaterThan(0);
-      expect(outcome.memorySamples).toBeLessThan(200_000 / 10);
+      expect(outcome.memorySamples).toBeLessThan(260_000 / 10);
       expect(outcome.snapshotSize).toBe(fileSize);
     } finally {
       await fs.rm(runtime, { recursive: true, force: true });
@@ -2577,7 +2578,7 @@ describe('SessionTranscriptReader', () => {
       const target = path.join(chats, denseSessionId + '.jsonl');
       const out = createWriteStream(target);
       let parent: string | null = null;
-      for (let i = 0; i < 340000; i += 1) {
+      for (let i = 0; i < 420000; i += 1) {
         const uuid = 'idle-' + String(i).padStart(7, '0');
         const rec = {
           uuid,
@@ -2648,14 +2649,13 @@ describe('SessionTranscriptReader', () => {
     await writeRecords(records);
     const expectedPromptTime = records[0]?.timestamp;
     setSessionTranscriptAvailableHeapBudgetForTest(64 * 1024);
-    const original = process.memoryUsage.bind(process);
+    const baseline = process.memoryUsage();
     let calls = 0;
     const spy = vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
       calls += 1;
-      const usage = original();
       return calls === 1
-        ? usage
-        : { ...usage, heapUsed: usage.heapUsed + 128 * 1024 };
+        ? baseline
+        : { ...baseline, heapUsed: baseline.heapUsed + 128 * 1024 };
     });
     const reader = newReader();
     try {
@@ -2665,6 +2665,40 @@ describe('SessionTranscriptReader', () => {
           retryable: true,
         },
       );
+    } finally {
+      spy.mockRestore();
+      setSessionTranscriptAvailableHeapBudgetForTest(undefined);
+    }
+
+    expect(await reader.getLastUserPromptAt(sessionId)).toBe(
+      expectedPromptTime,
+    );
+  });
+
+  it('marks a final heap-growth spike retryable and does not poison the prompt cache', async () => {
+    const records = longTurn(4, () => 'answer');
+    await writeRecords(records);
+    const expectedPromptTime = records[0]?.timestamp;
+    setSessionTranscriptAvailableHeapBudgetForTest(64 * 1024);
+    const baseline = process.memoryUsage();
+    let calls = 0;
+    const spy = vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
+      calls += 1;
+      // Calls 1 (buildHeapUsedStart) and 2 (sequence 1 loop sample) stay at
+      // baseline; call 3 (finalHeapGrowth after the scan loop) spikes above 64 KiB.
+      return calls <= 2
+        ? baseline
+        : { ...baseline, heapUsed: baseline.heapUsed + 128 * 1024 };
+    });
+    const reader = newReader();
+    try {
+      await expect(reader.getLastUserPromptAt(sessionId)).rejects.toMatchObject(
+        {
+          dimension: 'index',
+          retryable: true,
+        },
+      );
+      expect(calls).toBe(3);
     } finally {
       spy.mockRestore();
       setSessionTranscriptAvailableHeapBudgetForTest(undefined);

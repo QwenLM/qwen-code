@@ -2654,10 +2654,11 @@ async function buildIndex(params: {
   const remainingHeapBudget =
     availableHeapBudgetForTest ??
     Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
-  // V8's heap_size_limit sits ~96 MiB above --max-old-space-size, so derive
-  // the real-heap OOM backstop from estimated old-space headroom (3/4 of
-  // available - 96 MiB, capped at 5/8 of available): tight 192/256 MiB heaps
-  // stop safely below Mark-Compact OOM while 512+ MiB heaps stay above GC noise.
+  // V8's heap_size_limit exceeds --max-old-space-size by a platform-dependent
+  // margin (~96 MiB on x86_64 Node 26; larger on aarch64/Node 24). Deducting
+  // 96 MiB keeps 256+ MiB heaps below Mark-Compact OOM while giving 512+ MiB
+  // heaps 5/8 headroom above GC noise; sub-256 MiB heaps where heap_size_limit
+  // is ~2x old-space remain bounded by V8 itself.
   const estimatedOldSpaceAvailableBytes = Math.max(
     0,
     availableHeapBytes - 96 * 1024 * 1024,
