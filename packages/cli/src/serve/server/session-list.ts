@@ -1105,7 +1105,15 @@ function readPersistedSidecars(
   revalidateWorktree: boolean,
 ): Promise<BridgeSessionSummary> {
   signal?.throwIfAborted();
-  let load = persistedSidecarLoads.get(session);
+  const cachedLoad = persistedSidecarLoads.get(session);
+  let load = cachedLoad;
+  // A load created or still pending for this call already read the sidecar
+  // in this request; revalidating it again would double every page read.
+  const revalidateCachedWorktree =
+    revalidateWorktree &&
+    cachedLoad !== undefined &&
+    !cachedLoad.controller.signal.aborted &&
+    cachedLoad.settled;
   if (!load || load.controller.signal.aborted) {
     const controller = new AbortController();
     const read = async () => {
@@ -1141,7 +1149,7 @@ function readPersistedSidecars(
   const metadataLoad = load;
   return waitForSessionListLoad(metadataLoad, signal).then(async (cached) => {
     // A fresh scan and its joiners already share this validated projection.
-    if (!revalidateWorktree) return clonePersistedSummary(cached);
+    if (!revalidateCachedWorktree) return clonePersistedSummary(cached);
     let worktreeLoad = metadataLoad.worktreeLoad;
     if (
       !worktreeLoad ||

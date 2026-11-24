@@ -187,16 +187,28 @@ describe('merged session catalog pagination', () => {
         [first.sessionId, 'active'],
         [second.sessionId, 'active'],
       ];
-      expect(worktree.mock.calls).toEqual([
-        ...persistedReads,
-        // Revalidate the selected current worktree on the cache-hit page.
-        [second.sessionId, 'active'],
-      ]);
+      expect(worktree.mock.calls).toEqual(persistedReads);
       expect(artifact.mock.calls).toEqual(persistedReads);
       expect(goal.mock.calls).toEqual(persistedReads);
       expect(pr.mock.calls).toEqual([
         ...persistedReads,
         [live.sessionId, 'active'],
+      ]);
+
+      // A later request that reuses the settled projection revalidates the
+      // selected row instead of trusting the cached removal state.
+      const repeatedPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      expect(repeatedPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(worktree.mock.calls).toEqual([
+        ...persistedReads,
+        [second.sessionId, 'active'],
       ]);
     },
   );

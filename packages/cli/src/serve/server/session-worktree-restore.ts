@@ -35,6 +35,7 @@ import {
   type SessionArchiveCoordinator,
 } from './session-archive.js';
 import type { WorktreeRestoreHandoff } from './session-restore.js';
+import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
 import {
   assertNoConflictingWorktreeOwners,
   assertRestoreCoordinates,
@@ -125,6 +126,8 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
   // A missing checkout intentionally uses the raw managed-path lock key.
   const release = await acquireWorktreeCleanupLock(initial);
   let handedOff = false;
+  let handoffKey = initial.lockKey;
+  let releaseRealKey: (() => void) | undefined;
   try {
     const task = archiveCoordinator.runExclusiveMany([sessionId], async () => {
       const location = await service.getMaintainableSessionLocation(sessionId);
@@ -350,19 +353,34 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
           'Restored binding failed its final state check',
         );
       }
+      // The lock key was taken while the checkout was missing, so a symlinked
+      // worktrees parent kept the raw spelling. Every operation after this
+      // point derives the resolved key; hold it before handing the checkout
+      // over so the raw key never outlives the reconstruction.
+      const canonicalKey = canonicalPathForTesting(expected);
+      if (canonicalKey !== initial.lockKey) {
+        releaseRealKey = await acquireWorktreeOwnershipOp(canonicalKey);
+        handoffKey = canonicalKey;
+      }
       return { session, branch: actual.branch, reconstructed: !existing };
     });
     const binding = await task;
     if (options.handoffWorktreeOwnership) {
       options.handoffWorktreeOwnership({
-        worktreeKey: initial.lockKey,
-        release,
+        worktreeKey: handoffKey,
+        release: () => {
+          releaseRealKey?.();
+          release();
+        },
       });
       handedOff = true;
     }
     return binding;
   } finally {
-    if (!handedOff) release();
+    if (!handedOff) {
+      releaseRealKey?.();
+      release();
+    }
   }
 }
 

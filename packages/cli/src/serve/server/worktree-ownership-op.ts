@@ -33,44 +33,7 @@
  * `resolveWorktreeOwnershipTarget` (`routes/session.ts`), which refuses an
  * unresolvable checkout, so it only ever locks a resolved path.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-
 const worktreeOwnershipOpTails = new Map<string, Promise<void>>();
-
-/**
- * Canonicalizes a worktree path consistently before and after checkout
- * removal: resolves existing paths via `fs.realpathSync`, and for a genuinely
- * absent leaf (`ENOENT`) resolves the nearest existing ancestor so symlinked
- * parents (including macOS `/var -> /private/var`) yield the same lock key and
- * coordinate match across deletion and reconstruction.
- */
-export function canonicalWorktreePath(candidate: string): string {
-  if (candidate.length === 0) return candidate;
-  try {
-    return fs.realpathSync(candidate);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return candidate;
-    }
-  }
-  const trailing: string[] = [];
-  let current = candidate;
-  for (;;) {
-    const parent = path.dirname(current);
-    if (parent === current) return candidate;
-    trailing.push(path.basename(current));
-    current = parent;
-    try {
-      const realAncestor = fs.realpathSync(current);
-      return path.join(realAncestor, ...trailing.reverse());
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        return candidate;
-      }
-    }
-  }
-}
 
 export async function acquireWorktreeOwnershipOp(
   worktreeKey: string,

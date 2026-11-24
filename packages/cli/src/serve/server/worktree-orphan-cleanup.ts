@@ -32,10 +32,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { runGit } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
-import {
-  acquireWorktreeOwnershipOp,
-  canonicalWorktreePath,
-} from './worktree-ownership-op.js';
+import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
 
@@ -68,7 +65,11 @@ export interface WorktreeCleanupPlan {
  * too.
  */
 function canonicalPath(candidate: string): string {
-  return canonicalWorktreePath(candidate);
+  try {
+    return fs.realpathSync(candidate);
+  } catch {
+    return candidate;
+  }
 }
 
 export const canonicalPathForTesting = canonicalPath;
