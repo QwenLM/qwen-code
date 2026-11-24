@@ -2125,13 +2125,15 @@ export async function settleCrashedWakeTurnAftermath(params: {
 // the pump that would deliver it can never run. H6: an automation input
 // rides the same pump and the same rules; H5: so does a channel input.
 /** The wake sources whose interrupted approval wait the pump resumes, so
- * the only ones whose wait may park (#18149 S4). Channel, `pr_event` and
- * session-message Turns keep their own settlement. */
+ * the only ones whose wait may park (#18149 S4, S4b). Session-message
+ * Turns keep their own settlement. */
 function isResumableWakeSource(source: unknown): boolean {
   return (
     source === 'monitor' ||
     source === AUTOMATION_INPUT_SOURCE ||
     source === LOOP_INPUT_SOURCE ||
+    source === CHANNEL_INPUT_SOURCE ||
+    source === PR_EVENT_INPUT_SOURCE ||
     isChildNotificationSource(source)
   );
 }
@@ -8294,9 +8296,9 @@ export function registerHostedHarnessSessionRoutes(
               // keep the recovery-blocked freeze their fleet owns.
               settleInterrupted: settleInterruptedChannelWake,
               // A wake turn's native approval wait resumes on the terms the
-              // takeover arm applies to a parked prompt's. Channel, pr_event
-              // and session-message turns keep their own settlement for now
-              // (#18149 Stage 2).
+              // takeover arm applies to a parked prompt's, ahead of a channel
+              // turn's own settlement, which keeps every other wait.
+              // Session-message turns keep their own settlement.
               resumeInterrupted: async (turn) => {
                 if (
                   !isResumableWakeSource(turn.source) ||

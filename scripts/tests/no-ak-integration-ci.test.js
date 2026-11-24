@@ -241,6 +241,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/qwen-serve-routes.test.ts',
       './cli/qwen-serve-restart-recovery.test.ts',
       './cli/qwen-serve-liveness-grace.test.ts',
+      './cli/qwen-serve-scheduled-task-delete.test.ts',
       './cli/qwen-serve-session-cd.test.ts',
       './cli/qwen-serve-workspace-input-history.test.ts',
       './cli/qwen-serve-generated-ui-state.test.ts',
