@@ -82,13 +82,15 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 
 ## 范围边界
 
-- 范围内：`usage-dashboard-service.ts`、`tokenUsageService.ts`（仅读取路径）、
-  `usage-stats` 路由、Web Shell 用量页的输出 tile、持久化侧
-  （`UiTelemetryService`、两处重放点、各运行落盘调用方）、`usageHistoryService`
-  的记录标记与归约，以及 TUI 跨会话视图（`statsDataService.loadStatsData`）。
-- 范围外：`/stats` 的会话视图（其「累计含恢复历史」的语义是有意为之）、台账记录 schema、
-  用量记录的版本升级或迁移、迁移已落盘的存量记录、费用计费、重放缓存的扫描边界。
-  两个可选的、纯增量的来源标记（`runScoped` 与 `transcriptRebuild`）在范围内，不构成 schema 版本变更。
+- 范围内：`usage-dashboard-service.ts`、`tokenUsageService.ts` 中将真实响应写入可选
+  `executionId` 的路径，以及该字段的读取与已结束月份 copy/merge、`usage-stats` 路由、
+  Web Shell 用量页的输出 tile、持久化侧（`UiTelemetryService`、两处重放点、各运行落盘调用方）、
+  `usageHistoryService` 的记录标记与归约，以及 TUI 跨会话视图（`statsDataService.loadStatsData`）。
+- 范围外：`/stats` 的会话视图（其「累计含恢复历史」的语义是有意为之）、台账或用量记录的
+  版本升级或迁移、改写已落盘的存量记录、费用计费、重放缓存的扫描边界。
+  新写入响应行的可选 `executionId` 不需要版本变更；两个可选、纯增量的来源标记
+  （`runScoped` 和 `transcriptRebuild`）也不构成 schema 版本变更。
+  按 root 配对台账 / 历史及其重放缓存生命周期是 root 隔离修正，不改变单独设计中的重放扫描边界。
 
 ## 已实现方案（选项 A）
 
@@ -107,8 +109,8 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   而不是让整个表面失败。
 - `loadUsageDashboardSources()` 以 `LEDGER_WINDOW_DAYS = 366` 同时加载会话历史与台账，
   与路由的 `heatmapDays` 上限一致，因此一次缓存加载即可覆盖调用方可能请求的任何窗口。
-- 路由现在只有一个可注入依赖 `loadSources`，同时返回两者，这样注入了会话记录的测试不会
-  意外读到操作者真实的台账。
+- 测试可通过 `loadSources` 注入整个数据源集合。真实加载器还接受 `getLedgerRuntimeBaseDirs`，
+  用于提供已注册 workspace 的 runtime roots；不替换整个加载器的调用方需要这一依赖来聚合这些根目录。
 - 输出 tile 渲染 `summary.outputTokens`，由 core 通过 `outputTokenCount` 逐模型归一化（缺陷 1）。
 
 ## 已实现方案（持久化侧）
@@ -149,7 +151,7 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 （`summarizeTranscriptFile`、持久化迁移、删除前抢救）另写 `transcriptRebuild: true`，
 从而把已测量的历史与来源不可知的旧累计记录分开。
 
-`dedupBySessionId` 先按 sessionId 分组，然后：
+`dedupBySessionId` 先按 sessionId 和 project 分组，然后：
 
 - **组内没有 run-scoped 记录** -> 普通累计副本继续 last-wins；但更新时间更晚的真实 transcript 重建可以按实际事件时间替代较旧重建快照，防止旧快照隐藏之后出现的 daemon 原生用量。
 - **组内有 run-scoped 记录** -> 保留各次不相交运行。运行窗口是半开区间：
@@ -170,6 +172,48 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   绝不能直接比较这两类时间就声称发生了不同消费；覆盖由请求身份或有界的旧证据判定。
   重建证据不完整或存在歧义时，仍采用保守的已知 run 口径。
 
+**精确的逐响应台账身份。** 真实 API 响应提供 `execution_id` 时，成功响应的台账行将其保存为可选 `executionId`，与台账行自己的随机 `id` 不同。
+当前月读取以及已结束月份的 copy/merge 都保留这一证据。对 run-scoped 记录，符合条件的日 / 模型 / session 台账桶必须共同证明其非空 `successfulRequestExecutionIds` 的全部 ID；证明可以在一个本地日内完成，也可以跨多个本地日收集。
+每个 ID 必须来自属于该记录的 session 的同一条响应行，不能把一行中的 session 与另一行中的 ID 拼成证明。
+先收集每个目标 ID 在所有相关日 / 模型桶中的响应指纹，再决定是否可证：即使另一个日期或只有 API 耗时不同，该 ID 仍未证明。
+按台账与日 / 模型惰性建索引保留候选，避免为每条 run 重扫整个桶。
+执行 ID 是可选的：某次响应没有 ID，就使成功 ID 列表不完整，已知的匹配 ID 不能代替其余响应的连接证据。
+owner-aware 读取保留 run 和台账，不用日期 / 模型 / 计数代替缺失证明，接受与其它未解决证据边界相同的已披露潜在重复。
+各模型成功响应数也必须与被证明的 ID 数相符。消费计数比较必须承认 provider 已定义的等价口径，而不是无条件做算术相等：除下述 cache-only 归一化外，input 必须精确相等，不能把 cached 数之内的任意 input 差异视为同一 API 响应；output、cached、reasoning 计数、成功请求数与 grand total 仍严格检查。仅当原始 session input 为零、cached 为正时，允许台账以 exact cached 值作为代理 input，且台账总额等于记录的自洽总额，或恰好多出完整的 cached 部分。这兼容缺 input / total 的旧数据，但不能覆盖另一条独立消费；100-token 响应不能仅凭相同 execution ID 替代独立观察的 200-token 记录。缺 total 时逐 row 按自己的 `authType` 汇总 `inputTokens + outputTokens + (outputIncludesThoughts(authType) ? 0 : thoughtsTokens)`，不能把混合 OpenAI / Gemini 汇成任一 provider 的单一 flag；该合计只有在 session 的完整 input / output / reasoning 分项总额一致时才能匹配。缺少、空、不同或不完整的身份都不能通过精确 ID 路径删除另一条独立真实消费。
+有界的 transcript / 所有权回退继续用于兼容旧数据，但缺失或冲突的 owning-root path 不能授权一次碰巧的连接。
+具备归属信息的读取方不能把新的冲突身份降级成 session / 日 / 模型模糊覆盖；没有这类元数据的原始 legacy 日表保留兼容回退。
+不完整的元数据宁可保留已披露的 legacy 潜在重复，也不由计数去猜事件同一性。旧记录缺 `project` 时，不能只因 session、时间窗与 token 相符便归入当前 project；没有真实归属证据，就得保守保留它与重建记录之间可能存在的重复，不把目录名或 sanitized 拼写当作项目归属证明。双方明确属于不同 project 的同 ID 记录仍分别保留。
+这把成功响应与没有成功响应台账行的失败尝试分开，避免单桶覆盖误判。
+可选 `executionId` 存在但不是字符串时，该台账行对聚合无效。
+
+有 owning scope 的台账可以对本地真实 `transcriptRebuild` 使用同样的证明；显式 runtime-scoped 构建也可以跨 root 建立该证明。
+普通累计记录并不因此变成运行增量证明。
+调用方明确给出的当前 live 记录是另一个 owner 边界，而不是同 session 无条件豁免。
+只有这条确切记录的请求 ID 完整、唯一、非空且没有记录的模型错误时，才允许这些 request ID 代替旧快照缺失的成功 ID 列表；
+每个 ID 仍必须通过同一响应行指纹和模型成功数证明，不能给失败请求、未知连接或其它项目的同 ID 记录授权。
+没有这类 ID 时保留该 live 记录与台账，不走旧的模糊回退去抹掉另一笔独立响应；活动请求 ID 尚未能在完整执行证据表中找到时，也不能被更早的台账覆盖。若活动记录只有部分响应已落盘，只扣减同模型、唯一响应指纹且与活动计数相容的台账行，保留未落盘残量，不把整条记录再加到台账旁边。
+全局同 session、跨 project 的歧义不撤销另一 root 自己完整且归属相容的精确证明；该证明必须在这个 root 的 transcript / project 归属内独立成立，不能使用合并 token 总数代替。
+
+跨 root 的内存证据表只提供日 / 模型、session 与执行 ID 元数据，token 计数为零。
+只有精确 ID 证明使用证据日期与本地 root 日期的并集，并包含实际查询 root 的日期；空的全局台账不能隐藏另一完整 root 的日桶。正常跨日的响应可以使用完整本地证明；拒绝的是同一 execution ID 的响应指纹冲突，而不是日期数量。旧的 legacy fallback 仍只看本地 root 的日期及 owning transcript scope。
+
+跨 root 的重复台账行必须有完整一致的响应指纹：原始 localDate、session、模型、执行 ID、认证类型、来源、响应时间戳以及全部响应计数（含 API 耗时）。
+随机台账行 `id` 不参与同一性判断。只从内存聚合中扣减后续完全相同的行，不改磁盘台账；不同证据仍全部保留。
+加与扣共用同一 provider 计数归一化，包含只有总量的行。台账自己的 session / 执行 ID 索引及 owning scope 随该 ledger map 一起复制；
+不能错误地从 records 数组借 scope，否则归属证明会被清空。每份台账表按日 / 模型在私有 WeakMap 中保存 session→executionId→未加工响应行及其指纹集，只在证据完整时用于候选查找；合并执行证据会使派生索引失效，预算释放或证据不完整只能得到空证明，不复用旧索引冒充更完整证据。这些都是只读内存元数据，不向台账 / dashboard JSON 加字段，也不写盘。已有覆盖快照的 future 对账读取不能每次重复追加同一快照；迟到事件仍可被发现，真正新项目的首次迁移只在必要时写入一次，不让已知覆盖行无限增长。
+
+**有界身份证明。** 月度 JSONL 仍然流式读取，但每份逻辑台账表（含 completed-month 与合并派生表）最多为身份证明保留 `MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS`（10,000）条完整响应行。
+流式读取或合并超过预算时，释放私有执行证据并标记不完整，不再保存完整响应行或第二套永久执行 ID 索引；每个有效范围内行的 session / 模型 / 日计数仍完整累加。
+没有 execution ID 的行在私有内存中只保留日 / 模型 / session 存在性作为歧义证据，并计入上述同一预算，不另开容量；合并时同样保留这些元数据。它们不能被当成没有台账，也不能由 legacy fallback 用来抹掉具有已知执行 ID 的响应。
+已结束月份聚合另行保存受同一预算限制的末日完整身份快照。只有窄窗口恰好从该日开始且文件签名未变时才复用快照；其他窄窗口重新流式读取以取得窗口内证据。此时计数与身份证据均来自同一次扫描，不与旧快照混用，因此窗口重扫期间的追加不会造成计数与身份证明版本错位。该月份内较早的行不会耗尽窄窗口预算，也不会因整月证明不完整而替换其末日精确身份。
+
+超过上限后，`isCompleteLedgerExecutionEvidence` 为 false，不能把有限样本伪装成全量证据，不能使用该受限证据做新的精确 ID 证明或跨 root 台账扣减。各 root 的完整表与此受限合并证据独立查询，丢弃超限合并不会撤销本地仍然完整的响应证明。
+run-scoped 的旧日/session 回退仍需唯一预期 transcript 路径；scoped 归属有歧义时保留潜在重复。
+没有逐响应执行证据时，缺失的旧路径、未知项目或有限身份预算都不能变成新的精确 ID 证明。
+无作用域 legacy 累计记录保留既有的有限日/session 兼容回退，但现代冲突身份证据仍否决 session / 模型捷径。
+证据完整时，冲突或不完整身份仍是禁止模糊覆盖的否决，而不是 session / 模型捷径。
+这只释放可重建内存证据，不改写 transcript、持久运行记录或台账行，也不宣称受限预算下能完成全部精确去重。
+
 **独立迟到证据。** 公开 transcript 只与含内部 helper 调用的 run 共享部分身份时，主重建自身可能有歧义，不能再次相加；
 但一个新 API 响应或错误只要带已知 run 没有的 `execution_id`，且可用时间严格晚于该 run 的落盘时钟，就作为临时 `transcriptSupplement` 保留。
 它不是新 run，也绝不持久化为整段历史的权威记录。工具和文件计数没有执行 id 连接键，晚到的工具或文件记录不能用来证明先前 run 的覆盖；
@@ -183,13 +227,18 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 无法解析的会话级起止时钟使整会话累计重建无效，但不能连带丢弃已经识别的边界后补充；
 即使返回 `record: null`，这些补充也必须保留，而不是随无效会话时钟一起丢失。
 
-来源标记、可选 `requestExecutionIds` 数组及可选失败次数/耗时元数据都是增量补充；所有按 `version === 1` 过滤的读取方继续可用，无需 schema 迁移或就地改写历史。
+来源标记、可选 `requestExecutionIds` 与 `successfulRequestExecutionIds` 数组及可选失败次数/耗时元数据都是增量补充；所有按 `version === 1` 过滤的读取方继续可用，无需 schema 迁移或就地改写历史。
 
 `usage_record.jsonl` 为空或缺失时，即使传入了当前会话 id，也保留原本的首次全量迁移。
 当前会话仅被排除出**落盘迁移**，并不阻止发现其它旧 transcript。已有记录后，`loadUsageHistory()`
 只为确实需要的 run-scoped id 与明确指定的当前会话定向补建；无需补建时，直接返回归约结果，
 不会借此对其它未记录会话做普查。仍只纳入带可用时间戳且严格早于相关最早运行起点的事件，
 后续活动归属各自 run；按边界补出的结果仅在内存中归并，不另写成整会话权威快照。
+
+调用方提供当前 project root 时，持久化迁移只排除这个精确的 project/session 对，不排除另一 project 下 session id 相同的 transcript。
+当前 project 的快照留给其自身退出时的持久化，另一 project 的重建则在重复加载和必要的 transcript 删除后依然可靠持久化。
+另一 project 的重建记录不能缩小当前会话的目录候选，也不能在当前 project 自身尚未检查覆盖时授权早退回。
+未提供 project-root 选项时，保留旧的整会话排除行为。
 
 定向 `loadUsageHistory` 对已有 `transcriptRebuild` 保留快路径，不只因为后续 run 出现就重新打开。实时发现则重新验证符合条件的近期文件；
 文件 `(mtimeMs, size)` 签名改变后，旧重建必然失效。带完整执行身份的 run 读取整个 transcript，只有没有身份的旧 run 才沿用最早运行起点，
@@ -212,7 +261,9 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 
 只要持久历史非空（即使全是 run 增量），未记录的 daemon transcript 仍受 `LIVE_REBUILD_WINDOW_DAYS`
 的 mtime 窗口约束，不需要无请求凭据，也不扩展到无关旧文件。只有空历史才执行首次无界迁移；
-显式 `sinceMs: 0` 仍是明确的脱离窗口选项。`loadUsageHistoryWithLive` 以只读方式合入这部分近期活动；
+显式 `sinceMs: 0` 仍是明确的脱离窗口选项。按 runtime 分配持久记录不会改变这项决定：
+某个 root 的空子集仍依据未分区的完整历史使用有界窗口，不能重新开启一次无界首次迁移。
+`loadUsageHistoryWithLive` 以只读方式合入这部分近期活动；
 明确指定的旧 run 仍可在窗口之外得到精确的边界补建，而不打开无关的旧 transcript。
 
 分支复制的父历史不属于分支新消耗。`forkSession` 会给每条父记录写入 `forkedFrom`；
@@ -235,6 +286,100 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 
 **有意的取舍：** 跨越升级时点且来源不明的普通累计记录让位于运行增量，即使它覆盖更早的活动。
 真实 transcript 重建与后续不相交运行则不必丢弃。少算这段有歧义的重叠是安全方向，重复计算不是。
+
+**已知 runtime 根目录同时拥有自己的 transcript 与台账。** daemon 不是先混掉 root 再比较，
+而是保持每个根目录的 records / ledger 配对，在各自配对内做覆盖，再合计逐根 token 表。
+只有完整的逐响应 ID 证明或完全一致的台账响应行能跨 root 归并，不借另一个 root 的聚合 token 数来猜归属。
+回放显式接收 transcript 所属根目录，不假设固定 runtime context 也会改变全局 Qwen 目录。
+默认全局根目录仍是独立来源，包括已经找不到 runtime 的记录。内部新增的 scope 配对不改动 dashboard 的 JSON 字段形状。
+
+即使没有找到可用的 transcript replay 摘要，每个已知 root 的台账仍保留它的 owning runtime root。
+这是确定归属边界的依据，而不是可任意连接的通配符。transcript-path 索引随 ledger map 一起复制；
+缺失或有歧义的 transcript 不能因此授权一份碰巧同会话的台账覆盖另一项目的真实消费。
+
+持久记录只有在「精确 session + project」对应的一个真实 `SessionService` transcript 文件确实位于某 runtime 根目录时，
+才归属该 runtime。找不到归属或存在多个候选的记录留在无外部 ledger 关联的全局保守来源中，
+不会仅凭 session id 被连接到另一个 root。这个归属检查不向台账行添加 project 路径，
+也不从日期、模型或聚合计数推导逐请求事件连接。
+单个候选也不是重写一个冲突历史 run 的许可。每个 root 的重放只用持久记录计算边界，
+先分别保留它与重放结果，再交给严格的消费身份归并；即使只留下一个真实 transcript 候选，
+ID 或模型消费字段不一致时也保留两份真实记录。仅有完整一致的副本证据才允许合并。
+在已确定的 root 内，彼此兼容的重建仍沿用原来的归约规则，更完整的后续快照覆盖旧快照，而不是重复相加。
+部分身份，或同一请求集合却有冲突模型消费字段的记录，必须绕开这条普通归并路径，交给严格身份比较。
+这样既允许正常的 transcript 追加，也不会把 100-token 与 200-token 的冲突当成同一份证据。
+
+副本归并与台账覆盖是两件事：候选必须具备相同的 project/session 和同一非空、唯一、完整的执行 ID 集合，且 ID 数量等于记录的模型请求数。
+模型名称按字典序对齐后，其请求、错误、input、output、cache-read、reasoning 与 total-token 计数也必须一致；
+相同 ID 但 token 证据冲突的记录仍各自保留。API 与失败耗时是需要保留或归并的观测信息，不是为了对齐身份而丢弃的消费字段。
+补充记录以及未识别或部分识别的记录从不参与。优先保留全局来源，使模糊的归属仍与其台账配对。
+沿用的运行 / 重建身份、工具 / 文件与技能证据决定归并，能保留更真实的 API 延迟与观测信息，而不是为了对齐计数删除这些数据。
+只有非重建快照在比较时临时视为 run-scoped；重建记录保留自身覆盖规则，并在对外提供或持久化前恢复原来源。对消费身份完全相同的持久非重建副本，即便写入窗口不相交，也允许折叠，避免把窗口差异伪造成第二笔 API 消费；不同 ID、不同消费计数或不完整出处从不因此合并。
+被选中的旧 run 若缺少成功 ID，只能当组内所有已定义候选数组具有相同唯一排序内容时，继承对应数组。
+冲突集合不能把全部 request ID 伪造成成功集合，也不能覆盖被选记录自己的成功 ID；缺失仍保守处理。
+若不能唯一归约为一条，整组原记录全部保留。
+这里不向另一个 root 借用聚合台账计数作覆盖，也不从日期、模型或聚合计数推导事件同一性；只有上述完整的执行 ID 证明可以跨 root。
+
+**session id 不能跨 project 作为归并命名空间。** transcript 回放与持久运行归约分别保留 project/session 对，
+即使同一个 runtime 根目录中出现相同 id 或相同时间窗。同一 project 内仍保留目录首项选择，
+以及既有的同窗口计数与身份规则。project 仍是独立输入，不能从日期、模型或聚合总数伪造事件连接。
+transcript 无法给出有效 project 时钟时，按文件保留已识别的补充，不让同 session 的首项规则吞掉它们。
+
+已知 root 的台账检查使用私有内存索引，记录既有项目枚举中实际出现的 transcript 路径，
+不增加内容读取，也不向台账添加 project 字段。同一 id 存在多个真实路径时，
+不能让某个 project 的台账替换另一个 project 的运行。run-scoped 记录或真实重建在 owner-aware legacy 回退中需要其目标 transcript 实际路径才能替换；transcript 缺失本身不否决另一个 root 已精确证明的逐响应身份，存在冲突或来自多个 project 的 transcript 也不能授权该证明。
+归属缺失或歧义时，保留独立记录与台账，不删除消费；可能保留的重复与无法溯源的旧重放一样，
+是明确接受的边界，不是宣称完美去重。已被覆盖的普通文件利用目录项信息，避免额外 `stat`。
+没有该索引时保留有界的旧判定作为兼容回退，不把它宣称为通用事件身份连接。
+
+持久历史的快路径也必须保留这些归属信息。它只检查符合条件的记录的标准 project/transcript 路径，文件仍存在时才采用，不枚举所有项目。
+scope 查找沿用重放使用的裸 session id 键，每条路径则按记录的真实 project 与 runtime root 构造。
+不同项目中同 ID 的路径不能合并成一次授权；缺失或有歧义的证据继续保守处理。
+`sinceMs` 补充豁免还同时绑定预期路径与实际解析 header 的 project/session 键：裸 session id 不能使另一 project 的同 ID 旧文件越界接受补建。
+两个不同 project 键对应同一个 sanitized 预期路径时，双方都不获得豁免，不能选择最后一条记录；预期路径上的实际 header 不匹配时，该文件也不能成为补充。
+项目元数据缺失时不授予路径豁免。显式 `sinceMs: 0` 仍允许正常发现，但不能把不匹配的 header 变成 future run 归属。
+这些私有 path/key 映射不会向台账行或 dashboard 返回新增任何 project/path 字段。
+
+台账按日 / 模型建立身份索引，并在每份表上缓存；raw-row 合并在初次创建时复制数组，之后仅按源数组原长度追加，避免逐次展开已累积的完整数组。
+同一身份跨 root、但各根 transcript 的观测完整度不同时，工具、文件与技能分别选择该领域观测最丰富的完整 payload，不把重复副本相加；当工具 / 技能总计数相等时，则比较 `byName` 的 count、success、fail 完整度，工具还比较各项耗时，文件按新增 + 删除总行数选取完整载荷，不能把逐字段拼合或枚举顺序当成 richer。各模型保留最大的成功/失败时延，记录总时延取这些模型值之和，与指标序列化口径一致，权威运行时钟也继续保留。
+不虚构工具身份：未知 legacy 与部分身份观测仍保留明确的保守去重边界。
+
+**project 边界来自记录内容，而不是目录拼写。** replay 读取器从实际解析到的 transcript header 中
+取得 sessionId 与 cwd，选择本 project 的 before/after/request-id 过滤；不通过项目目录名反推归属，
+目录可能采用旧别名。replay 缓存按 owning root 分区：某个根目录只清理自身过期或已删除文件，
+不抹掉另一根目录的暖缓存。只有文件 mtime/size、项目边界与时间边界都匹配时才复用。
+仅发生变化的文件需要再次读取内容。没有边界约束的瞬态 transcript 不会仅因存在 cwd 就被标成 scoped project。
+已有唯一 project/session 覆盖的 transcript 只有在缓存 `(mtimeMs, size)` 与当前文件一致时才可使用快路径；已覆盖文件追加后必须重新扫描。相反的 cache 身份必须重读 header。此例外不绑定新发现的冷 transcript：实际 header 才选择匹配的 project 过滤，普通缓存复用也要求先前观察到的 project/session 键。
+另一个项目的持久候选只提供该项目的窗口过滤，不删除缓存中已观察到的实际 project 键；
+若 transcript 的实际项目没有已知窗口，仍可命中暖缓存，而不会借用已记录项目的边界。
+调用方裸 session 的 `beforeMs` 只用于声明的当前 project root；未提供该选项时保留旧调用方窗口行为。
+删除前抢救的两次覆盖检查同样按 project/session 身份判断，不因为另一 project 的记录而放弃真实 transcript 的持久化。
+按访问顺序保留 64 个最近使用的 root；淘汰只涉及可从真实文件重建的内存摘要，不删除持久记录、台账行或真实文件。
+future ownership 不全局关闭缓存。私有签名包含已拥有的执行 ID 及其有界 future 时间窗；拥有快照被修改或删除后必须重新验证，即使旧摘要为 `record: null` 也不能复用。无关 project 的条目仍按普通暖缓存路径命中；未观察到 project 键的条目不提供 future 归属证明。
+
+**会话钟与已结束运行的时间截止各有作用。** 恢复的会话钟可能在 UI 初次订阅之后才绑定；
+通知携带目标 session id。另一个 session id 仍处于活动状态时，provider 忽略该更新；
+只有 `startNewSession(targetId)` 提交目标 id 与对应指标时，才一并应用恢复时钟。
+不带 owner 的旧时钟通知保持既有行为。只有显式的 `clockSessionId` 标记（包括没有 owner 的值）才读取 telemetry store 的时钟作为时钟更新。
+普通指标通知保留 provider 当前时钟，不把另一个会话恢复出的值混入其快照。`resetLiveMetrics` 与持久化运行起点仍属于当前 run。
+
+跨 root 归并组中存在时钟有效的权威 run-scoped 记录时，即使重建提供更完整的响应观测信息，也恢复该运行的 `timestamp`、`startTime`、`durationMs` 和 provenance。
+损坏的权威时钟不得覆盖有效重建时钟；若已选记录的时钟同样损坏，可采用有效的原生候选时钟；没有有效替代时钟时，不虚构零时长证据。
+若存在权威 run，其 provenance 继续优先，即使缺失重建标记也是有意这样恢复，而不是错误回退成原生标记。run / session 的日期归属仍取真实退出日，token / API 请求的日期归属仍取真实响应发生日。跨午夜验证必须分别检查这两个日期，不能把昨天的台账强行放进今天的 token 桶。
+
+live 与普通 history 读取都使用完整持久历史决定 replay ownership 和“历史是否存在”，仅在返回 / 归约视图中应用读取时刻的 ended-run 截止。
+不能用这项截止选择首次迁移或挖出无关旧 transcript。每次读取只捕获一次 `readAt`，replay ownership、outer/inner root 暂存及 ended/future 分区共用它。非有限的持久 timestamp 既不提供 future ownership，也不用于把普通 replay 截断到更早 run 起点，不能据此抹掉有效 transcript 证据。timestamp 恰好等于该时刻时归 ended，不会两个分区都不进，也不会因各 root 的时钟不同而重复归属。非有限 timestamp 即便没有可恢复的 transcript，也保留在保守持久化侧，不因两项时间比较都为 false 而消失，也不虚构响应日期。
+明确属于 future run 的 API response/error ID 即使其事件早于 `readAt`，也从 replay 中排除。按 project/session 分别保存有限 future-owned 时间窗，不压成一个最早开始至最晚结束的区间；介于两次 owned run 之间的独立 API / 工具事件仍纳主重建，并推进实测时钟。落在拥有区间内也不能仅据此删除另一个独立 response ID（包括其它 model），只有已拥有的响应才可抑制；位于所有拥有区间外的 tool，或者 outer / inner 时钟冲突的 tool，不因更早乱序的 owned 响应而随 tool-only replay 被整体删除。只有响应本来会进入主重建或迟到补充时，才应用 API-owned 抑制；被时间边界排除的 future 行不能标记更早的独立工具史供删除。早于已知 future window 最早起点的工具证据独立于 API-owned 清除继续保留；只有没有这类独立证据的纯 owned tool-only 副本才被清理，时间窗或时钟缺失时保守保留。私有标记不写入持久字段；未知关系宁可保留潜在重复，也不能虚构逐工具身份。临时文件 header 损坏或乱序时，重建把恢复出的起点钳制到有效终点，使时长为零而非负数。尾行 timestamp 无效时，回退到最近个有效纳入行，再回退到 header，不能因此丢弃已测得的工具 / 文件活动。
+future run 已确有真实响应 ID、终点有限但起点无效时，只有有限且非负的 duration 才可推导 `[0, end]` 内的起点；同一有界起点必须同时约束普通 replay 纳入和 future 工具归属。行时间不可读不能证明其属于 future window，不能由该边界截掉；时间窗无效时，匹配的工具计数也不能证明逐工具同一性，宁可保留不确定的一份观测，也不能删掉另一 run 真正较早的工作。
+header 无法解析不得丢弃已测得的用量：只用实际纳入重建的 api_response、api_error 与 tool_call 的最早 / 最晚有效事件时间恢复时钟，不替无证据事件编造日期。没有有效权威 run 提供时钟时，选择最新且时钟完整的 native；纯 durable 副本归并使用实际入选 durable 的时钟，不能由 root 枚举顺序决定日期。无界 `all` 聚合保留非有限 timestamp 对应的真实消费，受限日期范围不把这些记录臆造为那一天的活动。
+只有 `runScoped === true` 才将 future 行作为独立延后的 delta，与更早 ended run 隔离，并在精确跨 root 消费归并前回到实际所属 root。其它快照仍与 ended 记录一起归约。同一 project/session 的普通 future 累计快照若遇到明确的 future delta，旧副本让位于 delta；较新的普通累计快照在自身具有完整消费键，并由 `rebuildCoversRun` 证明其起点、请求 ID 超集、逐模型请求 / error / token 计数及工具 / 文件覆盖包含旧 delta 时，不得仅因旧 delta 存在而丢掉新增 ID 和相容消费。仅 ID 是超集但总消耗更低的快照不能删除旧 delta，未解决的普通累计冲突要与旧 delta 一起保守保留。这不是通用 last-wins：ID 不相交、证据不足 / 冲突或没有完整身份的记录仍须分开保留；其它 future 累计组不变。原生重建则另按覆盖证明处理，不能仅因存在 delta 就删除它。ID 的存在不是 run-delta 出处。replay-only 选项不返回这些持久 future 快照，但它们仍参与 replay 边界。绝不根据日/模型总量臆造会话归属。
+非法 ID 条目逐项忽略，同数组的有效项仍可建立归属；非数组形状只不建立归属，不使整个历史读取抛出 TypeError。持久 JSONL 中不可作为身份的畸形 owner 对象在加载时隔离，不强制转成 session / project 键，也不影响同文件的合法记录。
+transcript 补充仍保留明确的豁免，读取不会改写历史。
+同一天中结束时刻晚于本次读取的运行，其已结束 session、工具与 session-record token 均被排除。
+这一字段级截止**不会**删除成功响应的台账行：该行已经证明真实 API 消耗，并不是 ended-run 归属。
+所以，带一条真实 100-token 台账响应的 future-ended run，仍向汇总 / 每日 token 贡献 100 token 和 1 次请求，
+但它的 sessions/tools 为零。transcript 补充同样贡献实际 API token，但不伪造一个已结束运行。
+若该持久记录本身是响应的直接证据，即使台账缺失，其未覆盖 token/request 回退也保留；在 `readAt` 之前仍不会因此生成 ended session 或工具计数。
+既有日历日窗口不变；不能借用时钟不一致来删除真实消耗，只为让所有 tile 都显示零。
 
 ## 已实现方案（TUI 跨会话视图）
 
@@ -268,7 +413,10 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 也能补回该会话尚未持久化的 transcript，而不伪造空的运行记录或把重放历史计费成新运行。
 确有当前活动时，live 记录由同一个共享构造函数生成。历史已经归约，只取其当前会话的连续记录段
 再做局部归并，不再对所有旧窗口做第二次全量比较。先前不相交运行及兼容的真实 transcript 重建，
-各自保留 token 与会话粒度字段。
+各自保留 token 与会话粒度字段。原有 transcript root/path scope 仍附着于持久化数组；
+只有合并 live 记录后才重建 project/session 键，否则其它项目的同名历史会被活动请求的台账错误删除。
+它们仍是私有 WeakMap metadata，不向台账或 dashboard JSON 增加 project 字段。
+原始 live 记录也传入 `buildUsageDayTable`，仅允许它自身在没有已持久化成功 ID 时以完整请求身份精确覆盖。
 
 仍取自会话记录的：`sessionCount`、`totalDurationMs`、工具、变更行、技能，以及**项目**；
 它们都按与 token 相同的本地日闭区间筛选。台账没有项目维度（#4479 的隐私边界），
@@ -309,11 +457,11 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 ## 约束
 
 - 面板路径不得写入 `~/.qwen`。
-- **台账范围是用户回合，不是所有模型 helper 调用。** `logApiResponse` 总是喂 live 展示计数，
-  但会故意把 `prompt_suggestion`、`forked_query`、`speculation` 与 `side-query:*` 排除在持久化台账和
-  transcript telemetry 之外；其它 helper 调用也受到各自写入前的过滤。这些调用因此仍可计入
-  session/live 指标，却不在此按日 / 按月计量源里。这些数字并不宣称是包含内部压缩、记忆或路由 helper 的完整账单；
-  这里的边界与少算是有意选择并已公开，而不是让各处暗中改口径。
+- **台账计量真实 API token 消耗，包括内部 helper 调用。** 开启用量统计后，`logApiResponse`
+  记录它收到的每个真实响应的 token，包括 `prompt_suggestion`、`forked_query`、`speculation` 与 `side-query:*`。
+  内部 prompt 内容仍不写入 transcript。若仅记录普通响应却在汇总时剔除整段 run，会漏掉同时发生的侧查询真实消费。
+  旧行缺失的内部响应没有事件身份可重建，不得用日期、模型、计数或聚合大小猜测补齐。
+  进入 `logApiResponse` 前已被过滤的调用、关闭用量统计以及 best-effort 写入失败，不在这项保证内。
 - **provider 不报 total 时遵循 auth 语义。** 缺少 `total_token_count` 时，
   `apiResponseEventToTokenUsageRecord` 改用共享的 `outputIncludesThoughts`，而不是无条件加推理。
   OpenAI chat completions、OpenAI Responses、Qwen OAuth 与 Qwen subscription 的 output 已含推理；
@@ -331,8 +479,8 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   不宣称全局事件连接；ledger 的 `id` 与 telemetry 的 `execution_id` 仍是不同身份。
   没有 `runScoped` 标记并不证明一条记录就是重放副本；有 session 元数据时，某个 session 不在台账中，
   也不能仅因日期和模型相同，就将其重新归类为另一 session 的消费。
-- 台账写入受 `config.getUsageStatisticsEnabled()` 门控，且跳过 internal prompt id
-  （见 `loggers.ts`），因此台账覆盖并不保证。
+- 台账写入受 `config.getUsageStatisticsEnabled()` 门控。internal prompt id 禁止的是 chat transcript 记录，
+  不是 token 计量；best-effort 存储仍不能保证每个响应都实际写入磁盘。
 - 不得向台账记录加入 project 路径或内容。
 - 不得就地重写或迁移既有的 `usage_record.jsonl`。
 - 保持重放缓存的热加载延迟与去重顺序保证。
@@ -344,11 +492,18 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   未匹配的模型与 session 则保留保守的 record-day 归属，不再被无关台账整日覆盖。
 - **台账读取代价。** 实测流式解析 771,906 条记录（约 304 MB、5 个按月文件）耗时 862 ms；
   两个数据源合并加载实测 29.4 s，仍由 transcript 重放主导，路由缓存 60 秒。
-- **目录作用域。** 路由读取已注册工作空间各自的台账根目录，以及默认 CLI 会话使用的全局 `~/.qwen` 根目录。
-  先用 `path.resolve()` 规范化路径再去重，消除尾分隔符差异；不承诺把不同的符号链接路径折叠为同一物理目录。
-  相同根目录只读一次，相异的已知根目录合并；不会从已知工作空间的根目录退回到无关的进程 ambient runtime。
-  全局会话历史独立发现，不收窄为这些工作空间。对已经无法发现的历史 runtime，保留记录的保守归属，
-  而不是用错误作用域的台账改写它；这不虚构无法发现根目录的逐请求归属。
+- **目录作用域。** 路由把每个已知 runtime 的 transcript 根目录与台账根目录组为一份来源，
+  另加默认全局 CLI 来源。尽可能 canonicalize 根目录，消除尾分隔符差异；
+  文件系统提供目录 dev/inode 身份时，还据此去除符号链接和大小写别名，
+  不把大小写敏感卷上的不同目录合并；无法验证物理身份时不按字母大小写强行合并。
+  不同 realpath 共享同一个 dev/inode 身份时，本次读取固定首个已确认的 canonical root 为代表，
+  后续别名不会再拆出独立作用域。覆盖仅在每份配对来源内进行，不跨 root 混合并再猜归属。共享持久历史只读取一次；
+  精确的 session/project 记录只与实际唯一 transcript 文件所属 root 配对，缺失或歧义归属留在全局保守来源。
+  不以无关 ambient runtime 台账替代已知工作空间，也不丢弃全局或未映射记录。
+  即使 transcript 根目录是相对路径、且对应 runtime 停用自身 token 台账，
+  其 transcript 仍可提供 session、工具与文件变更；无法 canonicalize 的 root 沿既有逐 root 降级读取，
+  不改映射到 ambient root，也不拖垮其他来源。
+  这不改变保守归属无法精确到逐请求事实的边界。
 - **存量历史大部分是重放。** 2,065 条持久记录中有 1,482 条（72%）所属 id 的台账请求数为零，
   合计 376,868,201,294 token。台账只从 2026-07-30 开始，且关闭用量统计的运行同样不写台账，
   所以这是重放规模的**上界**，并不能证明这些记录每一条都虚增。
@@ -432,6 +587,6 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   上文的 72% 给出了这项工作的规模。
 - daemon 会话是否应在会话结束时持久化用量（承接重放缓存设计的待定问题），从而缩小重放路径？
 - 按项目的 token 列如今与已修正的总量不一致，是该去掉、改标签，还是换一种归属方式？
-- 不需要改动会话身份：发现 4 已撤回，归约以 `sessionId` 加运行窗口为键，不触碰任何写入方使用的身份。
+- 不需要改动会话身份：发现 4 已撤回，归约以 `sessionId`、project 与运行窗口为键，不触碰任何写入方使用的身份。
   删除前抢救与持久化迁移继续按事件时间写累计记录；仅在 transcript 已被覆盖时跳过。
   显式的重建来源与运行窗口让不相交历史和各次运行增量可以并存。

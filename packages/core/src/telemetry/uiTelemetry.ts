@@ -263,6 +263,10 @@ const createInitialModelMetrics = (): ModelMetrics => ({
  * through here so the guard survives a replay rollback.
  */
 const executionIdsByMetrics = new WeakMap<SessionMetrics, Set<string>>();
+const successfulExecutionIdsByMetrics = new WeakMap<
+  SessionMetrics,
+  Set<string>
+>();
 
 export function getRequestExecutionIds(
   metrics: SessionMetrics,
@@ -270,14 +274,27 @@ export function getRequestExecutionIds(
   return executionIdsByMetrics.get(metrics);
 }
 
+export function getSuccessfulRequestExecutionIds(
+  metrics: SessionMetrics,
+): ReadonlySet<string> | undefined {
+  return successfulExecutionIdsByMetrics.get(metrics);
+}
+
 function recordRequestExecutionId(
   metrics: SessionMetrics,
   executionId: string | undefined,
+  successful = false,
 ): void {
   if (!executionId) return;
   const ids = executionIdsByMetrics.get(metrics) ?? new Set<string>();
   ids.add(executionId);
   executionIdsByMetrics.set(metrics, ids);
+  if (successful) {
+    const successfulIds =
+      successfulExecutionIdsByMetrics.get(metrics) ?? new Set<string>();
+    successfulIds.add(executionId);
+    successfulExecutionIdsByMetrics.set(metrics, successfulIds);
+  }
 }
 
 const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
@@ -285,6 +302,10 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
   const executionIds = executionIdsByMetrics.get(metrics);
   if (executionIds) {
     executionIdsByMetrics.set(clone, new Set(executionIds));
+  }
+  const successfulExecutionIds = successfulExecutionIdsByMetrics.get(metrics);
+  if (successfulExecutionIds) {
+    successfulExecutionIdsByMetrics.set(clone, new Set(successfulExecutionIds));
   }
   clone.models = Object.assign(
     Object.create(null) as SessionMetrics['models'],
@@ -652,8 +673,14 @@ export class UiTelemetryService extends EventEmitter {
   }
 
   /** Clock for the displayed conversation, independent of the current run. */
-  setSessionStartTime(startTime: Date): void {
+  setSessionStartTime(startTime: Date, sessionId?: string): void {
     this.#sessionStartTime = new Date(startTime);
+    // The initial UI subscription can predate replay's clock binding.
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+      clockSessionId: sessionId,
+    });
   }
 
   /** Start of the active run for persisted usage records, not the UI clock. */
@@ -756,6 +783,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      clockSessionId: snapshot.outgoingSessionId,
     });
   }
 
@@ -800,6 +828,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      clockSessionId: undefined,
     });
   }
 
@@ -844,7 +873,7 @@ export class UiTelemetryService extends EventEmitter {
     event: ApiResponseEvent,
     sessionId?: string,
   ): void {
-    recordRequestExecutionId(metrics, event.execution_id);
+    recordRequestExecutionId(metrics, event.execution_id, true);
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const statsModelMetrics = sessionId
       ? this.#getOrCreateStatsModelMetrics(metrics, event.model)

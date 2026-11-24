@@ -1014,6 +1014,7 @@ export class LlmClient {
       const parsedStart = recordedStart ? new Date(recordedStart) : new Date();
       uiTelemetryService.setSessionStartTime(
         Number.isNaN(parsedStart.getTime()) ? new Date() : parsedStart,
+        sessionId,
       );
     }
     this.initializedSessionId = sessionId;

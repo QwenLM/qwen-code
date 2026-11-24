@@ -8,6 +8,7 @@ import {
   loadUsageHistory,
   aggregateUsage,
   dedupBySessionId,
+  getTranscriptScope,
   getTimeRangeBounds,
   buildUsageDayTable,
   filterUsageRecordsByLocalDay,
@@ -22,7 +23,11 @@ import {
   type UsageDayModelTable,
   type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
-import { recordTouchesLedgerDays } from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
+import {
+  recordTouchesLedgerDays,
+  setLedgerTranscriptScope,
+} from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
+import { projectKeysFromRecords } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
 
 /** Pending opens coalesce; only immutable completed months are retained. */
 const pendingLedgerLoads = new Map<string, Promise<TokenUsageDailyByModel>>();
@@ -285,6 +290,7 @@ function canUseLedgerDelta(
   records: readonly UsageSummaryRecord[],
   ledgerDaily: TokenUsageDailyByModel,
   sortedLedgerDays: readonly string[],
+  currentSession?: UsageSummaryRecord,
 ): boolean {
   return !records.some(
     (record) =>
@@ -297,7 +303,14 @@ function canUseLedgerDelta(
           model.thoughtsTokens > 0 ||
           model.totalTokens > 0 ||
           (model.totalLatencyMs ?? 0) > 0,
-      ) && !recordTouchesLedgerDays(record, ledgerDaily, sortedLedgerDays),
+      ) &&
+      !recordTouchesLedgerDays(
+        record,
+        ledgerDaily,
+        sortedLedgerDays,
+        undefined,
+        currentSession,
+      ),
   );
 }
 
@@ -315,6 +328,7 @@ export async function loadStatsData(
       : undefined,
   });
   let records = persisted;
+  const persistedScope = getTranscriptScope(persisted);
   if (currentSession) {
     const first = persisted.findIndex(
       (r) => r.sessionId === currentSession.sessionId,
@@ -335,6 +349,15 @@ export async function loadStatsData(
       ];
     }
   }
+  const transcriptScope = persistedScope
+    ? {
+        ...persistedScope,
+        projectKeysBySession: projectKeysFromRecords(
+          records,
+          persistedScope.projectKeysBySession,
+        ),
+      }
+    : undefined;
   const { start, end } = getTimeRangeBounds(range);
   const currentStartKey = localDateKey(start.getTime());
   const currentEndKey = localDateKey(end.getTime());
@@ -365,8 +388,15 @@ export async function loadStatsData(
   const ledgerStartKey =
     firstRecordKey < comparisonStartKey ? firstRecordKey : comparisonStartKey;
   const ledgerDaily = await loadLedgerShared(ledgerStartKey);
+  setLedgerTranscriptScope(ledgerDaily, transcriptScope);
   const sortedLedgerDays = [...ledgerDaily.keys()].sort();
-  const table = buildUsageDayTable(records, ledgerDaily, sortedLedgerDays);
+  const table = buildUsageDayTable(
+    records,
+    ledgerDaily,
+    sortedLedgerDays,
+    undefined,
+    currentSession,
+  );
   const report = aggregateUsage(
     filterUsageRecordsByLocalDay(records, currentStartKey, currentEndKey),
     'all',
@@ -409,8 +439,14 @@ export async function loadStatsData(
           currentCompletedRecords,
           ledgerDaily,
           sortedLedgerDays,
+          currentSession,
         ) &&
-        canUseLedgerDelta(prevFiltered, ledgerDaily, sortedLedgerDays)
+        canUseLedgerDelta(
+          prevFiltered,
+          ledgerDaily,
+          sortedLedgerDays,
+          currentSession,
+        )
       ) {
         applyTokenWindow(
           currentDeltaReport,

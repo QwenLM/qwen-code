@@ -17,35 +17,65 @@ import { ApiResponseEvent } from '../telemetry/types.js';
 import { setDebugLogSession } from '../utils/debugLogger.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import {
+  MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS,
   __overrideNowForTesting,
   apiResponseEventToTokenUsageRecord,
   exportTokenUsageSummary,
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
+  getTokenUsageExecutionIds,
+  getTokenUsageExecutionRecords,
   getTokenUsageFilePath,
   getTokenUsageSessionIds,
+  getTokenUsageUnidentifiedSessionIds,
+  isCompleteLedgerExecutionEvidence,
   loadTokenUsageDailyByModel,
+  mergeTokenUsageExecutionIds,
   mergeTokenUsageSessionIds,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
   resetTokenUsageFailureLogging,
+  subtractTokenUsageFromDailyByModel,
 } from './tokenUsageService.js';
-import type { TokenUsageDailyByModel } from './tokenUsageService.js';
-import { buildUsageDashboard } from './usage-dashboard-service.js';
+import type {
+  TokenUsageCompletedMonthCache,
+  TokenUsageDailyByModel,
+  TokenUsageRecord,
+} from './tokenUsageService.js';
+import {
+  buildUsageDashboard,
+  loadUsageDashboardSources,
+  localDateKey,
+  setLedgerTranscriptScope,
+} from './usage-dashboard-service.js';
+import {
+  persistSessionUsage,
+  type UsageSummaryRecord,
+} from './usageHistoryService.js';
+import { SessionService } from './sessionService.js';
+import {
+  UiTelemetryService,
+  uiTelemetryService,
+  type UiEvent,
+} from '../telemetry/uiTelemetry.js';
+import { EVENT_API_RESPONSE } from '../telemetry/constants.js';
 
 describe('tokenUsageService', () => {
   let tempDir: string;
   let originalRuntimeDir: string | undefined;
+  let originalQwenHome: string | undefined;
   let originalDebugLogFileEnv: string | undefined;
 
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-25T10:00:00.000Z'));
     originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    originalQwenHome = process.env['QWEN_HOME'];
     originalDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
     tempDir = await mkdtemp(path.join(tmpdir(), 'qwen-token-usage-'));
     process.env['QWEN_RUNTIME_DIR'] = tempDir;
+    process.env['QWEN_HOME'] = tempDir;
   });
 
   afterEach(async () => {
@@ -57,6 +87,11 @@ describe('tokenUsageService', () => {
       delete process.env['QWEN_RUNTIME_DIR'];
     } else {
       process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+    }
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
     }
     if (originalDebugLogFileEnv === undefined) {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
@@ -119,6 +154,45 @@ describe('tokenUsageService', () => {
 
   const silenceStderr = () =>
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+  const buildTranscriptlessRunDashboard = async (
+    startTime: Date,
+    endTime: Date,
+    responses: ApiResponseEvent[],
+  ) => {
+    const originalQwenHome = process.env['QWEN_HOME'];
+    const config = fakeConfig();
+    const sessionId = config.getSessionId();
+    const telemetry = new UiTelemetryService();
+    process.env['QWEN_HOME'] = tempDir;
+    try {
+      for (const response of responses) {
+        await recordTokenUsageFromApiResponse(config, response);
+        telemetry.addEvent(
+          { ...response, 'event.name': EVENT_API_RESPONSE } as UiEvent,
+          sessionId,
+        );
+      }
+      persistSessionUsage({
+        sessionId,
+        startTime,
+        endTime,
+        project: path.join(tempDir, 'identified-project'),
+        metrics: telemetry.getLiveMetrics(),
+      });
+      vi.setSystemTime(Math.max(Date.now(), endTime.getTime()));
+      const sources = await loadUsageDashboardSources([tempDir]);
+      return buildUsageDashboard(
+        sources.records,
+        { range: 'all' },
+        sources.ledgerDaily,
+        sources.runtimeScopes,
+      );
+    } finally {
+      if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalQwenHome;
+    }
+  };
 
   it('maps an API response event to a privacy-preserving usage record', () => {
     const config = fakeConfig();
@@ -802,6 +876,81 @@ describe('tokenUsageService', () => {
     );
   });
 
+  it('keeps cached counters coherent with a rescan during a late append', async () => {
+    vi.setSystemTime(new Date(2026, 4, 1, 12));
+    const timestamp = '2026-04-15T04:00:00.000Z';
+    const day = localDateKey(Date.parse(timestamp));
+    const first: TokenUsageRecord = {
+      schemaVersion: 1,
+      id: 'middle-a',
+      executionId: 'middle-a',
+      timestamp,
+      localDate: day,
+      localMonth: '2026-04',
+      sessionId: 'session-1',
+      model: 'model-a',
+      authType: 'openai',
+      source: 'main',
+      inputTokens: 1,
+      outputTokens: 0,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 1,
+      apiDurationMs: 1,
+    };
+    const appended: TokenUsageRecord = {
+      ...first,
+      id: 'middle-b',
+      executionId: 'middle-b',
+    };
+    const later = {
+      ...first,
+      id: 'latest-c',
+      executionId: 'latest-c',
+      timestamp: '2026-04-30T04:00:00.000Z',
+      localDate: '2026-04-30',
+    };
+    const file = getTokenUsageFilePath('2026-04');
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      [first, later].map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf8',
+    );
+    const cache: TokenUsageCompletedMonthCache = new Map();
+    await loadTokenUsageDailyByModel('2026-04-01', cache);
+    const originalStream = fs.createReadStream;
+    let appendedBeforeRead = false;
+    const stream = vi.spyOn(fs, 'createReadStream').mockImplementation(((
+      filePath: fs.PathLike,
+      options?: Parameters<typeof fs.createReadStream>[1],
+    ) => {
+      if (!appendedBeforeRead) {
+        appendedBeforeRead = true;
+        fs.appendFileSync(filePath as string, `${JSON.stringify(appended)}\n`);
+      }
+      return originalStream(filePath, options);
+    }) as typeof fs.createReadStream);
+    try {
+      const table = await loadTokenUsageDailyByModel(day, cache);
+      expect(table.get(day)?.get('model-a')).toMatchObject({
+        requests: 2,
+        totalTokens: 2,
+      });
+      expect(getTokenUsageExecutionIds(table, day, 'model-a')).toEqual(
+        new Set(['middle-a', 'middle-b']),
+      );
+      expect(cache.get(file)?.get(day)?.get('model-a')?.requests).toBe(1);
+      subtractTokenUsageFromDailyByModel(table, appended);
+      expect(table.get(day)?.get('model-a')).toMatchObject({
+        requests: 1,
+        totalTokens: 1,
+      });
+    } finally {
+      stream.mockRestore();
+    }
+  });
+
   it('reuses completed-month aggregates across different start days', async () => {
     const config = fakeConfig();
     await recordUsage(config, 'past', 'p1', usage(100, 10, 110), {
@@ -981,14 +1130,880 @@ describe('tokenUsageService', () => {
     );
   });
 
+  it('omits request execution identity when the response has none', async () => {
+    const event = createEvent('model-a', 'p1', usage(4, 6, 10));
+    await recordTokenUsageFromApiResponse(fakeConfig(), event);
+
+    expect(
+      getTokenUsageExecutionIds(
+        await loadTokenUsageDailyByModel('2026-05-01'),
+        localDateKey(Date.parse(event['event.timestamp'])),
+        'model-a',
+      ),
+    ).toBeUndefined();
+    expect(event.execution_id).toBeUndefined();
+  });
+
+  it('preserves execution identity in snapshots and merged tables', async () => {
+    const cache: TokenUsageCompletedMonthCache = new Map();
+    await recordUsage(fakeConfig(), 'model-a', 'p1', usage(10, 0, 10), {
+      timestamp: '2026-04-20T10:00:00.000Z',
+    });
+    const file = getTokenUsageFilePath('2026-04');
+    const [line] = (await readFile(file, 'utf8')).trim().split('\n');
+    const row = JSON.parse(line!) as Record<string, unknown>;
+    row['executionId'] = 'completed-month-request';
+    await writeFile(file, `${JSON.stringify(row)}\n`, 'utf8');
+
+    const first = await loadTokenUsageDailyByModel('2026-04-01', cache);
+    const fromCache = await loadTokenUsageDailyByModel('2026-04-01', cache);
+    const merged: TokenUsageDailyByModel = new Map();
+    mergeTokenUsageExecutionIds(merged, cache.values().next().value!);
+
+    const requestDay = localDateKey(Date.parse('2026-04-20T10:00:00.000Z'));
+    for (const table of [first, fromCache, merged]) {
+      expect(getTokenUsageExecutionIds(table, requestDay, 'model-a')).toEqual(
+        new Set(['completed-month-request']),
+      );
+    }
+  });
+
+  it('bounds execution evidence while preserving all counters', async () => {
+    const timestamp = '2026-05-25T10:00:00.000Z';
+    const localDate = localDateKey(Date.parse(timestamp));
+    const localMonth = localDate.slice(0, 7);
+    const file = getTokenUsageFilePath(localMonth);
+    await mkdir(path.dirname(file), { recursive: true });
+    const count = MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS + 1;
+    const rows = Array.from({ length: count }, (_, index) =>
+      JSON.stringify({
+        schemaVersion: 1,
+        id: `budget-${index}`,
+        executionId: `budget-${index}`,
+        timestamp,
+        localDate,
+        localMonth,
+        sessionId: 'session-1',
+        model: 'model-a',
+        authType: 'openai',
+        source: 'main',
+        inputTokens: 1,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 1,
+        apiDurationMs: 1,
+      }),
+    ).join('\n');
+    await writeFile(file, `${rows}\n`, 'utf8');
+
+    const cache: TokenUsageCompletedMonthCache = new Map();
+    const table = await loadTokenUsageDailyByModel('2026-05-01', cache);
+    expect(table.get(localDate)?.get('model-a')).toMatchObject({
+      requests: count,
+      totalTokens: count,
+    });
+    expect(isCompleteLedgerExecutionEvidence(table)).toBe(false);
+    expect(
+      getTokenUsageExecutionRecords(table, localDate, 'model-a'),
+    ).toBeUndefined();
+    expect(
+      getTokenUsageExecutionIds(table, localDate, 'model-a'),
+    ).toBeUndefined();
+    expect(
+      isCompleteLedgerExecutionEvidence(
+        await loadTokenUsageDailyByModel('2026-05-01', cache),
+      ),
+    ).toBe(false);
+    const merged: TokenUsageDailyByModel = new Map();
+    mergeTokenUsageExecutionIds(merged, table);
+    expect(isCompleteLedgerExecutionEvidence(merged)).toBe(false);
+
+    const record: UsageSummaryRecord = {
+      version: 1,
+      sessionId: 'session-1',
+      timestamp: Date.parse(timestamp),
+      startTime: Date.parse(timestamp) - 1_000,
+      project: tempDir,
+      durationMs: 1_000,
+      totalLatencyMs: 1,
+      models: {
+        'model-a': {
+          requests: 1,
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 1,
+          totalLatencyMs: 1,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+      runScoped: true,
+      requestExecutionIds: ['budget-0'],
+      successfulRequestExecutionIds: ['budget-0'],
+    };
+    setLedgerTranscriptScope(table, {
+      root: tempDir,
+      pathsBySessionId: new Map(),
+    });
+    expect(
+      buildUsageDashboard([record], { range: 'all' }, table, [
+        { records: [record], ledgerDaily: table },
+      ]).summary,
+    ).toMatchObject({ totalTokens: count + 1, requests: count + 1 });
+
+    const transcript = new SessionService(record.project, {
+      runtimeBaseDir: tempDir,
+    }).getSessionTranscriptPath(record.sessionId);
+    expect(fs.existsSync(transcript)).toBe(false);
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(
+      transcript,
+      `${JSON.stringify({
+        sessionId: record.sessionId,
+        cwd: record.project,
+        timestamp: new Date(record.startTime).toISOString(),
+        type: 'user',
+        message: { role: 'user', content: 'verified transcript' },
+      })}\n`,
+    );
+    setLedgerTranscriptScope(table, {
+      root: tempDir,
+      pathsBySessionId: new Map([[record.sessionId, new Set([transcript])]]),
+    });
+    expect(fs.existsSync(transcript)).toBe(true);
+    expect(
+      buildUsageDashboard([record], { range: 'all' }, table, [
+        { records: [record], ledgerDaily: table },
+      ]).summary,
+    ).toMatchObject({ totalTokens: count, requests: count });
+  });
+
+  it('counts unidentified rows in the evidence budget and merged metadata', async () => {
+    const timestamp = '2026-05-25T10:00:00.000Z';
+    const localDate = localDateKey(Date.parse(timestamp));
+    const localMonth = localDate.slice(0, 7);
+    const file = getTokenUsageFilePath(localMonth);
+    await mkdir(path.dirname(file), { recursive: true });
+    const rows: Array<Partial<TokenUsageRecord>> = Array.from(
+      { length: MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS - 1 },
+      (_, index) => ({
+        schemaVersion: 1,
+        id: `unidentified-budget-${index}`,
+        executionId: `unidentified-budget-${index}`,
+        timestamp,
+        localDate,
+        localMonth,
+        sessionId: 'unidentified-budget-session',
+        model: 'model-a',
+        authType: 'openai',
+        source: 'main',
+        inputTokens: 1,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 1,
+        apiDurationMs: 1,
+      }),
+    );
+    const unidentified = structuredClone(rows.at(-1)!);
+    delete unidentified.executionId;
+    rows.push(unidentified);
+    const writeRows = async () => {
+      await writeFile(
+        file,
+        `${rows.map((record) => JSON.stringify(record)).join('\n')}\n`,
+      );
+    };
+    await writeRows();
+    const table = await loadTokenUsageDailyByModel('2026-05-01');
+    expect(isCompleteLedgerExecutionEvidence(table)).toBe(true);
+    expect(
+      getTokenUsageExecutionRecords(table, localDate, 'model-a'),
+    ).toHaveLength(MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS - 1);
+    expect(
+      getTokenUsageUnidentifiedSessionIds(table, localDate, 'model-a'),
+    ).toEqual(new Set(['unidentified-budget-session']));
+
+    const unidentifiedOnly: TokenUsageDailyByModel = new Map();
+    mergeTokenUsageExecutionIds(unidentifiedOnly, table);
+    expect(isCompleteLedgerExecutionEvidence(unidentifiedOnly)).toBe(true);
+    expect(
+      getTokenUsageUnidentifiedSessionIds(
+        unidentifiedOnly,
+        localDate,
+        'model-a',
+      ),
+    ).toEqual(new Set(['unidentified-budget-session']));
+
+    rows.push({ ...unidentified, id: 'unidentified-budget-overflow' });
+    await writeRows();
+    expect(
+      isCompleteLedgerExecutionEvidence(
+        await loadTokenUsageDailyByModel('2026-05-01'),
+      ),
+    ).toBe(false);
+  });
+
+  it('retains complete evidence exactly at the single-root and merged cap', async () => {
+    const timestamp = '2026-05-25T10:00:00.000Z';
+    const localDate = localDateKey(Date.parse(timestamp));
+    const localMonth = localDate.slice(0, 7);
+    const writeRows = async (root: string, prefix: string, count: number) => {
+      await Storage.runWithResolvedRuntimeBaseDir(root, async () => {
+        const file = getTokenUsageFilePath(localMonth);
+        await mkdir(path.dirname(file), { recursive: true });
+        const rows = Array.from({ length: count }, (_, index) =>
+          JSON.stringify({
+            schemaVersion: 1,
+            id: `${prefix}-${index}`,
+            executionId: `${prefix}-${index}`,
+            timestamp,
+            localDate,
+            localMonth,
+            sessionId: 'exact-budget-session',
+            model: 'model-a',
+            authType: 'openai',
+            source: 'main',
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 1,
+            apiDurationMs: 1,
+          }),
+        ).join('\n');
+        await writeFile(file, `${rows}\n`, 'utf8');
+      });
+    };
+    const singleRoot = path.join(tempDir, 'single-cap');
+    await writeRows(
+      singleRoot,
+      'single-cap',
+      MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS,
+    );
+    const single = await Storage.runWithResolvedRuntimeBaseDir(singleRoot, () =>
+      loadTokenUsageDailyByModel('2026-05-01'),
+    );
+    expect(isCompleteLedgerExecutionEvidence(single)).toBe(true);
+    expect(
+      getTokenUsageExecutionRecords(single, localDate, 'model-a'),
+    ).toHaveLength(MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS);
+
+    const roots = ['half-cap-a', 'half-cap-b'].map((name) =>
+      path.join(tempDir, name),
+    );
+    const merged: TokenUsageDailyByModel = new Map();
+    let actualRequests = 0;
+    let actualTokens = 0;
+    for (const root of roots) {
+      await writeRows(
+        root,
+        `exact-${root}`,
+        MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS / 2,
+      );
+      const table = await Storage.runWithResolvedRuntimeBaseDir(root, () =>
+        loadTokenUsageDailyByModel('2026-05-01'),
+      );
+      actualRequests += table.get(localDate)?.get('model-a')?.requests ?? 0;
+      actualTokens += table.get(localDate)?.get('model-a')?.totalTokens ?? 0;
+      mergeTokenUsageExecutionIds(merged, table);
+    }
+    expect(isCompleteLedgerExecutionEvidence(merged)).toBe(true);
+    expect(
+      getTokenUsageExecutionRecords(merged, localDate, 'model-a'),
+    ).toHaveLength(MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS);
+    expect({ requests: actualRequests, tokens: actualTokens }).toEqual({
+      requests: MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS,
+      tokens: MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS,
+    });
+  });
+
+  it('discards merged evidence above the combined budget but keeps counters', async () => {
+    const sourceCount = 6_000;
+    const timestamp = '2026-05-25T10:00:00.000Z';
+    const localDate = localDateKey(Date.parse(timestamp));
+    const localMonth = localDate.slice(0, 7);
+    const roots = ['merge-budget-a', 'merge-budget-b'].map((name) =>
+      path.join(tempDir, name),
+    );
+    for (const root of roots) {
+      Storage.runWithResolvedRuntimeBaseDir(root, () => {
+        const file = getTokenUsageFilePath(localMonth);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const rows = Array.from({ length: sourceCount }, (_, index) =>
+          JSON.stringify({
+            schemaVersion: 1,
+            id: `row-${root}-${index}`,
+            executionId: `execution-${root}-${index}`,
+            timestamp,
+            localDate,
+            localMonth,
+            sessionId: 'merge-session',
+            model: 'model-a',
+            authType: 'openai',
+            source: 'main',
+            inputTokens: 1,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 1,
+            apiDurationMs: 1,
+          }),
+        ).join('\n');
+        fs.writeFileSync(file, `${rows}\n`);
+      });
+    }
+    const tables: TokenUsageDailyByModel[] = [];
+    for (const root of roots) {
+      tables.push(
+        await Storage.runWithResolvedRuntimeBaseDir(root, () =>
+          loadTokenUsageDailyByModel('2026-05-01'),
+        ),
+      );
+    }
+    for (const table of tables) {
+      expect(isCompleteLedgerExecutionEvidence(table)).toBe(true);
+      expect(
+        getTokenUsageExecutionRecords(table, localDate, 'model-a'),
+      ).toHaveLength(sourceCount);
+    }
+    const merged: TokenUsageDailyByModel = new Map();
+    for (const table of tables) mergeTokenUsageExecutionIds(merged, table);
+    expect(isCompleteLedgerExecutionEvidence(merged)).toBe(false);
+    expect(
+      getTokenUsageExecutionRecords(merged, localDate, 'model-a'),
+    ).toBeUndefined();
+    expect(
+      tables.reduce(
+        (sum, table) =>
+          sum + (table.get(localDate)?.get('model-a')?.requests ?? 0),
+        0,
+      ),
+    ).toBe(12_000);
+    expect(
+      tables.reduce(
+        (sum, table) =>
+          sum + (table.get(localDate)?.get('model-a')?.totalTokens ?? 0),
+        0,
+      ),
+    ).toBe(12_000);
+    const sources = await loadUsageDashboardSources(roots);
+    expect(isCompleteLedgerExecutionEvidence(sources.ledgerDaily)).toBe(false);
+    expect(
+      buildUsageDashboard(
+        sources.records,
+        { range: 'today' },
+        sources.ledgerDaily,
+        sources.runtimeScopes,
+      ).summary,
+    ).toMatchObject({ requests: 12_000, totalTokens: 12_000 });
+  });
+
+  it('keeps execution evidence scoped to the requested completed-month day', async () => {
+    const firstDay = new Date(2026, 3, 1, 12);
+    const lastDay = new Date(2026, 3, 30, 12);
+    vi.setSystemTime(new Date(2026, 4, 1, 12));
+    const firstDayIso = firstDay.toISOString();
+    const middleDayIso = new Date(2026, 3, 15, 12).toISOString();
+    const lastDayIso = lastDay.toISOString();
+    const localMonth = '2026-04';
+    const file = getTokenUsageFilePath(localMonth);
+    await mkdir(path.dirname(file), { recursive: true });
+    const rows = Array.from(
+      { length: MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS + 1 },
+      (_, index) => {
+        const timestamp =
+          index === 0 ? lastDayIso : index === 1 ? middleDayIso : firstDayIso;
+        return JSON.stringify({
+          schemaVersion: 1,
+          id: `window-row-${index}`,
+          executionId:
+            index === 0
+              ? 'window-only-response'
+              : index === 1
+                ? 'window-only-middle'
+                : `old-${index}`,
+          timestamp,
+          localDate: localDateKey(Date.parse(timestamp)),
+          localMonth,
+          sessionId: 'session-1',
+          model: 'model-a',
+          authType: 'openai',
+          source: 'main',
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 1,
+          apiDurationMs: 1,
+        });
+      },
+    ).join('\n');
+    await writeFile(file, `${rows}\n`, 'utf8');
+    const cache: TokenUsageCompletedMonthCache = new Map();
+    const direct = await loadTokenUsageDailyByModel('2026-04-30');
+    await loadTokenUsageDailyByModel('2026-04-01', cache);
+    const cached = await loadTokenUsageDailyByModel('2026-04-30', cache);
+    const record: UsageSummaryRecord = {
+      version: 1,
+      sessionId: 'session-1',
+      timestamp: lastDay.getTime(),
+      startTime: lastDay.getTime() - 1_000,
+      project: tempDir,
+      durationMs: 1_000,
+      totalLatencyMs: 1,
+      models: {
+        'model-a': {
+          requests: 1,
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 1,
+          totalLatencyMs: 1,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+      runScoped: true,
+      requestExecutionIds: ['window-only-response'],
+      successfulRequestExecutionIds: ['window-only-response'],
+    };
+    for (const table of [direct, cached]) {
+      expect(isCompleteLedgerExecutionEvidence(table)).toBe(true);
+      expect(getTokenUsageExecutionIds(table, '2026-04-30', 'model-a')).toEqual(
+        new Set(['window-only-response']),
+      );
+      setLedgerTranscriptScope(table, {
+        root: tempDir,
+        pathsBySessionId: new Map(),
+      });
+      expect(
+        buildUsageDashboard([record], { range: 'all' }, table, [
+          { records: [record], ledgerDaily: table },
+        ]).summary,
+      ).toMatchObject({ totalTokens: 1, requests: 1 });
+    }
+
+    const middleRecord = structuredClone(record);
+    middleRecord.startTime = Date.parse(middleDayIso) - 1_000;
+    middleRecord.timestamp = Date.parse(middleDayIso);
+    middleRecord.requestExecutionIds = ['window-only-middle'];
+    middleRecord.successfulRequestExecutionIds = ['window-only-middle'];
+    for (const table of [
+      await loadTokenUsageDailyByModel('2026-04-15'),
+      await loadTokenUsageDailyByModel('2026-04-15', cache),
+    ]) {
+      expect(isCompleteLedgerExecutionEvidence(table)).toBe(true);
+      expect(getTokenUsageExecutionIds(table, '2026-04-15', 'model-a')).toEqual(
+        new Set(['window-only-middle']),
+      );
+      setLedgerTranscriptScope(table, {
+        root: tempDir,
+        pathsBySessionId: new Map(),
+      });
+      expect(
+        getTokenUsageExecutionRecords(table, '2026-04-15', 'model-a'),
+      ).toHaveLength(1);
+      expect(
+        buildUsageDashboard([middleRecord], { range: 'all' }, table, [
+          { records: [middleRecord], ledgerDaily: table },
+        ]).summary,
+      ).toMatchObject({ totalTokens: 2, requests: 2 });
+    }
+  });
+
+  it('appends a table to itself only once', async () => {
+    const event = createEvent('model-a', 'alias-request', usage(2, 0, 2));
+    event.execution_id = 'alias-execution';
+    await recordTokenUsageFromApiResponse(fakeConfig(), event);
+    const table = await loadTokenUsageDailyByModel('2026-05-01');
+    const day = localDateKey(Date.now());
+    expect(table.get(day)?.get('model-a')?.totalTokens).toBe(2);
+    mergeTokenUsageExecutionIds(table, table);
+    expect(getTokenUsageExecutionRecords(table, day, 'model-a')?.length).toBe(
+      2,
+    );
+    expect(table.get(day)?.get('model-a')?.totalTokens).toBe(2);
+    expect(table.get(day)?.get('model-a')?.requests).toBe(1);
+  });
+
+  it('uses successful request IDs to replace only the covered persisted run', async () => {
+    const originalQwenHome = process.env['QWEN_HOME'];
+    const config = fakeConfig();
+    const sessionId = config.getSessionId();
+    const project = path.join(tempDir, 'deleted-project');
+    const startTime = new Date(2026, 4, 25, 12);
+    const endTime = new Date(startTime.getTime() + 1_000);
+    // This is a completed-run test; the read must follow it in every timezone.
+    vi.setSystemTime(endTime);
+    const transcript = new SessionService(project, {
+      runtimeBaseDir: tempDir,
+    }).getSessionTranscriptPath(sessionId);
+    const usageRecordPath = path.join(tempDir, 'usage_record.jsonl');
+    const event = createEvent('qwen-max', 'p1', usage(100, 0, 100), {
+      timestamp: endTime.toISOString(),
+    });
+    event.execution_id = 'request-after-delete';
+    const failure = {
+      'event.name': 'qwen-code.api_error',
+      'event.timestamp': endTime.toISOString(),
+      execution_id: 'failure-after-delete',
+      model: 'qwen-max',
+      duration_ms: 25,
+      error_message: 'failed',
+    } as UiEvent;
+    uiTelemetryService.reset();
+    process.env['QWEN_HOME'] = tempDir;
+    try {
+      fs.mkdirSync(path.dirname(transcript), { recursive: true });
+      fs.writeFileSync(
+        transcript,
+        `${JSON.stringify({
+          sessionId,
+          cwd: project,
+          uuid: 'user-before-delete',
+          parentUuid: null,
+          timestamp: startTime.toISOString(),
+          type: 'user',
+          message: { role: 'user', content: 'temporary transcript' },
+        })}\n`,
+      );
+      await recordTokenUsageFromApiResponse(config, event);
+      uiTelemetryService.setSessionStartTime(
+        new Date(startTime.getTime() - 1_000),
+        sessionId,
+      );
+      uiTelemetryService.addEvent(
+        { ...event, 'event.name': EVENT_API_RESPONSE } as UiEvent,
+        sessionId,
+      );
+      uiTelemetryService.addEvent(failure, sessionId);
+      persistSessionUsage({
+        sessionId,
+        startTime,
+        endTime,
+        project,
+        metrics: uiTelemetryService.getLiveMetrics(),
+      });
+      const persistedRecord = JSON.parse(
+        fs.readFileSync(usageRecordPath, 'utf8').trim(),
+      ) as UsageSummaryRecord;
+      expect(persistedRecord.requestExecutionIds).toEqual([
+        'failure-after-delete',
+        'request-after-delete',
+      ]);
+      expect(persistedRecord.successfulRequestExecutionIds).toEqual([
+        'request-after-delete',
+      ]);
+
+      const legacyRecord = { ...persistedRecord };
+      delete legacyRecord.successfulRequestExecutionIds;
+      fs.writeFileSync(usageRecordPath, `${JSON.stringify(legacyRecord)}\n`);
+      const legacyIdentified = await loadUsageDashboardSources([tempDir]);
+      expect(
+        buildUsageDashboard(
+          legacyIdentified.records,
+          { range: 'all' },
+          legacyIdentified.ledgerDaily,
+          legacyIdentified.runtimeScopes,
+        ).summary,
+      ).toMatchObject({ totalTokens: 100, requests: 2 });
+
+      fs.writeFileSync(usageRecordPath, `${JSON.stringify(persistedRecord)}\n`);
+      const transcriptContent = fs.readFileSync(transcript, 'utf8');
+      fs.rmSync(transcript);
+      const sources = await loadUsageDashboardSources([tempDir]);
+      expect(fs.existsSync(transcript)).toBe(false);
+      expect(
+        buildUsageDashboard(
+          sources.records,
+          { range: 'all' },
+          sources.ledgerDaily,
+          sources.runtimeScopes,
+        ).summary,
+      ).toMatchObject({
+        totalTokens: 100,
+        requests: 2,
+      });
+
+      const rewriteLedger = async (
+        change: (row: Record<string, unknown>) => void,
+      ) => {
+        const ledgerPath = getTokenUsageFilePath('2026-05');
+        const lines = (await readFile(ledgerPath, 'utf8')).trim().split('\n');
+        const row = JSON.parse(lines[0]!) as Record<string, unknown>;
+        change(row);
+        await writeFile(ledgerPath, `${JSON.stringify(row)}\n`, 'utf8');
+      };
+
+      await rewriteLedger((row) => {
+        row['executionId'] = 'a-different-request';
+      });
+      const mismatched = await loadUsageDashboardSources([tempDir]);
+      expect(
+        buildUsageDashboard(
+          mismatched.records,
+          { range: 'all' },
+          mismatched.ledgerDaily,
+          mismatched.runtimeScopes,
+        ).summary,
+      ).toMatchObject({
+        totalTokens: 200,
+        requests: 3,
+      });
+      fs.writeFileSync(transcript, transcriptContent);
+      expect(fs.existsSync(transcript)).toBe(true);
+      const mismatchedWithTranscript = await loadUsageDashboardSources([
+        tempDir,
+      ]);
+      expect(
+        buildUsageDashboard(
+          mismatchedWithTranscript.records,
+          { range: 'all' },
+          mismatchedWithTranscript.ledgerDaily,
+          mismatchedWithTranscript.runtimeScopes,
+        ).summary,
+      ).toMatchObject({ totalTokens: 200, requests: 3 });
+
+      const partialRecord = structuredClone(persistedRecord);
+      partialRecord.requestExecutionIds = [
+        'request-after-delete',
+        'unknown-second-request',
+      ];
+      partialRecord.successfulRequestExecutionIds!.push(
+        'unknown-second-request',
+      );
+      Object.assign(partialRecord.models['qwen-max']!, {
+        errors: 0,
+        errorLatencyMs: 0,
+        totalLatencyMs: 100,
+      });
+      partialRecord.totalLatencyMs = 100;
+      fs.writeFileSync(usageRecordPath, `${JSON.stringify(partialRecord)}\n`);
+      await rewriteLedger((row) => {
+        row['executionId'] = 'request-after-delete';
+      });
+      fs.rmSync(transcript);
+      expect(fs.existsSync(transcript)).toBe(false);
+      const partial = await loadUsageDashboardSources([tempDir]);
+      expect(
+        buildUsageDashboard(
+          partial.records,
+          { range: 'all' },
+          partial.ledgerDaily,
+          partial.runtimeScopes,
+        ).summary,
+      ).toMatchObject({
+        totalTokens: 200,
+        requests: 3,
+      });
+      fs.writeFileSync(transcript, transcriptContent);
+      expect(fs.existsSync(transcript)).toBe(true);
+      const partialWithTranscript = await loadUsageDashboardSources([tempDir]);
+      expect(
+        buildUsageDashboard(
+          partialWithTranscript.records,
+          { range: 'all' },
+          partialWithTranscript.ledgerDaily,
+          partialWithTranscript.runtimeScopes,
+        ).summary,
+      ).toMatchObject({ totalTokens: 200, requests: 3 });
+
+      fs.rmSync(transcript);
+      delete persistedRecord.requestExecutionIds;
+      delete persistedRecord.successfulRequestExecutionIds;
+      fs.writeFileSync(usageRecordPath, `${JSON.stringify(persistedRecord)}\n`);
+      await rewriteLedger((row) => {
+        delete row['executionId'];
+      });
+      const legacy = await loadUsageDashboardSources([tempDir]);
+      expect(
+        buildUsageDashboard(
+          legacy.records,
+          { range: 'all' },
+          legacy.ledgerDaily,
+          legacy.runtimeScopes,
+        ).summary,
+      ).toMatchObject({
+        totalTokens: 200,
+        requests: 3,
+      });
+    } finally {
+      if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalQwenHome;
+      uiTelemetryService.reset();
+    }
+  });
+
+  it('normalizes a missing Qwen OAuth total without double-billing reasoning', async () => {
+    const startTime = new Date(2026, 4, 25, 10);
+    const endTime = new Date(startTime.getTime() + 1_000);
+    const response = createEvent(
+      'model-a',
+      'missing-oauth-total',
+      {
+        promptTokenCount: 10,
+        candidatesTokenCount: 20,
+        thoughtsTokenCount: 5,
+      },
+      {
+        authType: AuthType.QWEN_OAUTH,
+        timestamp: startTime.toISOString(),
+        durationMs: 1,
+      },
+    );
+    response.execution_id = 'oauth-missing-total';
+    const dashboard = await buildTranscriptlessRunDashboard(
+      startTime,
+      endTime,
+      [response],
+    );
+    expect(dashboard.summary).toMatchObject({
+      requests: 1,
+      totalTokens: 30,
+      inputTokens: 10,
+      outputTokens: 20,
+      thoughtsTokens: 5,
+    });
+  });
+
+  it('matches a cache-only response across live and ledger normalization', async () => {
+    const startTime = new Date(2026, 4, 25, 10);
+    const endTime = new Date(startTime.getTime() + 1_000);
+    const response = createEvent(
+      'model-a',
+      'cache-only-total',
+      {
+        promptTokenCount: 0,
+        candidatesTokenCount: 0,
+        cachedContentTokenCount: 100,
+        totalTokenCount: 100,
+      },
+      {
+        authType: AuthType.USE_OPENAI,
+        timestamp: startTime.toISOString(),
+        durationMs: 1,
+      },
+    );
+    response.execution_id = 'cache-only-response';
+    const dashboard = await buildTranscriptlessRunDashboard(
+      startTime,
+      endTime,
+      [response],
+    );
+    expect(dashboard.summary).toMatchObject({
+      requests: 1,
+      inputTokens: 100,
+      cachedTokens: 100,
+      totalTokens: 100,
+    });
+    expect(
+      getTokenUsageExecutionRecords(
+        await loadTokenUsageDailyByModel('2026-05-01'),
+        localDateKey(startTime.getTime()),
+        'model-a',
+      ),
+    ).toMatchObject([{ apiDurationMs: 1 }]);
+  });
+
+  it('matches a cache-only response without an explicit total', async () => {
+    const startTime = new Date(2026, 4, 25, 10);
+    const endTime = new Date(startTime.getTime() + 1_000);
+    const response = createEvent(
+      'model-a',
+      'cache-only-without-total',
+      {
+        promptTokenCount: 0,
+        candidatesTokenCount: 0,
+        cachedContentTokenCount: 100,
+        totalTokenCount: 0,
+      },
+      {
+        authType: AuthType.USE_GEMINI,
+        timestamp: startTime.toISOString(),
+        durationMs: 1,
+      },
+    );
+    response.execution_id = 'cache-only-without-total-response';
+    const dashboard = await buildTranscriptlessRunDashboard(
+      startTime,
+      endTime,
+      [response],
+    );
+    expect(dashboard.summary).toMatchObject({
+      requests: 1,
+      inputTokens: 100,
+      cachedTokens: 100,
+      totalTokens: 100,
+    });
+  });
+
+  it('matches successful identities across every model in a run', async () => {
+    const startTime = new Date(2026, 4, 25, 10);
+    const endTime = new Date(startTime.getTime() + 1_000);
+    const first = createEvent('model-a', 'a', usage(100, 0, 100), {
+      timestamp: startTime.toISOString(),
+    });
+    first.execution_id = 'model-a-request';
+    const second = createEvent('model-b', 'b', usage(200, 0, 200), {
+      timestamp: endTime.toISOString(),
+    });
+    second.execution_id = 'model-b-request';
+
+    const dashboard = await buildTranscriptlessRunDashboard(
+      startTime,
+      endTime,
+      [first, second],
+    );
+
+    expect(dashboard.summary).toMatchObject({ totalTokens: 300, requests: 2 });
+    expect(dashboard.models.map((model) => model.totalTokens).sort()).toEqual([
+      100, 200,
+    ]);
+  });
+
+  it('matches successful identities across every local day in a run', async () => {
+    const startTime = new Date(2026, 4, 24, 23, 59);
+    const endTime = new Date(2026, 4, 25, 0, 1);
+    const first = createEvent('model-a', 'a', usage(100, 0, 100), {
+      timestamp: startTime.toISOString(),
+    });
+    first.execution_id = 'first-day-request';
+    const second = createEvent('model-a', 'b', usage(200, 0, 200), {
+      timestamp: endTime.toISOString(),
+    });
+    second.execution_id = 'second-day-request';
+
+    const dashboard = await buildTranscriptlessRunDashboard(
+      startTime,
+      endTime,
+      [first, second],
+    );
+
+    expect(dashboard.summary).toMatchObject({ totalTokens: 300, requests: 2 });
+    expect(dashboard.heatmap['2026-05-24']?.tokens).toBe(100);
+    expect(dashboard.heatmap['2026-05-25']?.tokens).toBe(200);
+  });
+
   it('drops invalid and future-schema records while keeping valid ones', async () => {
     const config = fakeConfig();
-    await recordUsage(config, 'model-a', 'p1', usage(4, 6, 10));
+    const event = createEvent('model-a', 'p1', usage(4, 6, 10));
+    event.execution_id = 'valid-execution';
+    await recordTokenUsageFromApiResponse(config, event);
     const file = getTokenUsageFilePath('2026-05');
     const valid = JSON.parse(
       (await readFile(file, 'utf-8')).trim().split('\n')[0]!,
     ) as Record<string, unknown>;
     await jsonl.writeLine(file, { ...valid, schemaVersion: 99, id: 'future' });
+    await jsonl.writeLine(file, {
+      ...valid,
+      id: 'invalid-execution-id',
+      executionId: 42,
+    });
     // `undefined` drops the key on serialization, so the record fails validation.
     await jsonl.writeLine(file, {
       ...valid,
@@ -1005,6 +2020,9 @@ describe('tokenUsageService', () => {
       requests: 1,
       totalTokens: 10,
     });
+    expect(getTokenUsageExecutionIds(table, '2026-05-25', 'model-a')).toEqual(
+      new Set(['valid-execution']),
+    );
   });
 
   it('validates period values', async () => {

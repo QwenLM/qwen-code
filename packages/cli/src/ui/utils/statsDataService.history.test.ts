@@ -10,6 +10,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { SessionMetrics } from '@qwen-code/qwen-code-core';
 import {
+  localDateKey,
+  loadUsageHistory,
   persistSessionUsage,
   _resetReplayCacheForTest,
 } from '@qwen-code/qwen-code-core';
@@ -171,6 +173,320 @@ describe('stats cross-session transcript reconstruction', () => {
     expect(data.report.totalRequests).toBe(2);
   });
 
+  it('keeps same-root project transcripts distinct from an unjoined ledger', async () => {
+    const isolatedHome = path.join(home, 'same-root-projects');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 5, 12));
+    const originalHome = process.env['HOME'];
+    process.env['HOME'] = isolatedHome;
+    process.env['QWEN_HOME'] = isolatedHome;
+    process.env['QWEN_RUNTIME_DIR'] = isolatedHome;
+    const sessionId = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+    for (const project of ['/project/a', '/project/b']) {
+      const pathForSession = new SessionService(project, {
+        runtimeBaseDir: isolatedHome,
+      }).getSessionTranscriptPath(sessionId);
+      seedTranscript(
+        isolatedHome,
+        path.dirname(pathForSession),
+        sessionId,
+        project,
+      );
+    }
+    const localDate = localDateKey(Date.now());
+    const ledgerFile = path.join(
+      isolatedHome,
+      'usage',
+      `token-usage-${localDate.slice(0, 7)}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(ledgerFile), { recursive: true });
+    fs.writeFileSync(
+      ledgerFile,
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'unjoined-runtime-request',
+        timestamp: new Date(Date.now() - 1000).toISOString(),
+        localDate,
+        localMonth: localDate.slice(0, 7),
+        sessionId,
+        model: 'qwen-max',
+        authType: 'openai',
+        source: 'main',
+        inputTokens: 100,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 100,
+        apiDurationMs: 10,
+      }) + '\n',
+    );
+
+    try {
+      const data = await loadStatsData('today', undefined, sessionId);
+
+      expect(data.report.models['qwen-max']?.totalTokens).toBe(2100);
+      expect(data.report.totalRequests).toBe(3);
+      expect(data.report.sessionCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      if (originalHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = originalHome;
+    }
+  });
+
+  it('keeps transcript ownership on the persisted fast path', async () => {
+    const isolatedHome = path.join(home, 'persisted-transcript-scope');
+    const originalHome = process.env['HOME'];
+    process.env['HOME'] = isolatedHome;
+    process.env['QWEN_HOME'] = isolatedHome;
+    process.env['QWEN_RUNTIME_DIR'] = isolatedHome;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 5, 12));
+    const sessionId = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+    const history = path.join(isolatedHome, 'usage_record.jsonl');
+    try {
+      const projects = ['/project/a', '/project/b'];
+      for (const [index, project] of projects.entries()) {
+        const transcript = new SessionService(project, {
+          runtimeBaseDir: isolatedHome,
+        }).getSessionTranscriptPath(sessionId);
+        seedTranscript(
+          isolatedHome,
+          path.dirname(transcript),
+          sessionId,
+          project,
+        );
+        persistSessionUsage({
+          sessionId,
+          project,
+          startTime: new Date(Date.now() - 7_200_000),
+          endTime: new Date(Date.now() - 7_200_000 + 2_000),
+          metrics: metrics((index + 1) * 100),
+        });
+      }
+      const records = fs
+        .readFileSync(history, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => ({
+          ...JSON.parse(line),
+          runScoped: false,
+          transcriptRebuild: true,
+        }));
+      fs.writeFileSync(
+        history,
+        `${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
+      );
+      const localDate = localDateKey(Date.now());
+      const ledgerFile = path.join(
+        isolatedHome,
+        'usage',
+        `token-usage-${localDate.slice(0, 7)}.jsonl`,
+      );
+      fs.mkdirSync(path.dirname(ledgerFile), { recursive: true });
+      fs.writeFileSync(
+        ledgerFile,
+        JSON.stringify({
+          schemaVersion: 1,
+          id: 'unjoined-ledger',
+          timestamp: new Date().toISOString(),
+          localDate,
+          localMonth: localDate.slice(0, 7),
+          sessionId,
+          model: 'qwen-max',
+          authType: 'openai',
+          source: 'main',
+          inputTokens: 50,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 50,
+          apiDurationMs: 10,
+        }) + '\n',
+      );
+
+      const data = await loadStatsData(
+        'all',
+        undefined,
+        sessionId,
+        projects[0],
+      );
+      expect(data.report.models['qwen-max']?.totalTokens).toBe(350);
+      expect(data.report.totalRequests).toBe(3);
+      expect(data.report.sessionCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      if (originalHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = originalHome;
+    }
+  });
+
+  it('keeps the active session joined to its ledger without a transcript', async () => {
+    const isolatedHome = path.join(home, 'active-missing-transcript');
+    const originalHome = process.env['HOME'];
+    process.env['HOME'] = isolatedHome;
+    process.env['QWEN_HOME'] = isolatedHome;
+    process.env['QWEN_RUNTIME_DIR'] = isolatedHome;
+    fs.mkdirSync(isolatedHome, { recursive: true });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 5, 12));
+    const sessionId = B;
+    const executionId = 'active-no-transcript-response';
+    const current = buildCurrentSessionRecord(
+      sessionId,
+      new Date(Date.now() - 1_000),
+      isolatedHome,
+      metrics(100),
+    )!;
+    current.requestExecutionIds = [executionId];
+    expect(current.successfulRequestExecutionIds).toBeUndefined();
+    const transcript = new SessionService(isolatedHome, {
+      runtimeBaseDir: isolatedHome,
+    }).getSessionTranscriptPath(sessionId);
+    expect(fs.existsSync(transcript)).toBe(false);
+    const localDate = localDateKey(Date.now());
+    const ledgerFile = path.join(
+      isolatedHome,
+      'usage',
+      `token-usage-${localDate.slice(0, 7)}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(ledgerFile), { recursive: true });
+    fs.writeFileSync(
+      ledgerFile,
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'active-missing-transcript-row',
+        executionId,
+        timestamp: new Date().toISOString(),
+        localDate,
+        localMonth: localDate.slice(0, 7),
+        sessionId,
+        model: 'qwen-max',
+        authType: 'openai',
+        source: 'main',
+        inputTokens: 100,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 100,
+        apiDurationMs: 10,
+      }) + '\n',
+    );
+
+    try {
+      const data = await loadStatsData(
+        'today',
+        current,
+        sessionId,
+        isolatedHome,
+      );
+      expect(data.report.models['qwen-max']?.totalTokens).toBe(100);
+      expect(data.report.totalRequests).toBe(1);
+      expect(data.report.sessionCount).toBe(1);
+      expect(data.report.tools.totalCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      if (originalHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = originalHome;
+    }
+  });
+
+  it('keeps another project history beside the active session ledger', async () => {
+    const isolatedHome = path.join(home, 'active-project-isolation');
+    const previousHome = process.env['HOME'];
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const previousRuntime = process.env['QWEN_RUNTIME_DIR'];
+    process.env['HOME'] = isolatedHome;
+    process.env['QWEN_HOME'] = isolatedHome;
+    process.env['QWEN_RUNTIME_DIR'] = isolatedHome;
+    fs.mkdirSync(isolatedHome, { recursive: true });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 5, 12));
+    const projectA = '/runtime/history-a';
+    const projectB = '/runtime/history-b';
+    const sessionId = B;
+    persistSessionUsage({
+      sessionId,
+      project: projectA,
+      startTime: new Date(Date.now() - 7_200_000),
+      endTime: new Date(Date.now() - 3_600_000),
+      metrics: metrics(1000),
+    });
+    const usagePath = path.join(isolatedHome, 'usage_record.jsonl');
+    const authoritative = JSON.parse(
+      fs.readFileSync(usagePath, 'utf8').trim().split('\n').at(-1)!,
+    );
+    authoritative.transcriptRebuild = true;
+    delete authoritative.runScoped;
+    fs.writeFileSync(usagePath, `${JSON.stringify(authoritative)}\n`);
+    seedTranscript(
+      isolatedHome,
+      path.dirname(
+        new SessionService(projectA, {
+          runtimeBaseDir: isolatedHome,
+        }).getSessionTranscriptPath(sessionId),
+      ),
+      sessionId,
+      projectA,
+    );
+    const current = buildCurrentSessionRecord(
+      sessionId,
+      new Date(Date.now() - 1_000),
+      projectB,
+      metrics(100),
+    )!;
+    const executionId = 'project-b-active-response';
+    current.requestExecutionIds = [executionId];
+    delete current.successfulRequestExecutionIds;
+    const ledgerPath = path.join(
+      isolatedHome,
+      'usage',
+      `token-usage-${localDateKey(Date.now()).slice(0, 7)}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+    fs.writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'project-b-ledger',
+        executionId,
+        timestamp: new Date().toISOString(),
+        localDate: localDateKey(Date.now()),
+        localMonth: localDateKey(Date.now()).slice(0, 7),
+        sessionId,
+        model: 'qwen-max',
+        authType: 'openai',
+        source: 'main',
+        inputTokens: 100,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 100,
+        apiDurationMs: 10,
+      }) + '\n',
+    );
+    try {
+      const loaded = await loadUsageHistory(sessionId, {
+        persistRebuild: false,
+        projectRoot: projectB,
+        readAt: Date.now(),
+      });
+      expect(loaded.map((record) => record.project)).toEqual([projectA]);
+      const data = await loadStatsData('today', current, sessionId, projectB);
+      expect(data.report.models['qwen-max']?.totalTokens).toBe(1100);
+      expect(data.report.totalRequests).toBe(2);
+      expect(data.report.sessionCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      if (previousHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previousHome;
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      if (previousRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = previousRuntime;
+    }
+  });
+
   it('adds only the current run without rewriting historical tokens', async () => {
     const live = buildCurrentSessionRecord(
       B,
@@ -191,6 +507,101 @@ describe('stats cross-session transcript reconstruction', () => {
       .split('\n')
       .map((line) => JSON.parse(line));
     expect(records.map((record) => record.sessionId)).toEqual([A]);
+  });
+
+  it('uses the active session identity in the completed-window delta', async () => {
+    const isolatedHome = path.join(home, 'active-delta-proof');
+    const previousHome = process.env['HOME'];
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const previousRuntime = process.env['QWEN_RUNTIME_DIR'];
+    process.env['HOME'] = isolatedHome;
+    process.env['QWEN_HOME'] = isolatedHome;
+    process.env['QWEN_RUNTIME_DIR'] = isolatedHome;
+    fs.mkdirSync(isolatedHome, { recursive: true });
+    const dayAt = (offset: number) => new Date(2026, 5, 1 + offset, 12);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(dayAt(15));
+    const sessionId = B;
+    const project = '/delta/current-project';
+    const current = buildCurrentSessionRecord(
+      sessionId,
+      dayAt(5),
+      project,
+      metrics(200),
+    )!;
+    current.timestamp = dayAt(13).getTime();
+    current.models['qwen-max']!.requests = 2;
+    current.requestExecutionIds = [
+      'active-previous-response',
+      'active-current-response',
+    ];
+    delete current.successfulRequestExecutionIds;
+    persistSessionUsage({
+      sessionId: 'earlier-delta-session',
+      project: '/delta/old-project',
+      startTime: dayAt(3),
+      endTime: dayAt(4),
+      metrics: metrics(100),
+    });
+    const usagePath = path.join(isolatedHome, 'usage_record.jsonl');
+    const oldSnapshot = JSON.parse(fs.readFileSync(usagePath, 'utf8').trim());
+    delete oldSnapshot.runScoped;
+    fs.writeFileSync(usagePath, `${JSON.stringify(oldSnapshot)}\n`);
+    const rows = [
+      {
+        offset: 4,
+        id: 'earlier-delta-response',
+        sessionId: 'earlier-delta-session',
+      },
+      { offset: 7, id: 'active-previous-response', sessionId },
+      { offset: 13, id: 'active-current-response', sessionId },
+    ].map(({ offset, id, sessionId: owner }) => {
+      const date = dayAt(offset);
+      return JSON.stringify({
+        schemaVersion: 1,
+        id,
+        executionId: id,
+        timestamp: date.toISOString(),
+        localDate: localDateKey(date.getTime()),
+        localMonth: localDateKey(date.getTime()).slice(0, 7),
+        sessionId: owner,
+        model: 'qwen-max',
+        authType: 'openai',
+        source: 'main',
+        inputTokens: 100,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 100,
+        apiDurationMs: 10,
+      });
+    });
+    const ledger = path.join(
+      isolatedHome,
+      'usage',
+      'token-usage-2026-06.jsonl',
+    );
+    fs.mkdirSync(path.dirname(ledger), { recursive: true });
+    fs.writeFileSync(ledger, `${rows.join('\n')}\n`);
+    expect(
+      fs.existsSync(
+        new SessionService(project, {
+          runtimeBaseDir: isolatedHome,
+        }).getSessionTranscriptPath(sessionId),
+      ),
+    ).toBe(false);
+    try {
+      const data = await loadStatsData('week', current, sessionId, project);
+      expect(data.delta?.tokens).toBe(-50);
+    } finally {
+      vi.useRealTimers();
+      if (previousHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previousHome;
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      if (previousRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = previousRuntime;
+    }
   });
 
   it('keeps multiple verified project directories out of the discovery path', async () => {

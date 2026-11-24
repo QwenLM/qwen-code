@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   getRequestExecutionIds,
+  getSuccessfulRequestExecutionIds,
   UiTelemetryService,
   MAIN_SOURCE,
   MAX_FAILURE_SAMPLES,
@@ -1881,6 +1882,10 @@ describe('UiTelemetryService live usage accounting', () => {
       apiResponse('m', 10, [5, 2, 7, 0, 0], { execution_id: 'live-call' }),
       's',
     );
+    service.addEvent(
+      apiError('m', 20, 'failed', { execution_id: 'failed-call' }),
+      's',
+    );
     service.addReplayedEvent(
       apiResponse('m', 10, [5, 2, 7, 0, 0], { execution_id: 'old-call' }),
       's',
@@ -1888,6 +1893,9 @@ describe('UiTelemetryService live usage accounting', () => {
     const snapshot = service.snapshotForReplay('other');
 
     expect(getRequestExecutionIds(snapshot.liveMetrics)).toEqual(
+      new Set(['live-call', 'failed-call']),
+    );
+    expect(getSuccessfulRequestExecutionIds(snapshot.liveMetrics)).toEqual(
       new Set(['live-call']),
     );
     expect(service.getLiveMetrics()).not.toHaveProperty('requestExecutionIds');
@@ -1905,9 +1913,15 @@ describe('UiTelemetryService live usage accounting', () => {
     ).toBe(false);
     service.resetLiveMetrics();
     expect(getRequestExecutionIds(service.getLiveMetrics())?.size ?? 0).toBe(0);
+    expect(
+      getSuccessfulRequestExecutionIds(service.getLiveMetrics())?.size ?? 0,
+    ).toBe(0);
 
     service.restoreFromReplaySnapshot(snapshot);
     expect(getRequestExecutionIds(service.getLiveMetrics())).toEqual(
+      new Set(['live-call', 'failed-call']),
+    );
+    expect(getSuccessfulRequestExecutionIds(service.getLiveMetrics())).toEqual(
       new Set(['live-call']),
     );
   });
@@ -2086,6 +2100,42 @@ describe('UiTelemetryService live usage accounting', () => {
 
     expect(requests(service.getLiveMetrics())).toBe(0);
     expect(requests(service.getMetrics())).toBe(0);
+  });
+
+  it('tags a restored clock with its owner and preserves legacy updates', () => {
+    const owners: Array<string | undefined> = [];
+    const capture = (event: { clockSessionId?: string }) => {
+      owners.push(event.clockSessionId);
+    };
+    service.on('update', capture);
+
+    service.setSessionStartTime(
+      new Date('2019-01-02T03:04:05.000Z'),
+      'target-session',
+    );
+    service.setSessionStartTime(new Date('2019-01-03T03:04:05.000Z'));
+
+    service.off('update', capture);
+    expect(owners).toEqual(['target-session', undefined]);
+    expect(service.getSessionStartTime()).toEqual(
+      new Date('2019-01-03T03:04:05.000Z'),
+    );
+  });
+
+  it('notifies a new clock owner at the same timestamp', () => {
+    const owners: Array<string | undefined> = [];
+    const capture = (event: { clockSessionId?: string }) => {
+      owners.push(event.clockSessionId);
+    };
+    service.on('update', capture);
+    const start = new Date('2020-01-01T00:00:00.000Z');
+    try {
+      service.setSessionStartTime(start, 'session-a');
+      service.setSessionStartTime(new Date(start), 'session-b');
+      expect(owners).toEqual(['session-a', 'session-b']);
+    } finally {
+      service.off('update', capture);
+    }
   });
 
   it('resets a completed run and its start time without clearing the display', () => {

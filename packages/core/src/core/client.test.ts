@@ -1253,6 +1253,7 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledWith(
         new Date(start),
+        'test-session-id',
       );
     });
 
@@ -1269,6 +1270,7 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledWith(
         new Date(start),
+        'test-session-id',
       );
     });
 

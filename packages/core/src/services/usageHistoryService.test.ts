@@ -32,8 +32,10 @@ import {
   metricsToUsageRecord as toRecord,
   aggregateUsage,
   dedupBySessionId,
+  deduplicateIdentifiedRootHistory,
   getTimeRangeBounds,
   metricsToRunUsageRecord,
+  getTranscriptScope,
   loadUsageHistory,
   loadUsageHistoryWithLive,
   persistSessionUsage,
@@ -41,10 +43,15 @@ import {
   prepareUsageBeforeTranscriptDeletion,
   commitUsageBeforeTranscriptDeletion,
   _resetReplayCacheForTest,
+  identifiedConsumptionKey,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import { SessionService } from './sessionService.js';
-import { localDateKey } from './usage-dashboard-service.js';
+import {
+  buildUsageDashboard,
+  loadUsageDashboardSources,
+  localDateKey,
+} from './usage-dashboard-service.js';
 import { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import type { SessionMetrics, UiEvent } from '../telemetry/uiTelemetry.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
@@ -186,6 +193,37 @@ describe('metricsToUsageRecord', () => {
   it('omits skills when SessionMetrics has none', () => {
     const record = toRecord('s', '/p', 0, 1000, makeMetrics());
     expect(record.skills).toBeUndefined();
+  });
+
+  it('persists successful request identities separately from failures', () => {
+    const telemetry = new UiTelemetryService();
+    telemetry.addEvent({
+      'event.name': 'qwen-code.api_response',
+      execution_id: 'successful-call',
+      model: 'qwen-max',
+      duration_ms: 10,
+      input_token_count: 100,
+      output_token_count: 0,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+      total_token_count: 100,
+    } as UiEvent);
+    telemetry.addEvent({
+      'event.name': 'qwen-code.api_error',
+      execution_id: 'failed-call',
+      model: 'qwen-max',
+      duration_ms: 20,
+      error_message: 'failed',
+    } as UiEvent);
+
+    const record = toRecord('s', '/p', 0, 1000, telemetry.getLiveMetrics());
+
+    expect(record.requestExecutionIds).toEqual([
+      'failed-call',
+      'successful-call',
+    ]);
+    expect(record.successfulRequestExecutionIds).toEqual(['successful-call']);
+    expect(record.models['qwen-max']).toMatchObject({ requests: 2, errors: 1 });
   });
 });
 
@@ -449,11 +487,26 @@ function writeTranscript(
   return filePath;
 }
 
+function writeSessionTranscript(
+  cwd: string,
+  sessionId: string,
+  opts: Omit<Parameters<typeof writeTranscript>[2], 'cwd'>,
+): string {
+  const filePath = new SessionService(cwd, {
+    runtimeBaseDir: process.env['QWEN_HOME']!,
+  }).getSessionTranscriptPath(sessionId);
+  return writeTranscript(
+    path.basename(path.dirname(path.dirname(filePath))),
+    sessionId,
+    { ...opts, cwd },
+  );
+}
+
 function appendNativeResponse(
   filePath: string,
   sessionId: string,
   timestamp: string,
-  executionId: string,
+  executionId: string | undefined,
   tokens = 500,
 ): UiEvent {
   const event = {
@@ -484,6 +537,41 @@ function appendNativeResponse(
     }) + '\n',
   );
   return event;
+}
+
+function appendNativeToolCall(
+  filePath: string,
+  sessionId: string,
+  timestamp: string,
+  linesAdded: number,
+  linesRemoved: number,
+  outerTimestamp = timestamp,
+): void {
+  fs.appendFileSync(
+    filePath,
+    `${JSON.stringify({
+      sessionId,
+      cwd: '/repro/project',
+      timestamp: outerTimestamp,
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.tool_call',
+          'event.timestamp': timestamp,
+          call_id: `tool-${timestamp}`,
+          function_name: 'edit',
+          function_args: { file_path: '/repro/project/demo.ts' },
+          duration_ms: 20,
+          success: true,
+          metadata: {
+            model_added_lines: linesAdded,
+            model_removed_lines: linesRemoved,
+          },
+        },
+      },
+    })}\n`,
+  );
 }
 
 // Regression coverage for issue #4994: opening /stats during the first-ever
@@ -687,9 +775,10 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   });
 
   it('withLive: a persisted session with a live transcript is not double-counted (persisted wins)', async () => {
-    // Same sessionId in both the persisted file (authoritative 1000) and the
-    // transcript (1600). Must appear exactly once, keeping the persisted value.
-    seedPersisted([persistedRec('sess-both', 1000)]);
+    // Same project and sessionId in both sources must keep the persisted value.
+    seedPersisted([
+      { ...persistedRec('sess-both', 1000), project: '/repro/project' },
+    ]);
     plantChatJsonl('sess-both', 1600);
 
     const merged = await loadUsageHistoryWithLive();
@@ -966,7 +1055,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(usageLines()).toHaveLength(1);
   });
 
-  it('retains discovery and directory priority when a session has ambiguous roots', async () => {
+  it('retains discovery and distinct project records for ambiguous ids', async () => {
     const sessionId = 'ambiguous-scoped-session';
     const start = Date.parse('2026-06-12T00:00:00Z');
     const records = ['/a/project', '/z/project'].map((project) => {
@@ -994,13 +1083,160 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     const directorySpy = vi.spyOn(fs, 'readdirSync');
     try {
       const result = await loadUsageHistory();
-      expect(totalTokensOf(aggregateUsage(result, 'all'))).toBe(1200);
+      expect(totalTokensOf(aggregateUsage(result, 'all'))).toBe(3400);
       expect(result.find((record) => record.transcriptRebuild)?.project).toBe(
         '/a/project',
       );
       expect(directorySpy).toHaveBeenCalledWith(projectsDir);
     } finally {
       directorySpy.mockRestore();
+    }
+  });
+
+  it('withLive preserves equal session ids belonging to distinct projects', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    for (const [project, tokens, executionId] of [
+      ['/project/a', 100, 'request-a'],
+      ['/project/b', 200, 'request-b'],
+    ] as const) {
+      const transcript = new SessionService(project, {
+        runtimeBaseDir: process.env['QWEN_HOME']!,
+      }).getSessionTranscriptPath(sessionId);
+      writeTranscript(
+        path.basename(path.dirname(path.dirname(transcript))),
+        sessionId,
+        {
+          cwd: project,
+          day: '2026-06-11',
+          durationMs: 1200,
+          tokens,
+          executionId,
+          assistant: true,
+        },
+      );
+    }
+
+    const records = await loadUsageHistoryWithLive({
+      qwenHomeDir: process.env['QWEN_HOME']!,
+      persistedRecords: [],
+    });
+
+    expect(records.map((record) => record.project).sort()).toEqual([
+      '/project/a',
+      '/project/b',
+    ]);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(300);
+  });
+
+  it('withLive scopes replay windows by project for a reused session id', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const at = (time: string) => Date.parse(`2026-06-11T${time}:00.000Z`);
+    let aTranscript = '';
+    for (const project of ['/project/a', '/project/b']) {
+      const transcript = new SessionService(project, {
+        runtimeBaseDir: process.env['QWEN_HOME']!,
+      }).getSessionTranscriptPath(sessionId);
+      if (project === '/project/a') aTranscript = transcript;
+      writeTranscript(
+        path.basename(path.dirname(path.dirname(transcript))),
+        sessionId,
+        { cwd: project, day: '2026-06-11', durationMs: 1200, assistant: true },
+      );
+    }
+    appendNativeResponse(
+      aTranscript,
+      sessionId,
+      '2026-06-11T00:30:00.000Z',
+      'request-a-late',
+    );
+    seedPersisted([
+      {
+        ...runRec(sessionId, 100, at('00:10'), at('00:20')),
+        project: '/project/a',
+      },
+      {
+        ...runRec(sessionId, 200, at('01:00'), at('02:00')),
+        project: '/project/b',
+      },
+    ]);
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    const supplement = records.find(
+      (record) => record.transcriptSupplement === true,
+    );
+    expect(supplement?.project).toBe('/project/a');
+    expect(supplement?.requestExecutionIds).toEqual(['request-a-late']);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(800);
+  });
+
+  it('withLive validates covered transcripts once before reusing metadata', async () => {
+    const sessionId = 'covered-transcript';
+    const project = '/repro/project';
+    const filePath = new SessionService(project, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(filePath))),
+      sessionId,
+      {
+        cwd: project,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 1000,
+        assistant: true,
+      },
+    );
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 1000),
+        project,
+        startTime: Date.parse('2026-06-11T00:00:00.000Z'),
+        timestamp: Date.parse('2026-06-11T00:02:00.000Z'),
+      },
+    ]);
+    const statSpy = vi.spyOn(fs, 'statSync');
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    try {
+      const first = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(first.map((record) => record.project)).toEqual([project]);
+      expect(getTranscriptScope(first)?.root).toBe(process.env['QWEN_HOME']);
+      expect(
+        getTranscriptScope(first)
+          ?.pathsBySessionId.get(sessionId)
+          ?.has(filePath),
+      ).toBe(true);
+      const second = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(second).toEqual(first);
+      expect(
+        getTranscriptScope(second)
+          ?.pathsBySessionId.get(sessionId)
+          ?.has(filePath),
+      ).toBe(true);
+      expect(
+        statSpy.mock.calls.filter(([path]) => path === filePath),
+      ).toHaveLength(2);
+      expect(
+        openSpy.mock.calls.filter(([path]) => path === filePath),
+      ).toHaveLength(1);
+      appendNativeResponse(
+        filePath,
+        sessionId,
+        '2026-06-11T00:03:00.000Z',
+        'covered-transcript-appended',
+        500,
+      );
+      const third = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(totalTokensOf(aggregateUsage(third, 'all'))).toBe(1500);
+      expect(
+        statSpy.mock.calls.filter(([path]) => path === filePath),
+      ).toHaveLength(3);
+      expect(
+        openSpy.mock.calls.filter(([path]) => path === filePath),
+      ).toHaveLength(2);
+    } finally {
+      statSpy.mockRestore();
+      openSpy.mockRestore();
     }
   });
 
@@ -1126,6 +1362,2299 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(usageLines()).toHaveLength(1);
   });
 
+  it('uses actual header projects before applying cold candidate windows', async () => {
+    const sessionId = 'cold-candidate-two-projects';
+    const projectA = '/cold-candidate/project-a';
+    const projectB = '/cold-candidate/project-b';
+    seedPersisted([
+      {
+        ...runRec(
+          sessionId,
+          200,
+          Date.parse('2026-07-01T00:00:30.000Z'),
+          Date.parse('2026-07-01T02:00:00.000Z'),
+        ),
+        project: projectA,
+      },
+    ]);
+    writeTranscript('cold-candidate-b', sessionId, {
+      cwd: projectB,
+      day: '2026-07-01',
+      durationMs: 1000,
+      tokens: 300,
+    });
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(500);
+    expect(
+      records.find((record) => record.project === projectB)?.models['qwen-max']
+        ?.totalTokens,
+    ).toBe(300);
+  });
+
+  it('loads persisted usage from the explicitly selected runtime root', async () => {
+    seedPersisted([persistedRec('ambient-only', 100)]);
+    const explicitRoot = path.join(
+      process.env['QWEN_HOME']!,
+      'explicit-runtime',
+    );
+    fs.mkdirSync(explicitRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(explicitRoot, 'usage_record.jsonl'),
+      `${JSON.stringify(persistedRec('selected-root-only', 200))}\n`,
+    );
+    const records = await loadUsageHistoryWithLive({
+      qwenHomeDir: explicitRoot,
+      sinceMs: 0,
+    });
+    expect(records.map((record) => record.sessionId)).toEqual([
+      'selected-root-only',
+    ]);
+  });
+
+  it('does not assign future ownership to a non-finite persisted clock', async () => {
+    const sessionId = 'malformed-future-clock';
+    const project = '/malformed/future-clock';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: readAt - 120_000,
+        timestamp: 'not-a-date',
+        runScoped: true,
+        requestExecutionIds: ['owned-response'],
+      } as unknown as UsageSummaryRecord,
+    ]);
+    writeTranscript('malformed-future-clock', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 1_000,
+      tokens: 100,
+      executionId: 'owned-response',
+    });
+    const control = await loadUsageHistoryWithLive({
+      qwenHomeDir: process.env['QWEN_HOME']!,
+      persistedRecords: [],
+      sinceMs: 0,
+      readAt,
+    });
+    expect(control).toHaveLength(1);
+    for (const [loader, records] of [
+      [
+        'ordinary',
+        await loadUsageHistory(undefined, { persistRebuild: false, readAt }),
+      ],
+      ['live', await loadUsageHistoryWithLive({ sinceMs: 0, readAt })],
+    ] as const) {
+      expect({ loader, count: records.length }).toEqual({ loader, count: 1 });
+      expect(records[0]).toMatchObject({
+        transcriptRebuild: true,
+        models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+      });
+    }
+  });
+
+  it('isolates malformed persisted owner identities from valid history', async () => {
+    const valid = { ...persistedRec('valid-owner', 100), project: '/valid' };
+    const malformedOwner = { toString: null, valueOf: null };
+    fs.writeFileSync(
+      usagePath(),
+      [
+        JSON.stringify(valid),
+        JSON.stringify({ ...valid, sessionId: malformedOwner }),
+        JSON.stringify({ ...valid, project: malformedOwner }),
+      ].join('\n') + '\n',
+    );
+
+    const history = await loadUsageHistory();
+    const live = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    const sources = await loadUsageDashboardSources([]);
+    expect(history).toMatchObject([{ sessionId: 'valid-owner' }]);
+    expect(live).toMatchObject([{ sessionId: 'valid-owner' }]);
+    expect(sources.records).toMatchObject([{ sessionId: 'valid-owner' }]);
+    expect(
+      buildUsageDashboard(
+        sources.records,
+        { range: 'all' },
+        sources.ledgerDaily,
+        sources.runtimeScopes,
+      ).summary,
+    ).toMatchObject({ totalTokens: 100, requests: 1 });
+  });
+
+  it('keeps the latest cumulative snapshot across the ended/future partition', async () => {
+    const now = Date.now();
+    seedPersisted([
+      {
+        ...persistedRec('legacy-future-snapshot', 1000),
+        timestamp: now - 1_000,
+      },
+      {
+        ...persistedRec('legacy-future-snapshot', 1600),
+        startTime: now,
+        timestamp: now + 60_000,
+      },
+    ]);
+    for (const records of [
+      await loadUsageHistory(undefined, {
+        persistRebuild: false,
+        readAt: now,
+      }),
+      await loadUsageHistoryWithLive({ sinceMs: 0, readAt: now }),
+    ]) {
+      expect(records).toHaveLength(1);
+      expect(records[0]?.timestamp).toBe(now + 60_000);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(now + 60_000);
+      try {
+        expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1600);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it('treats null model metrics as incomplete identity evidence', () => {
+    const malformed = {
+      ...persistedRec('null-model-metrics', 100),
+      requestExecutionIds: ['known-id'],
+      models: { 'qwen-max': null },
+    } as unknown as UsageSummaryRecord;
+    expect(identifiedConsumptionKey(malformed)).toBeUndefined();
+  });
+
+  it('skips transcript indexing when a legacy record has no project', async () => {
+    seedPersisted([
+      {
+        ...persistedRec('missing-project', 100),
+        transcriptRebuild: true,
+        project: undefined,
+      } as unknown as UsageSummaryRecord,
+      {
+        ...persistedRec('healthy-legacy', 200),
+        transcriptRebuild: true,
+      },
+    ]);
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+    expect(records).toHaveLength(2);
+    expect(
+      records.find((record) => record.sessionId === 'healthy-legacy'),
+    ).toMatchObject({ models: { 'qwen-max': { totalTokens: 200 } } });
+  });
+
+  it('keeps a single ended/future partition when the clock crosses the record', async () => {
+    const timestamp = Date.now() + 120_000;
+    const record = {
+      ...persistedRec('clock-partition', 100),
+      startTime: timestamp - 1_000,
+      timestamp,
+      runScoped: true,
+      requestExecutionIds: ['clock-partition-response'],
+    };
+    seedPersisted([record]);
+    const clock = vi
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(timestamp - 1)
+      .mockReturnValueOnce(timestamp - 1)
+      .mockReturnValueOnce(timestamp - 1)
+      .mockReturnValue(timestamp);
+    try {
+      const records = await loadUsageHistory(undefined, {
+        persistRebuild: false,
+      });
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        sessionId: 'clock-partition',
+        timestamp,
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each(['not-an-array', { 0: 'owned', length: 1 }])(
+    'retains future records with malformed requestExecutionIds: %j',
+    async (malformedIds) => {
+      const record = {
+        ...persistedRec('malformed-future', 100),
+        timestamp: Date.now() + 60_000,
+        runScoped: true,
+        requestExecutionIds: malformedIds as unknown as string[],
+      };
+      seedPersisted([record]);
+      await expect(loadUsageHistory()).resolves.toHaveLength(1);
+      await expect(loadUsageHistoryWithLive()).resolves.toHaveLength(1);
+    },
+  );
+
+  it('retains the richer complete file payload in either root order', () => {
+    const makeRecord = (files: { linesAdded: number; linesRemoved: number }) =>
+      ({
+        ...persistedRec('shared-file-observation', 100),
+        project: '/shared/file-observation',
+        startTime: 1000,
+        timestamp: 1100,
+        durationMs: 100,
+        runScoped: true,
+        requestExecutionIds: ['shared-file-response'],
+        successfulRequestExecutionIds: ['shared-file-response'],
+        files,
+      }) as UsageSummaryRecord;
+    for (const variants of [
+      [
+        [10, 0],
+        [5, 20],
+      ],
+      [
+        [5, 20],
+        [10, 0],
+      ],
+    ] as const) {
+      const histories = variants.map(([added, removed]) => [
+        makeRecord({ linesAdded: added, linesRemoved: removed }),
+      ]);
+      deduplicateIdentifiedRootHistory(histories);
+      const merged = histories.flat();
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.files).toEqual({
+        linesAdded: 5,
+        linesRemoved: 20,
+      });
+      expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(100);
+    }
+  });
+
+  it('adversarial: pure durable copies retain the selected later clock in either root order', () => {
+    const sessionId = 'durable-copy-clock';
+    const project = '/durable/copy-clock';
+    const copy = (
+      startTime: number,
+      timestamp: number,
+    ): UsageSummaryRecord => ({
+      ...persistedRec(sessionId, 100, true),
+      project,
+      startTime,
+      timestamp,
+      durationMs: timestamp - startTime,
+      runScoped: true,
+      requestExecutionIds: ['same-durable-response'],
+      successfulRequestExecutionIds: ['same-durable-response'],
+    });
+    const early = copy(
+      Date.parse('2026-06-11T00:00:00.000Z'),
+      Date.parse('2026-06-11T00:01:00.000Z'),
+    );
+    const late = copy(
+      Date.parse('2026-06-12T00:02:00.000Z'),
+      Date.parse('2026-06-12T00:04:00.000Z'),
+    );
+
+    for (const ordered of [
+      [early, late],
+      [late, early],
+    ]) {
+      const histories = [ordered.map((record) => structuredClone(record))];
+      deduplicateIdentifiedRootHistory(histories);
+      expect(histories.flat()).toHaveLength(1);
+      expect(histories[0]![0]).toMatchObject({
+        timestamp: late.timestamp,
+        startTime: late.startTime,
+        durationMs: late.durationMs,
+        models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+      });
+      expect(new Date(histories[0]![0]!.timestamp).toISOString()).toBe(
+        '2026-06-12T00:04:00.000Z',
+      );
+    }
+  });
+
+  it('adversarial: native copies use the newest fully valid clock in either root order', () => {
+    const sessionId = 'native-copy-clock';
+    const project = '/native/copy-clock';
+    const copy = (
+      timestamp: number,
+      startTime = timestamp - 60_000,
+    ): UsageSummaryRecord => ({
+      ...persistedRec(sessionId, 100, true),
+      project,
+      startTime,
+      timestamp,
+      durationMs: timestamp - startTime,
+      transcriptRebuild: true,
+      requestExecutionIds: ['same-native-response'],
+      successfulRequestExecutionIds: ['same-native-response'],
+    });
+    const early = copy(Date.parse('2026-06-11T00:01:00.000Z'));
+    const late = copy(Date.parse('2026-06-12T00:02:00.000Z'));
+    const invalid = copy(3000, NaN);
+
+    for (const ordered of [
+      [invalid, early, late],
+      [late, invalid, early],
+    ]) {
+      const histories = [ordered.map((record) => structuredClone(record))];
+      deduplicateIdentifiedRootHistory(histories);
+      expect(histories.flat()).toHaveLength(1);
+      expect(histories[0]![0]).toMatchObject({
+        timestamp: late.timestamp,
+        startTime: late.startTime,
+        durationMs: late.durationMs,
+        transcriptRebuild: true,
+        models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+      });
+      expect(new Date(histories[0]![0]!.timestamp).toISOString()).toBe(
+        '2026-06-12T00:02:00.000Z',
+      );
+    }
+  });
+
+  it('adversarial: tied copies retain the richer tool and skill details in either root order', () => {
+    const sessionId = 'identified-rich-details';
+    const project = '/identified/rich-details';
+    const richTools: UsageSummaryRecord['tools'] = {
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        edit: { count: 1, success: 1, fail: 0, totalDurationMs: 25 },
+      },
+    };
+    const richSkills: NonNullable<UsageSummaryRecord['skills']> = {
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: { qreview: { count: 1, success: 1, fail: 0 } },
+    };
+    const copy = (
+      rich: boolean,
+      emptySkills: UsageSummaryRecord['skills'] | undefined,
+    ): UsageSummaryRecord => ({
+      ...persistedRec(sessionId, 100, true),
+      project,
+      startTime: 1000,
+      timestamp: 1100,
+      durationMs: 100,
+      runScoped: true,
+      requestExecutionIds: ['same-detail-response'],
+      successfulRequestExecutionIds: ['same-detail-response'],
+      tools: rich
+        ? structuredClone(richTools)
+        : { totalCalls: 1, totalSuccess: 1, totalFail: 0, byName: {} },
+      ...(rich
+        ? { skills: structuredClone(richSkills) }
+        : emptySkills
+          ? { skills: structuredClone(emptySkills) }
+          : {}),
+    });
+
+    for (const emptySkills of [
+      { totalCalls: 1, totalSuccess: 1, totalFail: 0, byName: {} },
+      undefined,
+    ] as const) {
+      for (const ordered of [
+        [copy(false, emptySkills), copy(true, emptySkills)],
+        [copy(true, emptySkills), copy(false, emptySkills)],
+      ]) {
+        const histories = [ordered];
+        deduplicateIdentifiedRootHistory(histories);
+        const merged = histories.flat();
+        expect(merged).toHaveLength(1);
+        expect(merged[0]!.tools).toEqual(richTools);
+        expect(merged[0]!.skills).toEqual(richSkills);
+        const report = aggregateUsage(merged, 'all');
+        expect(report.totalRequests).toBe(1);
+        expect(totalTokensOf(report)).toBe(100);
+        expect(report.tools.topTools).toEqual([
+          {
+            name: 'edit',
+            count: 1,
+            success: 1,
+            fail: 0,
+            totalDurationMs: 25,
+          },
+        ]);
+        expect(report.skills.topSkills).toEqual([
+          { name: 'qreview', count: 1, success: 1, fail: 0 },
+        ]);
+      }
+    }
+  });
+
+  it('does not inherit success evidence from conflicting copies', () => {
+    const makeRecord = (
+      sessionId: string,
+      successfulRequestExecutionIds?: string[],
+    ): UsageSummaryRecord => {
+      const base = persistedRec(sessionId, 100);
+      return {
+        ...base,
+        project: '/shared/success-evidence',
+        startTime: 1000,
+        timestamp: 1100,
+        durationMs: 100,
+        runScoped: true,
+        requestExecutionIds: ['a', 'b', 'c'],
+        ...(successfulRequestExecutionIds
+          ? { successfulRequestExecutionIds }
+          : {}),
+        models: {
+          'qwen-max': {
+            ...base.models['qwen-max']!,
+            requests: 3,
+            errors: 1,
+          },
+        },
+      };
+    };
+    for (const records of [
+      [
+        makeRecord('sync-set-one', ['a', 'b']),
+        makeRecord('sync-set-one', ['b', 'c']),
+        makeRecord('sync-set-one'),
+      ],
+      [
+        makeRecord('sync-set-two', ['b', 'c']),
+        makeRecord('sync-set-two', ['a', 'b']),
+        makeRecord('sync-set-two'),
+      ],
+    ]) {
+      const histories = records.map((record) => [record]);
+      deduplicateIdentifiedRootHistory(histories);
+      const merged = histories.flat();
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.successfulRequestExecutionIds).toBeUndefined();
+      expect('successfulRequestExecutionIds' in merged[0]!).toBe(false);
+    }
+  });
+
+  it('deduplicates future persisted runs while preserving an earlier run', async () => {
+    const now = Date.now();
+    const future = {
+      ...persistedRec('future-duplicate', 100),
+      startTime: now,
+      timestamp: now + 60_000,
+      runScoped: true,
+      requestExecutionIds: ['future-duplicate-response'],
+    };
+    seedPersisted([
+      {
+        ...persistedRec('previous-ended', 100),
+        timestamp: now - 1_000,
+        runScoped: true,
+        requestExecutionIds: ['previous-ended-response'],
+      },
+      future,
+      { ...future, models: structuredClone(future.models) },
+    ]);
+    for (const records of [
+      await loadUsageHistory(),
+      await loadUsageHistoryWithLive(),
+    ]) {
+      expect(records).toHaveLength(2);
+      expect(
+        records.filter((record) => record.sessionId === 'future-duplicate'),
+      ).toHaveLength(1);
+    }
+  });
+
+  it('suppresses a future-owned tool-only replay after the run ends', async () => {
+    const now = Date.parse('2026-07-02T00:02:20.000Z');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    const sessionId = 'future-tool-only';
+    const project = '/future/tool-only';
+    const executionId = 'future-tool-response';
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project,
+        startTime: now,
+        timestamp: now + 60_000,
+        runScoped: true,
+        requestExecutionIds: [executionId],
+        successfulRequestExecutionIds: [executionId],
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: {
+            edit: { count: 1, success: 1, fail: 0, totalDurationMs: 20 },
+          },
+        },
+        files: { linesAdded: 7, linesRemoved: 3 },
+      },
+    ]);
+    const file = writeTranscript('future-tool-only', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 1_000,
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      new Date(now + 1_000).toISOString(),
+      executionId,
+      100,
+    );
+    fs.appendFileSync(
+      file,
+      `${JSON.stringify({
+        sessionId,
+        cwd: project,
+        timestamp: new Date(now + 2_000).toISOString(),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.tool_call',
+            'event.timestamp': new Date(now + 2_000).toISOString(),
+            call_id: 'future-tool-call',
+            function_name: 'edit',
+            function_args: { file_path: `${project}/edit.ts` },
+            duration_ms: 20,
+            success: true,
+            metadata: { model_added_lines: 7, model_removed_lines: 3 },
+          },
+        },
+      })}\n`,
+    );
+    try {
+      const cached = await loadUsageDashboardSources();
+      vi.setSystemTime(now + 60_000);
+      const after = buildUsageDashboard(
+        cached.records,
+        { range: 'all' },
+        cached.ledgerDaily,
+      ).summary;
+      expect(after).toMatchObject({
+        sessions: 1,
+        requests: 1,
+        totalTokens: 100,
+        toolCalls: 1,
+        linesAdded: 7,
+        linesRemoved: 3,
+      });
+      const fresh = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(fresh).toHaveLength(1);
+      expect(fresh[0]).toMatchObject({
+        sessionId,
+        tools: { totalCalls: 1 },
+        files: { linesAdded: 7, linesRemoved: 3 },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains only the independent past response beside a future-owned run', async () => {
+    const sessionId = 'future-mixed-history';
+    const project = '/future/mixed-history';
+    const ownedId = 'owned-past-response';
+    const independentId = 'independent-past-response';
+    const now = Date.parse('2026-07-02T00:02:20.000Z');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project,
+        timestamp: now + 60_000,
+        startTime: now,
+        runScoped: true,
+        requestExecutionIds: [ownedId, ''],
+        successfulRequestExecutionIds: [ownedId],
+      },
+    ]);
+    const file = writeTranscript('future-mixed-history', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+      executionId: ownedId,
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:01:30.000Z',
+      independentId,
+      100,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:01:40.000Z',
+      undefined,
+      100,
+    );
+    try {
+      const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(records).toHaveLength(2);
+      expect(
+        records.filter((record) =>
+          record.requestExecutionIds?.includes(ownedId),
+        ),
+      ).toHaveLength(1);
+      expect(
+        records.find((record) =>
+          record.requestExecutionIds?.includes(independentId),
+        ),
+      ).toMatchObject({
+        requestExecutionIds: [independentId],
+        models: { 'qwen-max': { totalTokens: 200, requests: 2 } },
+      });
+      vi.setSystemTime(now + 60_000);
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        totalRequests: 3,
+        models: { 'qwen-max': { totalTokens: 300, requests: 3 } },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['request identity', { requestExecutionIds: ['future-response'] }],
+    [
+      'success identity',
+      { successfulRequestExecutionIds: ['future-response'] },
+    ],
+    ['rebuild provenance', { transcriptRebuild: true }],
+  ] satisfies Array<[string, Partial<UsageSummaryRecord>]>)(
+    'uses cumulative last-wins for a future snapshot with %s',
+    async (_label, fields) => {
+      const future = {
+        ...persistedRec('cumulative-future', 2000, true),
+        project: '/future/cumulative',
+        startTime: 1100,
+        timestamp: 2000,
+        ...fields,
+      };
+      seedPersisted([
+        {
+          ...persistedRec('cumulative-future', 1000, true),
+          project: '/future/cumulative',
+          startTime: 900,
+          timestamp: 1000,
+        },
+        future,
+      ]);
+      for (const records of [
+        await loadUsageHistory(undefined, {
+          persistRebuild: false,
+          readAt: 1500,
+        }),
+        await loadUsageHistoryWithLive({ sinceMs: 0, readAt: 1500 }),
+      ]) {
+        expect(records).toHaveLength(1);
+        expect(records).toMatchObject([
+          {
+            timestamp: 2000,
+            models: { 'qwen-max': { totalTokens: 2000 } },
+          },
+        ]);
+      }
+    },
+  );
+
+  it('does not let a future record bypass ended-run partitioning in the fast path', async () => {
+    seedPersisted([
+      {
+        ...persistedRec('fast-future-owner', 1),
+        project: '/fast/future-owner',
+        startTime: 0,
+        timestamp: 900,
+        transcriptRebuild: true,
+      },
+      {
+        ...persistedRec('fast-future-owner', 2),
+        project: '/fast/future-owner',
+        startTime: 1000,
+        timestamp: 1200,
+        runScoped: true,
+      },
+      {
+        ...persistedRec('fast-future-owner', 3),
+        project: '/fast/future-owner',
+        startTime: 1100,
+        timestamp: 2000,
+        runScoped: true,
+      },
+    ]);
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+      readAt: 1500,
+    });
+    expect(records).toHaveLength(3);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(6);
+    expect(records.find((record) => record.timestamp === 1200)).toBeDefined();
+  });
+
+  it('keeps replay-only reads free of durable future snapshots', async () => {
+    seedPersisted([
+      {
+        ...persistedRec('future-replay-only', 100),
+        timestamp: 2000,
+      },
+    ]);
+    await expect(
+      loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt: 1500,
+        includePersistedRecords: false,
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      loadUsageHistoryWithLive({ sinceMs: 0, readAt: 1500 }),
+    ).resolves.toHaveLength(1);
+  });
+
+  it('adversarial: an identified future cumulative snapshot covers its older run delta', async () => {
+    const sessionId = 'identified-future-cumulative';
+    const project = '/future/identified-cumulative';
+    const delta = {
+      ...persistedRec(sessionId, 100, true),
+      project,
+      startTime: 2000,
+      timestamp: 2100,
+      durationMs: 100,
+      runScoped: true,
+      requestExecutionIds: ['a'],
+      successfulRequestExecutionIds: ['a'],
+    };
+    const cumulative = {
+      ...persistedRec(sessionId, 250, true),
+      project,
+      startTime: 1900,
+      timestamp: 2200,
+      durationMs: 300,
+      requestExecutionIds: ['a', 'b'],
+      successfulRequestExecutionIds: ['a', 'b'],
+      models: { 'qwen-max': modelUsage(2, 150, 75, 250, 25) },
+    };
+    seedPersisted([delta, cumulative]);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1500);
+    let dashboardRecords: UsageSummaryRecord[];
+    try {
+      dashboardRecords = (await loadUsageDashboardSources()).records;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    for (const [loader, records] of [
+      [
+        'ordinary',
+        await loadUsageHistory(undefined, {
+          persistRebuild: false,
+          readAt: 1500,
+        }),
+      ],
+      ['live', await loadUsageHistoryWithLive({ sinceMs: 0, readAt: 1500 })],
+      ['dashboard', dashboardRecords],
+    ] as const) {
+      expect({ loader, count: records.length }).toEqual({ loader, count: 1 });
+      expect({ loader, record: records[0] }).toMatchObject({
+        loader,
+        record: {
+          project,
+          timestamp: 2200,
+          requestExecutionIds: ['a', 'b'],
+          models: { 'qwen-max': { requests: 2, totalTokens: 250 } },
+        },
+      });
+      expect(records[0]!.runScoped).toBeUndefined();
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        totalRequests: 2,
+        models: { 'qwen-max': { requests: 2, totalTokens: 250 } },
+      });
+    }
+
+    seedPersisted([
+      delta,
+      {
+        ...cumulative,
+        requestExecutionIds: ['b', 'c'],
+        successfulRequestExecutionIds: ['b', 'c'],
+      },
+    ]);
+    const distinct = await loadUsageHistoryWithLive({
+      sinceMs: 0,
+      readAt: 1500,
+    });
+    expect(distinct).toHaveLength(2);
+    expect(aggregateUsage(distinct, 'all')).toMatchObject({
+      totalRequests: 3,
+      models: { 'qwen-max': { requests: 3, totalTokens: 350 } },
+    });
+  });
+
+  it('uses a newer unidentified cumulative future over an older native snapshot', async () => {
+    const sessionId = 'ended-native-then-future-snapshot';
+    const project = '/future/ended-native-then-future-snapshot';
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: 1000,
+        timestamp: 1100,
+        durationMs: 100,
+        transcriptRebuild: true,
+      },
+      {
+        ...persistedRec(sessionId, 200),
+        project,
+        startTime: 1900,
+        timestamp: 2000,
+        durationMs: 100,
+      },
+    ]);
+    for (const records of [
+      await loadUsageHistory(undefined, {
+        persistRebuild: false,
+        readAt: 1500,
+      }),
+      await loadUsageHistoryWithLive({ sinceMs: 0, readAt: 1500 }),
+    ]) {
+      expect(records).toMatchObject([
+        {
+          timestamp: 2000,
+          models: { 'qwen-max': { totalTokens: 200 } },
+        },
+      ]);
+      expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(200);
+    }
+  });
+
+  it('reduces future native snapshots with matching run deltas once', async () => {
+    const project = '/future/native-and-delta';
+    const base = {
+      ...persistedRec('future-native-delta', 100, true),
+      project,
+      startTime: 2000,
+      timestamp: 2100,
+      durationMs: 100,
+      requestExecutionIds: ['same-future-response'],
+      successfulRequestExecutionIds: ['same-future-response'],
+    };
+    const native = {
+      ...base,
+      transcriptRebuild: true,
+      tools: {
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        byName: {
+          edit: { count: 1, success: 1, fail: 0, totalDurationMs: 20 },
+        },
+      },
+      files: { linesAdded: 7, linesRemoved: 3 },
+    };
+    const delta = { ...base, runScoped: true };
+    seedPersisted([native, delta]);
+    for (const records of [
+      await loadUsageHistory(undefined, {
+        persistRebuild: false,
+        readAt: 1500,
+      }),
+      await loadUsageHistoryWithLive({ sinceMs: 0, readAt: 1500 }),
+    ]) {
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        transcriptRebuild: true,
+        models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+        tools: { totalCalls: 1 },
+        files: { linesAdded: 7, linesRemoved: 3 },
+      });
+    }
+    seedPersisted([
+      native,
+      {
+        ...delta,
+        requestExecutionIds: ['different-future-response'],
+        successfulRequestExecutionIds: ['different-future-response'],
+      },
+    ]);
+    const distinct = await loadUsageHistoryWithLive({
+      sinceMs: 0,
+      readAt: 1500,
+    });
+    expect(distinct).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(distinct, 'all'))).toBe(200);
+  });
+
+  it('retains a run delta over a future cumulative snapshot without losing older runs', async () => {
+    const project = '/future/cumulative-with-delta';
+    seedPersisted([
+      {
+        ...persistedRec('previous-independent-run', 500),
+        project,
+        startTime: 1000,
+        timestamp: 1200,
+        runScoped: true,
+      },
+      {
+        ...persistedRec('future-cumulative-delta', 1000),
+        project,
+        startTime: 1000,
+        timestamp: 2000,
+      },
+      {
+        ...persistedRec('future-cumulative-delta', 2000),
+        project,
+        startTime: 1100,
+        timestamp: 2100,
+        runScoped: true,
+      },
+    ]);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1500);
+    let dashboardRecords: UsageSummaryRecord[];
+    try {
+      dashboardRecords = (
+        await loadUsageDashboardSources([process.env['QWEN_HOME']!])
+      ).records;
+    } finally {
+      vi.useRealTimers();
+    }
+    for (const [loader, records] of [
+      [
+        'ordinary',
+        await loadUsageHistory(undefined, {
+          persistRebuild: false,
+          readAt: 1500,
+        }),
+      ],
+      ['live', await loadUsageHistoryWithLive({ sinceMs: 0, readAt: 1500 })],
+      ['dashboard', dashboardRecords],
+    ] as const) {
+      expect({ loader, count: records.length }).toEqual({
+        loader,
+        count: 2,
+      });
+      expect({
+        loader,
+        previousRuns: records.filter(
+          (record) => record.sessionId === 'previous-independent-run',
+        ).length,
+      }).toEqual({ loader, previousRuns: 1 });
+      expect({
+        loader,
+        futureTimes: records
+          .filter((record) => record.sessionId === 'future-cumulative-delta')
+          .map((record) => record.timestamp),
+      }).toEqual({ loader, futureTimes: [2100] });
+      expect({
+        loader,
+        totalTokens: totalTokensOf(aggregateUsage(records, 'all')),
+      }).toEqual({ loader, totalTokens: 2500 });
+    }
+  });
+
+  it('clamps an out-of-order transcript header to a zero duration', async () => {
+    const sessionId = 'out-of-order-native-header';
+    const project = '/repro/project';
+    const file = writeSessionTranscript(project, sessionId, {
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+    });
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+    const header = JSON.parse(lines[0]!) as { timestamp: string };
+    header.timestamp = '2026-07-03T00:00:00.000Z';
+    lines[0] = JSON.stringify(header);
+    fs.writeFileSync(file, `${lines.join('\n')}\n`);
+
+    const records = await loadUsageHistoryWithLive({
+      sinceMs: 0,
+      readAt: Date.parse('2026-07-04T00:00:00.000Z'),
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      project,
+      transcriptRebuild: true,
+      startTime: Date.parse('2026-07-02T00:01:00.000Z'),
+      timestamp: Date.parse('2026-07-02T00:01:00.000Z'),
+      durationMs: 0,
+      models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+    });
+  });
+
+  it('adversarial: recovers an invalid header clock from counted native events', async () => {
+    const sessionId = 'invalid-header-event-clock';
+    const project = '/repro/project';
+    const file = writeSessionTranscript(project, sessionId, {
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+    });
+    appendNativeToolCall(file, sessionId, '2026-07-02T00:03:00.000Z', 7, 3);
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+    const header = JSON.parse(lines[0]!) as { timestamp: string };
+    header.timestamp = 'not-a-timestamp';
+    lines[0] = JSON.stringify(header);
+    fs.writeFileSync(file, `${lines.join('\n')}\n`);
+    const readAt = Date.parse('2026-07-04T00:00:00.000Z');
+
+    for (const [loader, records] of [
+      [
+        'ordinary',
+        await loadUsageHistory(undefined, {
+          persistRebuild: false,
+          readAt,
+        }),
+      ],
+      ['live', await loadUsageHistoryWithLive({ sinceMs: 0, readAt })],
+    ] as const) {
+      expect({ loader, count: records.length }).toEqual({ loader, count: 1 });
+      expect(records[0]).toMatchObject({
+        project,
+        transcriptRebuild: true,
+        startTime: Date.parse('2026-07-02T00:01:00.000Z'),
+        timestamp: Date.parse('2026-07-02T00:03:00.000Z'),
+        durationMs: 120_000,
+        models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+        tools: {
+          totalCalls: 1,
+          byName: {
+            edit: { count: 1, success: 1, fail: 0, totalDurationMs: 20 },
+          },
+        },
+        files: { linesAdded: 7, linesRemoved: 3 },
+      });
+    }
+  });
+
+  it('retains tool observations after an invalid trailing timestamp', async () => {
+    const sessionId = 'invalid-tail-with-tools';
+    const project = '/repro/project';
+    const file = writeSessionTranscript(project, sessionId, {
+      day: '2026-07-02',
+      durationMs: 100,
+    });
+    appendNativeToolCall(file, sessionId, '2026-07-02T00:01:00.000Z', 7, 3);
+    fs.appendFileSync(
+      file,
+      `${JSON.stringify({
+        sessionId,
+        cwd: project,
+        timestamp: 'not-a-timestamp',
+        type: 'user',
+        message: { role: 'user', content: 'tail' },
+      })}\n`,
+    );
+
+    const records = await loadUsageHistoryWithLive({
+      sinceMs: 0,
+      readAt: Date.parse('2026-07-04T00:00:00.000Z'),
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      project,
+      transcriptRebuild: true,
+      durationMs: 60_000,
+      tools: { totalCalls: 1 },
+      files: { linesAdded: 7, linesRemoved: 3 },
+    });
+  });
+
+  it('preserves a legacy supplement when the persisted run end is corrupt', async () => {
+    const sessionId = 'legacy-corrupt-end-supplement';
+    const project = '/legacy/corrupt-end-supplement';
+    const startTime = Date.parse('2026-07-02T00:02:00.000Z');
+    const readAt = Date.parse('2026-07-02T00:03:00.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 200),
+        project,
+        startTime,
+        timestamp: 'not-a-date' as unknown as number,
+        runScoped: true,
+      },
+    ]);
+    const file = writeSessionTranscript(project, sessionId, {
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+      executionId: 'prior-independent-response',
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:02:30.000Z',
+      'partially-visible-run-response',
+      50,
+    );
+    for (const records of [
+      await loadUsageHistory(undefined, {
+        persistRebuild: false,
+        readAt,
+      }),
+      await loadUsageHistoryWithLive({ sinceMs: 0, readAt }),
+    ]) {
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        totalRequests: 2,
+        models: { 'qwen-max': { totalTokens: 300 } },
+      });
+      expect(
+        records.find((record) =>
+          record.requestExecutionIds?.includes('prior-independent-response'),
+        ),
+      ).toBeDefined();
+    }
+    expect(usageLines()).toHaveLength(1);
+  });
+
+  it('does not assign future ownership to a non-finite JSON timestamp', async () => {
+    const sessionId = 'non-finite-json-clock';
+    const project = '/repro/project';
+    const responseId = 'non-finite-json-response';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: readAt - 60_000,
+        timestamp: 1,
+        runScoped: true,
+        requestExecutionIds: [responseId],
+        successfulRequestExecutionIds: [responseId],
+      },
+    ]);
+    const corrupted = fs
+      .readFileSync(usagePath(), 'utf8')
+      .replace('"timestamp":1', '"timestamp":1e400');
+    expect(corrupted).toContain('1e400');
+    fs.writeFileSync(usagePath(), corrupted);
+    writeSessionTranscript(project, sessionId, {
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+      executionId: responseId,
+    });
+
+    for (const records of [
+      await loadUsageHistory(undefined, {
+        persistRebuild: false,
+        readAt,
+      }),
+      await loadUsageHistoryWithLive({ sinceMs: 0, readAt }),
+    ]) {
+      expect(records).toMatchObject([
+        {
+          project,
+          transcriptRebuild: true,
+          models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+        },
+      ]);
+    }
+    expect(fs.readFileSync(usagePath(), 'utf8')).toBe(corrupted);
+  });
+
+  it('retains corrupted persisted timestamps without a transcript', async () => {
+    const sessionId = 'durable-corrupt-clock';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project: '/repro/project',
+        startTime: readAt - 60_000,
+        timestamp: 'not-a-date' as unknown as number,
+        runScoped: true,
+        requestExecutionIds: ['corrupt-clock-response'],
+      },
+    ]);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(readAt);
+    let dashboardRecords: UsageSummaryRecord[];
+    try {
+      dashboardRecords = (
+        await loadUsageDashboardSources([process.env['QWEN_HOME']!])
+      ).records;
+    } finally {
+      vi.useRealTimers();
+    }
+    for (const records of [
+      await loadUsageHistory(undefined, { persistRebuild: false, readAt }),
+      await loadUsageHistoryWithLive({ sinceMs: 0, readAt }),
+      dashboardRecords,
+    ]) {
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        sessionId,
+        models: { 'qwen-max': { totalTokens: 100 } },
+      });
+    }
+  });
+
+  it('keeps an earlier tool beside a future-owned out-of-order response', async () => {
+    const sessionId = 'out-of-order-future-owned-tool';
+    const startTime = Date.parse('2026-07-02T00:02:20.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project: '/repro/project',
+        startTime,
+        timestamp: startTime + 60_000,
+        runScoped: true,
+        requestExecutionIds: ['owned-response'],
+        successfulRequestExecutionIds: ['owned-response'],
+      },
+    ]);
+    const file = writeTranscript('out-of-order-future-owned-tool', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-07-02',
+      durationMs: 100,
+    });
+    appendNativeToolCall(
+      file,
+      sessionId,
+      new Date(startTime - 20_000).toISOString(),
+      4,
+      2,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      new Date(startTime - 10_000).toISOString(),
+      'owned-response',
+      100,
+    );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(startTime);
+    try {
+      const records = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt: startTime,
+      });
+      expect(records).toHaveLength(2);
+      vi.setSystemTime(startTime + 60_000);
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        tools: { totalCalls: 1 },
+        files: { linesAdded: 4, linesRemoved: 2 },
+        models: { 'qwen-max': { totalTokens: 100, requests: 1 } },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe('future-owned tools with older history', () => {
+    const project = '/repro/project';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    const futureStart = readAt - 20_000;
+    const futureEnd = readAt + 40_000;
+
+    function futureWithOneTool(sessionId: string): UsageSummaryRecord {
+      return {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: futureStart,
+        timestamp: futureEnd,
+        durationMs: futureEnd - futureStart,
+        runScoped: true,
+        requestExecutionIds: ['future-owned-response'],
+        successfulRequestExecutionIds: ['future-owned-response'],
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: {
+            edit: { count: 1, success: 1, fail: 0, totalDurationMs: 20 },
+          },
+        },
+        files: { linesAdded: 7, linesRemoved: 3 },
+      };
+    }
+
+    it('uses a valid inner timestamp to exclude a future response', async () => {
+      const sessionId = 'future-inner-timestamp-boundary';
+      const file = writeSessionTranscript(project, sessionId, {
+        day: '2026-07-02',
+        durationMs: 100,
+        tokens: 100,
+        executionId: 'old-response',
+      });
+      const futureTimestamp = '2026-07-02T00:03:00.000Z';
+      appendNativeResponse(
+        file,
+        sessionId,
+        futureTimestamp,
+        'future-response',
+        200,
+      );
+      const rows = fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      for (const row of rows) {
+        if (row['timestamp'] === futureTimestamp) {
+          row['timestamp'] = 'not-a-timestamp';
+        }
+      }
+      fs.writeFileSync(
+        file,
+        `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+      );
+
+      const records = await loadUsageHistory(undefined, {
+        persistRebuild: false,
+        readAt,
+        beforeMsBySession: new Map([
+          [sessionId, Date.parse('2026-07-02T00:02:00.000Z')],
+        ]),
+      });
+      expect(records).toMatchObject([
+        {
+          transcriptRebuild: true,
+          requestExecutionIds: ['old-response'],
+          models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+        },
+      ]);
+    });
+
+    it('retains earlier tools beside an unreadable future-owned response', async () => {
+      const sessionId = 'future-unreadable-owned-response';
+      const responseId = 'unreadable-future-owned-response';
+      seedPersisted([
+        {
+          ...persistedRec(sessionId, 100, true),
+          project,
+          startTime: futureStart,
+          timestamp: futureEnd,
+          runScoped: true,
+          requestExecutionIds: [responseId],
+          successfulRequestExecutionIds: [responseId],
+        },
+      ]);
+      const file = writeSessionTranscript(project, sessionId, {
+        day: '2026-07-02',
+        durationMs: 100,
+      });
+      appendNativeToolCall(file, sessionId, '2026-07-02T00:01:00.000Z', 4, 2);
+      appendNativeResponse(file, sessionId, 'not-a-timestamp', responseId, 100);
+
+      const records = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      expect(records).toHaveLength(2);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(futureEnd);
+      try {
+        expect(aggregateUsage(records, 'all')).toMatchObject({
+          totalRequests: 1,
+          tools: { totalCalls: 1 },
+          files: { linesAdded: 4, linesRemoved: 2 },
+          models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not let a negative future start erase older independent usage', async () => {
+      const sessionId = 'future-negative-start';
+      seedPersisted([
+        {
+          ...futureWithOneTool(sessionId),
+          startTime: -1,
+          durationMs: NaN,
+        },
+      ]);
+      const file = writeSessionTranscript(project, sessionId, {
+        day: '2026-07-02',
+        durationMs: 100,
+        tokens: 100,
+        executionId: 'independent-before-negative-start',
+      });
+      appendNativeToolCall(file, sessionId, '2026-07-02T00:01:00.000Z', 4, 2);
+      const records = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      expect(records).toHaveLength(2);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(futureEnd);
+      try {
+        expect(aggregateUsage(records, 'all')).toMatchObject({
+          totalRequests: 2,
+          tools: { totalCalls: 2 },
+          files: { linesAdded: 11, linesRemoved: 5 },
+          models: { 'qwen-max': { requests: 2, totalTokens: 200 } },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps independent tools whose timestamps cannot be established', async () => {
+      const sessionId = 'future-tool-unknown-timestamp';
+      const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+      seedPersisted([
+        {
+          ...persistedRec(sessionId, 100, true),
+          project: '/repro/project',
+          startTime: NaN,
+          timestamp: readAt + 60_000,
+          runScoped: true,
+          requestExecutionIds: ['unknown-clock-owned-response'],
+          successfulRequestExecutionIds: ['unknown-clock-owned-response'],
+        },
+      ]);
+      const file = writeTranscript('future-tool-unknown-timestamp', sessionId, {
+        cwd: '/repro/project',
+        day: '2026-07-02',
+        durationMs: 100,
+        tokens: 100,
+        executionId: 'unknown-clock-owned-response',
+      });
+      appendNativeToolCall(file, sessionId, 'not-a-timestamp', 4, 2);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(readAt);
+      try {
+        const records = await loadUsageHistoryWithLive({ sinceMs: 0, readAt });
+        expect(records).toHaveLength(2);
+        vi.setSystemTime(readAt + 60_000);
+        expect(aggregateUsage(records, 'all')).toMatchObject({
+          tools: { totalCalls: 1 },
+          files: { linesAdded: 4, linesRemoved: 2 },
+          models: { 'qwen-max': { requests: 1, totalTokens: 100 } },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps an older API response without duplicating future tools', async () => {
+      const sessionId = 'future-mixed-owned-tools';
+      seedPersisted([futureWithOneTool(sessionId)]);
+      const file = writeTranscript('future-mixed-owned-tools', sessionId, {
+        cwd: project,
+        day: '2026-07-02',
+        durationMs: 100,
+        tokens: 100,
+        executionId: 'older-independent-response',
+      });
+      appendNativeResponse(
+        file,
+        sessionId,
+        new Date(readAt + 10_000).toISOString(),
+        'future-owned-response',
+        100,
+      );
+      appendNativeToolCall(
+        file,
+        sessionId,
+        new Date(readAt + 20_000).toISOString(),
+        7,
+        3,
+      );
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(readAt);
+      try {
+        const records = await loadUsageHistoryWithLive({
+          sinceMs: 0,
+          readAt,
+        });
+        expect(records).toHaveLength(2);
+        vi.setSystemTime(futureEnd);
+        expect(aggregateUsage(records, 'all')).toMatchObject({
+          totalRequests: 2,
+          tools: { totalCalls: 1 },
+          files: { linesAdded: 7, linesRemoved: 3 },
+          models: { 'qwen-max': { totalTokens: 200, requests: 2 } },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retains older tools while excluding duplicate future tools', async () => {
+      const sessionId = 'future-owned-tools-older-tools';
+      seedPersisted([futureWithOneTool(sessionId)]);
+      const file = writeTranscript(
+        'future-owned-tools-older-tools',
+        sessionId,
+        {
+          cwd: project,
+          day: '2026-07-02',
+          durationMs: 100,
+        },
+      );
+      appendNativeToolCall(file, sessionId, '2026-07-02T00:01:00.000Z', 4, 2);
+      appendNativeResponse(
+        file,
+        sessionId,
+        new Date(readAt + 10_000).toISOString(),
+        'future-owned-response',
+        100,
+      );
+      appendNativeToolCall(
+        file,
+        sessionId,
+        new Date(readAt + 20_000).toISOString(),
+        7,
+        3,
+      );
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(readAt);
+      try {
+        const records = await loadUsageHistoryWithLive({
+          sinceMs: 0,
+          readAt,
+        });
+        expect(records).toHaveLength(2);
+        vi.setSystemTime(futureEnd);
+        expect(aggregateUsage(records, 'all')).toMatchObject({
+          totalRequests: 1,
+          tools: { totalCalls: 2 },
+          files: { linesAdded: 11, linesRemoved: 5 },
+          models: { 'qwen-max': { totalTokens: 100, requests: 1 } },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    it('uses a valid duration to bound future tools when startTime is invalid', async () => {
+      const sessionId = 'future-tool-derived-clock';
+      seedPersisted([{ ...futureWithOneTool(sessionId), startTime: NaN }]);
+      const file = writeSessionTranscript(project, sessionId, {
+        day: '2026-07-02',
+        durationMs: 100,
+      });
+      appendNativeToolCall(file, sessionId, '2026-07-02T00:01:00.000Z', 4, 2);
+      appendNativeResponse(
+        file,
+        sessionId,
+        new Date(readAt + 10_000).toISOString(),
+        'future-owned-response',
+        100,
+      );
+      appendNativeToolCall(
+        file,
+        sessionId,
+        new Date(readAt + 20_000).toISOString(),
+        7,
+        3,
+      );
+      const records = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      expect(records).toHaveLength(2);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(futureEnd);
+      try {
+        expect(aggregateUsage(records, 'all')).toMatchObject({
+          totalRequests: 1,
+          tools: { totalCalls: 2 },
+          files: { linesAdded: 11, linesRemoved: 5 },
+          models: { 'qwen-max': { totalTokens: 100, requests: 1 } },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not infer tool ownership without a valid future time window', async () => {
+      const sessionId = 'future-tool-no-valid-clock';
+      seedPersisted([
+        {
+          ...futureWithOneTool(sessionId),
+          startTime: NaN,
+          durationMs: NaN,
+        },
+      ]);
+      const file = writeSessionTranscript(project, sessionId, {
+        day: '2026-07-02',
+        durationMs: 100,
+      });
+      appendNativeToolCall(
+        file,
+        sessionId,
+        new Date(readAt + 20_000).toISOString(),
+        7,
+        3,
+      );
+      const records = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      expect(records).toHaveLength(2);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(futureEnd);
+      try {
+        expect(aggregateUsage(records, 'all')).toMatchObject({
+          tools: { totalCalls: 2 },
+          files: { linesAdded: 14, linesRemoved: 6 },
+          models: { 'qwen-max': { totalTokens: 100, requests: 1 } },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('restricts old supplemental replay to the verified project path', async () => {
+    const sessionId = 'supplemental-same-session-other-project';
+    const project = '/supplemental/session-a';
+    const otherProject = '/supplemental/session-b';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    const responseId = 'supplemental-project-a-response';
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: readAt - 60_000,
+        timestamp: readAt + 60_000,
+        runScoped: true,
+        requestExecutionIds: [responseId],
+        successfulRequestExecutionIds: [responseId],
+      },
+    ]);
+    const otherFile = writeSessionTranscript(otherProject, sessionId, {
+      day: '2026-06-11',
+      durationMs: 100,
+      tokens: 1000,
+      executionId: 'other-project-response',
+    });
+    const oldTime = (readAt - 100 * DAY) / 1000;
+    fs.utimesSync(otherFile, oldTime, oldTime);
+    const open = vi.spyOn(fs.promises, 'open');
+    try {
+      const bounded = await loadUsageHistoryWithLive({ readAt });
+      expect(bounded).toMatchObject([
+        { project, models: { 'qwen-max': { totalTokens: 100 } } },
+      ]);
+      expect(
+        open.mock.calls.filter(([file]) => file === otherFile),
+      ).toHaveLength(0);
+
+      const unbounded = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      expect(totalTokensOf(aggregateUsage(unbounded, 'all'))).toBe(1100);
+      expect(
+        unbounded.find((record) => record.project === otherProject),
+      ).toMatchObject({ transcriptRebuild: true });
+      expect(usageLines()).toHaveLength(1);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('rejects a supplemental transcript whose real header owns another project', async () => {
+    const sessionId = 'supplemental-header-project-mismatch';
+    const project = '/supplemental/header-a';
+    const headerProject = '/supplemental/header-b';
+    const file = new SessionService(project, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: readAt - 60_000,
+        timestamp: readAt + 60_000,
+        runScoped: true,
+        requestExecutionIds: ['header-owned-future-response'],
+        successfulRequestExecutionIds: ['header-owned-future-response'],
+      },
+    ]);
+    const actual = writeTranscript(
+      path.basename(path.dirname(path.dirname(file))),
+      sessionId,
+      {
+        cwd: headerProject,
+        day: '2026-06-11',
+        durationMs: 100,
+        tokens: 1000,
+        executionId: 'mismatched-project-response',
+      },
+    );
+    const oldTime = (readAt - 100 * DAY) / 1000;
+    fs.utimesSync(actual, oldTime, oldTime);
+    const open = vi.spyOn(fs.promises, 'open');
+    try {
+      const records = await loadUsageHistoryWithLive({ readAt });
+      expect(open.mock.calls.some(([path]) => path === file)).toBe(true);
+      expect(records).toMatchObject([
+        { project, models: { 'qwen-max': { totalTokens: 100 } } },
+      ]);
+      expect(usageLines()).toHaveLength(1);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('does not select between projects on a shared sanitized supplemental path', async () => {
+    const sessionId = 'supplemental-colliding-path';
+    const projectA = '/supplemental/project!same';
+    const projectB = '/supplemental/project@same';
+    const file = new SessionService(projectA, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    expect(
+      new SessionService(projectB, {
+        runtimeBaseDir: process.env['QWEN_HOME']!,
+      }).getSessionTranscriptPath(sessionId),
+    ).toBe(file);
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    const records = [100, 200].map((totalTokens, index) => ({
+      ...persistedRec(sessionId, totalTokens, true),
+      project: index === 0 ? projectA : projectB,
+      startTime: readAt - 60_000,
+      timestamp: readAt + 60_000,
+      runScoped: true as const,
+      requestExecutionIds: [`colliding-future-response-${index}`],
+      successfulRequestExecutionIds: [`colliding-future-response-${index}`],
+    }));
+    seedPersisted(records);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(file))),
+      sessionId,
+      {
+        cwd: projectB,
+        day: '2026-06-11',
+        durationMs: 100,
+        tokens: 1000,
+        executionId: 'colliding-path-older-response',
+      },
+    );
+    const oldTime = (readAt - 100 * DAY) / 1000;
+    fs.utimesSync(file, oldTime, oldTime);
+    const open = vi.spyOn(fs.promises, 'open');
+    try {
+      const bounded = await loadUsageHistoryWithLive({ readAt });
+      expect(totalTokensOf(aggregateUsage(bounded, 'all'))).toBe(300);
+      expect(open.mock.calls.some(([path]) => path === file)).toBe(false);
+
+      const unbounded = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      expect(totalTokensOf(aggregateUsage(unbounded, 'all'))).toBe(1300);
+      expect(usageLines()).toHaveLength(2);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('does not trust an unverified cached project when sanitized paths collide', async () => {
+    const sessionId = 'cold-cache-sanitized-project-collision';
+    const projectA = '/supplemental/cold!project';
+    const projectB = '/supplemental/cold@project';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project: projectA,
+        startTime: readAt - 70_000,
+        timestamp: readAt - 60_000,
+      },
+    ]);
+    const file = new SessionService(projectA, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(sessionId);
+    expect(
+      new SessionService(projectB, {
+        runtimeBaseDir: process.env['QWEN_HOME']!,
+      }).getSessionTranscriptPath(sessionId),
+    ).toBe(file);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(file))),
+      sessionId,
+      {
+        cwd: projectB,
+        day: '2026-07-02',
+        durationMs: 100,
+        tokens: 300,
+      },
+    );
+    const open = vi.spyOn(fs.promises, 'open');
+    try {
+      const first = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      const second = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      for (const records of [first, second]) {
+        expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(400);
+        expect(
+          records.find((record) => record.project === projectB),
+        ).toMatchObject({ transcriptRebuild: true });
+      }
+      expect(open.mock.calls.filter(([path]) => path === file)).toHaveLength(2);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('retains independent activity between two future-owned runs', async () => {
+    const sessionId = 'future-owned-run-gaps';
+    const project = '/future/owned-run-gaps';
+    const at = (minute: number, second = 0) =>
+      Date.parse(
+        `2026-07-02T00:0${minute}:${String(second).padStart(2, '0')}.000Z`,
+      );
+    const readAt = at(1, 30);
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: at(2),
+        timestamp: at(3),
+        runScoped: true,
+        requestExecutionIds: ['future-gap-first'],
+        successfulRequestExecutionIds: ['future-gap-first'],
+      },
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: at(5),
+        timestamp: at(6),
+        runScoped: true,
+        requestExecutionIds: ['future-gap-second'],
+        successfulRequestExecutionIds: ['future-gap-second'],
+      },
+    ]);
+    const file = writeTranscript('future-owned-run-gaps', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+      executionId: 'before-future-gaps',
+      assistant: true,
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:02:30.000Z',
+      'future-gap-first',
+      100,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:05:30.000Z',
+      'future-gap-second',
+      100,
+    );
+    const gapEvent = {
+      sessionId,
+      cwd: project,
+      timestamp: '2026-07-02T00:04:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-07-02T00:04:00.000Z',
+          response_id: 'between-future-gaps',
+          execution_id: 'between-future-gaps',
+          model: 'qwen-max',
+          input_token_count: 125,
+          output_token_count: 0,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+          total_token_count: 125,
+        },
+      },
+    };
+    fs.appendFileSync(file, `${JSON.stringify(gapEvent)}\n`);
+    appendNativeToolCall(
+      file,
+      sessionId,
+      '2026-07-02T00:04:00.000Z',
+      4,
+      2,
+      '2026-07-02T00:02:30.000Z',
+    );
+    const withinFuture = structuredClone(gapEvent);
+    withinFuture.timestamp = '2026-07-02T00:02:40.000Z';
+    const uiEvent = withinFuture.systemPayload.uiEvent;
+    uiEvent['event.timestamp'] = withinFuture.timestamp;
+    uiEvent.execution_id = 'independent-inside-future-window';
+    uiEvent.response_id = uiEvent.execution_id;
+    uiEvent.model = 'qwen-turbo';
+    uiEvent.input_token_count = 200;
+    uiEvent.total_token_count = 200;
+    fs.appendFileSync(file, `${JSON.stringify(withinFuture)}\n`);
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0, readAt });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(at(7));
+    try {
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        totalRequests: 5,
+        tools: { totalCalls: 1 },
+        models: { 'qwen-turbo': { totalTokens: 200 } },
+        files: { linesAdded: 4, linesRemoved: 2 },
+      });
+      expect(
+        buildUsageDashboard(records, { range: 'all' }, new Map()).summary,
+      ).toMatchObject({
+        totalTokens: 625,
+        requests: 5,
+        toolCalls: 1,
+        linesAdded: 4,
+        linesRemoved: 2,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an independent gap tool beside an out-of-order owned response', async () => {
+    const sessionId = 'future-out-of-order-gap-tool';
+    const project = '/future/out-of-order-gap-tool';
+    const readAt = Date.parse('2026-07-02T00:01:40.000Z');
+    const gapToolAt = Date.parse('2026-07-02T00:04:00.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: Date.parse('2026-07-02T00:02:00.000Z'),
+        timestamp: Date.parse('2026-07-02T00:03:00.000Z'),
+        runScoped: true,
+        requestExecutionIds: ['out-of-order-owned-response'],
+      },
+      {
+        ...persistedRec(sessionId, 100, true),
+        project,
+        startTime: Date.parse('2026-07-02T00:05:00.000Z'),
+        timestamp: Date.parse('2026-07-02T00:06:00.000Z'),
+        runScoped: true,
+        requestExecutionIds: ['second-owned-response'],
+      },
+    ]);
+    const file = writeTranscript(sessionId, sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 100,
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:01:30.000Z',
+      'out-of-order-owned-response',
+      100,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:05:30.000Z',
+      'second-owned-response',
+      100,
+    );
+    appendNativeToolCall(file, sessionId, '2026-07-02T00:04:00.000Z', 4, 2);
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0, readAt });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(gapToolAt + 180_000);
+    try {
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        totalRequests: 2,
+        tools: { totalCalls: 1 },
+        files: { linesAdded: 4, linesRemoved: 2 },
+      });
+      expect(
+        buildUsageDashboard(records, { range: 'all' }, new Map()).summary,
+      ).toMatchObject({ toolCalls: 1, linesAdded: 4, linesRemoved: 2 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an independent response inside nested future windows', async () => {
+    const sessionId = 'nested-future-owned-windows';
+    const project = '/future/nested-windows';
+    const readAt = Date.parse('2026-07-02T00:02:30.000Z');
+    const futureRun = (id: string, startTime: string, endTime: string) => ({
+      ...persistedRec(sessionId, 100, true),
+      project,
+      startTime: Date.parse(startTime),
+      timestamp: Date.parse(endTime),
+      runScoped: true,
+      requestExecutionIds: [id],
+      successfulRequestExecutionIds: [id],
+    });
+    seedPersisted([
+      futureRun(
+        'outer-future-window',
+        '2026-07-02T00:02:00.000Z',
+        '2026-07-02T00:10:00.000Z',
+      ),
+      futureRun(
+        'inner-future-window',
+        '2026-07-02T00:04:00.000Z',
+        '2026-07-02T00:06:00.000Z',
+      ),
+    ]);
+    const file = writeTranscript('nested-future-windows', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 100,
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:02:30.000Z',
+      'outer-future-window',
+      100,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:04:30.000Z',
+      'inner-future-window',
+      100,
+    );
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-07-02T00:08:00.000Z',
+      'independent-nested-response',
+      50,
+    );
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0, readAt });
+    expect(records).toHaveLength(3);
+    expect(
+      records.some((record) =>
+        record.requestExecutionIds?.includes('independent-nested-response'),
+      ),
+    ).toBe(true);
+    expect(aggregateUsage(records, 'all')).toMatchObject({
+      totalRequests: 3,
+      models: { 'qwen-max': { totalTokens: 250 } },
+    });
+  });
+
+  it('replays a response after its future-owner snapshot is removed', async () => {
+    const sessionId = 'future-owner-cache-removal';
+    const project = '/future/owner-cache-removal';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project,
+        startTime: readAt,
+        timestamp: readAt + 60_000,
+        runScoped: true,
+        requestExecutionIds: ['removed-future-response'],
+        successfulRequestExecutionIds: ['removed-future-response'],
+      },
+    ]);
+    writeTranscript('future-owner-cache-removal', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+      executionId: 'removed-future-response',
+    });
+
+    const cached = await loadUsageHistoryWithLive({ sinceMs: 0, readAt });
+    expect(cached).toHaveLength(1);
+    fs.rmSync(usagePath());
+    const afterRemoval = await loadUsageHistoryWithLive({
+      sinceMs: 0,
+      readAt,
+    });
+    expect(afterRemoval).toHaveLength(1);
+    expect(totalTokensOf(aggregateUsage(afterRemoval, 'all'))).toBe(100);
+    expect(afterRemoval[0]?.requestExecutionIds).toEqual([
+      'removed-future-response',
+    ]);
+  });
+
+  it('preserves replay ownership for a future-ended run', async () => {
+    const sessionId = 'future-ended-owned-session';
+    const project = '/repro/project';
+    const futureResponse = 'future-response';
+    const now = Date.parse('2026-07-02T00:02:20.000Z');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project,
+        startTime: now,
+        timestamp: now + 60_000,
+        durationMs: 60_000,
+        runScoped: true,
+        requestExecutionIds: [futureResponse],
+        successfulRequestExecutionIds: [futureResponse],
+      },
+    ]);
+    writeTranscript('future-owned-session', sessionId, {
+      cwd: project,
+      day: '2026-07-02',
+      durationMs: 1000,
+      tokens: 100,
+      executionId: futureResponse,
+    });
+    const oldSession = 'unrelated-old-session';
+    const oldFile = writeTranscript('unrelated-old-session', oldSession, {
+      cwd: '/unrelated/old-project',
+      day: '2026-05-01',
+      durationMs: 1000,
+      tokens: 200,
+      executionId: 'unrelated-old-response',
+    });
+    const oldTime = now - 60 * DAY;
+    fs.utimesSync(oldFile, new Date(oldTime), new Date(oldTime));
+    const open = vi.spyOn(fs.promises, 'open');
+    try {
+      expect(await loadUsageHistory()).toHaveLength(1);
+      expect(await loadUsageHistoryWithLive()).toHaveLength(1);
+      expect(
+        open.mock.calls.filter(([file]) =>
+          String(file).endsWith(`${oldSession}.jsonl`),
+        ),
+      ).toHaveLength(0);
+      expect(usageLines()).toHaveLength(1);
+      const sources = await loadUsageDashboardSources();
+      expect(
+        buildUsageDashboard(
+          sources.records,
+          { range: 'all' },
+          sources.ledgerDaily,
+          sources.runtimeScopes,
+        ).summary,
+      ).toMatchObject({
+        totalTokens: 100,
+        requests: 1,
+        sessions: 0,
+        toolCalls: 0,
+      });
+      // Explicit unbounded discovery still finds unrelated daemon history,
+      // but does not resurrect the future-owned response.
+      const unbounded = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(unbounded).toHaveLength(2);
+      expect(
+        unbounded.find((record) => record.sessionId === oldSession),
+      ).toMatchObject({ transcriptRebuild: true });
+      const retainedFuture = unbounded.find(
+        (record) => record.sessionId === sessionId,
+      );
+      expect(retainedFuture).toMatchObject({
+        timestamp: now + 60_000,
+        requestExecutionIds: [futureResponse],
+      });
+      expect(retainedFuture?.transcriptRebuild).not.toBe(true);
+    } finally {
+      open.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps unrelated transcript caches warm beside a future-owned replay', async () => {
+    const futureSession = 'cache-future-owner';
+    const otherSession = 'cache-future-unrelated';
+    const futureProject = '/cache/future-owner';
+    const otherProject = '/cache/future-unrelated';
+    const readAt = Date.parse('2026-07-02T00:02:20.000Z');
+    const responseId = 'cache-future-owned-response';
+    seedPersisted([
+      {
+        ...persistedRec(futureSession, 100, true),
+        project: futureProject,
+        startTime: readAt - 10_000,
+        timestamp: readAt + 60_000,
+        runScoped: true,
+        requestExecutionIds: [responseId],
+        successfulRequestExecutionIds: [responseId],
+      },
+    ]);
+    writeSessionTranscript(futureProject, futureSession, {
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 100,
+      executionId: responseId,
+    });
+    const otherFile = writeSessionTranscript(otherProject, otherSession, {
+      day: '2026-07-02',
+      durationMs: 100,
+      tokens: 300,
+      executionId: 'cache-unrelated-response',
+    });
+    const open = vi.spyOn(fs.promises, 'open');
+    try {
+      const first = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      const second = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        readAt,
+      });
+      expect(second).toEqual(first);
+      expect(totalTokensOf(aggregateUsage(second, 'all'))).toBe(400);
+      expect(
+        open.mock.calls.filter(([file]) => file === otherFile),
+      ).toHaveLength(1);
+      expect(usageLines()).toHaveLength(1);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('keeps an unrecorded project transcript warm across live reads', async () => {
+    const sessionId = 'unrecorded-project-cache';
+    const persisted = {
+      ...runRec(
+        sessionId,
+        200,
+        Date.parse('2026-07-01T01:00:00.000Z'),
+        Date.parse('2026-07-01T02:00:00.000Z'),
+      ),
+      project: '/cache-known/project-a',
+    };
+    const transcript = writeTranscript('cache-unknown-b', sessionId, {
+      cwd: '/cache-known/project-b',
+      day: '2026-07-01',
+      durationMs: 1000,
+      executionId: 'unknown-project-response',
+      tokens: 400,
+    });
+    const open = vi.spyOn(fs.promises, 'open');
+    try {
+      const first = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        persistedRecords: [persisted],
+      });
+      const opensBeforeSecondRead = open.mock.calls.filter(([file]) =>
+        String(file).endsWith(`${sessionId}.jsonl`),
+      ).length;
+      expect(opensBeforeSecondRead).toBeGreaterThan(0);
+      const second = await loadUsageHistoryWithLive({
+        sinceMs: 0,
+        persistedRecords: [persisted],
+      });
+      const opensAfterSecondRead = open.mock.calls.filter(([file]) =>
+        String(file).endsWith(`${sessionId}.jsonl`),
+      ).length;
+      expect(opensAfterSecondRead).toBe(opensBeforeSecondRead);
+      expect(second).toEqual(first);
+      expect(fs.readFileSync(transcript, 'utf8')).toContain(
+        'unknown-project-response',
+      );
+    } finally {
+      open.mockRestore();
+    }
+  });
+
   it('keeps later real daemon activity after an earlier reconstruction', async () => {
     const sessionId = '77777777-7777-4777-8777-777777777777';
     const project = '/live/project';
@@ -1224,6 +3753,157 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     ).toBe(1500);
   });
 
+  it('does not persist a caller-truncated transcript as authoritative', async () => {
+    const sessionId = 'caller-cutoff-must-not-persist';
+    const file = writeTranscript('caller-cutoff', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 1000,
+      tokens: 100,
+    });
+    appendNativeResponse(
+      file,
+      sessionId,
+      '2026-06-11T00:02:00.000Z',
+      'after-caller-cutoff',
+    );
+
+    const first = await loadUsageHistory(undefined, {
+      beforeMsBySession: new Map([
+        [sessionId, Date.parse('2026-06-11T00:01:30.000Z')],
+      ]),
+    });
+    expect(totalTokensOf(aggregateUsage(first, 'all'))).toBe(100);
+    expect(fs.existsSync(usagePath())).toBe(false);
+    const second = await loadUsageHistory(undefined, { persistRebuild: false });
+    expect(totalTokensOf(aggregateUsage(second, 'all'))).toBe(600);
+  });
+
+  it('does not skip a unique transcript path for an unverified project', async () => {
+    const sessionId = 'single-path-needs-project-proof';
+    seedPersisted([
+      {
+        ...persistedRec(sessionId, 100),
+        project: '/single-path/project-a',
+      },
+    ]);
+    writeTranscript('single-path-b', sessionId, {
+      cwd: '/single-path/project-b',
+      day: '2026-06-11',
+      durationMs: 1000,
+      tokens: 300,
+    });
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(400);
+    expect(
+      records.find((record) => record.project === '/single-path/project-b'),
+    ).toBeDefined();
+  });
+
+  it('preserves the active session on repeat reads without a project root', async () => {
+    const oldSession = 'prior-authoritative-session';
+    const activeSession = 'active-session-without-project-root';
+    writeTranscript('prior-authoritative', oldSession, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 1000,
+      tokens: 100,
+    });
+    await loadUsageHistory(undefined);
+    writeTranscript('later-active', activeSession, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 2000,
+      tokens: 200,
+    });
+
+    for (let read = 0; read < 2; read++) {
+      const records = await loadUsageHistory(activeSession);
+      expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(300);
+      expect(
+        records.find((record) => record.sessionId === activeSession),
+      ).toBeDefined();
+    }
+    expect(usageLines()).toHaveLength(1);
+  });
+
+  it('adversarial: covered history with a future run does not grow the ledger on repeat default loads', async () => {
+    const sessionId = 'covered-history-future-repeat';
+    const projectA = '/repeat/project-a';
+    const projectB = '/repeat/project-b';
+    writeTranscript('repeat-project-a', sessionId, {
+      cwd: projectA,
+      day: '1970-01-01',
+      durationMs: 100,
+      tokens: 100,
+      assistant: true,
+    });
+    writeTranscript('repeat-project-b', sessionId, {
+      cwd: projectB,
+      day: '1970-01-01',
+      durationMs: 100,
+      tokens: 200,
+      assistant: true,
+    });
+    const migrated = await loadUsageHistory();
+    expect(totalTokensOf(aggregateUsage(migrated, 'all'))).toBe(300);
+    expect(usageLines()).toHaveLength(2);
+    const future = {
+      ...runRec(sessionId, 50, 130_000, 200_000),
+      project: projectA,
+      requestExecutionIds: ['new-future-response'],
+    };
+    fs.appendFileSync(usagePath(), `${JSON.stringify(future)}\n`);
+    const initialLines = usageLines();
+    expect(initialLines).toHaveLength(3);
+
+    for (let read = 0; read < 2; read++) {
+      const records = await loadUsageHistory(undefined, { readAt: 150_000 });
+      expect(aggregateUsage(records, 'all')).toMatchObject({
+        totalRequests: 3,
+        models: { 'qwen-max': { requests: 3, totalTokens: 350 } },
+      });
+      expect(records).toHaveLength(3);
+      expect(
+        records.find(
+          (record) => record.project === projectA && record.runScoped === true,
+        ),
+      ).toMatchObject({
+        timestamp: 200_000,
+        requestExecutionIds: ['new-future-response'],
+        models: { 'qwen-max': { requests: 1, totalTokens: 50 } },
+      });
+      expect(usageLines()).toEqual(initialLines);
+    }
+
+    const projectC = '/repeat/project-c';
+    writeTranscript('repeat-project-c', sessionId, {
+      cwd: projectC,
+      day: '1970-01-01',
+      durationMs: 100,
+      tokens: 300,
+      assistant: true,
+    });
+    const firstDiscovery = await loadUsageHistory(undefined, {
+      readAt: 150_000,
+    });
+    expect(totalTokensOf(aggregateUsage(firstDiscovery, 'all'))).toBe(650);
+    const afterFirstDiscovery = usageLines();
+    expect(afterFirstDiscovery).toHaveLength(initialLines.length + 1);
+    expect(JSON.parse(afterFirstDiscovery.at(-1)!)).toMatchObject({
+      sessionId,
+      project: projectC,
+      transcriptRebuild: true,
+      models: { 'qwen-max': { requests: 1, totalTokens: 300 } },
+    });
+    const secondDiscovery = await loadUsageHistory(undefined, {
+      readAt: 150_000,
+    });
+    expect(totalTokensOf(aggregateUsage(secondDiscovery, 'all'))).toBe(650);
+    expect(usageLines()).toEqual(afterFirstDiscovery);
+  });
+
   it('retains late native activity without charging shared and internal calls again', async () => {
     const sessionId = 'sess-internal-and-late';
     const filePath = writeTranscript('repro-project', sessionId, {
@@ -1242,6 +3922,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
           Date.parse('2026-06-11T00:02:00.000Z'),
           Date.parse('2026-06-11T00:04:00.000Z'),
         ),
+        project: '/repro/project',
         models: { 'qwen-max': modelUsage(2, 200, 0, 200) },
         requestExecutionIds: ['shared-call', 'internal-call'],
       },
@@ -1255,6 +3936,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
 
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(700);
     expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(700);
     expect(aggregateUsage(records, 'all').totalRequests).toBe(3);
     const supplement = records.find((r) => r.transcriptSupplement === true);
@@ -1271,12 +3953,15 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       assistant: true,
     });
     seedPersisted([
-      runRec(
-        sessionId,
-        100,
-        Date.parse('2026-06-11T00:02:00.000Z'),
-        Date.parse('2026-06-11T00:04:00.000Z'),
-      ),
+      {
+        ...runRec(
+          sessionId,
+          100,
+          Date.parse('2026-06-11T00:02:00.000Z'),
+          Date.parse('2026-06-11T00:04:00.000Z'),
+        ),
+        project: '/repro/project',
+      },
     ]);
     appendNativeResponse(
       filePath,
@@ -1294,7 +3979,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(supplement?.models['qwen-max']?.totalTokens).toBe(500);
   });
 
-  it('retains identified supplements when the conversation clock is unparseable', async () => {
+  it('retains earlier usage and identified supplements when the conversation clock is unparseable', async () => {
     const sessionId = 'sess-corrupt-clock-and-late';
     const filePath = writeTranscript('repro-project', sessionId, {
       cwd: '/repro/project',
@@ -1302,6 +3987,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       durationMs: 100,
       tokens: 50,
       assistant: true,
+      executionId: 'prior-response-before-corrupt-header',
     });
     const [header, ...remaining] = fs
       .readFileSync(filePath, 'utf8')
@@ -1315,12 +4001,15 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       ].join('\n') + '\n',
     );
     seedPersisted([
-      runRec(
-        sessionId,
-        100,
-        Date.parse('2026-06-11T00:02:00.000Z'),
-        Date.parse('2026-06-11T00:04:00.000Z'),
-      ),
+      {
+        ...runRec(
+          sessionId,
+          100,
+          Date.parse('2026-06-11T00:02:00.000Z'),
+          Date.parse('2026-06-11T00:04:00.000Z'),
+        ),
+        project: '/repro/project',
+      },
     ]);
     appendNativeResponse(
       filePath,
@@ -1331,7 +4020,17 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
 
-    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(600);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(650);
+    expect(
+      records.find((record) =>
+        record.requestExecutionIds?.includes(
+          'prior-response-before-corrupt-header',
+        ),
+      ),
+    ).toMatchObject({
+      transcriptRebuild: true,
+      models: { 'qwen-max': { requests: 1, totalTokens: 50 } },
+    });
     const supplement = records.find((r) => r.transcriptSupplement === true);
     expect(supplement?.requestExecutionIds).toEqual(['late-identified-call']);
     expect(supplement?.models['qwen-max']?.totalTokens).toBe(500);
@@ -1384,9 +4083,11 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
         ...runRec(
           sessionId,
           1000,
-          Date.parse('2026-06-11T00:00:30.000Z'),
+          Date.parse('2026-06-11T00:00:00.000Z'),
           Date.parse('2026-06-11T00:04:00.000Z'),
         ),
+        project: '/repro/project',
+        models: structuredClone(persisted!.models),
         requestExecutionIds: ['existing-run'],
       },
     ]);
@@ -1486,6 +4187,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
           Date.parse('2026-06-11T00:00:00.000Z'),
           Date.parse('2026-06-11T00:04:00.000Z'),
         ),
+        project: '/repro/project',
         requestExecutionIds: ['known-api'],
         tools: {
           totalCalls: 1,
@@ -1544,13 +4246,59 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(report.totalDurationMs).toBe(240_000);
   });
 
+  it('does not let an authoritative sibling project skip a run-scoped transcript', async () => {
+    const sessionId = 'same-session-two-project-early-return';
+    const projectA = path.resolve('/early-return/project-a');
+    const projectB = path.resolve('/early-return/project-b');
+    writeTranscript('early-return-a', sessionId, {
+      cwd: projectA,
+      day: '2026-06-11',
+      durationMs: 9_000,
+      tokens: 100,
+    });
+    writeTranscript('early-return-b', sessionId, {
+      cwd: projectB,
+      day: '2026-06-11',
+      durationMs: 9_000,
+      tokens: 300,
+    });
+    const runStart = Date.parse('2026-06-11T00:02:00.000Z');
+    seedPersisted([
+      {
+        ...runRec(sessionId, 100, t0, t0 + 9_000),
+        project: projectA,
+        runScoped: false,
+        transcriptRebuild: true,
+      },
+      {
+        ...runRec(sessionId, 200, runStart, runStart + 1_000),
+        project: projectB,
+      },
+    ]);
+
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(600);
+    expect(
+      records.find(
+        (record) =>
+          record.project === projectB && record.transcriptRebuild === true,
+      )?.models['qwen-max']?.totalTokens,
+    ).toBe(300);
+  });
+
   it('revalidates a prior rebuild once and serves its later run refreshes from cache', async () => {
     const authoritativePath = plantChatJsonl('authoritative-session', 1000);
     await loadUsageHistory();
     const start = Date.parse('2026-06-12T00:00:00Z');
     fs.appendFileSync(
       usagePath(),
-      `${JSON.stringify(runRec('authoritative-session', 100, start, start + 60_000))}\n`,
+      `${JSON.stringify({
+        ...runRec('authoritative-session', 100, start, start + 60_000),
+        project: '/repro/project',
+      })}\n`,
     );
     const originalOpen = fs.promises.open;
     const opened: string[] = [];
@@ -1582,6 +4330,41 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     } finally {
       openSpy.mockRestore();
       directorySpy.mockRestore();
+    }
+  });
+
+  it('keeps an active single-project session warm without temporal maps', async () => {
+    const sessionId = 'active-session-without-temporal-maps';
+    const project = '/warm/project';
+    const filePath = writeTranscript('warm-project', sessionId, {
+      cwd: project,
+      day: '2026-06-11',
+      durationMs: 1000,
+      tokens: 100,
+    });
+    seedPersisted([{ ...persistedRec(sessionId, 0), project }]);
+    const originalOpen = fs.promises.open;
+    const opened: string[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(p));
+      return originalOpen(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      await loadUsageHistory(sessionId, {
+        projectRoot: project,
+        persistRebuild: false,
+      });
+      await loadUsageHistory(sessionId, {
+        projectRoot: project,
+        persistRebuild: false,
+      });
+      expect(opened.filter((entry) => entry === filePath)).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
     }
   });
 
@@ -1619,10 +4402,15 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     }
   });
 
-  it('keeps directory-first duplicate selection stable across cache resets', async () => {
+  it('keeps directory-first duplicates stable within one project across cache resets', async () => {
     const sessionId = 'duplicate-session';
     const start = Date.parse('2026-06-12T00:00:00Z');
-    const persisted = [runRec(sessionId, 200, start, start + 60_000)];
+    const persisted = [
+      {
+        ...runRec(sessionId, 200, start, start + 60_000),
+        project: '/a/project',
+      },
+    ];
     writeTranscript('a-project', sessionId, {
       cwd: '/a/project',
       day: '2026-06-11',
@@ -1631,7 +4419,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       assistant: true,
     });
     writeTranscript('z-project', sessionId, {
-      cwd: '/z/project',
+      cwd: '/a/project',
       day: '2026-06-11',
       durationMs: 1200,
       tokens: 2000,
@@ -1747,9 +4535,30 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     const oldRunStart = transcriptStart + DAY;
     seedPersisted([
       runRec('run-only', 50, now - DAY, now),
-      runRec('old-run', 50, oldRunStart, oldRunStart + 60_000),
+      {
+        ...runRec('old-run', 50, oldRunStart, oldRunStart + 60_000),
+        project: '/repro/project',
+      },
     ]);
-    const knownOld = plantChatJsonl('old-run', 100);
+    const knownOld = writeTranscript(
+      path.basename(
+        path.dirname(
+          path.dirname(
+            new SessionService('/repro/project', {
+              runtimeBaseDir: process.env['QWEN_HOME']!,
+            }).getSessionTranscriptPath('old-run'),
+          ),
+        ),
+      ),
+      'old-run',
+      {
+        cwd: '/repro/project',
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 100,
+        assistant: true,
+      },
+    );
     fs.utimesSync(knownOld, (now - 100 * DAY) / 1000, (now - 100 * DAY) / 1000);
     const older = plantChatJsonl('old-unrecorded', 100);
     const stale = (now - 100 * DAY) / 1000;
@@ -2070,6 +4879,22 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
   });
 
+  it('keeps same-window runs for distinct projects without request ids', () => {
+    const records = dedupBySessionId([
+      {
+        ...runRec('shared-id', 100, t0, t0 + 300),
+        project: '/project/a',
+      },
+      {
+        ...runRec('shared-id', 200, t0, t0 + 300),
+        project: '/project/b',
+      },
+    ]);
+
+    expect(records).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(300);
+  });
+
   it('keeps two independent calls with equal counters but different execution ids', () => {
     const records = dedupBySessionId([
       {
@@ -2101,6 +4926,68 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     expect(records).toHaveLength(2);
     expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(200);
+  });
+
+  it('retains distinct known calls on both sides of a partial ID overlap', () => {
+    const shared = modelUsage(1, 100, 0, 100);
+    const records = dedupBySessionId([
+      {
+        ...runRec('partial-runs', 100, t0 + 1_000, t0 + 2_000),
+        requestExecutionIds: ['shared', 'alpha-only'],
+        models: { 'qwen-max': shared, 'alpha-model': shared },
+      },
+      {
+        ...runRec('partial-runs', 100, t0 + 1_500, t0 + 2_500),
+        requestExecutionIds: ['shared', 'beta-only'],
+        models: { 'qwen-max': shared, 'beta-model': shared },
+      },
+    ]);
+    expect(records).toHaveLength(2);
+    expect(aggregateUsage(records, 'all')).toMatchObject({
+      models: {
+        'alpha-model': { requests: 1 },
+        'beta-model': { requests: 1 },
+      },
+    });
+
+    const partialNative = dedupBySessionId([
+      {
+        ...runRec('partial-native', 100, t0 + 1_000, t0 + 2_000),
+        requestExecutionIds: ['shared'],
+      },
+      {
+        ...persistedRec('partial-native', 200),
+        startTime: t0 + 1_100,
+        timestamp: t0 + 2_200,
+        transcriptRebuild: true,
+        models: { 'qwen-max': modelUsage(2, 200, 0, 200) },
+        requestExecutionIds: ['shared', 'rebuild-only'],
+      },
+    ]);
+    expect(partialNative).toHaveLength(1);
+    expect(partialNative[0]?.transcriptRebuild).toBe(true);
+    expect(aggregateUsage(partialNative, 'all')).toMatchObject({
+      totalRequests: 2,
+      models: { 'qwen-max': { totalTokens: 200 } },
+    });
+
+    const olderCoversNewer = dedupBySessionId([
+      {
+        ...runRec('older-covers-newer', 200, t0 + 1_000, t0 + 2_000),
+        requestExecutionIds: ['shared', 'older-only'],
+        models: { 'qwen-max': modelUsage(2, 200, 0, 200) },
+      },
+      {
+        ...runRec('older-covers-newer', 100, t0 + 1_500, t0 + 2_500),
+        requestExecutionIds: ['shared'],
+      },
+    ]);
+    expect(olderCoversNewer).toHaveLength(1);
+    expect(olderCoversNewer[0]?.requestExecutionIds).toContain('older-only');
+    expect(aggregateUsage(olderCoversNewer, 'all')).toMatchObject({
+      totalRequests: 2,
+      models: { 'qwen-max': { totalTokens: 200 } },
+    });
   });
 
   it('does not count a partial identity overlap as independent usage', () => {
@@ -2361,7 +5248,10 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     );
     seedPersisted([
       legacy!,
-      runRec(sessionId, 200, runStart, runStart + 60_000),
+      {
+        ...runRec(sessionId, 200, runStart, runStart + 60_000),
+        project: '/repro/project',
+      },
     ]);
 
     const records = await loadUsageHistory();
@@ -2373,7 +5263,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(usageLines()).toHaveLength(2);
   });
 
-  it('keeps whole-transcript rebuilds cumulative and collapses copies', async () => {
+  it('keeps whole-transcript rebuilds cumulative for one project and collapses copies', async () => {
     writeTranscript('repro-project', 'sess-rebuilt', {
       cwd: '/repro/project',
       day: '2026-06-11',
@@ -2382,7 +5272,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       assistant: true,
     });
     writeTranscript('zzz-repro-project', 'sess-rebuilt', {
-      cwd: '/repro/project-other',
+      cwd: '/repro/project',
       day: '2026-06-12',
       durationMs: 1200,
       tokens: 2000,
@@ -2415,6 +5305,87 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     expect(records).toHaveLength(1);
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('migrates a same-id transcript from another project without persisting the active project', async () => {
+    const sessionId = 'shared-across-projects';
+    const projectA = path.resolve('/migration/project-a');
+    const projectB = path.resolve('/migration/project-b');
+    writeTranscript('project-a', sessionId, {
+      cwd: projectA,
+      day: '2026-06-10',
+      durationMs: 1000,
+      tokens: 100,
+      assistant: true,
+    });
+    const projectBTranscript = writeTranscript('project-b', sessionId, {
+      cwd: projectB,
+      day: '2026-06-11',
+      durationMs: 2000,
+      tokens: 200,
+      assistant: true,
+    });
+    appendNativeResponse(
+      projectBTranscript,
+      sessionId,
+      '2026-06-11T00:03:00.000Z',
+      'project-b-after-project-a-cutoff',
+      50,
+    );
+
+    const first = await loadUsageHistory(sessionId, {
+      projectRoot: projectA,
+      beforeMsBySession: new Map([
+        [sessionId, Date.parse('2026-06-11T00:00:30.000Z')],
+      ]),
+    });
+    expect(totalTokensOf(aggregateUsage(first, 'all'))).toBe(350);
+    expect(usageLines().map((line) => JSON.parse(line))).toMatchObject([
+      {
+        sessionId,
+        project: projectB,
+        transcriptRebuild: true,
+        requestExecutionIds: ['project-b-after-project-a-cutoff'],
+        models: { 'qwen-max': { requests: 2, totalTokens: 250 } },
+      },
+    ]);
+
+    const second = await loadUsageHistory(sessionId, {
+      projectRoot: projectA,
+    });
+    expect(totalTokensOf(aggregateUsage(second, 'all'))).toBe(350);
+    expect(usageLines()).toHaveLength(1);
+
+    fs.rmSync(projectBTranscript);
+    const withoutB = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(totalTokensOf(aggregateUsage(withoutB, 'all'))).toBe(350);
+    expect(
+      withoutB.find((record) => record.project === projectB)?.models['qwen-max']
+        ?.totalTokens,
+    ).toBe(250);
+  });
+
+  it('retains whole-session migration exclusion without a project root', async () => {
+    const sessionId = 'legacy-shared-session';
+    writeTranscript('legacy-a', sessionId, {
+      cwd: '/legacy/project-a',
+      day: '2026-06-11',
+      durationMs: 1000,
+      tokens: 100,
+      assistant: true,
+    });
+    writeTranscript('legacy-b', sessionId, {
+      cwd: '/legacy/project-b',
+      day: '2026-06-11',
+      durationMs: 2000,
+      tokens: 200,
+      assistant: true,
+    });
+
+    const records = await loadUsageHistory(sessionId);
+
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(300);
+    expect(fs.existsSync(usagePath())).toBe(false);
   });
 
   it('withLive: a cumulative copy does not add on top of persisted runs', async () => {
@@ -2930,6 +5901,63 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
     } finally {
       vi.doUnmock('node:fs');
       vi.resetModules();
+    }
+  });
+
+  it('limits retained runtime root caches without losing recent reads', async () => {
+    const originalQwenHome = process.env['QWEN_HOME'];
+    const base = process.env['QWEN_HOME']!;
+    const originalOpen = fs.promises.open;
+    const opened: string[] = [];
+    const persistedRecords: UsageSummaryRecord[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(p));
+      return originalOpen(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      const roots = Array.from({ length: 65 }, (_, index) => {
+        const qwenHomeDir = path.join(base, `runtime-root-${index}`);
+        process.env['QWEN_HOME'] = qwenHomeDir;
+        const transcript = writeTranscript('project', `session-${index}`, {
+          cwd: `/runtime/project-${index}`,
+          day: '2026-06-11',
+          durationMs: 1000,
+          tokens: 100,
+        });
+        return { qwenHomeDir, transcript };
+      });
+      for (const root of roots) {
+        await loadUsageHistoryWithLive({
+          qwenHomeDir: root.qwenHomeDir,
+          sinceMs: 0,
+          persistedRecords,
+        });
+      }
+      opened.length = 0;
+      await loadUsageHistoryWithLive({
+        qwenHomeDir: roots[0]!.qwenHomeDir,
+        sinceMs: 0,
+        persistedRecords,
+      });
+      expect(
+        opened.filter((entry) => entry === roots[0]!.transcript),
+      ).toHaveLength(1);
+      await loadUsageHistoryWithLive({
+        qwenHomeDir: roots.at(-1)!.qwenHomeDir,
+        sinceMs: 0,
+        persistedRecords,
+      });
+      expect(
+        opened.filter((entry) => entry === roots.at(-1)!.transcript),
+      ).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+      if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalQwenHome;
     }
   });
 
@@ -3533,6 +6561,57 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
       false,
     );
     expect(usageLines()).toHaveLength(1);
+  });
+
+  it('project-scoped deletion salvage preserves another project', async () => {
+    const sessionId = 'sess-salvage-other-project';
+    const filePath = writeTranscript('salvage-other-project', sessionId, {
+      cwd: '/salvage/project-b',
+      day: '2026-07-01',
+      durationMs: 900,
+      tokens: 200,
+    });
+    persistSessionUsage({
+      sessionId,
+      project: '/salvage/project-a',
+      startTime: new Date('2026-07-01T00:00:00Z'),
+      endTime: new Date('2026-07-01T00:01:00Z'),
+      metrics: makeMetrics(),
+    });
+
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    expect(prepared?.record.project).toBe('/salvage/project-b');
+    expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(true);
+    const lines = usageLines().map((line) => JSON.parse(line));
+    expect(lines.map((line) => line.project)).toEqual([
+      '/salvage/project-a',
+      '/salvage/project-b',
+    ]);
+    expect(lines[1].models['qwen-max'].totalTokens).toBe(200);
+  });
+
+  it('project-scoped deletion salvage survives a concurrent other-project write', async () => {
+    const sessionId = 'sess-salvage-concurrent-project';
+    const filePath = writeTranscript('salvage-concurrent-project', sessionId, {
+      cwd: '/salvage/project-b',
+      day: '2026-07-01',
+      durationMs: 900,
+      tokens: 200,
+    });
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    persistSessionUsage({
+      sessionId,
+      project: '/salvage/project-a',
+      startTime: new Date('2026-07-01T00:00:00Z'),
+      endTime: new Date('2026-07-01T00:01:00Z'),
+      metrics: makeMetrics(),
+    });
+
+    expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(true);
+    expect(usageLines().map((line) => JSON.parse(line).project)).toEqual([
+      '/salvage/project-a',
+      '/salvage/project-b',
+    ]);
   });
 
   it('does not append stale salvage after authoritative usage is persisted', async () => {

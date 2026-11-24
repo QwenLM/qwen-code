@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
   getTokenUsageFilePath,
+  SessionService,
   Storage,
   type TokenUsageDailyByModel,
   type TokenUsageRecord,
@@ -274,10 +275,12 @@ describe('usage-stats route (real loader against seeded history)', () => {
       Storage.setRuntimeBaseDir(null);
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-05-25T10:00:00.000Z'));
+      vi.stubEnv('TZ', 'UTC');
     });
 
     afterEach(() => {
       vi.useRealTimers();
+      vi.unstubAllEnvs();
       Storage.setRuntimeBaseDir(null);
       if (originalRuntimeDir === undefined)
         delete process.env['QWEN_RUNTIME_DIR'];
@@ -322,6 +325,281 @@ describe('usage-stats route (real loader against seeded history)', () => {
       });
     });
 
+    it('reads a physical runtime only once through a symbolic-link alias', async () => {
+      const owner = path.join(roots, 'owner');
+      const alias = path.join(roots, 'owner-alias');
+      process.env['QWEN_RUNTIME_DIR'] = path.join(roots, 'ambient');
+      seedLedger(owner, ledgerRow('owned-request', 500, 100));
+      fs.symlinkSync(owner, alias, 'junction');
+
+      const app = mount({
+        getLedgerRuntimeBaseDirs: () => [alias, owner, `${alias}/`],
+      });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 600,
+        outputTokens: 100,
+        requests: 1,
+      });
+    });
+
+    it('keeps physically independent roots with case-different names separate', async (context) => {
+      const upper = path.join(roots, 'CaseIndependentRoot');
+      const lower = path.join(roots, 'caseindependentroot');
+      seedLedger(upper, ledgerRow('case-independent-u', 500, 100));
+      try {
+        if (fs.statSync(upper).ino === fs.statSync(lower).ino) {
+          context.skip();
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+      seedLedger(lower, ledgerRow('case-independent-l', 500, 100));
+      expect({
+        dev: fs.statSync(upper).dev,
+        ino: fs.statSync(upper).ino,
+      }).not.toEqual({
+        dev: fs.statSync(lower).dev,
+        ino: fs.statSync(lower).ino,
+      });
+
+      const app = mount({
+        getLedgerRuntimeBaseDirs: () => [upper, lower],
+      });
+      const res = await request(app).get('/usage/dashboard?range=today');
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 1200,
+        outputTokens: 200,
+        requests: 2,
+      });
+    });
+
+    it.skipIf(process.platform !== 'darwin')(
+      'deduplicates only case-spelling aliases of a physical root',
+      async () => {
+        const upper = path.join(roots, 'MixedCaseRoot');
+        const lower = path.join(roots, 'mixedcaseroot');
+        seedLedger(upper, ledgerRow('case-alias-request', 500, 100));
+        try {
+          expect(fs.statSync(lower).ino).toBe(fs.statSync(upper).ino);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            seedLedger(lower, ledgerRow('case-other-request', 500, 100));
+            const app = mount({
+              getLedgerRuntimeBaseDirs: () => [upper, lower],
+            });
+            const res = await request(app).get('/usage/dashboard?range=today');
+            expect(res.body.summary).toMatchObject({
+              totalTokens: 1200,
+              outputTokens: 200,
+              requests: 2,
+            });
+            return;
+          }
+          throw error;
+        }
+
+        const app = mount({
+          getLedgerRuntimeBaseDirs: () => [upper, lower, `${upper}/`],
+        });
+        const res = await request(app).get('/usage/dashboard?range=today');
+
+        expect(res.status).toBe(200);
+        expect(res.body.summary).toMatchObject({
+          totalTokens: 600,
+          outputTokens: 100,
+          requests: 1,
+        });
+      },
+    );
+
+    it('keeps healthy roots and global records when canonicalization fails', async () => {
+      const healthyRoot = path.join(roots, 'healthy-root');
+      const loopRoot = path.join(roots, 'self-loop-root');
+      seedLedger(healthyRoot, {
+        ...ledgerRow('healthy-request', 300, 100),
+        sessionId: 'healthy-session',
+      });
+      const record = rec({
+        sessionId: 'global-only',
+        timestamp: Date.parse('2026-05-25T09:00:00.000Z'),
+        totalTokens: 900,
+        inputTokens: 500,
+      });
+      fs.writeFileSync(
+        path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+        JSON.stringify(record) + '\n',
+      );
+      fs.symlinkSync(loopRoot, loopRoot, 'junction');
+
+      const app = mount({
+        getLedgerRuntimeBaseDirs: () => [healthyRoot, loopRoot],
+      });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 1300,
+        requests: 2,
+      });
+    });
+
+    it('replays transcript-only usage from its owning runtime root', async () => {
+      const owner = path.join(roots, 'owner');
+      const chats = path.dirname(
+        new SessionService('/project/a', {
+          runtimeBaseDir: owner,
+        }).getSessionTranscriptPath('workspace-live'),
+      );
+      fs.mkdirSync(chats, { recursive: true });
+      process.env['QWEN_RUNTIME_DIR'] = path.join(roots, 'ambient');
+      const timestamp = '2026-05-25T09:59:00.000Z';
+      const base = { sessionId: 'workspace-live', cwd: '/project/a' };
+      const events = [
+        {
+          ...base,
+          uuid: 'u1',
+          timestamp,
+          type: 'user',
+          message: { role: 'user', content: 'hi' },
+        },
+        {
+          ...base,
+          uuid: 'u2',
+          timestamp,
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': timestamp,
+              response_id: 'workspace-response',
+              model: 'qwen-max',
+              duration_ms: 20,
+              input_token_count: 200,
+              output_token_count: 300,
+              cached_content_token_count: 0,
+              thoughts_token_count: 0,
+              total_token_count: 500,
+              prompt_id: 'workspace-prompt',
+            },
+          },
+        },
+        {
+          ...base,
+          uuid: 'u3',
+          timestamp: '2026-05-25T09:59:30.000Z',
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.tool_call',
+              'event.timestamp': '2026-05-25T09:59:30.000Z',
+              call_id: 'workspace-edit',
+              function_name: 'edit',
+              duration_ms: 15,
+              success: true,
+              metadata: { model_added_lines: 2, model_removed_lines: 1 },
+              prompt_id: 'workspace-prompt',
+            },
+          },
+        },
+      ];
+      fs.writeFileSync(
+        path.join(chats, 'workspace-live.jsonl'),
+        events.map((event) => JSON.stringify(event)).join('\n') + '\n',
+      );
+
+      const app = mount({ getLedgerRuntimeBaseDirs: () => [owner] });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 500,
+        requests: 1,
+        sessions: 1,
+        toolCalls: 1,
+        linesAdded: 2,
+        linesRemoved: 1,
+      });
+    });
+
+    it('does not join equal session ids across distinct runtime roots', async () => {
+      const ownerA = path.join(roots, 'owner-a');
+      process.env['QWEN_RUNTIME_DIR'] = path.join(roots, 'ambient');
+      seedLedger(ownerA, {
+        ...ledgerRow('runtime-a-request', 100, 0),
+        sessionId: 'reused-id',
+      });
+      const timestamp = Date.parse('2026-05-25T09:00:00.000Z');
+      const record = {
+        ...rec({
+          sessionId: 'reused-id',
+          timestamp,
+          inputTokens: 200,
+          totalTokens: 500,
+        }),
+        project: '/project/b',
+        runScoped: true as const,
+        startTime: timestamp - 10 * 60_000,
+      };
+      fs.writeFileSync(
+        path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+        JSON.stringify(record) + '\n',
+      );
+
+      const app = mount({ getLedgerRuntimeBaseDirs: () => [ownerA] });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 600,
+        requests: 2,
+        sessions: 1,
+      });
+    });
+
+    it('does not join an unrelated project ledger without transcript evidence', async () => {
+      const sharedRoot = process.env['QWEN_HOME']!;
+      process.env['QWEN_RUNTIME_DIR'] = path.join(roots, 'ambient');
+      seedLedger(sharedRoot, {
+        ...ledgerRow('runtime-request', 100, 0),
+        sessionId: 'reused-id',
+        timestamp: '2026-05-25T08:00:00.000Z',
+      });
+      const timestamp = Date.parse('2026-05-25T10:00:00.000Z');
+      const record = {
+        ...rec({
+          sessionId: 'reused-id',
+          timestamp,
+          inputTokens: 200,
+          totalTokens: 500,
+        }),
+        project: '/project/b',
+        runScoped: true as const,
+        startTime: timestamp - 10 * 60_000,
+        requestExecutionIds: ['independent-project-request'],
+      };
+      fs.writeFileSync(
+        path.join(sharedRoot, 'usage_record.jsonl'),
+        JSON.stringify(record) + '\n',
+      );
+
+      const app = mount({ getLedgerRuntimeBaseDirs: () => [sharedRoot] });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 600,
+        requests: 2,
+        sessions: 1,
+      });
+    });
+
     it('falls back to global records when no ledger runtime is known', async () => {
       const ambient = path.join(roots, 'ambient');
       process.env['QWEN_RUNTIME_DIR'] = ambient;
@@ -353,12 +631,15 @@ describe('usage-stats route (real loader against seeded history)', () => {
       seedLedger(ownedRoot, ledgerRow('owned-session', 500, 100));
       const timestamp = Date.parse('2026-05-25T10:00:00.000Z');
       const records = [
-        rec({
-          sessionId: 'owned-session',
-          timestamp,
-          totalTokens: 600,
-          inputTokens: 500,
-        }),
+        {
+          ...rec({
+            sessionId: 'owned-session',
+            timestamp,
+            totalTokens: 600,
+            inputTokens: 500,
+          }),
+          project: '/owned/project',
+        },
         rec({
           sessionId: 'session-without-known-runtime',
           timestamp: timestamp - 10_000,
@@ -369,6 +650,38 @@ describe('usage-stats route (real loader against seeded history)', () => {
       fs.writeFileSync(
         path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
         records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+
+      const ownedTranscript = path.dirname(
+        new SessionService('/owned/project', {
+          runtimeBaseDir: ownedRoot,
+        }).getSessionTranscriptPath('owned-session'),
+      );
+      fs.mkdirSync(ownedTranscript, { recursive: true });
+      const uiEvent = {
+        'event.name': 'qwen-code.api_response',
+        'event.timestamp': new Date(timestamp).toISOString(),
+        response_id: 'owned-response',
+        model: 'qwen-max',
+        duration_ms: 50,
+        input_token_count: 500,
+        output_token_count: 100,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        total_token_count: 600,
+        prompt_id: 'owned-prompt',
+      };
+      fs.writeFileSync(
+        path.join(ownedTranscript, 'owned-session.jsonl'),
+        JSON.stringify({
+          sessionId: 'owned-session',
+          cwd: '/owned/project',
+          uuid: 'owned-row',
+          timestamp: new Date(timestamp).toISOString(),
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: { uiEvent },
+        }) + '\n',
       );
 
       const app = mount({ getLedgerRuntimeBaseDirs: () => [ownedRoot] });

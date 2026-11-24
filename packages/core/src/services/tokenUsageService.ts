@@ -29,6 +29,8 @@ export type TokenUsageExportFormat = 'json' | 'csv';
 export interface TokenUsageRecord {
   schemaVersion: typeof SCHEMA_VERSION;
   id: string;
+  /** Present only when the API response supplied that execution identity. */
+  executionId?: string;
   timestamp: string;
   /**
    * Calendar date in the local timezone of the process that wrote this record.
@@ -257,6 +259,7 @@ export function apiResponseEventToTokenUsageRecord(
     localDate: localParts.date,
     localMonth: localParts.month,
     sessionId: config.getSessionId(),
+    ...(event.execution_id ? { executionId: event.execution_id } : {}),
     model: event.model || 'unknown',
     authType: event.auth_type || UNKNOWN_AUTH_TYPE,
     source: event.subagent_name || MAIN_SOURCE,
@@ -276,6 +279,8 @@ function isTokenUsageRecord(value: unknown): value is TokenUsageRecord {
   const record = value as Partial<TokenUsageRecord>;
   return (
     typeof record.id === 'string' &&
+    (record.executionId === undefined ||
+      typeof record.executionId === 'string') &&
     typeof record.sessionId === 'string' &&
     typeof record.schemaVersion === 'number' &&
     Number.isInteger(record.schemaVersion) &&
@@ -350,6 +355,22 @@ const ledgerSessionIds = new WeakMap<
   TokenUsageDailyByModel,
   LedgerSessionIds
 >();
+const unidentifiedLedgerSessionIds = new WeakMap<
+  TokenUsageDailyByModel,
+  LedgerSessionIds
+>();
+export const MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS = 10_000;
+type LedgerExecutionRows = Map<string, Map<string, TokenUsageRecord[]>>;
+const ledgerExecutionRows = new WeakMap<
+  TokenUsageDailyByModel,
+  LedgerExecutionRows
+>();
+const ledgerExecutionCounts = new WeakMap<TokenUsageDailyByModel, number>();
+const incompleteLedgerEvidence = new WeakSet<TokenUsageDailyByModel>();
+const latestLedgerDayEvidence = new WeakMap<
+  TokenUsageDailyByModel,
+  { day: string; records?: TokenUsageRecord[] }
+>();
 
 function mutableLedgerSessionIds(
   table: TokenUsageDailyByModel,
@@ -362,6 +383,46 @@ function mutableLedgerSessionIds(
   return metadata;
 }
 
+export function getTokenUsageExecutionIds(
+  table: TokenUsageDailyByModel,
+  day: string,
+  model: string,
+): ReadonlySet<string> | undefined {
+  const records = getTokenUsageExecutionRecords(table, day, model);
+  return records
+    ? new Set(records.map((record) => record.executionId!))
+    : undefined;
+}
+
+export function getTokenUsageUnidentifiedSessionIds(
+  table: TokenUsageDailyByModel,
+  day: string,
+  model: string,
+): ReadonlySet<string> | undefined {
+  return unidentifiedLedgerSessionIds.get(table)?.get(day)?.get(model);
+}
+
+export function getTokenUsageExecutionRecords(
+  table: TokenUsageDailyByModel,
+  day: string,
+  model: string,
+): readonly TokenUsageRecord[] | undefined {
+  return ledgerExecutionRows.get(table)?.get(day)?.get(model);
+}
+
+export function isCompleteLedgerExecutionEvidence(
+  table: TokenUsageDailyByModel,
+): boolean {
+  return !incompleteLedgerEvidence.has(table);
+}
+
+function discardLedgerExecutionEvidence(table: TokenUsageDailyByModel): void {
+  incompleteLedgerEvidence.add(table);
+  ledgerExecutionRows.delete(table);
+  ledgerExecutionCounts.delete(table);
+  unidentifiedLedgerSessionIds.delete(table);
+}
+
 /** Session evidence behind the aggregate counters, never serialized to JSON. */
 export function getTokenUsageSessionIds(
   table: TokenUsageDailyByModel,
@@ -371,22 +432,104 @@ export function getTokenUsageSessionIds(
   return ledgerSessionIds.get(table)?.get(day)?.get(model);
 }
 
+function mergeLedgerIds(
+  destination: TokenUsageDailyByModel,
+  source: TokenUsageDailyByModel,
+  index: WeakMap<TokenUsageDailyByModel, LedgerSessionIds>,
+): void {
+  const sourceMetadata = index.get(source);
+  if (!sourceMetadata) return;
+  let destinationMetadata = index.get(destination);
+  if (!destinationMetadata) {
+    destinationMetadata = new Map();
+    index.set(destination, destinationMetadata);
+  }
+  for (const [day, models] of sourceMetadata) {
+    const destinationModels = destinationMetadata.get(day) ?? new Map();
+    destinationMetadata.set(day, destinationModels);
+    for (const [model, ids] of models) {
+      const merged = new Set(destinationModels.get(model));
+      for (const id of ids) merged.add(id);
+      destinationModels.set(model, merged);
+    }
+  }
+}
+
 export function mergeTokenUsageSessionIds(
   destination: TokenUsageDailyByModel,
   source: TokenUsageDailyByModel,
 ): void {
-  const sourceMetadata = ledgerSessionIds.get(source);
-  if (!sourceMetadata) return;
-  const destinationMetadata = mutableLedgerSessionIds(destination);
-  for (const [day, models] of sourceMetadata) {
-    const destinationModels = destinationMetadata.get(day) ?? new Map();
-    destinationMetadata.set(day, destinationModels);
-    for (const [model, sessionIds] of models) {
-      const merged = new Set(destinationModels.get(model));
-      for (const sessionId of sessionIds) merged.add(sessionId);
-      destinationModels.set(model, merged);
+  mergeLedgerIds(destination, source, ledgerSessionIds);
+}
+
+function mergeLedgerExecutionRows(
+  destination: TokenUsageDailyByModel,
+  source: TokenUsageDailyByModel,
+): void {
+  if (
+    incompleteLedgerEvidence.has(destination) ||
+    incompleteLedgerEvidence.has(source)
+  ) {
+    discardLedgerExecutionEvidence(destination);
+    return;
+  }
+  const sourceRows = ledgerExecutionRows.get(source);
+  if (!sourceRows && !unidentifiedLedgerSessionIds.has(source)) return;
+  const sourceCount = ledgerExecutionCounts.get(source) ?? 0;
+  const destinationCount = ledgerExecutionCounts.get(destination) ?? 0;
+  if (destinationCount + sourceCount > MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS) {
+    discardLedgerExecutionEvidence(destination);
+    return;
+  }
+  let destinationRows = ledgerExecutionRows.get(destination);
+  if (!destinationRows) {
+    destinationRows = new Map();
+    ledgerExecutionRows.set(destination, destinationRows);
+  }
+  mergeLedgerIds(destination, source, unidentifiedLedgerSessionIds);
+  for (const [day, models] of sourceRows ?? []) {
+    const destinationModels = destinationRows.get(day) ?? new Map();
+    destinationRows.set(day, destinationModels);
+    for (const [model, records] of models) {
+      const existing = destinationModels.get(model);
+      if (!existing) {
+        destinationModels.set(model, [...records]);
+        continue;
+      }
+      for (let index = 0, length = records.length; index < length; index++) {
+        existing.push(records[index]!);
+      }
     }
   }
+  ledgerExecutionCounts.set(destination, destinationCount + sourceCount);
+}
+
+export function mergeTokenUsageExecutionIds(
+  destination: TokenUsageDailyByModel,
+  source: TokenUsageDailyByModel,
+): void {
+  mergeLedgerExecutionRows(destination, source);
+}
+
+function rememberLatestLedgerDay(
+  table: TokenUsageDailyByModel,
+  record: TokenUsageRecord,
+): void {
+  const previous = latestLedgerDayEvidence.get(table);
+  if (previous && record.localDate < previous.day) return;
+  if (!previous || record.localDate > previous.day) {
+    latestLedgerDayEvidence.set(table, {
+      day: record.localDate,
+      records: [record],
+    });
+    return;
+  }
+  if (!previous.records) return;
+  if (previous.records.length >= MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS) {
+    latestLedgerDayEvidence.set(table, { day: previous.day });
+    return;
+  }
+  previous.records.push(record);
 }
 
 function rememberLedgerSession(
@@ -399,6 +542,84 @@ function rememberLedgerSession(
   const sessionIds = models.get(record.model) ?? new Set<string>();
   if (record.sessionId) sessionIds.add(record.sessionId);
   models.set(record.model, sessionIds);
+}
+
+function rememberLedgerExecution(
+  table: TokenUsageDailyByModel,
+  record: TokenUsageRecord,
+): void {
+  if (incompleteLedgerEvidence.has(table)) return;
+  const count = ledgerExecutionCounts.get(table) ?? 0;
+  if (count >= MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS) {
+    discardLedgerExecutionEvidence(table);
+    return;
+  }
+  if (!record.executionId) {
+    let metadata = unidentifiedLedgerSessionIds.get(table);
+    if (!metadata) {
+      metadata = new Map();
+      unidentifiedLedgerSessionIds.set(table, metadata);
+    }
+    const models = metadata.get(record.localDate) ?? new Map();
+    metadata.set(record.localDate, models);
+    const sessionIds = models.get(record.model) ?? new Set<string>();
+    if (record.sessionId) sessionIds.add(record.sessionId);
+    models.set(record.model, sessionIds);
+    ledgerExecutionCounts.set(table, count + 1);
+    return;
+  }
+  let recordsByDate = ledgerExecutionRows.get(table);
+  if (!recordsByDate) {
+    recordsByDate = new Map();
+    ledgerExecutionRows.set(table, recordsByDate);
+  }
+  const executionModels = recordsByDate.get(record.localDate) ?? new Map();
+  recordsByDate.set(record.localDate, executionModels);
+  const records = executionModels.get(record.model) ?? [];
+  records.push(record);
+  executionModels.set(record.model, records);
+  ledgerExecutionCounts.set(table, count + 1);
+}
+
+function applyTokenUsageRecordToDaily(
+  table: TokenUsageDailyByModel,
+  record: TokenUsageRecord,
+  direction: 1 | -1,
+): void {
+  let byModel = table.get(record.localDate);
+  if (!byModel) {
+    byModel = new Map();
+    table.set(record.localDate, byModel);
+  }
+  let totals = byModel.get(record.model);
+  if (!totals) {
+    totals = {
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 0,
+      apiDurationMs: 0,
+    };
+    byModel.set(record.model, totals);
+  }
+  const normalizedOutput = normalizedOutputTokens(record);
+  totals.requests += direction;
+  totals.inputTokens += direction * record.inputTokens;
+  totals.outputTokens += direction * normalizedOutput;
+  totals.cachedTokens += direction * record.cachedTokens;
+  totals.thoughtsTokens += direction * record.thoughtsTokens;
+  const componentTotal = record.inputTokens + normalizedOutput;
+  totals.totalTokens += direction * (componentTotal || record.totalTokens);
+  totals.apiDurationMs += direction * record.apiDurationMs;
+}
+
+export function subtractTokenUsageFromDailyByModel(
+  table: TokenUsageDailyByModel,
+  record: TokenUsageRecord,
+): void {
+  applyTokenUsageRecordToDaily(table, record, -1);
 }
 
 async function accumulateMonthByDay(
@@ -421,36 +642,10 @@ async function accumulateMonthByDay(
           continue;
         }
         if (record.localDate < sinceLocalDate) continue;
+        rememberLatestLedgerDay(table, record);
         rememberLedgerSession(table, record);
-        let byModel = table.get(record.localDate);
-        if (!byModel) {
-          byModel = new Map();
-          table.set(record.localDate, byModel);
-        }
-        let totals = byModel.get(record.model);
-        if (!totals) {
-          totals = {
-            requests: 0,
-            inputTokens: 0,
-            outputTokens: 0,
-            cachedTokens: 0,
-            thoughtsTokens: 0,
-            totalTokens: 0,
-            apiDurationMs: 0,
-          };
-          byModel.set(record.model, totals);
-        }
-        // Older writers could already include thoughts in totalTokens.
-        // Normalize at the record boundary, where authType is still available.
-        const normalizedOutput = normalizedOutputTokens(record);
-        totals.requests += 1;
-        totals.inputTokens += record.inputTokens;
-        totals.outputTokens += normalizedOutput;
-        totals.cachedTokens += record.cachedTokens;
-        totals.thoughtsTokens += record.thoughtsTokens;
-        const componentTotal = record.inputTokens + normalizedOutput;
-        totals.totalTokens += componentTotal || record.totalTokens;
-        totals.apiDurationMs += record.apiDurationMs;
+        rememberLedgerExecution(table, record);
+        applyTokenUsageRecordToDaily(table, record, 1);
       }
     }
   } finally {
@@ -463,10 +658,13 @@ async function accumulateMonthByDay(
 }
 
 /**
- * Aggregate the per-request ledger into per-local-day, per-model counters,
- * streaming each month file so a large history is never materialized. Only
- * months at/after `sinceLocalDate`'s month are opened, and records older than
- * `sinceLocalDate` are skipped.
+ * Aggregate the per-request ledger into per-local-day, per-model counters.
+ * Each month is streamed; at most MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS
+ * complete rows are retained per table for identity proof. Beyond that budget,
+ * execution evidence is discarded and exact matching is unavailable, while
+ * ordinary counters continue to accumulate for a conservative fallback.
+ * Only months at/after `sinceLocalDate`'s month are opened, and records older
+ * than `sinceLocalDate` are skipped.
  *
  * Unlike a session summary, a ledger record is written once, when the response
  * arrives, and carries the local day it happened on — so these counters neither
@@ -529,8 +727,26 @@ export async function loadTokenUsageDailyByModel(
         signatures.set(filePath, stats);
         completedMonthSignatures.set(completedMonthCache, signatures);
       }
-      mergeTokenUsageSessionIds(table, monthTable);
-      for (const [day, byModel] of monthTable) {
+      let aggregates = monthTable;
+      if (sinceLocalDate > `${month}-01`) {
+        // Reuse whole-month aggregates, but never their out-of-window evidence.
+        const cachedEvidence = reusableLatestDayEvidence(
+          monthTable,
+          sinceLocalDate,
+        );
+        const scopedEvidence: TokenUsageDailyByModel =
+          cachedEvidence ?? new Map();
+        if (!cachedEvidence) {
+          await accumulateMonthByDay(filePath, sinceLocalDate, scopedEvidence);
+          aggregates = scopedEvidence;
+        }
+        mergeTokenUsageSessionIds(table, scopedEvidence);
+        mergeTokenUsageExecutionIds(table, scopedEvidence);
+      } else {
+        mergeTokenUsageSessionIds(table, monthTable);
+        mergeTokenUsageExecutionIds(table, monthTable);
+      }
+      for (const [day, byModel] of aggregates) {
         if (day < sinceLocalDate) continue;
         let destination = table.get(day);
         if (!destination) {
@@ -546,6 +762,23 @@ export async function loadTokenUsageDailyByModel(
     }
   }
   return table;
+}
+
+/** The latest day can be copied without letting older rows exhaust its budget. */
+function reusableLatestDayEvidence(
+  monthTable: TokenUsageDailyByModel,
+  day: string,
+): TokenUsageDailyByModel | undefined {
+  const latest = latestLedgerDayEvidence.get(monthTable);
+  if (!monthTable.has(day) || latest?.day !== day || !latest.records) {
+    return undefined;
+  }
+  const evidence: TokenUsageDailyByModel = new Map();
+  for (const record of latest.records) {
+    rememberLedgerSession(evidence, record);
+    rememberLedgerExecution(evidence, record);
+  }
+  return evidence;
 }
 
 function summarizeRecords(

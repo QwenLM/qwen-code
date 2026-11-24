@@ -113,11 +113,12 @@ export function registerUsageStatsRoutes(
     const range = parseRange(req.query['range']);
     const heatmapDays = parseHeatmapDays(req.query['heatmapDays']);
     try {
-      const { records, ledgerDaily } = await getSources();
+      const { records, ledgerDaily, runtimeScopes } = await getSources();
       const dashboard = buildUsageDashboard(
         records,
         { range, heatmapDays },
         ledgerDaily,
+        runtimeScopes,
       );
       res.status(200).json(dashboard);
     } catch (err) {

@@ -433,18 +433,26 @@ export const SessionStatsProvider: React.FC<{
   );
 
   useEffect(() => {
-    const handleUpdate = ({
-      metrics,
-      lastPromptTokenCount,
-    }: {
+    const handleUpdate = (update: {
       metrics: SessionMetrics;
       lastPromptTokenCount: number;
+      clockSessionId?: string;
     }) => {
+      const { metrics, lastPromptTokenCount, clockSessionId } = update;
+      const isClockUpdate = Object.hasOwn(update, 'clockSessionId');
+      const eventClock = isClockUpdate
+        ? uiTelemetryService.getSessionStartTime()
+        : undefined;
       setStats((prevState) => {
+        if (clockSessionId && prevState.sessionId !== clockSessionId) {
+          return prevState;
+        }
         const nextMetrics = prevState.sessionId
           ? getMetricsForDisplay(prevState.sessionId)
           : cloneSessionMetrics(metrics);
+        const sessionStartTime = eventClock ?? prevState.sessionStartTime;
         if (
+          prevState.sessionStartTime.getTime() === sessionStartTime.getTime() &&
           prevState.lastPromptTokenCount === lastPromptTokenCount &&
           areMetricsEqual(prevState.metrics, nextMetrics)
         ) {
@@ -452,6 +460,7 @@ export const SessionStatsProvider: React.FC<{
         }
         return {
           ...prevState,
+          sessionStartTime,
           metrics: nextMetrics,
           lastPromptTokenCount,
         };
@@ -463,6 +472,7 @@ export const SessionStatsProvider: React.FC<{
     handleUpdate({
       metrics: uiTelemetryService.getMetrics(),
       lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      clockSessionId: undefined,
     });
 
     return () => {

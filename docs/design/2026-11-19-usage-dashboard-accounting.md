@@ -114,16 +114,20 @@ explicitly left the local-`today` window semantics out of scope.
 
 ## Scope boundaries
 
-- In scope: `usage-dashboard-service.ts`, `tokenUsageService.ts` (read path only),
-  the `usage-stats` route, the Web Shell usage tab's output tile, the persist side
-  (`UiTelemetryService`, the two replay sites, the run-persist call sites),
+- In scope: `usage-dashboard-service.ts`, the optional response-to-`executionId`
+  writing, reading and completed-month copy/merge paths in `tokenUsageService.ts`,
+  the `usage-stats` route, the Web Shell usage tab's output tile, the persist
+  side (`UiTelemetryService`, the two replay sites, the run-persist call sites),
   `usageHistoryService`'s record marker and reduction, and the TUI cross-session
   view (`statsDataService.loadStatsData`).
 - Out of scope: the `/stats` session view, whose cumulative resumed-history
-  semantics are intentional; the ledger record schema and a usage-record version
-  bump or migration; migrating records already on disk; cost billing; the replay
-  cache's scan bounds. Two optional, additive provenance flags (`runScoped` and
-  `transcriptRebuild`) are in scope and are not a schema version change.
+  semantics are intentional; a ledger or usage-record schema-version bump or
+  migration; rewriting records already on disk; cost billing; the replay cache's
+  scan bounds. The optional `executionId` field on newly written response rows
+  requires no version change. The two optional, additive provenance flags
+  (`runScoped` and `transcriptRebuild`) likewise are not a version change.
+  Per-root ledger/history pairing and its replay-cache lifecycle implement the
+  root-isolation correction, not a change to the separate replay-scan design.
 
 ## Implemented solution (Option A)
 
@@ -150,9 +154,10 @@ record can therefore appear on different days.
 - `loadUsageDashboardSources()` loads the session history and the ledger together
   over `LEDGER_WINDOW_DAYS = 366`, matching the route's `heatmapDays` clamp so one
   cached load covers every window a caller can request.
-- The route's single injectable dependency is now `loadSources`, returning both, so
-  a test that injects session records cannot accidentally read the operator's real
-  ledger.
+- Tests can inject the whole source set through `loadSources`. The real loader
+  additionally accepts `getLedgerRuntimeBaseDirs`, supplying registered
+  workspaces' runtime roots. Callers that do not replace the whole loader need
+  this second dependency to aggregate those roots.
 - The output tile renders `summary.outputTokens`, which core normalizes per model
   through `outputTokenCount` (defect 1).
 
@@ -214,7 +219,7 @@ carry no run marker and remain cumulative. Actual event-time reconstruction
 salvage) additionally writes `transcriptRebuild: true`, distinguishing measured
 history from an old unmarked record whose provenance is unknowable.
 
-`dedupBySessionId` groups by sessionId and then:
+`dedupBySessionId` groups by sessionId and project, then:
 
 - **No run-scoped record in the group** -> ordinary cumulative copies retain
   last-wins. A newer measured transcript reconstruction may replace an older
@@ -255,6 +260,152 @@ history from an old unmarked record whose provenance is unknowable.
   decide coverage instead. Incomplete or ambiguous reconstruction evidence
   takes the conservative known-run basis.
 
+**Exact per-response ledger identity.** When a real API response supplies an
+`execution_id`, its successful-response ledger row retains that identity as an
+optional `executionId`, separately from the ledger row's random `id`. The
+current-month reader and completed-month copy/merge preserve this evidence.
+For a run-scoped record, the eligible day/model/session ledger buckets must
+establish every ID in its non-empty `successfulRequestExecutionIds`, including
+across multiple local days. Each ID must come from a response row belonging to
+the record's own session; session and ID unions from different rows cannot be
+combined. For every expected ID, collect its fingerprints across all relevant
+day/model buckets before deciding; distinct evidence on another day or for a
+different API duration leaves it unproven. Lazy per-table day/model indexes
+preserve candidates without rescanning a whole bucket for every run. A
+per-`TokenUsageDailyByModel`/day/model WeakMap stores
+session→executionId→raw row and session→executionId→fingerprints, and is used
+only with complete evidence. An evidence merge invalidates its derived view;
+incomplete/budget-released evidence can only return the empty proof, never a
+stale index or stronger deduction. It is private read-only metadata and does
+not extend ledger/dashboard JSON or write files. Where covered snapshots are
+reconciled again, the same snapshot must not be appended on every future-only
+read. Late evidence can still be discovered without another migration write,
+while a genuinely new project migration can persist once, rather than
+repeating identical covered rows. A supplied
+execution ID is optional: one response lacking it leaves the successful-ID list
+incomplete. A known matching ID then cannot stand in for the remaining
+response's lineage. Owner-aware reads retain the run and ledger rather than
+using date/model counts as a substitute, accepting the same disclosed possible
+duplicate as the other unresolved evidence boundaries. The covered
+successful-ID count must also match
+each model's successful request count. Consumption counters must also agree,
+with provider-aware equivalences rather than unconditional arithmetic. When
+prompt tokens are omitted, the ledger uses cached tokens as their lower-bound
+input. Apart from the explicit cache-only normalization below, input must
+match exactly; an arbitrary difference within the cached amount is not one
+API response. Output, cached and reasoning counts, successful request count
+and grand total remain strict. Missing totals follow each ledger
+row's `outputIncludesThoughts(authType)`, so already-included reasoning is not
+added back while a missing-total session fallback is compared coherently.
+A 100-token response still cannot stand in for an independently observed
+200-token record merely because they share a request ID. Missing, empty,
+different or incomplete identity cannot use this path to erase independent
+real consumption. Cache-only normalization is still accepted, but only when raw session input
+is zero and cached input is positive. The ledger proxy input must equal that
+cache exactly, and the ledger total either must already equal the session's
+coherent total or must exceed it by exactly the complete cached amount. This
+never overrides a conflicting session grand total. Missing totals from mixed
+providers sum `inputTokens + outputTokens + (outputIncludesThoughts(authType)
+? 0 : thoughtsTokens)` separately for each row's authType; that coherent
+number may match only when the session's complete component sum agrees. It
+does not demote a 100-token row and a conflicting 200-token record into one
+API response merely because execution IDs match.
+The bounded transcript/ownership fallback remains for legacy compatibility; a
+missing or conflicting owning-root path does not authorize a coincidental join.
+An owner-aware reader does not demote new conflicting identity evidence to
+session/day/model matching; raw legacy tables without that metadata retain their
+compatibility fallback. Incomplete metadata therefore retains the disclosed
+possible legacy duplicates rather than guessing identity from counts. An old
+record with no project field cannot be assigned to the active project merely
+because its session, time window, and tokens agree. Without actual ownership
+proof, it remains separately available, potentially duplicating a reconstructed
+view; project names and sanitized path spellings never substitute for this
+proof. Different explicitly-known projects still remain separate. This
+separates successful responses
+from failed attempts, which have no successful-response ledger row. A present
+but non-string optional
+`executionId` makes that ledger row invalid for aggregation.
+
+An owner-scoped ledger may use the same proof for its own measured
+`transcriptRebuild`; an explicit runtime-scoped build may also establish that
+proof across roots. Neither turns an ordinary cumulative record into a
+run-scoped proof. A caller-declared current live record is a separate explicit
+owner boundary, not a blanket same-session exemption. Only when that exact
+record has a complete, unique, non-empty execution-ID set and no recorded
+model errors may those request IDs stand in for a legacy missing
+successful-ID list; every ID still has to establish the same response-row
+fingerprint and per-model count. It cannot legitimize a failed request, an
+unknown relationship, or a same-id record from another project. A live record
+without such IDs is retained beside the ledger rather than erased by the
+legacy fallback. Likewise, a live request ID that cannot yet be found in the
+complete execution-evidence tables cannot be covered by an older ledger. If
+only part of a live record is already persisted, subtract only uniquely
+fingerprinted same-model response rows whose consumption is compatible with
+the live counters; preserve the unpersisted residue instead of leaving the
+whole record to be counted again beside the ledger. Global
+same-session project ambiguity does not invalidate another root's complete,
+individually compatible owner-local exact proof; each such proof is evaluated
+against that root's own transcript/project scope, never a merged token count.
+
+The in-memory evidence table supplies day/model,
+session and execution-ID metadata, but zero token counters. Its dates are united
+with the local root's dates for exact-ID proof alone. The lookup also includes
+the actual queried root's dates, so an empty global ledger cannot hide another
+complete root's day buckets. Normal cross-day responses can use complete local
+proof; what is rejected is conflicting fingerprints for the same execution ID,
+not the number of dates. The existing legacy fallback still examines only the
+local root's days and owning transcript scope.
+
+Duplicate scoped ledger rows require an exact response fingerprint:
+original localDate, session, model, execution ID, auth type, source, response
+timestamp and all response counters, including API duration. A random ledger-row ID is deliberately
+excluded. Only later identical rows are subtracted from the in-memory aggregate;
+the on-disk ledger is unchanged and different evidence remains. Copying such a
+row uses the same provider normalization as addition, including totals-only
+records. The ledger's own session/execution indexes and owning scope follow that
+ledger map through these copies; borrowing scope from the records array would
+lose the ownership proof. The duplicate execution-ID set is constructed on
+demand, avoiding a second always-resident index of every response.
+
+**Bounded identity evidence.** Monthly JSONL is still streamed, but at most
+`MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS` (10,000) complete response rows are
+held for identity proof per logical ledger table, including its
+completed-month and merged derivatives. If a stream or merge exceeds that
+budget, the private execution evidence is released and marked incomplete.
+The separate permanent execution-ID set is not retained either. Full
+session/model/day counters continue accumulating from every valid in-scope row.
+
+Rows without an execution ID retain only private day/model/session presence
+as ambiguous evidence and count toward that same budget, not an extra one.
+Merging preserves this metadata. Such a row cannot be treated as an absent
+ledger or be used by the legacy fallback to erase a response with known IDs.
+
+A completed-month aggregate also has a separately bounded snapshot of its
+latest day's complete identity evidence. It is reused only by a partial-month
+query starting exactly on that day and only while the file signature is
+unchanged. Other partial windows stream the file for scoped evidence. When that
+fallback scan occurs, its counters and identity evidence come from that same
+scan, never mixed with the cached snapshot. A whole month's earlier rows cannot
+consume the narrow window's budget or silently replace its exact identity.
+
+Once that bound is exceeded, identity proof cannot be allowed to pretend that
+a bounded sample is exhaustive. `isCompleteLedgerExecutionEvidence` becomes
+false; new exact-ID matching and scoped-ledger subtraction using that evidence
+are unavailable. Complete per-root maps are queried independently from this
+bounded union, however, so discarding an over-budget merge does not discard
+otherwise complete local response proofs. A run-scoped legacy day/session
+fallback still needs its unique expected
+transcript path; scoped ownership ambiguity retains possible duplicates.
+Compatibility without per-response execution evidence does not turn a missing
+legacy path, an unknown project, or a finite execution-evidence budget into a
+new exact-ID proof. Unscoped legacy cumulative records retain their existing
+limited day/session compatibility, but modern conflicting identity evidence
+still vetoes a session/model shortcut. When complete evidence is available, a conflicting or incomplete
+explicit identity remains a veto, not a license for a session/model shortcut.
+Changing the in-memory cache
+never edits a transcript, a durable usage record or a ledger row, and this is
+not a claim that a bounded-budget ledger can reproduce all exact deduplication.
+
 **Independent late evidence.** A complete reconstruction can be ambiguous
 because a public transcript shares only some ids with a run that also contains
 internal helper calls. The ambiguous main reconstruction is then not added
@@ -285,9 +436,10 @@ therefore change reconciliation ownership without incorrectly retaining a
 cached supplement from the previous ownership. Boundary supplements never
 become durable copies merely because they were cached in memory.
 
-The provenance flags, optional `requestExecutionIds` array and optional failed-
-attempt count/latency metadata are additive. Every reader that filters
-`version === 1` keeps working without a schema migration or a history rewrite.
+The provenance flags, optional `requestExecutionIds` and
+`successfulRequestExecutionIds` arrays and optional failed-attempt
+count/latency metadata are additive. Every reader that filters `version === 1`
+keeps working without a schema migration or a history rewrite.
 
 **Deliberate trade:** an ordinary cumulative record spanning an upgrade loses to
 run deltas even if it covers earlier activity. Measured transcript rebuilds need
@@ -304,6 +456,15 @@ session census. Only events with usable timestamps strictly before the relevant
 earliest run start are backfilled; later activity remains with its run.
 Boundary-limited supplements are ephemeral, never additional authoritative
 whole-session snapshots.
+
+When the caller supplies the current project root, durable migration excludes
+only that exact project/session pair, not a same-id transcript from another
+project. The active project's snapshot is deferred to its own exit persistence,
+but the other project's reconstruction is still durable after a repeat load and
+(if necessary) transcript deletion. A record reconstructed under that other
+project cannot narrow the active session's directory candidates or authorize
+the early return before the active project itself has inspected coverage.
+Without the project-root option, the legacy whole-session exclusion remains.
 
 A targeted `loadUsageHistory` retains its fast path for an already completed
 `transcriptRebuild`, rather than reopening it merely because a later run is
@@ -348,7 +509,10 @@ Otherwise harmless empty calendar days do not require records, but unrelated
 unrecorded transcripts still respect `LIVE_REBUILD_WINDOW_DAYS` whenever any
 persisted history exists, including a run-only history. Only an empty history
 uses the unbounded initial replay, while `sinceMs: 0` is the explicit escape
-hatch. `loadUsageHistoryWithLive` merges this recent daemon activity read-only,
+hatch. Partitioning durable records by runtime must not alter this decision:
+an empty local subset still uses the unpartitioned history's bounded window and
+does not become a new unbounded first migration. `loadUsageHistoryWithLive`
+merges this recent daemon activity read-only,
 whereas a named older run may still receive a precise boundary supplement
 beyond that window without opening unrelated stale transcripts.
 
@@ -383,6 +547,273 @@ read two runs of one conversation as 2 sessions, where last-wins previously read
 
 1. That is the more honest number once each record is a delta rather than a
    cumulative copy, but it is a semantic shift, not an invariant the tiles preserve.
+
+**Known runtime roots own both transcripts and ledgers.** The daemon keeps each
+root's records and ledger paired, applies coverage within that pair, and sums
+the per-root token tables afterwards. Complete, identical response rows in
+separate runtime ledgers are first deduplicated in memory using the full
+per-response fingerprint; never by day, model or aggregate token counts.
+The merge never modifies durable ledger files. It passes the transcript's explicit root
+into replay rather than assuming that a pinned runtime context also changes the
+global Qwen directory. The default global root is retained as a separate source,
+including records whose runtime cannot be discovered. The source's extra scope
+pairing is internal; the dashboard's JSON field shape is unchanged.
+
+A durable record is assigned to a runtime only when its exact session and
+project have one actual transcript file under that runtime's real
+`SessionService` path. A missing or ambiguous match stays in the conservative
+global source instead of being joined to a foreign runtime by session id. This
+ownership check does not add project paths to ledger rows and does not infer a
+per-request event join from matching dates, models or aggregate counts.
+That candidate alone is likewise not permission to rewrite a conflicting
+historical run. During per-root replay, durable records supply replay bounds,
+but are carried separately from replay results into the strict consumption-key
+consolidation. A differing ID or model-consumption tuple therefore remains two
+real records even if only one actual transcript candidate survived. Exact
+matching can still consolidate a defensible copy without reopening every
+covered transcript. Within an established root, the ordinary compatible
+reconstruction/reduction rules still apply, so an older snapshot is replaced
+by a provably more complete later rebuild rather than added again. Records
+with partial identities, or with the same scoped request IDs but conflicting
+model-consumption fields, are held back for the strict identity comparison
+rather than reduced by that ordinary path. This keeps compatible appended
+history distinct from a 100-token versus 200-token conflict.
+
+Copy consolidation is separate from ledger coverage and is restricted to the
+same project/session and the same non-empty, unique, complete execution-id set;
+the ID count must equal the record's model-request count. Model names and their
+request, error, input, output, cache-read, reasoning and total-token counters
+must also agree after model-name sorting; matching IDs with conflicting token
+evidence remain independent. API and failure latency are observability to be
+reconciled, not token-identity to be discarded. Supplements and unidentified or
+partial records are never candidates. The global source is
+preferred to keep ambiguous ownership with its ledger pairing. Existing
+run/rebuild identity, tool/file and skill evidence governs the merge, retaining
+better API latency and observability rather than deleting data just to make
+counters match. Only a non-rebuild snapshot is temporarily marked run-scoped
+for comparison; rebuilds retain their coverage rules, and original provenance
+is restored before exposure or persistence. Within the same complete
+consumption identity, durable non-rebuild copies can be folded across
+non-overlapping writer windows, rather than forcing disjoint windows to
+fabricate another API charge. This exception never merges disjoint ID sets,
+different consumption counters or incomplete provenance. A selected older run that lacks
+`successfulRequestExecutionIds` may inherit that array only when every defined
+candidate array in the group has the same unique sorted contents. Conflicting
+sets cannot manufacture a success list from all-request IDs or overwrite a
+successful list present on the selected record. Absence therefore stays
+conservative instead of becoming an invented identity. If the group
+does not reduce to exactly one record, every original record remains. This
+does not borrow another root's aggregate counters or infer identity from days,
+models or totals; only the complete explicit-ID proof above may cross roots.
+
+Each known-root ledger retains its runtime root even if replay finds no usable
+transcript summary. That root is an ownership bound, not a wildcard. Its
+transcript-path index is copied through ledger maps, preserving the guard that
+an absent or ambiguous transcript cannot authorize a coincidental ledger copy.
+
+**A session id is not a dedup namespace across projects.** Replay and persisted
+run reduction preserve separate project/session pairs, even when equal ids or
+windows occur in one runtime root. Within one project, directory-first replay
+selection and the existing same-window counters/identity rules still apply.
+Record projects therefore remain distinct inputs, not an event join inferred
+from matching dates, models or aggregate totals. If a transcript cannot give a
+valid project clock, file-level fallback keeps its identified supplements rather
+than losing them to a session-wide first-wins rule.
+
+Known-root ledger checks also use a private in-memory index of actual transcript
+paths collected during the existing project enumeration; this adds no file
+content reads or project field to the ledger. Multiple real paths for an id
+cannot authorize one project's ledger to replace another project's run. A
+run-scoped record or measured rebuild needs its expected actual transcript path
+for replacement in an owner-aware legacy fallback. A missing transcript does
+not itself veto an otherwise exact per-root execution proof, while a present
+conflicting or multi-project transcript cannot authorize that proof.
+Missing or ambiguous ownership keeps the independent records and ledger rather
+than discarding consumption; the possible duplicate is the same explicitly
+accepted limit as unknown legacy replay provenance, not a claim of perfect
+deduplication. Directory entry metadata avoids an additional `stat` for ordinary
+already-covered files. Without this index, the bounded legacy predicate remains
+the compatibility fallback, not a universal event-identity claim.
+
+The durable-history fast path must preserve this ownership too. It constructs
+each eligible record's standard project/transcript path and retains it when the
+file still exists, rather than enumerating every project. Scope lookup uses the
+same raw-session keys as replay, while each path is derived from the record's
+actual project and runtime root. Same-id paths from different projects are not
+collapsed into one authorization; missing or ambiguous evidence stays
+conservative. A `sinceMs` supplement exemption is separately bound to the
+expected path plus the parsed real header's project/session key. A bare session
+id may not exempt a same-id file from another project merely because its mtime
+is old. Two different project keys sharing a sanitized expected path do not
+authorize exemption for either project, rather than selecting whichever record
+appeared last; a wrong real header at the expected path rejects that file as a
+supplement. Missing project metadata supplies no path exemption. An explicit
+`sinceMs: 0` still permits ordinary discovery, but does not turn a mismatched
+header into ownership of the future run. These private path/key maps add no
+project/path fields to ledger rows or dashboard responses.
+
+The ledger's per-day/model identity index and raw-row merge are incremental:
+lookup buckets are built once per table, and row arrays are cloned once and then
+appended over the original source length, rather than copied again per merge.
+When a known identity spans roots whose transcripts have unequal observability,
+the merged record chooses the richest whole tool/file/skill payload per domain
+instead of summing duplicate calls. When tool/skill totals tie, prefer the
+copy with more complete `byName` count/success/fail observations; tools also
+compare their name-specific duration totals. File payloads are compared by
+total added+removed lines and retained intact, never by an additions-only
+sort, a fieldwise synthetic union, or incidental root order. Each model retains its maximum observed
+success/error latency, and the record's total latency is the sum of those
+per-model values, consistent with metrics serialization. The authoritative
+run clock is preserved too. No tool identity is invented: unknown legacy and
+partial-identity observations still keep their disclosed conservative boundary.
+
+**Project boundaries come from record content, not directory spelling.** The
+replay reader chooses before/after/request-id filters from the parsed
+transcript header's session id and cwd. It does not infer project ownership by
+unescaping the project directory name, which may be a legacy alias. The replay
+cache is partitioned by owning root: each root prunes its own aged/deleted
+files without discarding another root's warm entries. File mtime/size, the
+matching project scope and temporal boundaries still gate reuse, so only a
+changed file needs another content read. Unscoped transient transcripts are
+not marked as scoped projects merely because they have a cwd. The established
+fast path may still skip a known, uniquely covered project/session's expected
+transcript only after confirming that its cached mtime/size match the current
+file; a newly appended covered transcript must be scanned again. Contrary
+cached identity forces a fresh header read. That shortcut
+does not bind a newly discovered cold transcript, whose actual header selects
+the matching project filters. Once a header has been observed, a matching
+project/session key is required for ordinary cache reuse. Durable candidates for another project supply only
+that other project's window filters; they do not erase the cached actual
+project key. A transcript whose actual project has no known window can therefore
+hit a warm cache without borrowing the recorded project's bounds. A caller's
+raw-session `beforeMs` is restricted to
+its declared current project root; omitting that option preserves the legacy
+caller-window behavior. The same project/session identity also governs both
+deletion-salvage coverage checks, so one project's record cannot suppress
+another project's transcript persistence. The ordered root cache retains the
+64 most-recently-used roots. Eviction removes only reconstructible in-memory
+summaries, never durable records, ledger rows or real files. Future ownership
+does not globally disable this cache. An entry's private signature includes
+the owned execution IDs and their bounded future windows. Changing or deleting
+the owning snapshot therefore forces revalidation even when the stale summary
+is `record: null`; unrelated project entries retain their ordinary warm path.
+An entry without an observed project key supplies no future ownership proof.
+
+**Conversation clock and ended-record clock stay separate.** A restored
+conversation clock can be bound after the initial UI subscription; the
+notification carries the target session id. The provider ignores that update
+while another session id is active and applies the restored clock only when
+`startNewSession(targetId)` commits the target id and its metrics together.
+Legacy clock notifications without an owner retain their existing behavior.
+Only an explicit `clockSessionId` marker (including an absent-owner value)
+reads the telemetry store's clock as a clock update. Ordinary metric
+notifications retain the provider's current clock instead of mixing a different
+session's restored value into its snapshot. `resetLiveMetrics` and persisted run
+starts retain the current-run clock.
+
+When a root group has an authoritative run-scoped record with a valid clock,
+cross-root consolidation restores its `timestamp`, `startTime`, `durationMs`
+and provenance, even if a reconstruct offers richer response observability. A
+malformed authority clock must not overwrite a valid reconstructed clock. If
+the selected record's clock is also malformed, a valid native candidate can
+supply it; if no valid alternative exists, the unknown clock is not replaced by
+invented zero-time evidence. Provenance follows the authoritative run when it
+exists, including an intentionally absent reconstruction flag. Run/session day
+attribution therefore remains the real exit day, while token and API-request
+day attribution remains the day of the actual response. A midnight test must
+check those two calendars independently rather than forcing yesterday's ledger
+into today's token bucket.
+
+Both live and ordinary history readers keep the full durable history for replay
+ownership and for the decision that history exists. Each read captures one
+`readAt`: replay ownership, the outer/inner root split and the ended/future
+partition all use it. A non-finite persisted timestamp neither grants future
+ownership nor truncates ordinary replay to an earlier run's start boundary, so
+it cannot erase valid transcript evidence. A record exactly at the shared
+instant is ended, neither
+missing from both groups nor classified differently across roots. Non-finite
+timestamps stay on the conservative durable side even when no transcript can
+recover them, rather than failing both temporal tests or inventing a response
+date. Ended-run cutoff applies only to returned/reconciled views, not to
+initial migration or unrelated stale transcripts.
+
+Matching future-owned API response/error IDs are excluded from replay even when
+their events precede `readAt`. Finite future-owned windows are kept separately
+by project/session rather than collapsed into one earliest-start/latest-end
+interval. An independent API/tool observation between two owned runs remains
+in the main reconstruction and advances its measured clock. Being inside an
+owned interval does not by itself discard an independent response ID, even for
+another model; only a known owned response may be suppressed. Tool evidence
+outside every owned interval, or with disagreeing outer/inner clocks, is
+independent of an earlier out-of-order owned response and must not be culled
+with a supposedly tool-only replay. Before applying the
+API-owned filter, calculation must say whether the event would actually enter
+main reconstruction or a late supplement; excluded future rows cannot mark an
+older independent tool history for deletion. Tool evidence before the known
+future window's earliest start is retained independently of an API-owned
+removal; only a residual purely owned tool-only copy without such independent
+evidence is culled. Missing window/clock evidence is conservative. The private
+marker never becomes a persisted field, and unresolved relationships retain
+possible duplicates rather than invented per-tool identity. If a transient-file
+header is malformed or out of order, reconstruction clamps the recovered start
+to the valid end, yielding zero rather than a negative duration. An invalid
+trailing timestamp falls back to the latest valid included row, then the
+header, so measured tool/file activity is not discarded. Where a future run has
+real response IDs and a finite end but an invalid start, a finite non-negative
+duration may derive a start in `[0, end]`; that same bounded start governs both
+ordinary replay inclusion and future-tool ownership. An invalid or unknown
+row timestamp cannot prove future membership and is therefore not truncated by
+that boundary. Without a valid window, matching tool counts alone are not an
+identity, so an uncertain extra observation may remain instead of deleting
+another run's genuine earlier work. An unreadable header must not discard
+measurable usage: use only the earliest and latest valid timestamps of API
+responses, API errors and tool calls actually accepted into reconstruction to
+recover its clock. When no valid authoritative run supplies a clock, choose
+the latest finite-clock native candidate; pure durable-copy reconciliation
+uses the selected durable record's clock, never whichever root appeared
+first. Unrestricted `all` aggregation retains consumption with non-finite
+timestamps, while bounded date ranges do not assign those records to a
+particular day by inference.
+
+Only `runScoped === true` makes a future row an independently deferred delta.
+It stays separate from older ended runs and is returned to its owning root
+before exact cross-root consumption reduction. Other snapshots remain with ended counterparts before cumulative reduction.
+When a plain future cumulative snapshot and an explicit run delta share a
+project/session, the delta wins over its older copy; unrelated future
+cumulative groups remain unchanged. A newer ordinary cumulative snapshot may
+also provide full coverage only when it has a valid complete consumption key
+of its own and `rebuildCoversRun` proves its start, request-ID superset,
+per-model request/error/token counters and tool/file envelope cover the older
+delta. A lower-consumption snapshot cannot discard the older real delta merely
+because its IDs are a superset; an unresolved ordinary cumulative conflict is
+retained conservatively beside that delta. If it really adds the other
+response ID and its compatible consumption, that fuller snapshot and request
+are not lost merely because the older delta exists. Such proof is not generic
+last-wins: disjoint IDs, weak or conflicting consumption and legacy records
+without their own complete identity remain separate. Native reconstructions are judged by
+their own coverage rules rather than being removed merely because that delta
+exists. ID presence alone is not run-delta provenance. The replay-only option
+returns no such persisted future snapshots, although their identities still
+bound replay. Rebuild/session ownership is never inferred from Day/Model totals.
+Invalid ID members are ignored individually; valid siblings still establish
+ownership, and non-array shapes are ignored for ownership without crashing
+history reads. A malformed owner object is isolated while loading durable
+JSONL rather than coerced into a session/project key; valid sibling rows still
+load. Supplements keep their explicit exemption and no read rewrites
+the durable history.
+
+A same-day run ending after the read is excluded from ended sessions, tools and
+its session-record tokens. This field-level cutoff does **not** delete a
+successful-response ledger row: that row is already evidence of real API
+consumption, not an ended-run attribution. Thus a future-ended run with a real
+100-token ledger response still contributes 100 tokens and one request to
+summary/daily tokens, while its sessions/tools remain zero. A transcript
+supplement likewise contributes actual API tokens without inventing an ended
+run. When the durable record itself is the only direct evidence of that real
+response, its unknown-ledger token/request fallback also remains; that still
+does not create an ended session or tool metrics before `readAt`. Established
+calendar-day windows are unchanged; clock disagreement cannot erase real usage
+merely to make every tile zero.
 
 ## Implemented solution (TUI cross-session view)
 
@@ -444,7 +875,13 @@ built by that shared constructor. The already-reduced history supplies only the
 current session's contiguous group for another local reduction; unrelated groups
 do not undergo a second whole-history comparison. Earlier disjoint runs and
 compatible transcript reconstructions keep their own tokens and session-granular
-fields.
+fields. The original transcript root/path scope stays attached to the persisted
+array; project/session keys are rebuilt **after** the live record is merged.
+Without that ordering, another project's same-id history can be erased by the
+active request's ledger. This remains private WeakMap metadata, not a project
+field added to ledger/dashboard JSON. The original live record also reaches
+`buildUsageDayTable`, so only it can use its complete request identities for
+exact coverage when no successful-ID list has been persisted.
 
 Stays on session records: `sessionCount`, `totalDurationMs`, tools, files, skills
 and **projects**, all selected by the same inclusive local-day keys as tokens.
@@ -508,15 +945,16 @@ than a fabricated attribution.
 ## Constraints
 
 - The dashboard path must not write to `~/.qwen`.
-- **Ledger scope is user-facing turns, not every model helper call.**
-  `logApiResponse` always feeds the live display, but intentionally excludes
-  `prompt_suggestion`, `forked_query`, `speculation` and `side-query:*` from the
-  persistent ledger and transcript telemetry, along with the other helper-call
-  paths gated before those stores. Those calls therefore remain in session/live
-  metrics but not in this daily/monthly accounting source; the figures are not
-  claimed to be an exhaustive bill including internal compaction, memory or
-  routing helpers. The boundary and any loss are deliberate and disclosed rather
-  than silently repaired everywhere.
+- **The ledger counts real API-token consumption, including internal helper calls.**
+  With usage statistics enabled, `logApiResponse` records the tokens of every
+  actual response it receives, including `prompt_suggestion`, `forked_query`,
+  `speculation` and `side-query:*`. Those hidden prompt contents still do not
+  enter the transcript. Reporting a run's aggregate while omitting its side
+  queries could otherwise delete a real response whenever the ordinary part
+  had ledger coverage. Older rows that omitted internal calls cannot be
+  repaired by guessing their event identities from days, models, counts or
+  aggregates. Calls filtered before `logApiResponse`, a disabled usage-statistics
+  preference and best-effort storage failures remain outside this guarantee.
 - **Missing provider totals follow auth semantics.** When a provider omits
   `total_token_count`, `apiResponseEventToTokenUsageRecord` asks the shared
   `outputIncludesThoughts` helper instead of unconditionally adding reasoning.
@@ -547,8 +985,9 @@ than a fabricated attribution.
   `runScoped` flag does not prove that a record is a replay copy. Where session
   metadata is available, a session absent from the ledger must not be
   reclassified as another session's spend merely by a shared day and model.
-- Ledger writes are gated by `config.getUsageStatisticsEnabled()` and skip internal
-  prompt ids (`loggers.ts`), so ledger coverage is not guaranteed.
+- Ledger writes are gated by `config.getUsageStatisticsEnabled()`. Internal
+  prompt ids suppress chat transcript recording, not token accounting; best-effort
+  storage still cannot promise that every response reached disk.
 - Do not add project paths or content to ledger records.
 - Do not rewrite or migrate the existing `usage_record.jsonl` in place.
 - Preserve the replay cache's warm-load latency and dedup ordering guarantees.
@@ -564,17 +1003,24 @@ than a fabricated attribution.
 - **Ledger read cost.** Measured 862 ms to stream and parse 771,906 records
   (~304 MB, 5 month files); the combined source load measured 29.4 s, still
   dominated by the transcript replay, and the route caches it for 60 s.
-- **Directory scope.** The route reads the ledger roots of registered workspaces,
-  plus the global `~/.qwen` root used by default CLI sessions. `path.resolve()`
-  normalizes spellings before de-duplication, including trailing separators;
-  it does not collapse distinct symlink aliases. Shared roots are loaded once;
-  distinct known roots are merged. It does not fall back from a known
-  workspace root to an unrelated ambient process runtime. Global session history
-  is loaded independently and is never narrowed to those workspaces. For a
-  historical runtime that is no longer discoverable, records retain their
-  conservative session-record attribution rather than being rewritten from a
-  wrong-scope ledger; this does not invent per-request attribution for the
-  undiscoverable root.
+- **Directory scope.** The route reads each known runtime's transcript root
+  and ledger root as one source, plus the default global CLI source. Roots are
+  canonicalized where possible. Trailing-separator spellings are eliminated.
+  When the filesystem reports a directory's dev/inode identity, that identity
+  also deduplicates symlink and case-spelling aliases without coalescing
+  distinct case-sensitive directories; unverifiable identities are not
+  force-merged by letter casing. With different realpaths sharing one
+  dev/inode identity, the first confirmed canonical representative is retained
+  for the pass, so a later alias cannot split the scope again. Coverage
+  happens inside each paired source, not across roots. A shared durable history
+  is read once; an exact session/project recording is paired only with its
+  unique actual transcript path, while missing or ambiguous ownership stays
+  global. Unresolvable roots keep the existing per-root fallbacks rather than
+  aborting the response or aliasing into ambient runtime. No ambient-runtime
+  ledger is substituted for a known workspace, and global/unmapped records are
+  not discarded. A relative transcript root can
+  therefore provide sessions, tools and file changes even with its own token
+  ledger disabled, without treating an unrelated runtime as its source.
 - **Existing history is mostly replay.** 1,482 of 2,065 persisted records (72%)
   belong to ids with zero ledger requests, totalling 376,868,201,294 tokens. The
   ledger only starts 2026-07-30 and a run with usage statistics disabled also
@@ -713,8 +1159,8 @@ than a fabricated attribution.
 - Should the per-project token column be dropped, relabelled, or attributed some
   other way, now that it disagrees with the corrected totals?
 - No session-identity change is needed: finding 4 was retracted, and the reduction
-  keys on `sessionId` plus the run window without touching what any writer uses as
-  its identity. The pre-deletion salvage and persisting migration still write
+  keys on `sessionId`, project and the run window without touching what any
+  writer uses as its identity. The pre-deletion salvage and persisting migration still write
   cumulative event-time reconstructions. They suppress only an already covered
   transcript, and explicit reconstruction provenance preserves disjoint history
   beside per-run deltas.
