@@ -30,7 +30,8 @@ public interface ManagedExtensionRecordStore {
             "managed_session_extension_record_rejected";
 
     public record TaskRow(String taskId, String kind,
-            TaskProjection projection, String resourceId) {
+            TaskProjection projection, String resourceId,
+            String domain, String recordId) {
     }
 
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
@@ -76,6 +77,14 @@ public interface ManagedExtensionRecordStore {
     public Optional<TaskTarget> findTaskTarget(String tenantId,
             String sessionId, String taskId);
 
+    /**
+     * The task target keyed by its raw (domain, record_id) tuple, for callers
+     * that already hold the row (a task page item) and must not re-resolve the
+     * public task id hash through a Session-wide scan.
+     */
+    public Optional<TaskTarget> findTaskTargetByRecord(String tenantId,
+            String sessionId, String domain, String recordId);
+
     public JsonNode readRecordResource(String tenantId, String sessionId,
             JsonNode ref);
 
@@ -90,6 +99,14 @@ public interface ManagedExtensionRecordStore {
 
     public Optional<TaskRow> findTask(String tenantId, String sessionId,
             String taskId);
+
+    /**
+     * Resolves a page of public task ids in one Session-wide scan, keyed by
+     * task id, so a caller looping over page items does not pay a scan per
+     * item. Ids absent from the Session are simply not returned.
+     */
+    public Map<String, TaskRow> findTasks(String tenantId, String sessionId,
+            List<String> taskIds);
 
     public record ChildTaskDetails(String sessionId, Boolean stopRequested, String approvalMode) { }
 

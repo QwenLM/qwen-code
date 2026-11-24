@@ -69,7 +69,7 @@ class WorkspaceReadScopeMySqlIT extends WorkspaceFileStoreTest {
             try (var statement = writer.prepareStatement("UPDATE " + table + " SET " + change
                     + " WHERE tenant_id = ? AND workspace_id = ?")) {
                 statement.setBytes(1, "tenant".getBytes(StandardCharsets.UTF_8));
-                statement.setBytes(2, workspace.getBytes(StandardCharsets.UTF_8));
+                statement.setString(2, workspace);
                 assertThat(statement.executeUpdate()).isEqualTo(1);
             }
             var reader = pool.submit(() -> readRoute(route));
@@ -206,7 +206,7 @@ class WorkspaceReadScopeMySqlIT extends WorkspaceFileStoreTest {
                     : "UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = ?";
             try (var statement = writer.prepareStatement(sql)) {
                 statement.setBytes(1, "tenant".getBytes(StandardCharsets.UTF_8));
-                statement.setBytes(2, workspace.getBytes(StandardCharsets.UTF_8));
+                statement.setString(2, workspace);
                 assertThat(statement.executeUpdate()).isOne();
             }
             var upload = pool.submit(() -> {

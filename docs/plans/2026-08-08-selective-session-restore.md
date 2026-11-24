@@ -256,7 +256,7 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
   stored-session cleanup. Do not add map-independent teardown, gate every Session
   constructor callback, or claim to repair unrelated pre-existing cleanup edges.
 - Add one narrow ACP-only selective-restore finalizer after
-  `session.installRewriter()` and before `session.startCronScheduler()` and the
+  `session.installMods()` and before `session.startCronScheduler()` and the
   available-command timer. It is called exactly once, is synchronous, and does
   not throw, with independent error boundaries around best-effort attribution
   application, scheduling `GoalRuntime.activateRestoredWork()`, and starting

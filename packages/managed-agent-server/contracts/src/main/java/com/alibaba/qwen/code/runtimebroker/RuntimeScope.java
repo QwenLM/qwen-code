@@ -30,8 +30,8 @@ public final class RuntimeScope {
     private RuntimeScope(String tenantId, String workspaceId, String workspaceGeneration,
             String canonicalCwd, String capabilityDigest, String isolationClass, RuntimeLifecycleAuthority authority) {
         this.lifecycleAuthority = authority;
-        this.tenantId = BrokerValues.requireId(tenantId, "tenantId");
-        this.workspaceId = BrokerValues.requireId(workspaceId, "workspaceId");
+        this.tenantId = BrokerValues.requireTenantId(tenantId, "tenantId");
+        this.workspaceId = BrokerValues.requireWorkspaceId(workspaceId, "workspaceId");
         this.workspaceGeneration = BrokerValues.requireId(
                 workspaceGeneration, "workspaceGeneration");
         this.canonicalCwd = BrokerValues.requireId(canonicalCwd,
@@ -44,6 +44,11 @@ public final class RuntimeScope {
                     "isolationClass must be workspace or session");
         }
         this.isolationClass = isolationClass;
+        // The canonical scope reference percent-encodes these components, so a
+        // tuple the character validators admit can still overflow the column
+        // budget. Refuse it here at admission rather than at a repository
+        // INSERT or replay path.
+        RuntimeRequestKeys.scopeKey(this);
     }
 
     public String getTenantId() {

@@ -36,6 +36,20 @@ public class ManagedAgentPropertiesTest {
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
 
     @Test
+    void actionParkingRequiresWakeDispatchAtStartup() {
+        var environment = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("qwen.managed-agent.action-parking.enabled", "true");
+        var properties = new ManagedAgentProperties();
+        properties.setEnvironment(environment);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wake-dispatch.enabled");
+
+        environment.setProperty("qwen.managed-agent.wake-dispatch.enabled", "true");
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
     void generatedAccessorsKeepNestedBindingAndInternalStatePrivate() {
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)

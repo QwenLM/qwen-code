@@ -16,13 +16,14 @@ of built-in defaults for the new generation.
   family tables in `packages/core/src/core/tokenLimits.ts`. The generic Gemini
   input fallback is 1M, but its output fallback is 8K; the 64K output row only
   names `gemini-3*`.
-- An explicitly declared `profile: "gemini"` supports `low`, `medium`, and
-  `high`. Without a declaration, Gemini has no built-in capability fallback;
-  other protocol-specific fallbacks already exist.
+- An explicitly declared `profile: "gemini"` supports `low`, `medium`, `high`,
+  and `xhigh` (`max` remains rejected). Without a declaration, Gemini has no
+  built-in capability fallback; other protocol-specific fallbacks already exist.
 - `/effort`, ACP session options, and the Web Shell provider preview consume
   the resolved capabilities. An undeclared Gemini 4 route either exposes the
   generic five-tier ladder or no provider preview at all.
-- The Gemini generator already maps reasoning tiers to `thinkingLevel`, honors
+- The Gemini generator maps reasoning tiers to `thinkingLevel` (`LOW`, `MEDIUM`,
+  `HIGH`, and `XHIGH` when the model or declaration supports `xhigh`), honors
   `reasoning: false`, and preserves a per-request opt-out once capabilities
   resolve. No new transport field is needed.
 
@@ -31,9 +32,12 @@ of built-in defaults for the new generation.
 - Give normalized `gemini-4*` ids a built-in 1M input window and 64K output
   limit.
 - Give Gemini and Vertex routes serving `gemini-4*` a built-in reasoning
-  capability: `low`, `medium`, and `high`, defaulting to `high`.
-- Offer only those three tiers in CLI, ACP, and Web Shell controls, allow
-  thinking to be disabled, and clamp any persisted legacy tier to that ladder.
+  capability defaulting to `high`: `low`, `medium`, `high`, and `xhigh` for
+  `gemini-4-neon*` and `gemini-4-hydrogen*`, and `low`, `medium`, and `high`
+  for other `gemini-4*` models.
+- Offer only the model's supported tiers in CLI, ACP, and Web Shell controls,
+  allow thinking to be disabled, and clamp any persisted legacy tier to that
+  ladder.
 - Preserve explicit user settings and explicit capability declarations.
 
 ## Proposed changes
@@ -49,18 +53,23 @@ existing precedence.
 ### Reasoning capabilities
 
 Add a narrowly scoped built-in recognizer for `gemini-4*` on `gemini` and
-`vertex-ai` routes. It returns the existing `gemini` profile with
-`low/medium/high`, default `high`, and the `thinking` disable field.
+`vertex-ai` routes. It returns the `gemini` profile with default `high` and the
+`thinking` disable field, exposing `low/medium/high/xhigh` for normalized
+`gemini-4-neon` and `gemini-4-hydrogen` ids (including dated, `-preview`, and
+suffixed aliases) and `low/medium/high` for other `gemini-4*` models.
 
 When no declaration exists, this recognizer is the Gemini counterpart of the
 existing DeepSeek fallback. When a partial declaration exists, its native
 ladder and default can be inherited just like GPT and Claude built-ins. Explicit
-full declarations still govern the route.
+full declarations still govern the route, and `profile: "gemini"` allows
+`xhigh` while rejecting `max`.
 
-The existing effective-reasoning clamp turns unsupported persisted tiers such
-as `xhigh` or `max` into `high` at request time; selection controls reject new
-choices outside the declared ladder. Selecting the provider default emits
-`thinkingLevel: HIGH`; selecting thinking off emits the existing disabled
+The existing effective-reasoning clamp turns unsupported persisted tiers into
+the model's ceiling at request time (`max` → `xhigh` for Neon/Hydrogen;
+`xhigh`/`max` → `high` for other Gemini 4 models); selection controls reject
+new choices outside the declared ladder. Selecting the provider default emits
+`thinkingLevel: HIGH`, selecting `xhigh` on a supporting model emits
+`thinkingLevel: XHIGH`, and selecting thinking off emits the existing disabled
 thinking config.
 
 ### Controls and documentation
@@ -105,10 +114,14 @@ records the defaults and the override mechanism.
 
 1. Undeclared `gemini-4*` Gemini/Vertex routes resolve to 1M input and 64K
    output defaults.
-2. Their default request uses `thinkingLevel: HIGH`; low and medium are honored,
-   legacy stronger tiers clamp to high, and thinking can be disabled.
-3. `/effort` and provider reasoning controls offer only low/medium/high, with
-   high as the default and no persistence of an implicit user choice.
+2. Their default request uses `thinkingLevel: HIGH`; `low` and `medium` are
+   honored, `xhigh` emits `thinkingLevel: XHIGH` on `gemini-4-neon*` /
+   `gemini-4-hydrogen*` (or routes declaring `xhigh`) and clamps to `HIGH`
+   otherwise, legacy `max` clamps to the model's ceiling, and thinking can be
+   disabled.
+3. `/effort` and provider reasoning controls offer `low`/`medium`/`high`/`xhigh`
+   for Neon/Hydrogen and `low`/`medium`/`high` for other Gemini 4 models, with
+   `high` as the default and no persistence of an implicit user choice.
 4. OpenAI routes with the same model id and pre-Gemini-4 routes are unchanged.
 5. Focused tests, typecheck, and the mock-wire verification pass.
 

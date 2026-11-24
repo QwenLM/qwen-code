@@ -12,7 +12,12 @@ import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
-import { fakeServerHostOptions, sharedLoopRoundCount } from '../test-helper.js';
+import {
+  fakeServerHostOptions,
+  headlessLoopPaths,
+  readDebugLogs,
+  sharedLoopRoundCount,
+} from '../test-helper.js';
 import {
   SDKTestHelper,
   createResultWaiter,
@@ -52,7 +57,7 @@ describe.each([
       JSON.stringify({
         security: { auth: { selectedType: 'openai' } },
         tools: { workflowsEnabled: true },
-        experimental: { unifiedAgentLoop: shared },
+        experimental: { unifiedAgentLoop: shared, eventBusAgentLoop: false },
         memory: {
           enableManagedAutoMemory: false,
           enableManagedAutoDream: false,
@@ -89,6 +94,9 @@ describe.each([
       // Arm-dependent: an unconditional '0' would force the shared arm onto
       // the legacy loop now that the env override beats the setting.
       QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: shared ? '1' : '0',
+      // Both arms stay off the kernel, so the shared arm runs the shared
+      // loop's procedural path even where the kernel is on by default.
+      QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: '0',
       QWEN_DEBUG_LOG_FILE: '1',
       QWEN_CODE_DISABLE_CRON: '1',
       OPENAI_API_KEY: 'fake-key',
@@ -174,6 +182,9 @@ describe.each([
     // The arm label must be real: the shared arm runs the shared loop, the
     // legacy arm never calls runModelRound.
     expect(sharedLoopRoundCount(join(home, 'runtime')) > 0).toBe(shared);
+    expect([
+      ...new Set(headlessLoopPaths(readDebugLogs(join(home, 'runtime')))),
+    ]).toEqual([shared ? 'shared' : 'legacy']);
   }, 120_000);
 
   it('honors explicit initial false over saved on and preserves it on the next resume', async () => {

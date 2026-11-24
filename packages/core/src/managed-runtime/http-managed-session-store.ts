@@ -192,6 +192,13 @@ export interface HttpManagedSessionStores {
   supportsExecutionDiagnostics(): boolean;
   /** Whether the control plane delivers a suspended Session's wake inputs. */
   supportsWakeDispatch(): boolean;
+  /** Whether this control plane lets a background Session suspend behind the pull. */
+  supportsRuntimeObservation(): boolean;
+  supportsActionParking(): boolean;
+  /** Whether a park certificate may share its seal with a background hold. */
+  supportsBackgroundActionParking(): boolean;
+  /** Whether a wake-started Turn's approval wait may park. */
+  supportsWakeActionParking(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -436,6 +443,11 @@ export function createHttpManagedSessionStores(
     supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
     supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
+    supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
+    supportsActionParking: () => client.supportsActionParking(),
+    supportsBackgroundActionParking: () =>
+      client.supportsBackgroundActionParking(),
+    supportsWakeActionParking: () => client.supportsWakeActionParking(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -840,12 +852,13 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   async publish(
     kind: string,
     source: Buffer,
+    resourceId?: string,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
-      resourceId: randomUUID(),
+      resourceId: resourceId ?? randomUUID(),
       kind: safeKind,
       schemaVersion: 1,
       byteLength: bytes.byteLength,
@@ -986,6 +999,10 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
   readonly wakeDispatch: boolean;
+  readonly runtimeObservation: boolean;
+  readonly actionParking: boolean;
+  readonly backgroundActionParking: boolean;
+  readonly wakeActionParking: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1054,6 +1071,22 @@ class ManagedSessionStoreHttpClient {
   }
   supportsWakeDispatch(): boolean {
     return this.grant?.wakeDispatch === true;
+  }
+
+  supportsRuntimeObservation(): boolean {
+    return this.grant?.runtimeObservation === true;
+  }
+
+  supportsActionParking(): boolean {
+    return this.grant?.actionParking === true;
+  }
+
+  supportsBackgroundActionParking(): boolean {
+    return this.grant?.backgroundActionParking === true;
+  }
+
+  supportsWakeActionParking(): boolean {
+    return this.grant?.wakeActionParking === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -3129,6 +3162,10 @@ class ManagedSessionStoreHttpClient {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
         wakeDispatch: renewed.wakeDispatch,
+        runtimeObservation: renewed.runtimeObservation,
+        actionParking: renewed.actionParking,
+        backgroundActionParking: renewed.backgroundActionParking,
+        wakeActionParking: renewed.wakeActionParking,
       };
       this.scheduleRenewal();
     })();
@@ -3772,6 +3809,10 @@ function parseWriterGrant(value: unknown): WriterGrant {
   return {
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
     wakeDispatch: record['wakeDispatch'] === true,
+    runtimeObservation: record['runtimeObservation'] === true,
+    actionParking: record['actionParking'] === true,
+    backgroundActionParking: record['backgroundActionParking'] === true,
+    wakeActionParking: record['wakeActionParking'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
@@ -4036,6 +4077,10 @@ function isReferenceContainer(kind: string): boolean {
       'managed-hook-message-chunks',
       MANAGED_MESSAGE_CHUNKS_KIND,
       'managed-tool-outcome-chunks',
+      // Phase 3b: a draining Harness commits a manifest it never staged in
+      // memory, so the closure must walk its pages server-side exactly like
+      // the resident staged arm does, or the pages stay unreferenced.
+      MANAGED_TOOL_RESULT_KINDS.manifest,
     ].includes(kind)
   );
 }

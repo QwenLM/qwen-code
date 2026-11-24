@@ -57,7 +57,9 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
 
 const { I18nProvider } = await import('../../i18n');
 const { BrandProvider } = await import('../../brandContext');
-const { WebShellSidebar } = await import('./WebShellSidebar');
+const { WebShellSidebar, DEFAULT_PRIMARY_NAV_ITEMS } = await import(
+  './WebShellSidebar'
+);
 
 installSidebarDomShims();
 
@@ -72,6 +74,7 @@ function renderSidebar(
     | 'sessionContent'
     | 'sessionHeader'
     | 'onNewSession'
+    | 'onOpenArtifacts'
     | 'primaryNav'
     | 'hideProjectHeader'
     | 'collapsed'
@@ -576,5 +579,24 @@ describe('sidebar brand', () => {
       container.querySelector('[data-testid="custom-brand"]'),
     ).not.toBeNull();
     expect(container.textContent).not.toContain('QiuQiu Code');
+  });
+
+  it('includes artifacts in DEFAULT_PRIMARY_NAV_ITEMS and hides the nav entry when onOpenArtifacts is omitted', () => {
+    expect(DEFAULT_PRIMARY_NAV_ITEMS).toContain('artifacts');
+
+    renderSidebar(undefined, undefined, {});
+    expect(
+      container.querySelector('[data-testid="sidebar-artifacts-nav"]'),
+    ).toBeNull();
+
+    const onOpenArtifacts = vi.fn();
+    renderSidebar(undefined, undefined, { onOpenArtifacts });
+    const navBtn = container.querySelector(
+      '[data-testid="sidebar-artifacts-nav"]',
+    );
+    expect(navBtn).not.toBeNull();
+    expect(navBtn?.textContent).toContain('Artifacts');
+    clickSidebarElement(navBtn);
+    expect(onOpenArtifacts).toHaveBeenCalledOnce();
   });
 });
