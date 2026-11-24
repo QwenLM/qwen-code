@@ -12,6 +12,7 @@ import type {
   GenerateContentConfig,
   ThinkingLevel,
   Content,
+  FunctionResponsePart,
   Part,
   HttpOptions,
 } from '@google/genai';
@@ -577,20 +578,68 @@ export class LlmContentGenerator implements ContentGenerator {
       delete result.thoughtSignature;
     }
 
-    // Handle functionResponse parts (which may contain nested media parts)
-    // Convert unsupported media types (audio, video) to text for Gemini API
+    // Gemini's FunctionResponsePart schema only permits `inlineData` and
+    // `fileData` — never `text`. Convert unsupported audio/video to notes and
+    // move all text entries (including compaction placeholders / disclosures)
+    // into `functionResponse.response` so no `text` field reaches the wire in
+    // `function_response.parts`.
     if (result.functionResponse?.parts) {
-      const processedParts = result.functionResponse.parts.map((p) => {
-        // First convert unsupported media to text (before stripping displayName)
-        const converted = this.convertUnsupportedMediaToText(p);
-        // Then strip unsupported fields from remaining parts
-        return this.stripPartFields(converted);
-      });
+      const retainedParts: FunctionResponsePart[] = [];
+      const extractedTexts: string[] = [];
 
-      result.functionResponse = {
-        ...result.functionResponse,
-        parts: processedParts,
+      for (const nestedPart of result.functionResponse.parts as Part[]) {
+        const converted = this.convertUnsupportedMediaToText(nestedPart);
+        if (typeof converted.text === 'string' && converted.text.length > 0) {
+          extractedTexts.push(converted.text);
+        }
+        if (converted.inlineData || converted.fileData) {
+          const stripped = this.stripPartFields(converted);
+          const sanitizedPart: FunctionResponsePart = {};
+          if (stripped.inlineData) {
+            sanitizedPart.inlineData = stripped.inlineData;
+          }
+          if (stripped.fileData) {
+            sanitizedPart.fileData = stripped.fileData;
+          }
+          retainedParts.push(sanitizedPart);
+        }
+      }
+
+      const { parts: _unusedParts, ...restFunctionResponse } =
+        result.functionResponse;
+      const nextFunctionResponse = {
+        ...restFunctionResponse,
+        ...(retainedParts.length > 0 ? { parts: retainedParts } : {}),
       };
+
+      if (extractedTexts.length > 0) {
+        const joinedText = extractedTexts.join('\n');
+        const existingResponse = nextFunctionResponse.response ?? {};
+        if (typeof existingResponse['output'] === 'string') {
+          nextFunctionResponse.response = {
+            ...existingResponse,
+            output: existingResponse['output']
+              ? `${existingResponse['output']}\n${joinedText}`
+              : joinedText,
+          };
+        } else if (existingResponse['output'] === undefined) {
+          nextFunctionResponse.response = {
+            ...existingResponse,
+            output: joinedText,
+          };
+        } else {
+          const existingNotes = existingResponse['notes'];
+          nextFunctionResponse.response = {
+            ...existingResponse,
+            notes:
+              typeof existingNotes === 'string' && existingNotes
+                ? `${existingNotes}\n${joinedText}`
+                : joinedText,
+          };
+        }
+      }
+
+      result.functionResponse = nextFunctionResponse;
     }
 
     return result;
