@@ -58,12 +58,21 @@
  * relayed — the path is matched exactly, not as a suffix.
  */
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  chmodSync,
+  chownSync,
+  lstatSync,
+  readFileSync,
+  unlinkSync,
+} from 'node:fs';
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { isEntryPoint } from './lib/entry-point.js';
+import { validateSocketPathLength } from './verify-pr-vm-collector.mjs';
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 240_000;
+const MAX_TOKEN_FILE_BYTES = 64 * 1024;
 
 // The qwen client tolerates 240 s of silence inside one stream
 // (DEFAULT_STREAM_IDLE_TIMEOUT_MS in the OpenAI content generator), so a
@@ -90,6 +99,7 @@ const STRIPPED_REQUEST_HEADERS = [
 
 export function parseArgs(argv) {
   const options = { listen: '127.0.0.1' };
+  let sawListen = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--listen') {
@@ -100,11 +110,96 @@ export function parseArgs(argv) {
         throw new Error('--listen requires a value');
       }
       options.listen = value;
+      sawListen = true;
+    } else if (arg === '--socket') {
+      const value = argv[++i];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        throw new Error('--socket requires a value');
+      }
+      options.socketPath = value;
+    } else if (arg === '--token-file') {
+      const value = argv[++i];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        throw new Error('--token-file requires a value');
+      }
+      options.tokenFile = value;
+    } else if (arg === '--max-requests') {
+      const raw = argv[++i];
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error('--max-requests requires a positive integer');
+      }
+      options.maxRequests = value;
+    } else if (arg === '--vmm-uid') {
+      const raw = argv[++i];
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error('--vmm-uid requires a positive integer');
+      }
+      options.vmmUid = value;
+    } else if (arg === '--vmm-gid') {
+      const raw = argv[++i];
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error('--vmm-gid requires a positive integer');
+      }
+      options.vmmGid = value;
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
+  if (options.socketPath && sawListen) {
+    throw new Error('--socket and --listen are mutually exclusive');
+  }
+  if ((options.vmmUid !== undefined) !== (options.vmmGid !== undefined)) {
+    throw new Error('--vmm-uid and --vmm-gid must be provided together');
+  }
+  if (options.vmmUid !== undefined && !options.socketPath) {
+    throw new Error('--vmm-uid and --vmm-gid require --socket');
+  }
   return options;
+}
+
+/**
+ * Fail-closed check against a per-round host token state file (shared with
+ * `verify-pr-vm-lifecycle.mjs` `reapOwnership()`). Any missing, symlinked,
+ * multi-linked, oversized, malformed, or non-`revoked:false` file is treated
+ * as revoked so a deleted or corrupted token record can never fail open.
+ */
+export function isTokenFileRevoked(tokenFilePath) {
+  let st;
+  try {
+    st = lstatSync(tokenFilePath);
+  } catch {
+    return true;
+  }
+  if (
+    st.isSymbolicLink() ||
+    !st.isFile() ||
+    st.nlink !== 1 ||
+    st.size > MAX_TOKEN_FILE_BYTES
+  ) {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(tokenFilePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return true;
+    }
+    return parsed.revoked !== false;
+  } catch {
+    return true;
+  }
+}
+
+function bearerMatches(authHeader, expectedToken) {
+  if (typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
+    return false;
+  }
+  const actual = Buffer.from(authHeader.slice('Bearer '.length), 'utf8');
+  const expected = Buffer.from(expectedToken, 'utf8');
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(actual, expected);
 }
 
 /** Strips the trailing slashes a base path may carry; `''` means none. */
@@ -137,14 +232,34 @@ export function createModelProxy({
   token,
   nonce,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  tokenFile = null,
+  maxRequests = null,
 }) {
   if (!baseUrl || !apiKey || !token || !nonce) {
     throw new Error('baseUrl, apiKey, token and nonce are all required');
   }
+  if (
+    maxRequests !== null &&
+    (!Number.isInteger(maxRequests) || maxRequests <= 0)
+  ) {
+    throw new Error('maxRequests must be a positive integer when provided');
+  }
+  if (
+    tokenFile !== null &&
+    (typeof tokenFile !== 'string' || tokenFile.trim() === '')
+  ) {
+    throw new Error('tokenFile must be a non-empty path when provided');
+  }
   const base = new URL(baseUrl);
   const basePath = normalizeBasePath(base.pathname);
+  const stats = {
+    acceptedRequests: 0,
+    rejectedUnauthorized: 0,
+    rejectedRevoked: 0,
+    rejectedBudget: 0,
+  };
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     if (req.url === '/__health') {
       // Identity, not just liveness: a squatter cannot know the nonce.
       res.writeHead(200, { 'content-type': 'text/plain' });
@@ -182,11 +297,27 @@ export function createModelProxy({
 
       // Only the agent knows this run's token; anything else that finds the
       // port cannot get the key used.
-      if (req.headers.authorization !== `Bearer ${token}`) {
+      if (!bearerMatches(req.headers.authorization, token)) {
+        stats.rejectedUnauthorized += 1;
         res.writeHead(401, { 'content-type': 'text/plain' });
         res.end('proxy: unauthorized\n');
         return;
       }
+
+      if (tokenFile !== null && isTokenFileRevoked(tokenFile)) {
+        stats.rejectedRevoked += 1;
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        res.end('proxy: token revoked\n');
+        return;
+      }
+
+      if (maxRequests !== null && stats.acceptedRequests >= maxRequests) {
+        stats.rejectedBudget += 1;
+        res.writeHead(429, { 'content-type': 'text/plain' });
+        res.end('proxy: request budget exceeded\n');
+        return;
+      }
+      stats.acceptedRequests += 1;
 
       const headers = new Headers(req.headers);
       for (const name of STRIPPED_REQUEST_HEADERS) headers.delete(name);
@@ -292,6 +423,8 @@ export function createModelProxy({
       res.end('proxy error: upstream request failed\n');
     }
   });
+  server.getStats = () => ({ ...stats });
+  return server;
 }
 
 async function main(argv) {
@@ -313,7 +446,77 @@ async function main(argv) {
   const token =
     process.env.QWEN_VERIFY_PROXY_TOKEN || randomBytes(24).toString('hex');
   const nonce = randomBytes(24).toString('hex');
-  const server = createModelProxy({ baseUrl, apiKey, token, nonce });
+  const server = createModelProxy({
+    baseUrl,
+    apiKey,
+    token,
+    nonce,
+    tokenFile: options.tokenFile ?? null,
+    maxRequests: options.maxRequests ?? null,
+  });
+
+  if (options.socketPath) {
+    const len = validateSocketPathLength(options.socketPath);
+    if (!len.ok) {
+      process.stderr.write(`model-proxy: ${len.reason}\n`);
+      return 2;
+    }
+    try {
+      lstatSync(options.socketPath);
+      process.stderr.write(
+        `model-proxy: refusing existing socket path ${options.socketPath}\n`,
+      );
+      return 1;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(options.socketPath, resolve);
+    });
+    try {
+      chmodSync(options.socketPath, 0o600);
+      if (
+        Number.isInteger(options.vmmUid) &&
+        Number.isInteger(options.vmmGid)
+      ) {
+        chownSync(options.socketPath, options.vmmUid, options.vmmGid);
+      }
+    } catch (error) {
+      server.close();
+      try {
+        unlinkSync(options.socketPath);
+      } catch {
+        // Ignore cleanup failure.
+      }
+      throw error;
+    }
+    const removeSocket = () => {
+      try {
+        unlinkSync(options.socketPath);
+      } catch {
+        // Already removed.
+      }
+    };
+    server.on('close', removeSocket);
+    const onSignal = () => {
+      if (typeof server.closeAllConnections === 'function') {
+        server.closeAllConnections();
+      }
+      server.close(() => {
+        removeSocket();
+        process.exit(0);
+      });
+      removeSocket();
+    };
+    process.once('SIGTERM', onSignal);
+    process.once('SIGINT', onSignal);
+    process.stdout.write(
+      `${JSON.stringify({ socketPath: options.socketPath, token, nonce })}\n`,
+    );
+    return 0;
+  }
+
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, options.listen, resolve);

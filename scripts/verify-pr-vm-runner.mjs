@@ -18,14 +18,51 @@
  * bare Seatbelt, or the host when no hardware backend is available (§4.4/D10).
  */
 
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  chownSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from './lib/entry-point.js';
-import { validateSocketPathLength } from './verify-pr-vm-collector.mjs';
+import {
+  HARDWARE_BACKENDS,
+  checkTrustClassification,
+} from './verify-pr-check.mjs';
+import {
+  createModelProxy,
+  formatLocalBaseUrl,
+  isTokenFileRevoked,
+  normalizeBasePath,
+} from './verify-pr-model-proxy.mjs';
+import {
+  startCollectorServer,
+  validateSocketPathLength,
+} from './verify-pr-vm-collector.mjs';
+import {
+  buildExecutionRecord,
+  inspectPidState,
+  reapOwnership,
+  writeExecutionRecordAndBoundary,
+  writeOwnershipRecord,
+} from './verify-pr-vm-lifecycle.mjs';
 
 const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$/;
 const FULL_OID_RE = /^[0-9a-f]{40}$/;
+const SHA256_RE = /^[0-9a-f]{64}$/;
+const MAX_HOST_JSON_BYTES = 16 * 1024 * 1024;
+const CHECK_SCRIPT = fileURLToPath(
+  new URL('./verify-pr-check.mjs', import.meta.url),
+);
 
 function sha256Json(value) {
   return createHash('sha256')
@@ -779,12 +816,841 @@ export function buildAliyunAgentSandboxPlan({
   };
 }
 
-function main(argv) {
+function withinDir(root, target) {
+  return (
+    target === root || target.startsWith(root.endsWith(sep) ? root : root + sep)
+  );
+}
+
+function writePrivateSafeFile(filePath, content) {
+  try {
+    const st = lstatSync(filePath);
+    if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+      throw new Error(
+        `refusing to overwrite symlink, non-regular, or multi-link file: ${filePath}`,
+      );
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  writeFileSync(filePath, content, { mode: 0o600 });
+  chmodSync(filePath, 0o600);
+}
+
+function sha256RegularFile(filePath) {
+  let st;
+  try {
+    st = lstatSync(filePath);
+  } catch (error) {
+    return { error: `unreadable:${error.code ?? 'ENOENT'}`, digest: null };
+  }
+  if (st.isSymbolicLink() || !st.isFile()) {
+    return { error: 'non-regular-or-symlink', digest: null };
+  }
+  return {
+    error: null,
+    digest: createHash('sha256').update(readFileSync(filePath)).digest('hex'),
+  };
+}
+
+function readSingleLinkJsonFile(filePath) {
+  let st;
+  try {
+    st = lstatSync(filePath);
+  } catch (error) {
+    return { error: `unreadable:${error.code ?? 'ENOENT'}`, text: null };
+  }
+  if (
+    st.isSymbolicLink() ||
+    !st.isFile() ||
+    st.nlink !== 1 ||
+    st.size > MAX_HOST_JSON_BYTES
+  ) {
+    return { error: 'invalid-host-file', text: null };
+  }
+  try {
+    const text = readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { error: 'not-json-object', text: null };
+    }
+    return { error: null, text, parsed };
+  } catch {
+    return { error: 'invalid-json', text: null };
+  }
+}
+
+async function waitForPidFile(pidFile, timeoutMs = 10_000, shouldAbort = null) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(pidFile)) {
+      try {
+        const raw = readFileSync(pidFile, 'utf8').trim();
+        if (/^\d+$/.test(raw)) {
+          const pid = Number(raw);
+          if (pid > 1) return pid;
+        }
+      } catch {
+        // Retry until written cleanly.
+      }
+    }
+    if (typeof shouldAbort === 'function' && shouldAbort()) {
+      return null;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return null;
+}
+
+/**
+ * Orchestrates one complete hardware-isolated `/verify-pr` round end to end:
+ *   1. Validates host-held `contextPath` + `contextSha256` and cross-checks
+ *      `trustClassification` (fail-closed before starting any process).
+ *   2. Creates per-round `token.json` (0o600), optional `verify-pr-model-proxy`
+ *      bound to that `tokenFile` + `maxRequests`, and `verify-pr-vm-collector`.
+ *   3. Launches the configured hardware backend (Firecracker+jailer, sandboxed
+ *      vfkit, or provider-vm driver) and records `ownership.json`.
+ *   4. Waits for bounded collector completion, then unconditionally reaps the
+ *      worker, deletes working disk/sockets, revokes `token.json`, closes the
+ *      model proxy, and verifies source golden rootfs digest immutability.
+ *   5. Finalizes `execution-record.json` + `boundary.json` (only on clean pass)
+ *      and runs production `verify-pr-check.mjs`.
+ */
+export async function runHardwareRound({
+  contextPath,
+  contextSha256,
+  launcherDir,
+  vaultDir,
+  approvedRoots = [],
+  plan,
+  backendVersion = 'unknown',
+  platform = `${process.platform}-${process.arch}`,
+  sourceKernelPath = null,
+  sourceRootfsPath = null,
+  trustedInputDigest,
+  modelProxy = null,
+  collectorOptions = {},
+  launchBackend = null,
+  providerDriver = null,
+  runChecker = true,
+  verifyLivePid = true,
+}) {
+  const errors = [];
+  if (!SHA256_RE.test(contextSha256 ?? '')) {
+    return {
+      ok: false,
+      errors: ['contextSha256 must be a 64-hex sha256 digest'],
+    };
+  }
+  if (!SHA256_RE.test(trustedInputDigest ?? '')) {
+    return {
+      ok: false,
+      errors: ['trustedInputDigest must be a 64-hex sha256 digest'],
+    };
+  }
+  if (!plan || !HARDWARE_BACKENDS.includes(plan.backend)) {
+    return {
+      ok: false,
+      errors: [
+        `plan.backend must be a hardware backend (${HARDWARE_BACKENDS.join(' | ')})`,
+      ],
+    };
+  }
+
+  mkdirSync(resolve(launcherDir), { recursive: true, mode: 0o700 });
+  mkdirSync(resolve(vaultDir), { recursive: true, mode: 0o700 });
+  const realLauncher = realpathSync(resolve(launcherDir));
+  const realVault = realpathSync(resolve(vaultDir));
+  if (
+    realLauncher === realVault ||
+    withinDir(realVault, realLauncher) ||
+    withinDir(realLauncher, realVault)
+  ) {
+    return {
+      ok: false,
+      errors: ['launcherDir and vaultDir must not overlap or nest'],
+    };
+  }
+
+  const ctxRead = readSingleLinkJsonFile(contextPath);
+  if (ctxRead.error) {
+    return { ok: false, errors: [`host context rejected: ${ctxRead.error}`] };
+  }
+  const realContext = realpathSync(resolve(contextPath));
+  if (withinDir(realVault, realContext)) {
+    return {
+      ok: false,
+      errors: ['contextPath must not reside inside vaultDir'],
+    };
+  }
+  const actualCtxSha = createHash('sha256')
+    .update(ctxRead.text, 'utf8')
+    .digest('hex');
+  if (actualCtxSha !== contextSha256) {
+    return {
+      ok: false,
+      errors: ['contextPath bytes do not match contextSha256'],
+    };
+  }
+  const contextSnapshot = ctxRead.parsed;
+  const tcCheck = checkTrustClassification(
+    contextSnapshot.trustClassification,
+    contextSnapshot.headRefOid ?? null,
+  );
+  if (tcCheck.errors.length > 0) {
+    return { ok: false, errors: tcCheck.errors };
+  }
+
+  const isLocalVmm = plan.backend === 'firecracker' || plan.backend === 'vfkit';
+  let kernelDigest = null;
+  let rootfsDigest = null;
+  if (isLocalVmm) {
+    if (!plan.hostVsockPath) {
+      return {
+        ok: false,
+        errors: ['local VMM plan requires hostVsockPath'],
+      };
+    }
+    if (
+      typeof launchBackend !== 'function' &&
+      (!Array.isArray(plan.argv) || plan.argv.length === 0)
+    ) {
+      return {
+        ok: false,
+        errors: ['local VMM plan requires non-empty argv'],
+      };
+    }
+    if (!sourceKernelPath || !sourceRootfsPath) {
+      return {
+        ok: false,
+        errors: [
+          'local VMM backends require sourceKernelPath and sourceRootfsPath for digest verification',
+        ],
+      };
+    }
+    const kHash = sha256RegularFile(sourceKernelPath);
+    if (kHash.error) {
+      return {
+        ok: false,
+        errors: [`sourceKernelPath rejected (${kHash.error})`],
+      };
+    }
+    const rHash = sha256RegularFile(sourceRootfsPath);
+    if (rHash.error) {
+      return {
+        ok: false,
+        errors: [`sourceRootfsPath rejected (${rHash.error})`],
+      };
+    }
+    const workDisk = plan.ownershipTemplate?.workDiskPath;
+    if (workDisk) {
+      const realSrcRootfs = realpathSync(resolve(sourceRootfsPath));
+      let realWorkDisk = resolve(workDisk);
+      try {
+        realWorkDisk = realpathSync(realWorkDisk);
+      } catch {
+        // Keep lexical resolved path if working disk does not exist yet.
+      }
+      if (realWorkDisk === realSrcRootfs) {
+        return {
+          ok: false,
+          errors: [
+            'working disk path must be a per-round copy distinct from sourceRootfsPath',
+          ],
+        };
+      }
+    }
+    kernelDigest = kHash.digest;
+    rootfsDigest = rHash.digest;
+  }
+
+  const tokenFile = join(realLauncher, 'token.json');
+  const proxyToken = randomBytes(24).toString('hex');
+  const proxyNonce = randomBytes(24).toString('hex');
+  try {
+    writePrivateSafeFile(
+      tokenFile,
+      `${JSON.stringify({ runId: plan.runId, revoked: false }, null, 2)}\n`,
+    );
+  } catch (error) {
+    return { ok: false, errors: [`token-file-rejected:${error.message}`] };
+  }
+
+  let proxyServer = null;
+  let proxyInfo = null;
+  let proxySocketOwned = false;
+  let collector = null;
+  let ownershipPath = null;
+  let launched = null;
+  let providerAlloc = null;
+  let collectorSummary = {
+    outputStatus: 'incomplete',
+    reason: 'not-started',
+    files: [],
+    vaultEntries: [],
+  };
+  let teardownStatus = 'failed';
+  let diskDestroyed = false;
+  let tokenRevoked = false;
+  let sourceRootfsUnchanged = true;
+  let workerPid = null;
+  let supervisorPid = null;
+  let workerExe = null;
+  let workerExitEvidence = 'unknown';
+  let providerLifecycle = null;
+
+  const startedAt = new Date().toISOString();
+  let endedAt = startedAt;
+  let destroyedAt = null;
+
+  try {
+    // 1. Optional host-side model proxy bound to this round's token.json
+    if (modelProxy) {
+      proxyServer = createModelProxy({
+        baseUrl: modelProxy.baseUrl,
+        apiKey: modelProxy.apiKey,
+        token: proxyToken,
+        nonce: proxyNonce,
+        idleTimeoutMs: modelProxy.idleTimeoutMs,
+        tokenFile,
+        maxRequests: modelProxy.maxRequests ?? null,
+      });
+      if (modelProxy.socketPath) {
+        const sockLen = validateSocketPathLength(modelProxy.socketPath);
+        if (!sockLen.ok) throw new Error(`model proxy: ${sockLen.reason}`);
+        try {
+          lstatSync(modelProxy.socketPath);
+          throw new Error(
+            `model proxy: refusing existing socket path ${modelProxy.socketPath}`,
+          );
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        await new Promise((res, rej) => {
+          proxyServer.once('error', rej);
+          proxyServer.listen(modelProxy.socketPath, res);
+        });
+        proxySocketOwned = true;
+        chmodSync(modelProxy.socketPath, 0o600);
+        const proxyUid = modelProxy.vmmUid ?? plan.vmmUid ?? null;
+        const proxyGid = modelProxy.vmmGid ?? plan.vmmGid ?? null;
+        if (Number.isInteger(proxyUid) && Number.isInteger(proxyGid)) {
+          chownSync(modelProxy.socketPath, proxyUid, proxyGid);
+        }
+        proxyInfo = {
+          socketPath: modelProxy.socketPath,
+          token: proxyToken,
+          nonce: proxyNonce,
+        };
+      } else {
+        const listenHost = modelProxy.listenHost ?? '127.0.0.1';
+        await new Promise((res, rej) => {
+          proxyServer.once('error', rej);
+          proxyServer.listen(0, listenHost, res);
+        });
+        const { port } = proxyServer.address();
+        proxyInfo = {
+          port,
+          baseUrl: formatLocalBaseUrl(
+            listenHost,
+            port,
+            normalizeBasePath(new URL(modelProxy.baseUrl).pathname),
+          ),
+          token: proxyToken,
+          nonce: proxyNonce,
+        };
+      }
+    }
+
+    // 2. Start bounded content-only collector when plan carries a UDS path
+    if (plan.hostVsockPath) {
+      collector = startCollectorServer({
+        ...collectorOptions,
+        socketPath: plan.hostVsockPath,
+        vaultDir: realVault,
+        vmmUid: plan.vmmUid ?? null,
+        vmmGid: plan.vmmGid ?? null,
+      });
+      await collector.ready;
+    }
+
+    // 3. Launch hardware backend (or injected driver) and record ownership
+    if (plan.backend === 'provider-vm') {
+      if (!providerDriver || typeof providerDriver.allocate !== 'function') {
+        throw new Error(
+          'provider-vm execution requires providerDriver.{allocate,destroy}',
+        );
+      }
+      providerAlloc = await providerDriver.allocate({
+        plan,
+        vaultDir: realVault,
+        launcherDir: realLauncher,
+        proxyInfo,
+        collectorSocketPath: plan.hostVsockPath ?? null,
+      });
+      if (collector) {
+        collectorSummary = await collector.done;
+      } else if (providerAlloc?.outputStatus) {
+        collectorSummary = {
+          outputStatus: providerAlloc.outputStatus,
+          reason: providerAlloc.outputReason ?? 'provider',
+          files: providerAlloc.files ?? [],
+          vaultEntries: [],
+        };
+      }
+    } else {
+      if (typeof launchBackend === 'function') {
+        launched = await launchBackend({
+          plan,
+          vaultDir: realVault,
+          launcherDir: realLauncher,
+          proxyInfo,
+          collectorSocketPath: plan.hostVsockPath,
+        });
+      } else {
+        const child = spawn(plan.argv[0], plan.argv.slice(1), {
+          stdio: 'ignore',
+        });
+        let spawnError = null;
+        let childExited = false;
+        const onChildError = (err) => {
+          spawnError = err;
+          childExited = true;
+        };
+        child.once('error', onChildError);
+        child.once('exit', () => {
+          childExited = true;
+        });
+        // Wait one turn (or spawn/error event) so ENOENT / EACCES surfaces
+        // cleanly instead of leaving an unhandled error or undefined PID.
+        await new Promise((resolveSpawn, rejectSpawn) => {
+          if (spawnError) {
+            rejectSpawn(spawnError);
+            return;
+          }
+          child.once('spawn', resolveSpawn);
+          child.once('error', rejectSpawn);
+        });
+        let pid = child.pid;
+        let supPid = child.pid;
+        if (plan.backend === 'firecracker' && plan.workerPidFile) {
+          const fcPid = await waitForPidFile(
+            plan.workerPidFile,
+            10_000,
+            () => childExited,
+          );
+          if (!fcPid) {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // Ignore kill error.
+            }
+            throw new Error(
+              `timed out waiting for firecracker worker pid file ${plan.workerPidFile}`,
+            );
+          }
+          pid = fcPid;
+        }
+        launched = {
+          workerPid: pid,
+          supervisorPid: supPid,
+          workerExe: plan.ownershipTemplate.expectedExeTokens[0],
+          child,
+          childExited: () => childExited,
+        };
+      }
+
+      workerPid = launched?.workerPid ?? null;
+      supervisorPid = launched?.supervisorPid ?? workerPid;
+      workerExe =
+        launched?.workerExe ??
+        plan.ownershipTemplate?.expectedExeTokens?.[0] ??
+        null;
+
+      ownershipPath = join(realLauncher, 'ownership.json');
+      writeOwnershipRecord(ownershipPath, {
+        ...plan.ownershipTemplate,
+        worker: {
+          pid: workerPid,
+          expectedExeTokens:
+            launched?.expectedExeTokens ??
+            plan.ownershipTemplate?.expectedExeTokens ??
+            [],
+        },
+        tokenFile,
+      });
+
+      let collectorFinished = false;
+      let earlyExitTimer = null;
+      const onEarlyExit = () => {
+        if (collectorFinished || earlyExitTimer) return;
+        earlyExitTimer = setTimeout(() => {
+          earlyExitTimer = null;
+          if (collectorFinished) return;
+          const workerStillAlive =
+            Number.isInteger(workerPid) && workerPid > 1
+              ? inspectPidState(workerPid).alive
+              : false;
+          if (!workerStillAlive) {
+            errors.push('worker-exited-before-collector-done');
+            collector.close();
+          }
+        }, 500);
+        earlyExitTimer.unref?.();
+      };
+      if (launched?.child) {
+        if (launched.childExited?.() || launched.child.exitCode !== null) {
+          onEarlyExit();
+        } else {
+          launched.child.once('exit', onEarlyExit);
+        }
+      }
+      try {
+        collectorSummary = await collector.done;
+      } finally {
+        collectorFinished = true;
+        if (earlyExitTimer) {
+          clearTimeout(earlyExitTimer);
+          earlyExitTimer = null;
+        }
+        if (launched?.child) {
+          launched.child.removeListener('exit', onEarlyExit);
+        }
+      }
+    }
+
+    endedAt = new Date().toISOString();
+  } catch (error) {
+    errors.push(`round-execution-error:${error.message}`);
+    endedAt = new Date().toISOString();
+    if (collector) {
+      collector.close();
+      try {
+        collectorSummary = await collector.done;
+      } catch {
+        // Ignore collector shutdown error.
+      }
+    }
+  } finally {
+    // 4. Unconditional teardown: close model proxy & its owned UDS first (so
+    //    no further upstream calls can fly and per-round socketDir is empty
+    //    before reapOwnership rmdirs it), then reap local VMM or destroy
+    //    provider VM, revoke token.json, and verify source golden immutability.
+    if (proxyServer) {
+      if (proxyServer.listening) {
+        await new Promise((done) => {
+          if (typeof proxyServer.closeAllConnections === 'function') {
+            proxyServer.closeAllConnections();
+          }
+          proxyServer.close(() => done());
+        });
+      }
+      if (proxySocketOwned && modelProxy?.socketPath) {
+        try {
+          unlinkSync(modelProxy.socketPath);
+        } catch {
+          // Already removed.
+        }
+      }
+    }
+
+    if (isLocalVmm) {
+      let reapClean = true;
+      if (ownershipPath && existsSync(ownershipPath)) {
+        const roots = [
+          ...approvedRoots,
+          realLauncher,
+          ...(plan.socketDir ? [dirname(plan.socketDir), plan.socketDir] : []),
+          ...(plan.jailRoot ? [dirname(plan.jailRoot)] : []),
+        ];
+        const reapRes = reapOwnership(ownershipPath, { approvedRoots: roots });
+        if (reapRes.status !== 'reaped') {
+          reapClean = false;
+          errors.push(...reapRes.errors.map((e) => `reap:${e}`));
+        }
+      } else {
+        // Launch failed before ownership.json existed: still revoke token.json.
+        try {
+          writePrivateSafeFile(
+            tokenFile,
+            `${JSON.stringify({ runId: plan.runId, revoked: true, revokedBy: 'verify-pr-vm-runner' }, null, 2)}\n`,
+          );
+        } catch (error) {
+          reapClean = false;
+          errors.push(`token-revoke-failed:${error.message}`);
+        }
+      }
+      if (launched?.child && launched.child.exitCode === null) {
+        try {
+          launched.child.kill('SIGKILL');
+        } catch {
+          // Already exited.
+        }
+      }
+      const aliveAfterReap =
+        Number.isInteger(workerPid) && workerPid > 1
+          ? inspectPidState(workerPid).alive
+          : false;
+      workerExitEvidence = aliveAfterReap ? 'alive' : 'absent';
+      const workDisk = plan.ownershipTemplate?.workDiskPath;
+      diskDestroyed = workDisk ? !existsSync(workDisk) : true;
+      tokenRevoked = isTokenFileRevoked(tokenFile);
+      if (sourceRootfsPath && rootfsDigest) {
+        const postHash = sha256RegularFile(sourceRootfsPath);
+        sourceRootfsUnchanged =
+          postHash.error === null && postHash.digest === rootfsDigest;
+        if (!sourceRootfsUnchanged) {
+          errors.push('source-rootfs-digest-mutated');
+        }
+      }
+      teardownStatus =
+        reapClean &&
+        !aliveAfterReap &&
+        diskDestroyed &&
+        tokenRevoked &&
+        sourceRootfsUnchanged
+          ? 'destroyed'
+          : 'failed';
+      destroyedAt = new Date().toISOString();
+    } else if (plan.backend === 'provider-vm') {
+      let destroyRes = { terminated: false, diskDeleted: false };
+      let destroyClean = true;
+      if (
+        providerAlloc &&
+        providerDriver &&
+        typeof providerDriver.destroy === 'function'
+      ) {
+        try {
+          destroyRes = await providerDriver.destroy(providerAlloc);
+        } catch (error) {
+          destroyClean = false;
+          errors.push(`provider-destroy-error:${error.message}`);
+        }
+      }
+      try {
+        writePrivateSafeFile(
+          tokenFile,
+          `${JSON.stringify({ runId: plan.runId, revoked: true, revokedBy: 'verify-pr-vm-runner' }, null, 2)}\n`,
+        );
+      } catch (error) {
+        destroyClean = false;
+        errors.push(`token-revoke-failed:${error.message}`);
+      }
+      tokenRevoked = isTokenFileRevoked(tokenFile);
+      diskDestroyed = destroyRes?.diskDeleted === true;
+      const terminated = destroyRes?.terminated === true;
+      teardownStatus =
+        destroyClean && terminated && diskDestroyed && tokenRevoked
+          ? 'destroyed'
+          : 'failed';
+      destroyedAt = new Date().toISOString();
+      providerLifecycle = {
+        allocationId: providerAlloc?.allocationId ?? '',
+        freshDiskId: providerAlloc?.freshDiskId ?? '',
+        boundRunId: plan.runId,
+        boundHeadRefOid: contextSnapshot.headRefOid ?? '',
+        terminationState: terminated ? 'terminated' : 'running',
+        diskDeleted: diskDestroyed,
+      };
+    }
+  }
+
+  // 5. Finalize host-held execution-record.json and (only on pass) boundary.json
+  const record = buildExecutionRecord({
+    contextSnapshot,
+    contextSha256,
+    runId: plan.runId,
+    backend: plan.backend,
+    backendVersion,
+    platform,
+    startedAt,
+    endedAt,
+    destroyedAt,
+    outputStatus: collectorSummary.outputStatus,
+    teardownStatus,
+    diskDestroyed,
+    tokenRevoked,
+    launchPolicyDigest: plan.launchPolicyDigest,
+    trustedInputDigest,
+    kernelDigest,
+    rootfsDigest,
+    supervisorPid,
+    workerPid,
+    workerExe,
+    workerExitEvidence,
+    providerLifecycle,
+  });
+
+  const finalized = writeExecutionRecordAndBoundary({
+    record,
+    launcherDir: realLauncher,
+    artifactDir: realVault,
+    verifyLivePid,
+  });
+  if (!finalized.ok) {
+    errors.push(...finalized.errors);
+  }
+
+  let checkExitCode = null;
+  let checkStdout = '';
+  let checkStderr = '';
+  if (runChecker && finalized.executionRecordPath) {
+    const chk = spawnSync(
+      process.execPath,
+      [
+        CHECK_SCRIPT,
+        '--context',
+        realContext,
+        '--context-sha256',
+        contextSha256,
+        '--execution-record',
+        finalized.executionRecordPath,
+        '--execution-record-sha256',
+        finalized.executionRecordSha256,
+        realVault,
+      ],
+      { encoding: 'utf8' },
+    );
+    checkExitCode = chk.status;
+    checkStdout = chk.stdout ?? '';
+    checkStderr = chk.stderr ?? '';
+    if (chk.status !== 0) {
+      errors.push(`verify-pr-check-failed:exit=${chk.status}`);
+    }
+  }
+
+  const ok =
+    errors.length === 0 &&
+    finalized.ok &&
+    sourceRootfsUnchanged &&
+    (!runChecker || checkExitCode === 0);
+
+  return {
+    ok,
+    runId: plan.runId,
+    backend: plan.backend,
+    outputStatus: collectorSummary.outputStatus,
+    teardownStatus,
+    sourceRootfsUnchanged,
+    modelProxyStats: proxyServer ? proxyServer.getStats() : null,
+    executionRecordPath: finalized.executionRecordPath,
+    executionRecordSha256: finalized.executionRecordSha256,
+    boundaryPath: finalized.boundaryPath,
+    checkExitCode,
+    checkStdout,
+    checkStderr,
+    errors,
+  };
+}
+
+async function main(argv) {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(
-      'Usage: node scripts/verify-pr-vm-runner.mjs select --context <snapshot> [--backend <name>] [--kvm] [--vfkit --seatbelt-enforcing] [--provider-configured]\n',
+      'Usage:\n' +
+        '  node scripts/verify-pr-vm-runner.mjs select --context <snapshot> [--backend <name>] [--kvm] [--vfkit --seatbelt-enforcing] [--provider-configured]\n' +
+        '  node scripts/verify-pr-vm-runner.mjs run --config <host-run-config.json>\n',
     );
     return 0;
+  }
+  if (argv[0] === 'run') {
+    let configPath = null;
+    for (let i = 1; i < argv.length; i += 1) {
+      if (argv[i] === '--config') configPath = argv[(i += 1)] ?? null;
+      else {
+        process.stderr.write(
+          `verify-pr vm-runner run: unknown option ${argv[i]}\n`,
+        );
+        return 2;
+      }
+    }
+    if (!configPath) {
+      process.stderr.write('verify-pr vm-runner run: --config is required\n');
+      return 2;
+    }
+    const cfgRead = readSingleLinkJsonFile(configPath);
+    if (cfgRead.error) {
+      process.stderr.write(
+        `verify-pr vm-runner run: config rejected (${cfgRead.error})\n`,
+      );
+      return 1;
+    }
+    const cfg = cfgRead.parsed;
+    let plan;
+    try {
+      if (cfg.backend === 'firecracker') {
+        plan = buildFirecrackerLaunchPlan(cfg.planOptions);
+      } else if (cfg.backend === 'vfkit') {
+        plan = buildVfkitLaunchPlan(cfg.planOptions);
+      } else {
+        process.stderr.write(
+          `verify-pr vm-runner run: CLI run supports local firecracker/vfkit plans (got ${JSON.stringify(cfg.backend)})\n`,
+        );
+        return 2;
+      }
+    } catch (error) {
+      process.stderr.write(`verify-pr vm-runner run: ${error.message}\n`);
+      return 1;
+    }
+    const rawProxy =
+      cfg.modelProxy &&
+      typeof cfg.modelProxy === 'object' &&
+      !Array.isArray(cfg.modelProxy)
+        ? cfg.modelProxy
+        : null;
+    const resolvedModelProxy = rawProxy
+      ? {
+          baseUrl: rawProxy.baseUrl,
+          apiKey: rawProxy.apiKey ?? process.env.REVIEW_OPENAI_API_KEY ?? '',
+          listenHost: rawProxy.listenHost,
+          socketPath: rawProxy.socketPath,
+          idleTimeoutMs: rawProxy.idleTimeoutMs,
+          maxRequests: rawProxy.maxRequests,
+          vmmUid: rawProxy.vmmUid,
+          vmmGid: rawProxy.vmmGid,
+        }
+      : null;
+    const rawCollector =
+      cfg.collectorOptions &&
+      typeof cfg.collectorOptions === 'object' &&
+      !Array.isArray(cfg.collectorOptions)
+        ? cfg.collectorOptions
+        : {};
+    const resolvedCollectorOptions = {};
+    for (const key of [
+      'allowedFiles',
+      'maxFiles',
+      'maxFileBytes',
+      'maxTotalBytes',
+      'maxFrameBytes',
+      'maxChunkBytes',
+      'maxOversizeDrainBytes',
+      'readDeadlineMs',
+      'acceptDeadlineMs',
+      'rejectControlChars',
+    ]) {
+      if (rawCollector[key] !== undefined) {
+        resolvedCollectorOptions[key] = rawCollector[key];
+      }
+    }
+    const result = await runHardwareRound({
+      contextPath: cfg.contextPath,
+      contextSha256: cfg.contextSha256,
+      launcherDir: cfg.launcherDir,
+      vaultDir: cfg.vaultDir,
+      approvedRoots: Array.isArray(cfg.approvedRoots) ? cfg.approvedRoots : [],
+      backendVersion: cfg.backendVersion,
+      platform: cfg.platform,
+      sourceKernelPath: cfg.sourceKernelPath,
+      sourceRootfsPath: cfg.sourceRootfsPath,
+      trustedInputDigest: cfg.trustedInputDigest,
+      collectorOptions: resolvedCollectorOptions,
+      modelProxy: resolvedModelProxy,
+      plan,
+      runChecker: true,
+      verifyLivePid: true,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return result.ok ? 0 : 1;
   }
   if (argv[0] !== 'select') {
     process.stderr.write(
@@ -847,5 +1713,13 @@ function main(argv) {
 }
 
 if (isEntryPoint(import.meta.url, process.argv[1])) {
-  process.exitCode = main(process.argv.slice(2));
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error) => {
+      console.error(error);
+      process.exitCode = 1;
+    },
+  );
 }
