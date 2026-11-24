@@ -18849,6 +18849,7 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const retryStarted = createDeferred<void>();
     let eventsCalls = 0;
     const conflict = new DaemonHttpError(
       409,
@@ -18864,9 +18865,12 @@ describe('DaemonSessionProvider', () => {
         events: async function* conflictEvents(
           opts: { signal?: AbortSignal } = {},
         ) {
-          eventsCalls += 1;
-          await wait(10);
-          if (opts.signal?.aborted) return;
+          if (++eventsCalls > 1) {
+            retryStarted.resolve();
+            await untilAborted(opts.signal);
+            return;
+          }
+          await Promise.resolve();
           yield* [];
           throw conflict;
         },
@@ -18885,7 +18889,7 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await wait(50);
+      await retryStarted.promise;
       await flushPromises();
     });
 
