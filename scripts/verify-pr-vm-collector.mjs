@@ -200,6 +200,30 @@ export function startCollectorServer({
   vmmUid = null,
   vmmGid = null,
 }) {
+  for (const [name, value] of Object.entries({
+    maxFiles,
+    maxFileBytes,
+    maxTotalBytes,
+    maxFrameBytes,
+    maxChunkBytes,
+    maxOversizeDrainBytes,
+    readDeadlineMs,
+    acceptDeadlineMs,
+  })) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${name} must be a positive safe integer`);
+    }
+  }
+  if (
+    allowedFiles !== null &&
+    (!(allowedFiles instanceof Set) ||
+      [...allowedFiles].some((name) => typeof name !== 'string'))
+  ) {
+    throw new Error('allowedFiles must be null or a Set of strings');
+  }
+  if (typeof rejectControlChars !== 'boolean') {
+    throw new Error('rejectControlChars must be a boolean');
+  }
   const lenCheck = validateSocketPathLength(socketPath);
   if (!lenCheck.ok) {
     throw new Error(lenCheck.reason);
