@@ -24,11 +24,8 @@ export function parseSedEditCommand(command: string): SedEditInfo | null {
   const sedMatch = trimmed.match(/^\s*sed\s+/);
   if (!sedMatch) return null;
 
-  // shell-quote decodes a byte-valued ANSI-C escape (`\xHH`/octal ≥ 0x80)
-  // to the same-numbered code point while bash passes the raw byte, so the
-  // parsed file path can name a different file than the one sed would edit.
-  // Decline to simulate: the caller falls back to the original shell
-  // command, which bash then runs with its own byte semantics.
+  // ANSI-C byte and Unicode escapes can parse to different path bytes than
+  // bash passes to sed. Fall back to the original shell command instead.
   if (hasByteValuedAnsiCEscape(trimmed)) return null;
 
   let parsed: ReturnType<typeof parse>;

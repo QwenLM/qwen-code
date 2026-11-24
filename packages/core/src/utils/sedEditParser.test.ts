@@ -146,15 +146,9 @@ describe('sedEditParser', () => {
     expect(
       parseSedEditCommand(String.raw`sed -i 's/base/changed/' $'\377'`),
     ).toBeNull();
-    // `\u` decodes to a code point on both sides (UTF-8 for bash), so the
-    // parsed path stays the one bash uses and the simulation stands.
-    expect(parseSedEditCommand("sed -i 's/foo/bar/' $'\\u00ff'")).toEqual({
-      filePath: 'ÿ',
-      pattern: 'foo',
-      replacement: 'bar',
-      flags: '',
-      extendedRegex: false,
-    });
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/foo/bar/' $'\u00ff'`),
+    ).toBeNull();
     expect(parseSedEditCommand('sed -i "s/$1/bar/" a.ts')).toBeNull();
     expect(parseSedEditCommand('sed -i "s/$(whoami)/root/" a.ts')).toBeNull();
     expect(parseSedEditCommand("sed -i 's/`whoami`/root/' a.ts")).toBeNull();

@@ -669,16 +669,10 @@ export function decodeAnsiCEscape(
 }
 
 /**
- * True when `text` holds an ANSI-C `$'…'` string whose `\xHH` or octal
- * escape carries a byte ≥ 0x80. shell-quote decodes those to the
- * same-numbered Unicode code point while bash passes the raw byte through,
- * so a token parsed from such a string names different path bytes than the
- * ones bash hands the program: `$'\xc3\xbf'` parses as `Ã¿` but executes
- * as `ÿ`. A consumer that acts on the parsed token (a path guard, a sed
- * simulation) cannot recover bash's bytes from it and must fail closed.
- * `\u`/`\U` escapes are NOT byte-valued — both sides UTF-8-encode the code
- * point — so they stay aligned and are never flagged; neither are the
- * ASCII-valued escapes, whose byte and code point agree.
+ * True when `text` holds an ANSI-C `$'…'` escape whose parsed value cannot
+ * be assumed to match bash's bytes. Byte-valued escapes ≥ 0x80 can differ,
+ * and `\u`/`\U` output depends on the shell locale and can encode surrogate
+ * code points differently. Consumers must fail closed on these forms.
  */
 export function hasByteValuedAnsiCEscape(text: string): boolean {
   for (let index = 0; index + 1 < text.length; index++) {
@@ -695,14 +689,15 @@ export function hasByteValuedAnsiCEscape(text: string): boolean {
         continue;
       }
       const marker = text[index + 1]!;
-      if (marker === 'x') {
+      if (marker === 'u' || marker === 'U') {
+        return true;
+      } else if (marker === 'x') {
         if (escape.bytes[0]! >= 0x80) return true;
       } else if (marker >= '0' && marker <= '7') {
-        // decodeAnsiCEscape masks to a byte; the divergence is on the
-        // unmasked value (`\477` is byte `?` for bash but U+013F for
-        // shell-quote), so re-read the digits here.
+        // Both decoders mask to a byte, so compare the resulting byte:
+        // `\477` agrees on `?`, while `\600` differs from U+0080.
         const digits = /^[0-7]{1,3}/.exec(text.slice(index + 1))![0];
-        if (parseInt(digits, 8) >= 0x80) return true;
+        if ((parseInt(digits, 8) & 0xff) >= 0x80) return true;
       }
       index += escape.length;
     }

@@ -276,17 +276,19 @@ describe('createDaemonToolGuard', () => {
         guard(request(String.raw`git -C $'\303\277' reset --hard`)),
       ).resolves.toMatchObject({ allowed: false });
 
-      // `\u` encodes the code point as UTF-8 on both sides, so the
-      // `\u00ff` form still analyses as the byte path `ÿ` and earns the
-      // ordinary relocation denial — not the fail-closed one.
-      await expect(
-        guard(request(String.raw`git -C $'\u00ff' reset --hard`)),
-      ).resolves.toMatchObject({
-        allowed: false,
-        reason: expect.stringContaining(
-          'outside the session working directory',
-        ),
-      });
+      // Unicode escape output varies with bash's locale and surrogate
+      // handling, so these forms fail closed before path analysis.
+      for (const command of [
+        String.raw`git -C $'\u00ff' reset --hard`,
+        String.raw`git -C $'\ud800' reset --hard`,
+        String.raw`git -C $'\U0000d800' reset --hard`,
+        String.raw`git -C $'\U00110000' reset --hard`,
+      ]) {
+        await expect(guard(request(command))).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining('could not be parsed'),
+        });
+      }
     },
   );
 

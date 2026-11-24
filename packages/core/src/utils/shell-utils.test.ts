@@ -621,11 +621,13 @@ describe('hasByteValuedAnsiCEscape', () => {
     [String.raw`git -C $'\xc3\xbf' reset --hard`, true],
     [String.raw`sed -i 's/a/b/' $'\377'`, true],
     [String.raw`echo $'\200'`, true],
-    // Octal beyond 0377 wraps for bash but not for shell-quote.
-    [String.raw`echo $'\477'`, true],
-    // `\u`/`\U` encode the code point as UTF-8 on both sides.
-    [String.raw`git -C $'\u00ff' reset --hard`, false],
-    [String.raw`echo $'\U0001F600'`, false],
+    // Octal beyond 0377 wraps to the same byte on both sides.
+    [String.raw`echo $'\600'`, true],
+    [String.raw`echo $'\477'`, false],
+    // Unicode output depends on bash's locale and surrogate handling.
+    [String.raw`git -C $'\u00ff' reset --hard`, true],
+    [String.raw`git -C $'\ud800' reset --hard`, true],
+    [String.raw`echo $'\U0001F600'`, true],
     // ASCII-valued escapes agree as byte and code point.
     [String.raw`echo $'\x41\t'`, false],
     [String.raw`echo $'\101'`, false],

@@ -695,12 +695,9 @@ function tokenizeSegment(
   } catch {
     return null;
   }
-  // shell-quote decodes an ANSI-C `\xHH`/octal escape to the same-numbered
-  // code point while bash passes the raw byte, so for a byte ≥ 0x80 the
-  // token the analysis would validate (`Ã¿`) is not the path bash executes
-  // (`ÿ`). Byte-exact recovery is impossible from the parsed tokens, so the
-  // segment fails closed; `\u`/`\U` and ASCII escapes agree on both sides
-  // and stay analysable.
+  // ANSI-C byte and Unicode escapes can parse to different path bytes than
+  // bash executes. The parsed tokens cannot establish the actual target,
+  // so these segments fail closed.
   if (hasByteValuedAnsiCEscape(segment)) return null;
   let depth = startDepth;
   const runs: GuardRun[] = [{ tokens: [], depth }];
