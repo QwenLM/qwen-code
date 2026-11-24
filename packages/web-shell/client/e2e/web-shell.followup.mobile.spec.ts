@@ -394,12 +394,26 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
             );
             if (hasKeyboard) {
               if (placeholder) return false;
-            } else if (
-              !placeholder ||
-              !placeholder.disabled ||
-              getComputedStyle(placeholder).visibility !== 'hidden' ||
-              placeholder.getBoundingClientRect().width < 44 ||
-              placeholder.getBoundingClientRect().height < 44
+            }
+            const buttonMinWidth = window.innerWidth <= 260 ? 26 : 34;
+            if (
+              !hasKeyboard &&
+              (!placeholder ||
+                !placeholder.disabled ||
+                getComputedStyle(placeholder).visibility !== 'hidden' ||
+                placeholder.getBoundingClientRect().width < buttonMinWidth ||
+                placeholder.getBoundingClientRect().height < 36)
+            ) {
+              return false;
+            }
+            // The compact row's visual height is 36px with a transparent
+            // ::before extending the vertical tap target back to 44px.
+            const keyboardTarget = placeholder?.getBoundingClientRect();
+            if (
+              !hasKeyboard &&
+              (keyboardTarget?.height !== 36 ||
+                getComputedStyle(placeholder!, '::before').top !== '-4px' ||
+                getComputedStyle(placeholder!, '::before').bottom !== '-4px')
             ) {
               return false;
             }
@@ -420,15 +434,32 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
             );
             const expand = rects.at(-1)!;
             const expandRight = expand.x + expand.width;
-            // Tail buttons may wrap onto a later row, so compare right edges
-            // to every preceding button instead of requiring the same row.
+            // All six stays strictly on one compact row; the tail never wraps.
+            const groupBounds = group.getBoundingClientRect();
             if (
               !rects.every(
                 (rect) =>
                   expandRight >= rect.x + rect.width - 1 &&
-                  rect.width >= 44 &&
-                  rect.height >= 44,
+                  rect.width >= buttonMinWidth &&
+                  rect.height === 36 &&
+                  Math.abs(rect.y - expand.y) <= 1 &&
+                  rect.left >= groupBounds.left - 1 &&
+                  rect.x + rect.width <= groupBounds.right + 1,
               )
+            ) {
+              return false;
+            }
+            // Geometry declarations alone do not prove hit-testability.
+            // The 4px band must resolve to the actual key above and below.
+            if (
+              !buttons.every((button) => {
+                const rect = button.getBoundingClientRect();
+                const x = rect.x + rect.width / 2;
+                return [rect.y - 3.5, rect.y + rect.height + 3.5].every((y) => {
+                  const hit = document.elementFromPoint(x, y);
+                  return hit === button || button.contains(hit);
+                });
+              })
             ) {
               return false;
             }

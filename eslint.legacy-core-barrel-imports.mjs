@@ -29,8 +29,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/acp-integration/session/permissionUtils.ts',
   'packages/cli/src/acp-integration/session/recovered-goal-update.ts',
   'packages/cli/src/acp-integration/session/repeated-tool-failure-guard.ts',
-  'packages/cli/src/acp-integration/session/rewrite/LlmRewriter.ts',
-  'packages/cli/src/acp-integration/session/rewrite/MessageRewriteMiddleware.ts',
   'packages/cli/src/acp-integration/session/tasksSnapshot.ts',
   'packages/cli/src/acp-integration/session/tool-call-preparation-tracker.ts',
   'packages/cli/src/acp-integration/skill-management.ts',

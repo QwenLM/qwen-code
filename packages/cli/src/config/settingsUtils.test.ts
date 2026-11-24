@@ -1173,6 +1173,22 @@ describe('SettingsUtils', () => {
           ),
         ).toBe(true);
       });
+
+      it('turns the event-bus agent loop on from its unset state', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().experimental.properties.eventBusAgentLoop;
+        expect(
+          nextBooleanSettingValue(
+            undefined,
+            definition.default,
+            definition.unsetToggleValue,
+          ),
+        ).toBe(true);
+      });
     });
 
     describe('saveModifiedSettings', () => {

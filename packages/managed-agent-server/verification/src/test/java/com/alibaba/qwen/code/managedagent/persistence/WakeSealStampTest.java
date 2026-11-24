@@ -131,6 +131,10 @@ class WakeSealStampTest {
         assertThat(head.get("wake_seal_parked_prompt_id")).isNull();
         assertThat(head.get("wake_seal_parked_until")).isNull();
         assertThat(head.get("wake_seal_parked_approval_revision")).isNull();
+        // The acquisition leaves the head unscanned: a user Turn's park is
+        // still recovered through its ma_turn row, but a wake-owned park has
+        // none, so it must mark the head itself (#18149 Stage 2).
+        assertThat(head.get("is_wake_scan_pending")).isEqualTo(0);
     }
 
     @Test
@@ -149,6 +153,40 @@ class WakeSealStampTest {
         assertThat(head().get("wake_seal_parked_prompt_id")).isNull();
     }
 
+    // S4 (#18149): a wake-started Turn has no Turn row, so its park claims
+    // the wake at the park's own due time and the wake scan resumes it.
+    @Test
+    void aWakeOwnedParkCertificateClaimsItsWake() {
+        long due = System.currentTimeMillis() + 3_600_000L;
+        seal(new WakeStamp(1, true, due, new ParkedTurn("monitor-1:notify:1", due, 7L, "wake")));
+
+        var head = head();
+        assertThat(head.get("state")).isEqualTo("SEALED");
+        assertThat(head.get("is_wake_pending")).isEqualTo(1);
+        assertThat(head.get("wake_retry_at")).isEqualTo(due);
+        assertThat(head.get("wake_seal_parked_prompt_id")).isEqualTo("monitor-1:notify:1");
+        assertThat(head.get("wake_seal_parked_until")).isEqualTo(due);
+        assertThat(head.get("wake_seal_parked_owner")).isEqualTo("wake");
+
+        acquire();
+        assertThat(head().get("wake_seal_parked_prompt_id")).isNull();
+        assertThat(head().get("wake_seal_parked_owner")).isNull();
+        assertThat(head().get("is_wake_pending")).isEqualTo(1);
+    }
+
+    @Test
+    void aWakeOwnedParkCertificateMustClaimItsWake() {
+        for (WakeStamp wake : List.of(
+                new WakeStamp(1, false, 0, new ParkedTurn("monitor-1:notify:1", 1234, 7L, "wake")),
+                new WakeStamp(1, true, 1234, new ParkedTurn("monitor-1:notify:1", 1234, 7L, "pump")))) {
+            assertThatThrownBy(() -> seal(wake))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            refused -> assertThat(refused.getCode()).isEqualTo("invalid_managed_session_store_request"));
+        }
+        assertThat(head().get("state")).isEqualTo("ACTIVE");
+        assertThat(head().get("wake_seal_parked_owner")).isNull();
+    }
+
     // The certificate feeds the park guard's prompt match and ma_turn.retry_after.
     @Test
     void aParkCertificateNeedsAPromptAndNonNegativeCounters() {
@@ -162,19 +200,21 @@ class WakeSealStampTest {
     }
 
     @Test
-    void aParkCertificateCannotShareTheBackgroundCertificate() {
-        assertThatThrownBy(() -> seal(new WakeStamp(1, false, 0, true,
-                new ParkedTurn("prompt-1", 1234, 7L))))
-                .isInstanceOfSatisfying(ManagedAgentException.class,
-                        refused -> assertThat(refused.getCode()).isEqualTo("invalid_managed_session_store_request"));
-        assertThat(head().get("state")).isEqualTo("ACTIVE");
-        assertThat(head().get("wake_seal_background")).isEqualTo(0);
-        assertThat(head().get("wake_seal_parked_prompt_id")).isNull();
+    void aParkCertificateMayShareTheBackgroundCertificate() {
+        seal(new WakeStamp(1, false, 0, true, new ParkedTurn("prompt-1", 1234, 7L)));
+
+        var head = head();
+        assertThat(head.get("state")).isEqualTo("SEALED");
+        assertThat(head.get("is_wake_pending")).isEqualTo(0);
+        assertThat(head.get("wake_seal_background")).isEqualTo(1);
+        assertThat(head.get("wake_seal_parked_prompt_id")).isEqualTo("prompt-1");
+        assertThat(head.get("wake_seal_parked_until")).isEqualTo(1234L);
+        assertThat(head.get("wake_seal_parked_approval_revision")).isEqualTo(7L);
     }
 
     // A staged wake the Broker wrote after the Harness produced its park
     // certificate is server-discovered work, not a client contradiction:
-    // the seal takes the staged-wake path and clears the parked fields.
+    // the seal takes the staged-wake path, which makes the park due now.
     @Test
     void aStagedWakeSealsAParkedCertificateThroughTheWakePendingPath() {
         jdbc.update("INSERT INTO ma_runtime_stage (execution_call_id_hash, execution_call_id, delivery_seq,"
@@ -183,14 +223,16 @@ class WakeSealStampTest {
                 "b".repeat(64), "run:process".getBytes(StandardCharsets.UTF_8),
                 com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session));
 
-        seal(new WakeStamp(1, false, 0, new ParkedTurn("prompt-1", 1234, 7L)));
+        long before = System.currentTimeMillis();
+        seal(new WakeStamp(1, false, 0, new ParkedTurn("prompt-1", before + 3_600_000L, 7L)));
 
         var head = head();
         assertThat(head.get("state")).isEqualTo("SEALED");
         assertThat(head.get("is_wake_pending")).isEqualTo(1);
-        assertThat(head.get("wake_seal_parked_prompt_id")).isNull();
-        assertThat(head.get("wake_seal_parked_until")).isNull();
-        assertThat(head.get("wake_seal_parked_approval_revision")).isNull();
+        assertThat(head.get("wake_seal_parked_prompt_id")).isEqualTo("prompt-1");
+        assertThat((Long) head.get("wake_seal_parked_until"))
+                .isBetween(before - 1_000L, System.currentTimeMillis());
+        assertThat(head.get("wake_seal_parked_approval_revision")).isEqualTo(7L);
     }
 
     @Test
@@ -281,7 +323,8 @@ class WakeSealStampTest {
         // Read each column at its Java type: an unsigned BIGINT need not come back as a Long.
         return jdbc.queryForObject("SELECT state, wake_seal_revision, wake_head_revision, is_wake_pending,"
                         + " is_wake_scan_pending, wake_retry_at, wake_seal_background,"
-                        + " wake_seal_parked_prompt_id, wake_seal_parked_until, wake_seal_parked_approval_revision"
+                        + " wake_seal_parked_prompt_id, wake_seal_parked_until, wake_seal_parked_approval_revision,"
+                        + " wake_seal_parked_owner"
                         + " FROM ma_session_head WHERE session_id = ?",
                 (row, index) -> {
                     var values = new java.util.HashMap<String, Object>();
@@ -296,6 +339,7 @@ class WakeSealStampTest {
                     values.put("wake_seal_parked_until", row.getObject("wake_seal_parked_until", Long.class));
                     values.put("wake_seal_parked_approval_revision",
                             row.getObject("wake_seal_parked_approval_revision", Long.class));
+                    values.put("wake_seal_parked_owner", row.getString("wake_seal_parked_owner"));
                     return values;
                 }, session);
     }
