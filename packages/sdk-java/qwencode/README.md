@@ -119,6 +119,38 @@ Before creating a session, the SDK requires the daemon to advertise the REST tra
 
 An indeterminate completion is an outcome boundary, not a session-reuse boundary. After `PromptAdmissionUnknownException` or `PromptOutcomeIndeterminateException`, that `DaemonSessionClient` permanently rejects further prompts even if local stream cleanup later succeeds; close or destroy the session instead. An observation timeout is published without waiting forever for a blocked stream close, while cleanup continues asynchronously and retains bounded client capacity until it finishes.
 
+## Managed Agent public API
+
+Use `ManagedAgentClient` to call a standalone Managed Agent Server. The client signs requests for the supplied tenant and actor. Provide the signing key from the trusted service's secret store.
+
+```java
+import com.alibaba.qwen.code.daemon.ManagedAgentClient;
+import com.alibaba.qwen.code.daemon.ManagedAgentEventStream;
+import java.net.URI;
+import java.util.Map;
+
+ManagedAgentClient managed = new ManagedAgentClient(
+        URI.create("https://managed.example.com"), tenantId, actorId, signingKey);
+Map<String, Object> session = managed.createSession(
+        Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", workspaceId)),
+        createKey);
+String sessionId = (String) session.get("id");
+Map<String, Object> admission = managed.submitText(sessionId, "Summarize the workspace", messageKey);
+String turnId = (String) admission.get("turn_id");
+try (ManagedAgentEventStream events = managed.streamEvents(sessionId, 0)) {
+    ManagedAgentEventStream.Event first = events.next();
+    // Continue reading or reconnect from the last event ID processed by your application.
+}
+```
+
+The client follows the [public OpenAPI contract](../../managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json). `listSessions` supports the native archive and title filters and cursor pagination. Pass `unarchived` to exclude archived sessions. Workspace filtering requires server support.
+
+Supply a stable idempotency key for each write that takes one. Admission and lifecycle responses describe accepted commands. Use Turn, operation, or event queries to observe execution. The client does not retry writes on your behalf.
+
+After `agent.session.resync_required`, page through Items to rebuild the snapshot, then reopen the SSE stream from its `snapshot_through_sequence`. Close streams when finished. JSON responses and individual SSE frames are bounded to 8 MiB. Use a smaller page limit for large history queries.
+
+Use `managed.extensions()` to publish or import workspace packages, look up the original operation, load the published package pin, and apply a version to an existing Session. For initial Session creation, pass inline `skills` and any `extensionPins` in the public request map.
+
 ## Hosted Harness private API
 
 `HostedHarnessClient` is the Java control-plane transport for `qwen serve --profile hosted-harness`. Construction performs capability negotiation, verifies the deployment capability digest, and pins the process `bootId`. Every Session request then carries protocol and generation fencing automatically. This API keeps model-loop events raw; product services remain responsible for public Session, Turn, Event, tenant, and workspace authorization state.

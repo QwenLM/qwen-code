@@ -58,7 +58,7 @@ final class HttpSupport {
         if (body.isOverflow()) {
             if (success) {
                 throw new DaemonProtocolException("JSON response exceeds "
-                        + MAXIMUM_JSON_BYTES + " bytes");
+                        + bytes.length + " bytes");
             }
             bytes = appendTruncationSuffix(bytes);
         }

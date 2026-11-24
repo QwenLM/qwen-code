@@ -95,6 +95,10 @@ final class SseReader {
         }
     }
 
+    void close() throws IOException {
+        input.close();
+    }
+
     private static final class ActivityInputStream extends FilterInputStream {
         private final Runnable activity;
 
