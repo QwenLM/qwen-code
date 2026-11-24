@@ -405,7 +405,7 @@ CREATE TABLE ma_session_record (
     record_id VARCHAR(256) NOT NULL COMMENT 'Domain-specific Session record identity.',
     operation_id VARCHAR(128) COMMENT 'Raw identity of the domain operation linked to the record.',
     revision BIGINT UNSIGNED NOT NULL COMMENT 'Revision of the stored record.',
-    record_resource_id VARBINARY(2048) COMMENT 'Resource holding the serialized domain record.',
+    record_resource_id VARCHAR(256) COMMENT 'Resource holding the serialized domain record.',
     task_kind VARCHAR(32) NULL COMMENT 'Projected Task kind for task-bearing domain records.',
     task_state VARCHAR(32) NULL COMMENT 'Projected Task lifecycle state.',
     runtime_state VARCHAR(32) COMMENT 'Projected state of the associated Runtime execution.',
@@ -596,7 +596,7 @@ CREATE INDEX idx_ma_capture_session ON ma_output_capture (tenant_id, session_id)
 
 CREATE TABLE ma_artifact (
     artifact_id VARCHAR(128) NOT NULL COMMENT 'Public artifact identity.',
-    result_id VARBINARY(320) NOT NULL COMMENT 'Tool result identity that exposes the artifact.',
+    result_id VARCHAR(128) NOT NULL COMMENT 'Tool result identity that exposes the artifact.',
     scope_ref VARBINARY(512) NOT NULL COMMENT 'Canonical scope identity reference used to partition records.',
     descriptor_json MEDIUMTEXT NOT NULL COMMENT 'Public artifact descriptor.',
     publication_id VARCHAR(128) NOT NULL COMMENT 'Tool output publication identity.',
