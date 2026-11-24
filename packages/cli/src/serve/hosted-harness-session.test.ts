@@ -50105,6 +50105,485 @@ describe('idle suspension', () => {
     }
   });
 
+  // Decision 8 (#18149): public-children Shell waits already park, so their
+  // continuation is pinned for every outcome, both after a park and after the
+  // Harness dies in the wait.
+  const publicShellSession = {
+    toolProfile: 'hosted-workspace-shell/1',
+    captureBytes: 1024 * 1024,
+    publicChildAgentsVersion: 1,
+  };
+
+  async function mockPublicShellApproval(background = false) {
+    mockApprovalTurn();
+    const prepareV3 = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'prepareV3')
+      .mockResolvedValue({
+        executionCallId: 'shell-execution',
+        runtimeBindingId: 'binding',
+        bindingGeneration: '1',
+      });
+    const manifest = await LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    }).publish(
+      'managed-tool-result-manifest',
+      Buffer.from(
+        JSON.stringify({
+          toolResult: 'managed-tool-result/1',
+          type: 'manifest',
+          tenantId: 'tenant',
+          sessionId: SESSION_ID,
+          turnId: PROMPT_ID,
+          executionCallId: 'shell-execution',
+          callId: 'park-shell-call',
+          invocationDigest: 'digest',
+          bindingGeneration: '1',
+          captureId: randomUUID(),
+          revision: 1,
+          executionStatus: 'success',
+          exitCode: 0,
+          signal: null,
+          captureScope: 'process_pipes',
+          capturePolicy: 'complete_required',
+          captureStatus: 'complete',
+          captureReason: null,
+          upstreamTruncated: false,
+          contents: ['stdout', 'stderr'].map((streamId) => ({
+            streamId,
+            role: streamId,
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 0,
+            digest: createHash('sha256').update('').digest('hex'),
+            missingRanges: [],
+            body: { pages: [] },
+          })),
+        }),
+      ),
+    );
+    const envelope = {
+      executionStatus: 'success' as const,
+      responseParts: [{ text: 'touched' }],
+      capture: background
+        ? {
+            manifest: null,
+            captureStatus: 'detached' as const,
+            captureReason: null,
+            previewTruncated: false,
+            deliveryStatus: 'pending' as const,
+          }
+        : {
+            manifest,
+            captureStatus: 'complete' as const,
+            captureReason: null,
+            previewTruncated: false,
+            deliveryStatus: 'pending' as const,
+          },
+    };
+    const executeV3 = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'executeV3')
+      .mockResolvedValue(envelope);
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'acknowledgeV3',
+    ).mockResolvedValue();
+    state.publicationRequest.mockImplementation(
+      async (
+        resourceStore: LocalManagedSessionResourceStore,
+        route: string,
+        body: unknown,
+      ) => {
+        if (route === '/grants') return { state: 'OPEN' };
+        if (route.endsWith('/finished')) return { result: envelope };
+        if (route.endsWith('/admissions/prepare'))
+          return resourceStore.publish(
+            'managed-tool-outcome',
+            Buffer.from(JSON.stringify(body)),
+          );
+        throw new Error('Unexpected publication route ' + route);
+      },
+    );
+    state.model.mockImplementation(
+      async ({ toolTurn, resumeFromToolResults, signal }) => {
+        if (resumeFromToolResults)
+          return { text: 'resumed', model: 'test-model' };
+        const call = {
+          name: 'run_shell_command',
+          callId: 'park-shell-call',
+          args: background
+            ? { command: 'npm run dev', is_background: true }
+            : { command: 'touch notes.txt' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        // The production model pins this route before every public-children
+        // request; the saved plan is readable as public Shell only with it.
+        toolTurn!.setChildModelRoute!('test-model', {
+          authType: 'openai',
+          endpointDigest: 'a'.repeat(64),
+          providerPin: 'b'.repeat(64),
+        });
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        throw new Error('The waiting Turn unexpectedly continued.');
+      },
+    );
+    // A background Shell registers its output publisher before it asks.
+    if (background)
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'registerPublisher',
+      ).mockResolvedValue('1');
+    const saved = vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+    );
+    return { prepareV3, executeV3, saved };
+  }
+
+  async function promptPublicShellApproval(
+    server: Server,
+    approvalTimeoutMs = 60_000,
+  ): Promise<string> {
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        ...publicShellSession,
+        approvalMode: 'default',
+        approvalTimeoutMs,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'run the Shell' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    return clientId;
+  }
+
+  async function savedShellCall(
+    saved: Awaited<ReturnType<typeof mockPublicShellApproval>>['saved'],
+  ) {
+    const continuation = (await saved.mock.results[0]!.value) as Awaited<
+      ReturnType<typeof approvalContinuation.findHostedApprovalContinuation>
+    >;
+    const call = continuation!.plan.calls[0]!;
+    expect(call.call.name).toBe('run_shell_command');
+    expect(call.publicationId).toEqual(expect.any(String));
+    return { call, input: continuation!.inputs[0]!.input };
+  }
+
+  const readSessionJournal = () =>
+    LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+
+  it.each(
+    (['park', 'Harness death'] as const).flatMap((interruption) =>
+      (['allow', 'deny', 'expiry', 'mode change'] as const).map(
+        (outcome) => [outcome, interruption] as const,
+      ),
+    ),
+  )(
+    'settles a public-children Shell approval through %s after a %s',
+    async (outcome, interruption) => {
+      const parks = interruption === 'park';
+      state.wakeDispatch = parks;
+      state.actionParking = parks;
+      state.wakeStamps.length = 0;
+      state.approvalSelections.set(SESSION_ID, {
+        mode: 'default',
+        revision: 0,
+      });
+      const { prepareV3, executeV3, saved } = await mockPublicShellApproval();
+      const wait = parks
+        ? undefined
+        : vi
+            .spyOn(HostedApprovalWaiters.prototype, 'wait')
+            .mockRejectedValueOnce(
+              new HostedToolRecoveryRequiredError(
+                'approval writer interrupted',
+              ),
+            );
+      try {
+        const original = await app(
+          true,
+          undefined,
+          true,
+          parks ? { idleSuspendMs: 150 } : undefined,
+        );
+        const clientId = await promptPublicShellApproval(
+          original,
+          outcome === 'expiry' ? 1_500 : 60_000,
+        );
+        let server = original;
+        if (parks) {
+          await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+            timeout: 5000,
+          });
+          await vi.waitFor(
+            async () => {
+              expect((await statusOf(original, clientId)).status).toBe(404);
+            },
+            { timeout: 5000 },
+          );
+          expect(state.wakeStamps[0]).toMatchObject({
+            parkedTurn: { promptId: PROMPT_ID },
+          });
+          expect(statsOf(original).parkRefusals).toEqual({});
+        } else {
+          await vi.waitFor(
+            async () => {
+              expect((await statusOf(original, clientId)).body).toMatchObject({
+                hasActivePrompt: false,
+                recoveryBlocked: true,
+              });
+            },
+            { timeout: 5000 },
+          );
+          await (
+            wakeDeps.last as { session: { managed: ManagedSession } }
+          ).session.managed.close();
+          wait!.mockRestore();
+          server = await app(true);
+        }
+        if (outcome === 'expiry') await sleep(2_000);
+        if (outcome === 'mode change')
+          state.approvalSelections.set(SESSION_ID, {
+            mode: 'yolo',
+            revision: 1,
+          });
+        const loaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({
+            managedSessionStore: store(),
+            ...publicShellSession,
+            driveRuntimeRecovery: true,
+          })
+          .expect(200);
+        const resumedClient = loaded.body.clientId as string;
+        const requestId = (await readSessionJournal()).events.findLast(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'requested',
+        )!.payload['requestId'] as string;
+        if (outcome === 'allow' || outcome === 'deny')
+          await headers(
+            supertest(server).post(
+              `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+            ),
+          )
+            .set('X-Qwen-Client-Id', resumedClient)
+            .send({
+              optionId: outcome,
+              inputRevision: 1,
+              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+            })
+            .expect(200);
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, resumedClient)).body).toMatchObject({
+              hasActivePrompt: false,
+              recoveryBlocked: false,
+            });
+          },
+          { timeout: 5000 },
+        );
+
+        if (!parks) expect(state.wakeStamps).toEqual([]);
+        const executes = outcome === 'allow' || outcome === 'mode change';
+        if (executes) {
+          const { call } = await savedShellCall(saved);
+          expect(prepareV3).toHaveBeenCalledOnce();
+          expect(prepareV3).toHaveBeenCalledWith(
+            call.runtimeCallId,
+            call.argsDigest,
+            call.requestDigest,
+            call.publicationId,
+            PROMPT_ID,
+          );
+          expect(executeV3).toHaveBeenCalledOnce();
+        } else {
+          expect(prepareV3).not.toHaveBeenCalled();
+          expect(executeV3).not.toHaveBeenCalled();
+        }
+        const journal = await readSessionJournal();
+        const requested = journal.events.filter(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'requested',
+        );
+        expect(requested).toHaveLength(1);
+        expect(requested[0].payload['requestId']).toBe(requestId);
+        if (outcome === 'expiry')
+          expect(
+            journal.events.some(
+              (event) =>
+                event.kind === 'action.changed' &&
+                event.payload['requestId'] === requestId &&
+                event.payload['state'] === 'expired',
+            ),
+          ).toBe(true);
+        // G3 §4.2: a decision continues the saved batch; expiry ends the
+        // Turn cancelled without another model request.
+        const settled = journal.events.filter(
+          (event) => event.kind === 'turn.settled',
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0].payload['outcome']).toBe(
+          outcome === 'expiry' ? 'cancelled' : 'completed',
+        );
+        // The reloaded resident suspends on its own; let it go before the
+        // next test reads the shared wake stamps.
+        if (parks)
+          await vi.waitFor(
+            async () => {
+              expect((await statusOf(server, resumedClient)).status).toBe(404);
+            },
+            { timeout: 5000 },
+          );
+      } finally {
+        wait?.mockRestore();
+        saved.mockRestore();
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
+
+  it('parks a public-children background Shell approval and starts its one process after the Allow', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const { prepareV3, executeV3, saved } = await mockPublicShellApproval(true);
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptPublicShellApproval(server);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      expect(state.wakeStamps[0]).toMatchObject({
+        parkedTurn: { promptId: PROMPT_ID },
+      });
+      expect(statsOf(server).parkRefusals).toEqual({});
+      const { call, input } = await savedShellCall(saved);
+      expect(input['is_background']).toBe(true);
+      expect(prepareV3).not.toHaveBeenCalled();
+
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+          ...publicShellSession,
+          driveRuntimeRecovery: true,
+        })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      const requestId = (await readSessionJournal()).events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(prepareV3).toHaveBeenCalledOnce();
+      expect(prepareV3).toHaveBeenCalledWith(
+        call.runtimeCallId,
+        call.argsDigest,
+        call.requestDigest,
+        call.publicationId,
+        PROMPT_ID,
+      );
+      expect(executeV3).toHaveBeenCalledOnce();
+      const journal = await readSessionJournal();
+      // Every child_run record belongs to the one reserved execution: the
+      // resume admitted no second process.
+      const childRunOperations = journal.events
+        .filter(
+          (event) =>
+            event.kind === 'domain.committed' &&
+            event.payload['domain'] === 'child_run',
+        )
+        .map((event) => event.payload['operationId'] as string);
+      expect(childRunOperations).toContain('shell-execution');
+      expect(new Set(childRunOperations.map((id) => id.split(':')[0]))).toEqual(
+        new Set(['shell-execution']),
+      );
+      const settled = journal.events.filter(
+        (event) => event.kind === 'turn.settled',
+      );
+      expect(settled).toHaveLength(1);
+      expect(settled[0].payload['outcome']).toBe('completed');
+      // The started background Shell keeps the Session resident, so close it
+      // before the next test reads the shared wake stamps.
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    } finally {
+      saved.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
   const pngImage = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
     'base64',
   );
