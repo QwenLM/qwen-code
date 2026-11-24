@@ -23,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core/mods/tool-execution.js';
 import type { ModToolCheck } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { raceWithAbort } from '@qwen-code/qwen-code-core/utils/race-with-abort.js';
 import { getInteractiveModSession } from './interactive-mod-session.js';
 
 export type InteractiveCompletedToolCall =
@@ -94,37 +95,75 @@ type Options = Omit<
 
 /** Keeps the native batch path intact unless this session has tool middleware. */
 export class InteractiveModToolScheduler {
-  private readonly native: CoreToolScheduler;
+  private native: CoreToolScheduler;
   private tail: Promise<unknown> = Promise.resolve();
   private displayOwner?: object;
 
   constructor(private readonly options: Options) {
-    this.native = new CoreToolScheduler(options);
+    this.native = this.createNativeScheduler();
+  }
+
+  private createNativeScheduler(): CoreToolScheduler {
+    const retired = () => this.native !== scheduler;
+    const scheduler: CoreToolScheduler = new CoreToolScheduler({
+      ...this.options,
+      isFinished: () => retired() || this.options.isFinished?.() === true,
+      onToolCallsUpdate: (calls) => {
+        if (!retired()) this.options.onToolCallsUpdate?.(calls);
+      },
+      outputUpdateHandler: (id, chunk) => {
+        if (!retired()) this.options.outputUpdateHandler?.(id, chunk);
+      },
+      onAllToolCallsComplete: async (calls) => {
+        if (!retired()) await this.options.onAllToolCallsComplete(calls);
+      },
+      onEditorClose: () => {
+        if (!retired()) this.options.onEditorClose?.();
+      },
+      onToolResultFullTurnModel: (model) =>
+        !retired() && this.options.onToolResultFullTurnModel?.(model) === true,
+    });
+    return scheduler;
   }
 
   schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
     runtimeView?: Parameters<CoreToolScheduler['schedule']>[2],
+    abandoned?: AbortSignal,
   ): Promise<void> {
+    const scheduleNative = (active: AbortSignal) => {
+      if (abandoned?.aborted) return Promise.resolve();
+      abandoned?.addEventListener(
+        'abort',
+        () => {
+          this.native.handoffAfterAbandonment(request, () => {
+            this.native = this.createNativeScheduler();
+            return this.native;
+          });
+        },
+        { once: true },
+      );
+      return this.native.schedule(request, active, runtimeView);
+    };
     const session = getInteractiveModSession(this.options.config);
     // Client tools retain their existing scheduler, including concurrent batches.
     const requests = Array.isArray(request) ? request : [request];
     if (!session || requests.every((item) => item.isClientInitiated)) {
-      return this.native.schedule(request, signal, runtimeView);
+      return scheduleNative(signal);
     }
     const owner = captureHookExecutionOwner(this.options.config);
     const sessionSignal = session.captureToolSignal();
     const active = AbortSignal.any([signal, sessionSignal]);
     const displayOwner = {};
     const clearDisplay = () => {
-      if (this.displayOwner !== displayOwner) return;
+      if (abandoned?.aborted || this.displayOwner !== displayOwner) return;
       this.displayOwner = undefined;
       this.options.onToolCallsUpdate?.([]);
     };
     sessionSignal.addEventListener('abort', clearDisplay, { once: true });
     let delivered = false;
-    const task = this.tail.then(() =>
+    const run = () =>
       runWithHookExecutionOwner(owner, async () => {
         await new Promise<void>((resolve, reject) => {
           const cancel = () => reject(active.reason);
@@ -143,8 +182,7 @@ export class InteractiveModToolScheduler {
         });
         active.throwIfAborted();
         const middleware = session.toolCall();
-        if (!middleware)
-          return this.native.schedule(request, active, runtimeView);
+        if (!middleware) return scheduleNative(active);
         const calls: InteractiveToolCall[] = requests.map((item) => ({
           status: 'scheduled',
           request: item,
@@ -152,7 +190,7 @@ export class InteractiveModToolScheduler {
         }));
         const attemptUpdates = new Map<number, InteractiveToolCall[]>();
         const publish = () => {
-          if (!sessionSignal.aborted) {
+          if (!sessionSignal.aborted && !abandoned?.aborted) {
             this.displayOwner = displayOwner;
             this.options.onToolCallsUpdate?.(
               calls.flatMap(
@@ -165,7 +203,7 @@ export class InteractiveModToolScheduler {
         for (let index = 0; index < requests.length; index++) {
           const original = requests[index];
           let last: CompletedToolCall | undefined;
-          const execute = (
+          const executeAttempt = (
             nativeRequest: ToolCallRequestInfo,
             nativeSignal: AbortSignal,
             check?: ModToolCheck,
@@ -180,6 +218,9 @@ export class InteractiveModToolScheduler {
                 ...this.options,
                 chatRecordingService: undefined,
                 modToolCheck: check,
+                isFinished: () =>
+                  abandoned?.aborted === true ||
+                  this.options.isFinished?.() === true,
                 outputUpdateHandler: (id, chunk) => {
                   if (!attemptSignal.aborted)
                     this.options.outputUpdateHandler?.(id, chunk);
@@ -212,7 +253,7 @@ export class InteractiveModToolScheduler {
                   attemptUpdates.delete(index);
                   publish();
                   try {
-                    if (!sessionSignal.aborted)
+                    if (!sessionSignal.aborted && !abandoned?.aborted)
                       await this.options.onNativeAttempt?.(last);
                     resolve(last);
                   } catch (error) {
@@ -227,6 +268,14 @@ export class InteractiveModToolScheduler {
                 scheduler.schedule(nativeRequest, attemptSignal, runtimeView),
               ).catch(reject);
             });
+          const execute = (
+            nativeRequest: ToolCallRequestInfo,
+            nativeSignal: AbortSignal,
+            check?: ModToolCheck,
+          ) =>
+            raceWithAbort(abandoned, () =>
+              executeAttempt(nativeRequest, nativeSignal, check),
+            );
           try {
             active.throwIfAborted();
             const execution =
@@ -278,6 +327,7 @@ export class InteractiveModToolScheduler {
           }
           publish();
         }
+        if (abandoned?.aborted) return;
         sessionSignal.throwIfAborted();
         clearDisplay();
         delivered = true;
@@ -289,9 +339,10 @@ export class InteractiveModToolScheduler {
               call.status === 'cancelled',
           ),
         );
-      }),
-    );
+      });
+    const task = this.tail.then(() => raceWithAbort(abandoned, run));
     const settled = task.catch(async (error: unknown) => {
+      if (abandoned?.aborted) return;
       if (delivered || sessionSignal.aborted) throw error;
       clearDisplay();
       delivered = true;
@@ -321,6 +372,9 @@ export class InteractiveModToolScheduler {
     });
     const drained = settled.finally(() => {
       sessionSignal.removeEventListener('abort', clearDisplay);
+      if (abandoned?.aborted && this.displayOwner === displayOwner) {
+        this.displayOwner = undefined;
+      }
     });
     this.tail = drained.catch(() => {});
     return drained;

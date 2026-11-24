@@ -229,7 +229,10 @@ describe('useReactToolScheduler', () => {
     scheduleSpy.mockRestore();
   });
 
-  it('keeps the same scheduler so a later tool queues after callback identities change', async () => {
+  it.each([
+    { abandon: false, outcome: 'settles' },
+    { abandon: true, outcome: 'is abandoned' },
+  ])('drains queued tools when a batch $outcome', async ({ abandon }) => {
     let resolveFirst: ((result: ToolResult) => void) | undefined;
     const execute = vi.fn(
       (params: { [key: string]: unknown }): Promise<ToolResult> => {
@@ -314,7 +317,9 @@ describe('useReactToolScheduler', () => {
       },
     );
 
-    const signal = new AbortController().signal;
+    const firstBatch = new AbortController();
+    const abandonment = new AbortController();
+    const onAbandoned = vi.fn(async (_tools: InteractiveToolCall[]) => {});
     act(() => {
       result.current[1](
         {
@@ -324,7 +329,10 @@ describe('useReactToolScheduler', () => {
           isClientInitiated: false,
           prompt_id: 'prompt-1',
         },
-        signal,
+        firstBatch.signal,
+        undefined,
+        abandon ? onAbandoned : undefined,
+        abandon ? abandonment.signal : undefined,
       );
     });
 
@@ -349,7 +357,7 @@ describe('useReactToolScheduler', () => {
           isClientInitiated: false,
           prompt_id: 'prompt-2',
         },
-        signal,
+        new AbortController().signal,
       );
     });
     await act(async () => {
@@ -359,25 +367,34 @@ describe('useReactToolScheduler', () => {
 
     expect(execute).toHaveBeenCalledTimes(1);
 
-    await act(async () => {
-      resolveFirst!({
-        llmContent: 'first',
-        returnDisplay: 'first',
+    const releaseFirst = () =>
+      act(async () => {
+        resolveFirst!({ llmContent: 'first', returnDisplay: 'first' });
       });
-    });
+    if (abandon) {
+      await act(async () => {
+        firstBatch.abort();
+        abandonment.abort();
+      });
+      expect(onAbandoned).toHaveBeenCalledExactlyOnceWith([]);
+    } else {
+      await releaseFirst();
+    }
 
     await waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
     });
     await waitFor(() => {
-      expect(latestOnComplete).toHaveBeenCalled();
+      expect(latestOnComplete).toHaveBeenCalledTimes(abandon ? 1 : 2);
     });
+    if (abandon) await releaseFirst();
     const reportedCallIds = latestOnComplete.mock.calls
       .flat(2)
       .map((call) => call.request.callId);
     expect(reportedCallIds).toEqual(
-      expect.arrayContaining(['call-1', 'call-2']),
+      abandon ? ['call-2'] : ['call-1', 'call-2'],
     );
+    expect(result.current[0]).toEqual([]);
     expect(firstOnComplete).not.toHaveBeenCalled();
   });
 

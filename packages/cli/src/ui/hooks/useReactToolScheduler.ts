@@ -66,6 +66,8 @@ export type ScheduleFn = (
    * `onComplete`, for a caller that awaits the batch.
    */
   onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
+  /** Fires when the kernel stops waiting for this cancelled batch. */
+  abandoned?: AbortSignal,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -287,6 +289,7 @@ export function useReactToolScheduler(
       signal: AbortSignal,
       modelOverride?: string,
       onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
+      abandoned?: AbortSignal,
     ) => {
       const owner = captureHookExecutionOwner(config);
       const sessionSignal =
@@ -301,20 +304,28 @@ export function useReactToolScheduler(
       // A batch that ends without completing still releases its callback,
       // with no calls, so its caller stops waiting and a later batch that
       // reuses a call id is not routed to it.
-      const abandonBatchCompletion = () => {
+      const abandonBatchCompletion = (clearDisplay = false) => {
         if (!onBatchComplete) return;
-        let owned = false;
+        const released = new Set<string>();
         for (const { callId } of requests) {
           if (batchCompletionsRef.current.get(callId) === onBatchComplete) {
             batchCompletionsRef.current.delete(callId);
-            owned = true;
+            released.add(callId);
           }
         }
-        if (!owned) return;
+        if (released.size === 0) return;
+        if (clearDisplay) {
+          setToolCallsForDisplay((calls) =>
+            calls.filter(({ request }) => !released.has(request.callId)),
+          );
+        }
         void onBatchComplete([]).catch((error: unknown) => {
           debugLogger.error('Tool batch release failed:', error);
         });
       };
+      abandoned?.addEventListener('abort', () => abandonBatchCompletion(true), {
+        once: true,
+      });
       const isQueuedCancellation = (error: unknown) =>
         signal.aborted &&
         error instanceof Error &&
@@ -358,8 +369,9 @@ export function useReactToolScheduler(
 
       if (!modelOverride?.endsWith('\0')) {
         void runWithHookExecutionOwner(owner, () =>
-          scheduler.schedule(request, signal),
+          scheduler.schedule(request, signal, undefined, abandoned),
         ).catch((error: unknown) => {
+          if (abandoned?.aborted) return;
           if (isQueuedCancellation(error)) {
             void completeAsCancelled().catch((completionError: unknown) => {
               debugLogger.error(
@@ -383,7 +395,7 @@ export function useReactToolScheduler(
       // name the batch it failed to complete.
       void (async () => {
         const completeAsSchedulingError = async (error: unknown) => {
-          if (sessionSignal?.aborted) {
+          if (sessionSignal?.aborted || abandoned?.aborted) {
             abandonBatchCompletion();
             return;
           }
@@ -445,9 +457,10 @@ export function useReactToolScheduler(
 
         try {
           await runWithHookExecutionOwner(owner, () =>
-            scheduler.schedule(request, signal, runtimeView),
+            scheduler.schedule(request, signal, runtimeView, abandoned),
           );
         } catch (error) {
+          if (abandoned?.aborted) return;
           // The busy scheduler rejects a queued request once its signal
           // aborts, which is a cancellation rather than a scheduling failure.
           // Completing it as `cancelled` — instead of returning early — still

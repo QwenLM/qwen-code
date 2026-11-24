@@ -249,6 +249,68 @@ describe('interactive Mod logical scheduler', () => {
     expect(test.complete).toHaveBeenCalledTimes(2);
     expect(test.complete.mock.calls[1][0][0].status).toBe('cancelled');
   });
+
+  it('releases the middleware queue before an abandoned native attempt returns', async () => {
+    const unwind = deferred();
+    const started = deferred();
+    const firstTurn = new AbortController();
+    const abandoned = new AbortController();
+    let toolQueue = Promise.resolve();
+    const test = setup((input, next, active) => {
+      const task = toolQueue.then(() => next(input, active, check));
+      toolQueue = task.then(
+        () => {},
+        () => {},
+      );
+      return task;
+    });
+    let lateCompletion: Promise<void> | undefined;
+    mocks.schedule.mockImplementation(async (options, request) => {
+      if (request.callId === 'call') {
+        lateCompletion = unwind.promise.then(() =>
+          test.finish(options, request),
+        );
+        started.resolve();
+        return;
+      }
+      await test.finish(options, request);
+    });
+    const first = test.scheduler.schedule(
+      test.request,
+      firstTurn.signal,
+      undefined,
+      abandoned.signal,
+    );
+    await started.promise;
+    const second = test.scheduler.schedule(
+      { ...test.request, callId: 'second', args: { file_path: 'B' } },
+      signal(),
+    );
+    try {
+      firstTurn.abort();
+      abandoned.abort();
+      await vi.waitFor(() =>
+        expect(test.complete).toHaveBeenCalledExactlyOnceWith([
+          expect.objectContaining({
+            status: 'success',
+            request: expect.objectContaining({ callId: 'second' }),
+          }),
+        ]),
+      );
+      await Promise.all([first, second]);
+    } finally {
+      unwind.resolve();
+    }
+    await lateCompletion;
+    expect(test.complete).toHaveBeenCalledOnce();
+    expect(test.observe).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        request: expect.objectContaining({ callId: 'second' }),
+      }),
+    );
+    expect(test.update.mock.lastCall?.[0]).toEqual([]);
+  });
+
   it('waits for old native cleanup but never delivers to a replacement session', async () => {
     const drained = deferred();
     const test = setup(async (input, next, active) =>

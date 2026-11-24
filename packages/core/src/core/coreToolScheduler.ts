@@ -2045,6 +2045,8 @@ export class CoreToolScheduler {
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
+  private activeRequest?: ToolCallRequestInfo | ToolCallRequestInfo[];
+  private retired = false;
   private nestedToolScheduler?: CoreToolScheduler;
   private nestedToolCalls: ToolCall[] = [];
   private nestedSequence = 0;
@@ -3225,12 +3227,36 @@ export class CoreToolScheduler {
     return this.scheduleWithOwner(request, signal, runtimeView, owner);
   }
 
+  /**
+   * Leave an abandoned batch on this instance and move its queue to a fresh
+   * scheduler. The queue keeps its identity for queued abort listeners.
+   */
+  handoffAfterAbandonment(
+    request: ToolCallRequestInfo | ToolCallRequestInfo[],
+    createReplacement: () => CoreToolScheduler,
+  ): void {
+    if (
+      this.retired ||
+      this.activeRequest !== request ||
+      (!this.isScheduling && !this.isRunning())
+    ) {
+      return;
+    }
+    const replacement = createReplacement();
+    this.retired = true;
+    this.activeRequest = undefined;
+    replacement.requestQueue = this.requestQueue;
+    replacement.validationRetryCounts = new Map(this.validationRetryCounts);
+    replacement.drainRequestQueueIfIdle();
+  }
+
   private scheduleWithOwner(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
     runtimeView: RuntimeContentGeneratorView | undefined,
     owner: HookExecutionOwner | undefined,
   ): Promise<void> {
+    this.activeRequest = request;
     const items = Array.isArray(request) ? request : [request];
     for (const item of items) this.hookOwners.set(item.callId, owner);
     return runWithHookExecutionOwner(owner, () =>
@@ -3247,13 +3273,11 @@ export class CoreToolScheduler {
   }
 
   private drainRequestQueueIfIdle(): void {
-    if (
-      this.requestQueue.length === 0 ||
-      this.isScheduling ||
-      this.isRunning()
-    ) {
+    if (this.retired || this.isScheduling || this.isRunning()) {
       return;
     }
+    this.activeRequest = undefined;
+    if (this.requestQueue.length === 0) return;
     const next = this.requestQueue.shift()!;
     this.scheduleWithOwner(
       next.request,
