@@ -104,45 +104,47 @@ async function terminalMarkdown() {
   const [
     { getFencedCodeBlocks },
     { mergeInlineMathMatches },
-    { isTableStart, splitMarkdownTableRow, TABLE_ROW_RE, TABLE_SEPARATOR_RE },
+    { parseInkMarkdownBlocks },
     {
       INK_INLINE_MARKDOWN_PATTERN,
       MD_LINK_PATTERN,
       MD_LINK_CAPTURE,
+      isSafeOscScheme,
+      sanitizeForOsc,
+      shouldWrapMarkdownLink,
       trimTrailingUrlPunctuation,
     },
   ] = await Promise.all([
     import('../ui/utils/markdown-utilities.js'),
     import('../ui/utils/inline-math.js'),
-    import('../ui/utils/pending-rendered-height.js'),
+    import('../ui/utils/ink-markdown-blocks.js'),
     import('../ui/utils/osc8.js'),
   ]);
   const link = new RegExp(MD_LINK_PATTERN, 'g');
   const markup = new RegExp(INK_INLINE_MARKDOWN_PATTERN, 'g');
-  const inkBareTargets = (text: string, visual: boolean) => {
+  const inkLinkTargets = (text: string, visual: boolean) => {
     const targets: string[] = [];
-    const lines = text.split(/\r?\n/);
-    let tableColumns = 0;
-    for (const [index, line] of lines.entries()) {
-      let fragments = [line];
-      if (visual) {
-        if (tableColumns && TABLE_SEPARATOR_RE.test(line)) continue;
-        const row = TABLE_ROW_RE.exec(line);
-        if (row && (tableColumns || isTableStart(lines, index))) {
-          const cells = splitMarkdownTableRow(row[1]);
-          tableColumns ||= cells.length;
-          fragments = cells.slice(0, tableColumns);
-        } else {
-          tableColumns = 0;
-        }
-      }
+    for (const block of parseInkMarkdownBlocks(text.split(/\r?\n/), visual)) {
+      const fragments =
+        block.kind === 'table'
+          ? [...block.headers, ...block.rows.flat()]
+          : 'text' in block
+            ? [block.text]
+            : [];
       for (const fragment of fragments) {
         for (const token of mergeInlineMathMatches(fragment, markup, visual)) {
           if (token.kind !== 'markup') continue;
-          const [url] = token.match;
-          if (url.startsWith('https://') || url.startsWith('http://')) {
-            const end = (token.match.index ?? 0) + url.length;
-            targets.push(trimTrailingUrlPunctuation(url, fragment[end]));
+          const [value] = token.match;
+          const linkUrl = MD_LINK_CAPTURE.exec(value)?.[2];
+          if (linkUrl && shouldWrapMarkdownLink(linkUrl, true)) {
+            targets.push(sanitizeForOsc(linkUrl));
+          } else if (
+            value.startsWith('https://') ||
+            value.startsWith('http://')
+          ) {
+            const end = (token.match.index ?? 0) + value.length;
+            const url = trimTrailingUrlPunctuation(value, fragment[end]);
+            if (isSafeOscScheme(url)) targets.push(sanitizeForOsc(url));
           }
         }
       }
@@ -155,7 +157,7 @@ async function terminalMarkdown() {
       text.matchAll(link),
       ([token]) => token.match(MD_LINK_CAPTURE)?.[2],
     ).sort(),
-    bareTargets: [inkBareTargets(text, false), inkBareTargets(text, true)],
+    linkTargets: [inkLinkTargets(text, false), inkLinkTargets(text, true)],
   });
 }
 

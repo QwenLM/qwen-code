@@ -204,18 +204,22 @@ describe('translateDisplayText', () => {
       '| A | B | C |\n| --- | --- | --- |\n| **First | <https://example.test/releases_> | Third** |',
       '| 甲 | 乙 | 丙 |\n| --- | --- | --- |\n| **第一 | https://example.test/releases_。 | 第三** |',
     ],
+    [
+      '* See <https://example.test/releases_> for the *release notes*.',
+      '* 详见 https://example.test/releases_。 请阅读 *发行说明*。',
+    ],
+    [
+      '| A | B | C |\n| --- | --- | --- |\n$$\nx+y\n$$\n| **First | <https://example.test/releases_> | Third** |',
+      '| 甲 | 乙 | 丙 |\n| --- | --- | --- |\n$$\nx+y\n$$\n| **第一 | https://example.test/releases_。 | 第三** |',
+    ],
   ])(
     'rejects a translation whose clickable terminal URL changes: %s',
     async (original, translated) => {
+      const complete = answer(translated);
       await expect(
-        translateDisplayText(
-          original,
-          'zh-CN',
-          answer(translated),
-          signal,
-          'terminal',
-        ),
+        translateDisplayText(original, 'zh-CN', complete, signal, 'terminal'),
       ).resolves.toBeUndefined();
+      expect(complete).toHaveBeenCalledOnce();
     },
   );
 
