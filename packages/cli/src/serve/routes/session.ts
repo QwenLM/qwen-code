@@ -194,6 +194,7 @@ import { checkSseAdmission, countSseStream } from '../sse-occupancy.js';
 import {
   PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH,
   admitSessionPrompt,
+  findPromptReceipt,
   classifyPromptRequest,
   type SessionPromptAdmission,
 } from './session-prompt-admission.js';
@@ -925,6 +926,7 @@ export function registerSessionRoutes(
   deps: RegisterSessionRoutesDeps,
 ): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
   const btwStreams = new BtwStreamRequests();
+  const skillPreparations = new Map<string, Promise<void>>();
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -7246,6 +7248,130 @@ export function registerSessionRoutes(
     ),
   );
 
+  const retirementPath = '/session/:id/retirements/:operationId';
+  const retirementId = z.string().uuid();
+  const retirementRuntimes = () =>
+    workspaceRegistry
+      .listAll()
+      .filter(
+        (runtime) =>
+          runtime.trusted &&
+          !isInternalWorkspaceRuntime(runtime) &&
+          !runtime.routeFileSystemFactory.sshWorkspace &&
+          runtime.bridge.getSessionRetirement !== undefined,
+      );
+  const sendRetirement = (
+    res: Response,
+    receipt: NonNullable<
+      ReturnType<NonNullable<AcpSessionBridge['getSessionRetirement']>>
+    >,
+  ) =>
+    res
+      .set('Cache-Control', 'no-store')
+      .status(receipt.state === 'retired' ? 200 : 202)
+      .json(receipt);
+  app.get(retirementPath, (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const operation = retirementId.safeParse(req.params['operationId']);
+    if (!operation.success) {
+      res.status(400).json({ code: 'invalid_session_retirement' });
+      return;
+    }
+    const route = 'GET /session/:id/retirements/:operationId';
+    try {
+      const receipts = retirementRuntimes().flatMap(({ bridge }) => {
+        const receipt = bridge.getSessionRetirement?.(
+          sessionId,
+          operation.data,
+        );
+        return receipt ? [receipt] : [];
+      });
+      if (receipts.length === 1 && receipts[0])
+        sendRetirement(res, receipts[0]);
+      else if (receipts.length > 1)
+        res.status(409).json({ code: 'session_retire_identity_conflict' });
+      else res.status(404).json({ code: 'session_retire_receipt_unavailable' });
+    } catch (error) {
+      sendBridgeError(res, error, { route, sessionId });
+    }
+  });
+
+  app.put(retirementPath, mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const operation = retirementId.safeParse(req.params['operationId']);
+    const expected = retirementId.safeParse(
+      safeBody(req)['expectedEventEpoch'],
+    );
+    if (!operation.success || !expected.success) {
+      res.status(400).json({ code: 'invalid_session_retirement' });
+      return;
+    }
+    const identity = {
+      sessionId,
+      eventEpoch: expected.data,
+      operationId: operation.data,
+    };
+    const route = 'PUT /session/:id/retirements/:operationId';
+    try {
+      const existing = retirementRuntimes().flatMap(({ bridge }) => {
+        const receipt = bridge.getSessionRetirement?.(sessionId);
+        return receipt ? [receipt] : [];
+      });
+      if (existing.length) {
+        if (
+          existing.length !== 1 ||
+          existing[0]?.operationId !== identity.operationId ||
+          existing[0].eventEpoch !== identity.eventEpoch
+        )
+          res
+            .status(409)
+            .json({ ...identity, code: 'session_retire_identity_conflict' });
+        else sendRetirement(res, existing[0]);
+        return;
+      }
+      const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
+      if (!owner) return;
+      const runtime = owner.runtime;
+      if (
+        !retirementRuntimes().includes(runtime) ||
+        !runtime.bridge.retireSessionIfIdle
+      ) {
+        res
+          .status(409)
+          .json({ ...identity, code: 'session_retire_unavailable' });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      runtime.generationGuard?.assertOpen();
+      const receipt = await runtime.bridge.retireSessionIfIdle(
+        identity,
+        clientId === undefined ? undefined : { clientId },
+      );
+      sendRetirement(res, receipt);
+    } catch (error) {
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? error.code
+          : undefined;
+      if (
+        code === 'session_retire_busy' ||
+        code === 'session_retire_epoch_mismatch' ||
+        code === 'session_retire_identity_conflict'
+      ) {
+        res.status(409).json({
+          ...identity,
+          code,
+          ...(code === 'session_retire_busy'
+            ? { definitivelyNotStarted: true }
+            : {}),
+        });
+      } else sendBridgeError(res, error, { route, sessionId });
+    }
+  });
+
   app.get(
     '/session/:id/status',
     withOwnerReadSession(
@@ -7275,7 +7401,15 @@ export function registerSessionRoutes(
           summary.lastUserPromptAt = undefined;
         }
         runtime.generationGuard?.assertOpen();
-        res.status(200).json(summary);
+        res.status(200).json({
+          ...summary,
+          ...(runtime.bridge.retireSessionIfIdle
+            ? {
+                sessionId,
+                eventEpoch: runtime.bridge.getSessionEventEpoch(sessionId),
+              }
+            : {}),
+        });
       },
     ),
   );
@@ -9721,7 +9855,204 @@ export function registerSessionRoutes(
         res.once('finish', onResFinish);
 
         let admission: SessionPromptAdmission;
+        let turnSkillLease: string | undefined;
+        let skillDigest: string | undefined;
+        let releasePreparation: (() => void) | undefined;
+        const releaseLease = async () => {
+          if (turnSkillLease)
+            await runtime.bridge.updateTurnSkillLease?.(
+              sessionId,
+              turnSkillLease,
+              'release',
+            );
+        };
         try {
+          const pinSkills = body['pinSkills'];
+          const requireSessionSkillEffects = body['requireSessionSkillEffects'];
+          const expectedDigest = body['expectedSkillDigest'];
+          const pinExtensions = body['pinExtensions'];
+          const generation = body['expectedExtensionGeneration'];
+          if (
+            (pinExtensions !== undefined &&
+              typeof pinExtensions !== 'boolean') ||
+            (pinExtensions === true
+              ? pinSkills !== true ||
+                typeof generation !== 'number' ||
+                !Number.isSafeInteger(generation) ||
+                generation < 0
+              : generation !== undefined)
+          ) {
+            res.status(400).json({
+              code: 'invalid_turn_extension_options',
+              error:
+                'pinExtensions requires pinSkills and a nonnegative safe expectedExtensionGeneration',
+            });
+            return;
+          }
+          const extensionGeneration =
+            typeof generation === 'number' ? generation : undefined;
+          delete forwardedBody['pinExtensions'];
+          delete forwardedBody['expectedExtensionGeneration'];
+          if (
+            (pinSkills !== undefined && typeof pinSkills !== 'boolean') ||
+            (requireSessionSkillEffects !== undefined &&
+              (typeof requireSessionSkillEffects !== 'boolean' ||
+                (requireSessionSkillEffects && pinSkills !== true))) ||
+            (expectedDigest !== undefined &&
+              (pinSkills !== true ||
+                typeof expectedDigest !== 'string' ||
+                !/^[a-f0-9]{64}$/.test(expectedDigest)))
+          ) {
+            res.status(400).json({
+              error:
+                'pinSkills must be boolean. Enable pinSkills for a SHA-256 expectedSkillDigest or requireSessionSkillEffects: true.',
+              code: 'invalid_turn_skill_options',
+            });
+            return;
+          }
+          delete forwardedBody['pinSkills'];
+          delete forwardedBody['requireSessionSkillEffects'];
+          delete forwardedBody['expectedSkillDigest'];
+          const skillPromptHash =
+            pinSkills === true && idempotencyKey !== undefined
+              ? crypto
+                  .createHash('sha256')
+                  .update(JSON.stringify(prompt))
+                  .digest('hex')
+              : undefined;
+          const key =
+            idempotencyKey === undefined
+              ? undefined
+              : JSON.stringify([sessionId, idempotencyKey]);
+          // Serialize only same-key preparations. A synchronous admit below
+          // publishes its receipt before waiting retries can capture again.
+          if (key && !findPromptReceipt(sessionId, idempotencyKey)) {
+            for (
+              let pending = skillPreparations.get(key);
+              pending;
+              pending = skillPreparations.get(key)
+            ) {
+              await pending;
+              abort.signal.throwIfAborted();
+            }
+            if (
+              pinSkills === true &&
+              !findPromptReceipt(sessionId, idempotencyKey)
+            ) {
+              const pending = new Promise<void>((resolve) => {
+                releasePreparation = () => {
+                  skillPreparations.delete(key);
+                  resolve();
+                };
+              });
+              skillPreparations.set(key, pending);
+            }
+          }
+          const hasIncompatibleReceipt = () => {
+            const previous = findPromptReceipt(sessionId, idempotencyKey);
+            if (
+              !previous ||
+              (pinSkills !== true && previous.skillDigest === undefined) ||
+              (previous.skillDigest !== undefined &&
+                previous.extensionGeneration === extensionGeneration &&
+                (previous.sessionSkillEffectsChecked === true) ===
+                  (requireSessionSkillEffects === true) &&
+                previous.skillPromptHash === skillPromptHash &&
+                (expectedDigest === undefined ||
+                  expectedDigest === previous.skillDigest))
+            )
+              return false;
+            res.status(409).json({
+              code: 'turn_skill_receipt_conflict',
+              error:
+                'The idempotency key belongs to a different prompt or skill revision',
+            });
+            return true;
+          };
+          if (hasIncompatibleReceipt()) return;
+          // An accepted retry uses its original receipt even after an update.
+          if (
+            pinSkills === true &&
+            !findPromptReceipt(sessionId, idempotencyKey)
+          ) {
+            if (
+              !runtime.trusted ||
+              runtime.routeFileSystemFactory.sshWorkspace ||
+              !runtime.bridge.updateTurnSkillLease
+            ) {
+              res.status(409).json({
+                code: 'turn_skill_snapshot_unavailable',
+                error: 'The session runtime cannot pin skill files',
+              });
+              return;
+            }
+            turnSkillLease = crypto.randomUUID();
+            const receipt =
+              extensionGeneration === undefined
+                ? await runtime.bridge.updateTurnSkillLease(
+                    sessionId,
+                    turnSkillLease,
+                    'prepare',
+                  )
+                : await runtime.bridge.updateTurnSkillLease(
+                    sessionId,
+                    turnSkillLease,
+                    'prepare',
+                    undefined,
+                    extensionGeneration,
+                  );
+            if (
+              extensionGeneration !== undefined &&
+              receipt.extensionGeneration !== extensionGeneration
+            ) {
+              await releaseLease().catch(() => {});
+              res.status(409).json({
+                code: receipt.unsupportedExtensionComponent
+                  ? 'turn_extension_component_unsupported'
+                  : 'turn_extension_generation_unavailable',
+                sessionId,
+                definitivelyNotStarted: true,
+                error:
+                  'The session could not reserve the requested extension generation',
+              });
+              return;
+            }
+            if (
+              requireSessionSkillEffects === true &&
+              receipt.sessionSkillEffectsCompatible !== true
+            ) {
+              await releaseLease().catch(() => {});
+              res.status(409).json({
+                code: 'turn_skill_session_effects_unavailable',
+                sessionId,
+                definitivelyNotStarted: true,
+                error:
+                  receipt.sessionSkillEffectsCompatible === false
+                    ? 'A captured skill declares session hooks or allow rules that cannot run in a pinned turn'
+                    : 'The runtime did not verify session effects for the captured skills',
+              });
+              return;
+            }
+            skillDigest = receipt.digest;
+            if (
+              !skillDigest ||
+              !/^[a-f0-9]{64}$/.test(skillDigest) ||
+              (expectedDigest && expectedDigest !== skillDigest)
+            ) {
+              await releaseLease().catch(() => {});
+              res.status(409).json({
+                code: 'turn_skill_digest_mismatch',
+                error: 'Runtime did not confirm the requested skill revision',
+              });
+              return;
+            }
+            abort.signal.throwIfAborted();
+            runtime.generationGuard?.assertOpen();
+            if (hasIncompatibleReceipt()) {
+              await releaseLease().catch(() => {});
+              return;
+            }
+          }
           admission = admitSessionPrompt(
             {
               archiveCoordinator: deps.archiveCoordinator,
@@ -9734,6 +10065,12 @@ export function registerSessionRoutes(
               sessionId,
               prompt,
               request: forwardedBody,
+              turnSkillLease,
+              skillDigest,
+              skillPromptHash,
+              sessionSkillEffectsChecked:
+                requireSessionSkillEffects === true ? true : undefined,
+              extensionGeneration,
               classification,
               idempotencyKey,
               requestDeadlineMs,
@@ -9746,6 +10083,7 @@ export function registerSessionRoutes(
             },
           );
         } catch (err) {
+          await releaseLease().catch(() => {});
           res.off('close', onResClose);
           res.off('finish', onResFinish);
           sendBridgeError(res, err, {
@@ -9753,8 +10091,14 @@ export function registerSessionRoutes(
             sessionId,
           });
           return;
+        } finally {
+          releasePreparation?.();
         }
         res.off('close', onResClose);
+        if (turnSkillLease) {
+          if (admission.deduplicated) await releaseLease().catch(() => {});
+          else void admission.settled.then(releaseLease).catch(() => {});
+        }
         if (admission.deduplicated) {
           res.off('finish', onResFinish);
           res.status(202).json({
@@ -9762,10 +10106,16 @@ export function registerSessionRoutes(
             lastEventId: admission.lastEventId,
             eventEpoch: admission.eventEpoch,
             deduplicated: true,
+            skillDigest: admission.skillDigest,
+            sessionSkillEffectsChecked: admission.sessionSkillEffectsChecked,
+            extensionGeneration: admission.extensionGeneration,
           });
           return;
         }
         res.status(202).json({
+          skillDigest: admission.skillDigest,
+          sessionSkillEffectsChecked: admission.sessionSkillEffectsChecked,
+          extensionGeneration: admission.extensionGeneration,
           promptId: admission.promptId,
           lastEventId: admission.lastEventId,
           eventEpoch: admission.eventEpoch,

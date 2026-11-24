@@ -921,6 +921,15 @@ const EXPECTED_REGISTERED_FEATURES = [
         'managed_session_journal_delta_v1',
       ];
     }
+    if (feature === 'workspace_file_upload') {
+      return [
+        feature,
+        'turn_skill_file_snapshot',
+        'turn_skill_session_effects_check',
+        'turn_extension_store_lease',
+        'session_retire_if_idle',
+      ];
+    }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
     }
@@ -3747,6 +3756,38 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'session_retire_if_idle') {
+          expect(predicate({ sessionRetireIfIdleAvailable: true })).toBe(true);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionRetireIfIdleAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
+        if (feature === 'turn_extension_store_lease') {
+          expect(predicate({ turnExtensionStoreLeaseAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
+          continue;
+        }
+        if (
+          feature === 'turn_skill_file_snapshot' ||
+          feature === 'turn_skill_session_effects_check'
+        ) {
+          expect(predicate({ turnSkillFileSnapshotAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              turnSkillFileSnapshotAvailable: true,
+            }),
+          ).toContain(feature);
           continue;
         }
         if (feature === 'require_auth') {
@@ -21459,6 +21500,249 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(2);
       // The key is route-level admission metadata, never prompt content.
       expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
+    });
+
+    it('requires proof from the admission runtime before accepting the skill effects check', async () => {
+      const bridge = fakeBridge();
+      bridge.updateTurnSkillLease = vi.fn(async () => ({
+        digest: 'd'.repeat(64),
+      }));
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const submit = (pinSkills: boolean) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'guarded' }],
+            pinSkills,
+            requireSessionSkillEffects: true,
+          });
+      expect((await submit(false)).status).toBe(400);
+      const declined = await submit(true);
+      expect(declined.status).toBe(409);
+      expect(declined.body).toMatchObject({
+        code: 'turn_skill_session_effects_unavailable',
+        sessionId: 'session-A',
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.updateTurnSkillLease).toHaveBeenLastCalledWith(
+        'session-A',
+        expect.any(String),
+        'release',
+      );
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('admits only a confirmed extension generation and binds retries to it', async () => {
+      const bridge = fakeBridge();
+      const digest = 'c'.repeat(64);
+      bridge.updateTurnSkillLease = vi.fn(
+        async (_session, _key, action, _digest, generation) => {
+          if (action === 'prepare' && generation === 7)
+            return { digest, extensionGeneration: 7 };
+          if (action === 'prepare' && generation === 5)
+            return { unsupportedExtensionComponent: true as const };
+          return {};
+        },
+      );
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const sid = 'session-A';
+      const submit = (generation: number, idempotencyKey: string) =>
+        request(app)
+          .post(`/session/${sid}/prompt`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'extension prompt' }],
+            pinSkills: true,
+            pinExtensions: true,
+            expectedExtensionGeneration: generation,
+            idempotencyKey,
+          });
+      const unmanaged = await submit(5, 'unmanaged');
+      expect(unmanaged.status).toBe(409);
+      expect(unmanaged.body).toMatchObject({
+        code: 'turn_extension_component_unsupported',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
+      const unavailable = await submit(6, 'not-admitted');
+      expect(unavailable.status).toBe(409);
+      expect(unavailable.body).toMatchObject({
+        code: 'turn_extension_generation_unavailable',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.promptCalls).toHaveLength(0);
+      const first = await submit(7, 'same');
+      expect(first.status).toBe(202);
+      expect(first.body.extensionGeneration).toBe(7);
+      expect((await submit(7, 'same')).body).toMatchObject({
+        extensionGeneration: 7,
+        promptId: first.body.promptId,
+        deduplicated: true,
+      });
+      expect((await submit(8, 'same')).status).toBe(409);
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('pins one skill snapshot for concurrent retries and returns its original receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const bridge = fakeBridge();
+      let completeCapture!: () => void;
+      const capturing = new Promise<void>((resolve) => {
+        completeCapture = resolve;
+      });
+      const update = vi.fn(
+        async (_session: string, _key: string, action: string) => {
+          if (action === 'prepare') {
+            await capturing;
+            return { digest };
+          }
+          return {};
+        },
+      );
+      bridge.updateTurnSkillLease = update;
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const capability = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(capability.body.features).toContain('turn_skill_file_snapshot');
+      const body = {
+        prompt: [{ type: 'text', text: 'pinned' }],
+        pinSkills: true,
+        idempotencyKey: 'pin-1',
+        expectedSkillDigest: digest,
+      };
+      const submit = (params = body) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send(params);
+      const first = submit().then((response) => response);
+      const retry = submit().then((response) => response);
+      try {
+        await vi.waitFor(() => expect(update).toHaveBeenCalled());
+      } finally {
+        completeCapture();
+      }
+      const receipts = await Promise.all([first, retry]);
+      expect(receipts.map((r) => r.status)).toEqual([202, 202]);
+      expect(receipts.map((r) => r.body.skillDigest)).toEqual([digest, digest]);
+      expect(new Set(receipts.map((r) => r.body.promptId)).size).toBe(1);
+      expect(receipts.filter((r) => r.body.deduplicated)).toHaveLength(1);
+      expect(
+        update.mock.calls.filter(([, , action]) => action === 'prepare'),
+      ).toHaveLength(1);
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('pinSkills');
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty(
+        'expectedSkillDigest',
+      );
+
+      const wrong = await submit({
+        ...body,
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(wrong.status).toBe(409);
+      expect(wrong.body.code).toBe('turn_skill_receipt_conflict');
+      const differentPayload = await submit({
+        ...body,
+        prompt: [{ type: 'text', text: 'other' }],
+      });
+      expect(differentPayload.status).toBe(409);
+      const mismatchedNew = await submit({
+        ...body,
+        idempotencyKey: 'pin-other',
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(mismatchedNew.status).toBe(409);
+      expect(mismatchedNew.body.code).toBe('turn_skill_digest_mismatch');
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('returns exact retirement identities, busy refusal, and the stored receipt', async () => {
+      const sessionId = 'session-A';
+      const eventEpoch = '869de41b-bf9e-44ee-aa21-ab64a3af220a';
+      const operationId = '4279fbbe-7845-49a8-87fe-9cd4cc61b19c';
+      const pathName = `/session/${sessionId}/retirements/${operationId}`;
+      const bridge = fakeBridge({
+        getSessionEventEpochImpl: () => eventEpoch,
+        summaryImpl: () => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-11-01T00:00:00Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      let busy = true;
+      let received:
+        | Awaited<ReturnType<NonNullable<typeof bridge.retireSessionIfIdle>>>
+        | undefined;
+      bridge.getSessionRetirement = (id, operation) =>
+        id === sessionId && (!operation || operation === operationId)
+          ? received
+          : undefined;
+      bridge.retireSessionIfIdle = vi.fn(async (identity) => {
+        if (busy)
+          throw Object.assign(new Error('held'), {
+            code: 'session_retire_busy',
+          });
+        received = { ...identity, state: 'retired' };
+        return received;
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const host = `127.0.0.1:${baseOpts.port}`;
+      const caps = await request(app).get('/capabilities').set('Host', host);
+      expect(caps.body.features).toContain('session_retire_if_idle');
+      const status = await request(app)
+        .get(`/session/${sessionId}/status`)
+        .set('Host', host);
+      expect(status.status).toBe(200);
+      expect(status.body).toMatchObject({ sessionId, eventEpoch });
+      const put = () =>
+        request(app)
+          .put(pathName)
+          .set('Host', host)
+          .send({ expectedEventEpoch: eventEpoch });
+      const refused = await put();
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({
+        sessionId,
+        eventEpoch,
+        operationId,
+        definitivelyNotStarted: true,
+        code: 'session_retire_busy',
+      });
+      expect((await request(app).get(pathName).set('Host', host)).status).toBe(
+        404,
+      );
+      busy = false;
+      const accepted = await put();
+      expect(accepted.status).toBe(200);
+      expect(accepted.body).toEqual({
+        sessionId,
+        eventEpoch,
+        operationId,
+        state: 'retired',
+      });
+      expect((await put()).body).toEqual(accepted.body);
+      expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
+        accepted.body,
+      );
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(2);
     });
 
     it('scopes idempotency keys per session (W4)', async () => {

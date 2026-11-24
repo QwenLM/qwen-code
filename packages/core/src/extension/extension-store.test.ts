@@ -16,6 +16,7 @@ import {
   ExtensionDirectoryLockedError,
   ExtensionStore,
   ExtensionStoreCorruptError,
+  withExtensionTurnDrainWait,
   type ExtensionIdentity,
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
@@ -112,6 +113,98 @@ describe('ExtensionStore', () => {
     const initial = await store.ensureInitialized([identity]);
     return { store, identity, initial };
   };
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'holds the verified generation across store clients until the last turn drains',
+    async () => {
+      const { store, identity, initial } = await initStore('a'.repeat(64));
+      const writer = makeStore();
+      await expect(
+        store.acquireTurnReader(initial.generation + 1),
+      ).rejects.toThrow();
+      const [one, two] = await Promise.all([
+        store.acquireTurnReader(initial.generation),
+        writer.acquireTurnReader(initial.generation),
+      ]);
+      const change = () => writer.setDefaultActivation(identity, 'disabled');
+      const uninstall = () =>
+        writer.commitArtifact({
+          operation: 'uninstall',
+          identity,
+          destinationDirectory: path.join(extensionsDir, identity.name),
+        });
+      await expect(change()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      await expect(uninstall()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      await one();
+      await one();
+      await expect(change()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      expect((await writer.readSnapshot()).generation).toBe(initial.generation);
+      await two();
+      expect((await change()).generation).toBeGreaterThan(initial.generation);
+      await expect(
+        store.acquireTurnReader(initial.generation),
+      ).rejects.toThrow();
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'reclaims a reader after its process exits without running cleanup',
+    async () => {
+      const { store, identity, initial } = await initStore('c'.repeat(64));
+      const { spawnSync } = await import('node:child_process');
+      const directory = path.join(storeDir, '.turn-readers');
+      await fsp.mkdir(directory);
+      // The process working directory keeps the AF_UNIX path short on macOS.
+      const marker = '00000000-0000-4000-8000-000000000000';
+      const owner = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          `require('node:net').createServer().listen('${marker}', () => process.kill(process.pid, 'SIGKILL'))`,
+        ],
+        { cwd: directory, timeout: 3000 },
+      );
+      expect(owner.signal).toBe('SIGKILL');
+      expect(await fsp.readdir(directory)).toEqual([marker]);
+      expect(
+        (await store.setDefaultActivation(identity, 'disabled')).generation,
+      ).toBe(initial.generation + 1);
+      expect(await fsp.readdir(directory)).toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'commits a waiting mutation once without blocking readers or refreshing its budget',
+    async () => {
+      const { store, identity, initial } = await initStore('e'.repeat(64));
+      const release = await store.acquireTurnReader(initial.generation);
+      const signal = new AbortController().signal;
+      const change = () => store.setDefaultActivation(identity, 'disabled');
+      await expect(
+        withExtensionTurnDrainWait(5, signal, undefined, change),
+      ).rejects.toMatchObject({ code: 'extension_store_in_use' });
+      const waiting = withExtensionTurnDrainWait(
+        2000,
+        signal,
+        undefined,
+        change,
+      );
+      expect((await store.readSnapshot()).generation).toBe(initial.generation);
+      await release();
+      await expect(waiting).resolves.toMatchObject({
+        generation: initial.generation + 1,
+      });
+      await expect(store.readSnapshot()).resolves.toMatchObject({
+        generation: initial.generation + 1,
+      });
+    },
+  );
 
   const firstAndSecond = (
     a: string,

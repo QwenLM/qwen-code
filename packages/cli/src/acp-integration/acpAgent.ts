@@ -345,6 +345,13 @@ import { restoreSessionModelThenAuthenticate } from './session-model-persistence
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
+import { TurnSkillLeases } from './session/turn-skill-leases.js';
+import {
+  prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  UnsupportedTurnExtensionComponentError,
+  runWithTurnSkillSnapshot,
+} from '@qwen-code/qwen-code-core';
 import { ActiveWorkReporter } from './active-work-reporter.js';
 import {
   shouldProbeChildHeap,
@@ -525,6 +532,8 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
+  TURN_SKILL_LEASE_META_KEY,
+  TURN_SKILL_LEASE_METHOD,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -3985,6 +3994,7 @@ async function assertManagedConversationDirectoryIdentity(
 
 class QwenAgent implements Agent {
   private readonly workspaceSettings: LoadedSettings;
+  private readonly turnSkillLeases = new TurnSkillLeases();
   private sessions: Map<string, Session> = new Map();
   /**
    * Cross-session messaging for every session this process hosts.
@@ -4820,6 +4830,11 @@ class QwenAgent implements Agent {
     }
     try {
       uiTelemetryService.removeSession(sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await this.turnSkillLeases.collect(sessionId, true);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -7424,6 +7439,12 @@ class QwenAgent implements Agent {
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    const skillLeaseKey =
+      this.privateParentState === 'trusted' &&
+      typeof meta[TURN_SKILL_LEASE_META_KEY] === 'string'
+        ? (meta[TURN_SKILL_LEASE_META_KEY] as string)
+        : undefined;
+    delete meta[TURN_SKILL_LEASE_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedApprovalMode = meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
     const suppliedModeBeforeStart =
@@ -7576,12 +7597,26 @@ class QwenAgent implements Agent {
     }
     calls.add(call);
     try {
-      return await session.prompt(
-        sanitizedParams,
-        invocationContext,
-        call.controller.signal,
-        modelPrompt,
-      );
+      const execute = () =>
+        session.prompt(
+          sanitizedParams,
+          invocationContext,
+          call.controller.signal,
+          modelPrompt,
+        );
+      if (!skillLeaseKey) return await execute();
+      const lease = this.turnSkillLeases.claim(sessionId, skillLeaseKey);
+      try {
+        return await runWithTurnSkillSnapshot(lease.snapshot, execute);
+      } finally {
+        this.turnSkillLeases.settle(
+          sessionId,
+          skillLeaseKey,
+          () =>
+            !hasTurnResourceWork(lease.snapshot) &&
+            session.collectActiveWorkHolds(true).length === 0,
+        );
+      }
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
@@ -7607,7 +7642,7 @@ class QwenAgent implements Agent {
     await this.runInSessionContext(session, async () => {
       const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt(abortReason);
+        await session.cancelPendingPrompt(abortReason, true);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
@@ -10383,6 +10418,128 @@ class QwenAgent implements Agent {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
     switch (method) {
+      case TURN_SKILL_LEASE_METHOD: {
+        const key = params['key'];
+        if (
+          this.privateParentState !== 'trusted' ||
+          typeof key !== 'string' ||
+          !UUID_V4_RE.test(key) ||
+          typeof sessionId !== 'string' ||
+          !sessionConfig
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation',
+          );
+        if (params['action'] === 'release') {
+          await this.turnSkillLeases.releaseQueued(sessionId, key);
+        } else if (params['action'] === 'prepare') {
+          const session = this.sessions.get(sessionId)!;
+          if (!session.collectActiveWorkHolds().length)
+            await this.turnSkillLeases.collect(sessionId);
+          const expectedDigest = params['expectedDigest'];
+          if (
+            expectedDigest !== undefined &&
+            (typeof expectedDigest !== 'string' ||
+              !/^[a-f0-9]{64}$/.test(expectedDigest))
+          )
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected skill digest',
+            );
+          const expectedGeneration = params['expectedExtensionGeneration'];
+          if (
+            expectedGeneration !== undefined &&
+            (typeof expectedGeneration !== 'number' ||
+              !Number.isSafeInteger(expectedGeneration) ||
+              expectedGeneration < 0)
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected extension generation',
+            );
+          }
+          let unavailable = false;
+          let unsupportedComponent = false;
+          let sessionSkillEffectsCompatible: boolean | undefined;
+          try {
+            const digest = await this.turnSkillLeases.prepare(
+              sessionId,
+              key,
+              async () => {
+                let releaseExtensions: (() => Promise<void>) | undefined;
+                if (typeof expectedGeneration === 'number') {
+                  try {
+                    releaseExtensions = await sessionConfig
+                      .getExtensionManager()
+                      .acquireTurnExtensionLease(expectedGeneration);
+                  } catch (error) {
+                    unavailable = true;
+                    unsupportedComponent =
+                      error instanceof UnsupportedTurnExtensionComponentError;
+                    throw error;
+                  }
+                }
+                try {
+                  const manager = sessionConfig.getSkillManager();
+                  if (!manager) throw new Error('Skill manager unavailable');
+                  const skills = await manager.listSkills({ force: true });
+                  if (manager.hasDiscoveryReadErrors())
+                    throw new Error('Skill discovery incomplete');
+                  const enabled = skills.filter(
+                    (skill) =>
+                      skill.level !== 'bundled' &&
+                      sessionConfig.isSkillEnabled(skill),
+                  );
+                  const lease = await prepareTurnSkillSnapshot(enabled, {
+                    baseDirectory: sessionConfig.storage.getProjectTempDir(),
+                    skillManager: manager,
+                    expectedDigest,
+                  });
+                  // Check the material actually reserved by this admission. Trust
+                  // can change while a turn waits for permission.
+                  sessionSkillEffectsCompatible = lease.snapshot.skills.every(
+                    (skill) =>
+                      !skill.allowedTools?.length &&
+                      !Object.keys(skill.hooks ?? {}).length,
+                  );
+                  if (!releaseExtensions) return lease;
+                  const releaseStore = releaseExtensions;
+                  return {
+                    snapshot: lease.snapshot,
+                    dispose: async () => {
+                      try {
+                        await lease.dispose();
+                      } finally {
+                        await releaseStore();
+                      }
+                    },
+                  };
+                } catch (error) {
+                  await releaseExtensions?.();
+                  throw error;
+                }
+              },
+            );
+            return {
+              digest,
+              extensionGeneration: expectedGeneration,
+              sessionSkillEffectsCompatible,
+            };
+          } catch (error) {
+            if (unavailable)
+              return unsupportedComponent
+                ? { unsupportedExtensionComponent: true }
+                : {};
+            throw error;
+          }
+        } else
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation action',
+          );
+        return {};
+      }
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
         if (

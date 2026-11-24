@@ -283,6 +283,15 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    err.code === 'session_retirement_fenced'
+  ) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({ code: err.code, error: err.message });
+    return;
+  }
   if (err instanceof SessionAttachmentUploadError) {
     if (err.status >= 500) {
       reportBridgeError(err.cause ?? err, ctx, daemonLog);

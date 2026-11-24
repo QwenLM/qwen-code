@@ -9,7 +9,18 @@ import * as fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
+import {
+  createExtensionTurnReader,
+  assertNoExtensionTurnReaders,
+  ExtensionStoreInUseError,
+} from './turn-readers.js';
+export {
+  ExtensionStoreInUseError,
+  supportsLocalExtensionTurnStore,
+} from './turn-readers.js';
 import lockfile from 'proper-lockfile';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Mutex } from 'async-mutex';
 import { Storage } from '../config/storage.js';
 import { atomicWriteJSON, renameWithRetry } from '../utils/atomicFileWrite.js';
@@ -62,6 +73,33 @@ export interface ExtensionActivationResult {
     | 'workspace_override'
     | 'legacy_path_rule'
     | 'default';
+}
+
+interface TurnDrainWait {
+  deadline: number;
+  signal: AbortSignal;
+  checkOwnership?: () => void;
+}
+
+const turnDrainWait = new AsyncLocalStorage<TurnDrainWait>();
+
+/** Scope a caller's wait budget to mutations it owns. No setting or global queue is changed. */
+export function withExtensionTurnDrainWait<T>(
+  milliseconds: number,
+  signal: AbortSignal,
+  checkOwnership: (() => void) | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < 0 ||
+    milliseconds > 300_000
+  )
+    throw new Error('Invalid extension turn drain budget');
+  return turnDrainWait.run(
+    { deadline: performance.now() + milliseconds, signal, checkOwnership },
+    run,
+  );
 }
 
 export interface ExtensionStoreOptions {
@@ -975,12 +1013,64 @@ export class ExtensionStore {
     return await fsp.mkdtemp(path.join(stagingRoot, 'transaction-'));
   }
 
+  /** Reserve one verified generation atomically with all managed Store writes. */
+  async acquireTurnReader(
+    expectedGeneration: number,
+  ): Promise<() => Promise<void>> {
+    return this.withLock(async () => {
+      const snapshot = await this.readSnapshotUnlocked();
+      if (
+        (snapshot?.generation ?? 0) !== expectedGeneration ||
+        (await fsp.readdir(path.join(this.storeDir, 'transactions'))).length > 0
+      ) {
+        throw new Error('Extension store generation unavailable');
+      }
+      return createExtensionTurnReader(this.storeDir);
+    });
+  }
+
+  private async withWritableLock<T>(write: () => Promise<T>): Promise<T> {
+    const wait = turnDrainWait.getStore();
+    let retryDelay = 50;
+    let waiting = false;
+    for (;;) {
+      let busy: ExtensionStoreInUseError | undefined;
+      try {
+        return await this.withLock(async () => {
+          wait?.signal.throwIfAborted();
+          wait?.checkOwnership?.();
+          if (waiting && wait && performance.now() >= wait.deadline)
+            throw new ExtensionStoreInUseError();
+          try {
+            await assertNoExtensionTurnReaders(this.storeDir);
+          } catch (error) {
+            if (error instanceof ExtensionStoreInUseError) busy = error;
+            throw error;
+          }
+          // Only a pre-transaction refusal may be retried. Never replay a
+          // callback after an artifact swap, journal write or acknowledgement.
+          return write();
+        });
+      } catch (error) {
+        if (!wait || !busy || busy !== error) throw error;
+        waiting = true;
+        const remaining = wait.deadline - performance.now();
+        if (remaining <= 0) throw error;
+        await delay(Math.min(remaining, retryDelay), undefined, {
+          signal: wait.signal,
+          ref: false,
+        });
+        retryDelay = Math.min(500, retryDelay * 2);
+      }
+    }
+  }
+
   async commitArtifact(
     input: CommitExtensionArtifactInput,
   ): Promise<ExtensionStoreSnapshot> {
     assertIdentity(input.identity);
     this.assertArtifactPaths(input);
-    return await this.withLock(async () => {
+    return await this.withWritableLock(async () => {
       const snapshot =
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
       const transactionId = crypto.randomUUID();
@@ -1487,7 +1577,7 @@ export class ExtensionStore {
     update: (policy: ExtensionPolicy) => void,
   ): Promise<ExtensionStoreSnapshot> {
     assertIdentity(identity);
-    return await this.withLock(async () => {
+    return await this.withWritableLock(async () => {
       const snapshot =
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
       const policy = snapshot.extensions[identity.id];
@@ -1523,7 +1613,7 @@ export class ExtensionStore {
     if (identities.length === 0) {
       throw new Error('At least one extension identity is required.');
     }
-    return await this.withLock(async () => {
+    return await this.withWritableLock(async () => {
       const existing = await this.readSnapshotUnlocked();
       const snapshot = existing ?? this.emptySnapshot();
       const legacy = await this.readLegacyProjection();
@@ -1787,6 +1877,7 @@ export class ExtensionStore {
   private async writeSnapshotUnlocked(
     snapshot: ExtensionStoreSnapshot,
   ): Promise<void> {
+    await assertNoExtensionTurnReaders(this.storeDir);
     await this.prepareDirectories();
     const projection = this.buildLegacyProjection(snapshot);
     snapshot.legacyProjectionHash = projectionHash(projection);
