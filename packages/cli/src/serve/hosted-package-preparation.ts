@@ -21,6 +21,7 @@ import {
   ManagedPackageCompatibilityError,
 } from '@qwen-code/qwen-code-core/extension/managed-package.js';
 import { ManagedMcpRecipeError } from '@qwen-code/qwen-code-core/extension/managed-mcp-recipe.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   hostedHarnessContractMiddleware,
   type HostedHarnessContract,
@@ -28,6 +29,7 @@ import {
 
 export const HOSTED_PACKAGE_PREPARATION_PREFIX =
   '/internal/hosted-harness/v1/managed-packages';
+const debugLogger = createDebugLogger('HOSTED_PACKAGE_PREPARATION');
 const TTL_MS = 15 * 60_000;
 const DEADLINE_MS = 10 * 60_000;
 const MAX_PREPARING = 2;
@@ -159,7 +161,8 @@ export function registerHostedPackagePreparation(
     // Keep the reservation until every reader has closed and deletion succeeds.
     if (entry.readers > 0) return Promise.resolve();
     if (entry.removal) return entry.removal;
-    entry.removal = fs.rm(entry.directory, { recursive: true, force: true })
+    entry.removal = fs
+      .rm(entry.directory, { recursive: true, force: true })
       .then(() => {
         if (artifacts.get(id) === entry) {
           artifacts.delete(id);
@@ -172,7 +175,7 @@ export function registerHostedPackagePreparation(
     return entry.removal;
   };
   const reportCleanupFailure = (error: unknown) => {
-    console.error('Managed package preparation cleanup failed.', error);
+    debugLogger.warn('Managed package preparation cleanup failed.', error);
   };
   const expire = async () => {
     for (const [id, entry] of artifacts)
@@ -373,7 +376,9 @@ export function registerHostedPackagePreparation(
         res.status(204).end();
       } catch (error) {
         reportCleanupFailure(error);
-        res.status(500).json({ code: 'managed_package_preparation_release_failed' });
+        res
+          .status(500)
+          .json({ code: 'managed_package_preparation_release_failed' });
       }
     },
   );
