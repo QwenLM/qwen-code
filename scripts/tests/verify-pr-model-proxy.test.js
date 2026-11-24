@@ -1061,63 +1061,143 @@ describe('local container recipe pins', () => {
       // program is parsed in full and every command must have a registered shape.
       const fragments = [];
       const foldContinuations = (text) => text.replace(/\\\r?\n[ \t]*/g, '');
+      const unquoteCommandToken = (token) => {
+        const cleaned = token.replaceAll('\\', '').replace(/["']/g, '');
+        const name = cleaned.split('/').at(-1) ?? '';
+        const obfuscated =
+          cleaned !== token || token.includes('/') || token.includes('\\');
+        return { name, obfuscated };
+      };
       const stripLeadingWrappers = (source) => {
         let current = source.trim();
-        for (let step = 0; step < 8; step += 1) {
-          const match =
-            /^(?:\\|["'])?(command|env|sudo|nohup|time|exec|nice|builtin)(?:["'])?(?=\s|$)/.exec(
-              current,
-            );
-          if (!match) break;
-          const wrapper = match[1];
-          let rest = current.slice(match[0].length).trimStart();
+        let wrapped = false;
+        const envAssign =
+          /^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]*)\s+/;
+        for (let step = 0; step < 12; step += 1) {
+          let previous;
+          do {
+            previous = current;
+            const next = current.replace(envAssign, '');
+            if (next !== current) {
+              wrapped = true;
+              current = next.trimStart();
+            }
+          } while (current !== previous);
+          const tokenMatch = /^[^\s;|&()]+/.exec(current);
+          if (!tokenMatch) break;
+          const { name: wrapper } = unquoteCommandToken(tokenMatch[0]);
+          if (
+            ![
+              'command',
+              'env',
+              'sudo',
+              'nohup',
+              'time',
+              'exec',
+              'nice',
+              'builtin',
+              'timeout',
+            ].includes(wrapper)
+          ) {
+            break;
+          }
+          let rest = current.slice(tokenMatch[0].length).trimStart();
           if (wrapper === 'command') {
             if (/^-[vV]\b/.test(rest)) break;
             rest = rest.replace(/^(?:-[p]+\s+|--\s+)+/, '');
           } else if (wrapper === 'env') {
-            let previous;
+            let prev;
             do {
-              previous = rest;
+              prev = rest;
               rest = rest.replace(
-                /^(?:-[i0S]\s+|-u\s+\S+\s+|--\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)/,
+                /^(?:-[i0S]\s+|-u\s+\S+\s+|-u\S+\s+|--unset=\S+\s+|--\s+|[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]*)\s+)/,
                 '',
               );
-            } while (rest !== previous);
+            } while (rest !== prev);
           } else if (wrapper === 'sudo') {
-            let previous;
+            let prev;
             do {
-              previous = rest;
+              prev = rest;
               rest = rest.replace(
-                /^(?:-[nEHkKbsv]\s+|-[ugC]\s+\S+\s+|--\s+)/,
+                /^(?:-[nEHkKbsv]+\s+|-[ugC]\s+\S+\s+|--\s+)/,
                 '',
               );
-            } while (rest !== previous);
+            } while (rest !== prev);
           } else if (wrapper === 'nice') {
-            rest = rest.replace(/^(?:-n\s+-?\d+\s+|-\d+\s+|--\s+)/, '');
+            let prev;
+            do {
+              prev = rest;
+              rest = rest.replace(
+                /^(?:-n\s+-?\d+\s+|-n-?\d+\s+|-\d+\s+|--\s+)/,
+                '',
+              );
+            } while (rest !== prev);
           } else if (wrapper === 'time') {
-            rest = rest.replace(/^(?:-p\s+|--\s+)/, '');
+            let prev;
+            do {
+              prev = rest;
+              rest = rest.replace(/^(?:-p\s+|--\s+)/, '');
+            } while (rest !== prev);
           } else if (wrapper === 'exec') {
-            rest = rest.replace(/^(?:-[cl]\s+|-a\s+\S+\s+|--\s+)/, '');
+            let prev;
+            do {
+              prev = rest;
+              rest = rest.replace(/^(?:-[cl]+\s+|-a\s+\S+\s+|--\s+)/, '');
+            } while (rest !== prev);
+          } else if (wrapper === 'nohup') {
+            rest = rest.replace(/^--\s+/, '');
+          } else if (wrapper === 'timeout') {
+            let prev;
+            do {
+              prev = rest;
+              rest = rest.replace(
+                /^(?:--preserve-status\s+|--foreground\s+|--kill-after=\S+\s+|--signal=\S+\s+|-[sk]\s+\S+\s+|--\s+)/,
+                '',
+              );
+            } while (rest !== prev);
+            rest = rest.replace(/^\S+\s+/, '');
           }
           if (!rest || rest === current) break;
+          wrapped = true;
           current = rest;
         }
-        return current;
+        return { text: current, wrapped };
       };
-      const isDangerousCommandText = (source) => {
-        const stripped = stripLeadingWrappers(source);
-        return (
-          (/^gh\s+api\b/.test(stripped) &&
-            /(?:^|\s)(?:-X\S*|--method(?:=|\s)\S*|-f\b|-F\b|--field(?:=|\s)|--raw-field(?:=|\s)|--input(?:=|\s))/.test(
-              stripped,
-            )) ||
-          /^gh\s+pr\s+(?:merge|close|edit|comment|review|ready|reopen|create|checkout)\b/.test(
-            stripped,
-          ) ||
-          /^make\s+(?!this\b|the\b|a\b|an\b|it\b|sure\b|room\b)\S+/.test(
-            stripped,
-          )
-        );
+      const isDangerousCommandText = (source, { rawLine = false } = {}) => {
+        const { text: stripped, wrapped } = stripLeadingWrappers(source);
+        if (
+          /^(?:[^\s;|&()]*\$\([^)]*\))/.test(stripped) ||
+          (!rawLine && /^(?:[^\s;|&()]*`[^`]+`)/.test(stripped))
+        ) {
+          return true;
+        }
+        const headToken = /^[^\s;|&()]+/.exec(stripped)?.[0];
+        if (!headToken) return false;
+        const rest = stripped.slice(headToken.length).trimStart();
+        const { name, obfuscated } = unquoteCommandToken(headToken);
+        if (name === 'gh') {
+          if (!rest && !wrapped && /^~\/\.config\/gh$/.test(headToken)) {
+            return false;
+          }
+          if (wrapped || obfuscated) return true;
+          if (!rest) return false;
+          if (/^api(?:\s|$)/.test(rest)) {
+            return /(?:^|\s)(?:-X\S*|--method(?:=|\s)\S*|-[fF]\S*|--field(?:=|\s)|--raw-field(?:=|\s)|--input(?:=|\s))/.test(
+              rest,
+            );
+          }
+          if (/^pr\s+view(?:\s|$)/.test(rest)) return false;
+          if (/^auth\s+status(?:\s|$)/.test(rest)) return false;
+          return true;
+        }
+        if (name === 'make') {
+          if (wrapped || obfuscated) return true;
+          if (!rest) return !rawLine;
+          return !/^(?:this|the|a|an|it|sure|room|sense|both|up|out|use|no|any|one|two|progress|for|of|in|to|from|that|these|those|each|every|all|some|more|less|such|new|old|its|their|your|our|my)\b/i.test(
+            rest,
+          );
+        }
+        return false;
       };
       const heredocDeclarations = (header) =>
         [
@@ -1178,18 +1258,23 @@ describe('local container recipe pins', () => {
           transcriptBodies.push(body);
           continue;
         }
-        const foldedBody = foldContinuations(body).trim();
+        const foldedLines = foldContinuations(body)
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line !== '' && !line.startsWith('#'));
         const textHelperExample =
           language === 'text' &&
-          /^node\s+(?:-|["']?(?:\/|<|\$)|\S+\.[cm]?js(?=\s|$))/.test(
-            foldedBody,
+          foldedLines.some((line) =>
+            /^node\s+(?:-|["']?(?:\/|<|\$)|\S+\.[cm]?js(?=\s|$))/.test(line),
           );
         const textShellExample =
           language === 'text' &&
-          (/^(?:(?:curl|wget|ssh|scp|rsync|awk|sed|find|xargs|tar|unzip|pip\d?|brew|open|osascript|powershell|pwsh|cmd|wsl|kubectl|helm|terraform|ansible|vagrant|qemu-system-x86_64)\b|npm\s+(?:install|exec|run|dlx)\b|npx\s+\S+|git\s+(?:clone|submodule|fetch|pull|push|remote|config|apply|am|rebase|reset|clean|add|commit|tag|branch|merge|cherry-pick|revert|stash|restore|switch)\b|make\s+-|node\s+-[epr]\b|ls\s*;)/.test(
-            foldedBody,
-          ) ||
-            isDangerousCommandText(foldedBody));
+          foldedLines.some(
+            (line) =>
+              /^(?:(?:curl|wget|ssh|scp|rsync|awk|sed|find|xargs|tar|unzip|pip\d?|brew|open|osascript|powershell|pwsh|cmd|wsl|kubectl|helm|terraform|ansible|vagrant|qemu-system-x86_64)\b|npm\s+(?:install|exec|run|dlx)\b|npx\s+\S+|git\s+(?:clone|submodule|fetch|pull|push|remote|config|apply|am|rebase|reset|clean|add|commit|tag|branch|merge|cherry-pick|revert|stash|restore|switch)\b|make\s+-|node\s+-[epr]\b|ls\s*;)/.test(
+                line,
+              ) || isDangerousCommandText(line),
+          );
         if (
           !['bash', 'sh', 'shell'].includes(language) &&
           !textHelperExample &&
@@ -1577,7 +1662,7 @@ describe('local container recipe pins', () => {
       ]);
       const executableBoundary = async (source, { rawLine = false } = {}) => {
         const text = foldContinuations(source).trim();
-        if (isDangerousCommandText(text)) return true;
+        if (isDangerousCommandText(text, { rawLine })) return true;
         const executionWrappers = new Set([
           'command',
           'env',
@@ -3160,7 +3245,32 @@ describe('local container recipe pins', () => {
       'gh pr merge <n> --squash --delete-branch',
       'gh api --method DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>',
       'gh api -XDELETE repos/<owner>/<repo>/issues/<n>/comments/<id>',
+      'gh api repos/<owner>/<repo> -fbody=hi',
+      'gh pr --repo <owner>/<repo> merge <n>',
+      'gh --repo <owner>/<repo> pr merge <n>',
+      'gh issue comment <n> --body pwned',
+      'gh workflow run ci.yml',
+      '/usr/bin/gh pr merge <n>',
+      './gh pr merge <n>',
+      "'gh' pr merge <n>",
+      '\\gh pr merge <n>',
+      '$(which gh) pr merge <n>',
       'command gh pr merge <n> --squash',
+      'c\\ommand gh pr merge <n> --squash',
+      'timeout 10 gh pr merge <n> --squash',
+      'FOO=1 gh pr merge <n> --squash',
+      'env -uFOO gh pr merge <n> --squash',
+      'env FOO="a b" gh pr merge <n> --squash',
+      '/usr/bin/env gh pr merge <n> --squash',
+      'nice -n 5 -- gh pr merge <n> --squash',
+      'time -p -- gh pr merge <n> --squash',
+      'exec -c -a foo gh pr merge <n> --squash',
+      'nohup -- gh pr merge <n> --squash',
+      '# comment line\ngh pr merge <n> --squash',
+      '/usr/bin/make host-rule',
+      "'make' host-rule",
+      '\\make host-rule',
+      'make',
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(
@@ -3174,10 +3284,30 @@ describe('local container recipe pins', () => {
       '`gh api -X DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
       '`gh api --method DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
       '`gh api -XDELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
+      '`gh api repos/<owner>/<repo> -fbody=hi`',
+      '`gh api repos/<owner>/<repo> -Fbody=hi`',
+      '`gh pr --repo <owner>/<repo> merge <n>`',
+      '`gh pr -R <owner>/<repo> merge <n>`',
+      '`gh issue comment <n> --body pwned`',
+      '`gh pr lock <n>`',
+      '`gh workflow run ci.yml`',
+      '`/usr/bin/gh pr merge <n>`',
+      '`./gh pr merge <n>`',
+      "`'gh' pr merge <n>`",
+      '`"gh" api --method DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
+      '`\\gh pr merge <n>`',
+      '`$(which gh) pr merge <n>`',
       '`command gh pr merge <n> --squash`',
+      '`c\\ommand gh pr merge <n> --squash`',
+      '`timeout 10 gh pr merge <n> --squash`',
       '`env FOO=1 gh pr merge <n> --squash`',
       '`sudo -n gh api --method=DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>`',
       '`make host-rule`',
+      '`/usr/bin/make host-rule`',
+      '`/usr/bin/make`',
+      "`'make' host-rule`",
+      "`'make'`",
+      '`\\make host-rule`',
       '`command make host-rule`',
     ]) {
       expect(
@@ -3190,10 +3320,20 @@ describe('local container recipe pins', () => {
       'gh api -X DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>',
       'gh api --method DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>',
       'gh api -XDELETE repos/<owner>/<repo>/issues/<n>/comments/<id>',
+      'gh api repos/<owner>/<repo> -fbody=hi',
+      'gh pr --repo <owner>/<repo> merge <n>',
+      'gh issue comment <n> --body pwned',
+      '/usr/bin/gh pr merge <n>',
+      "'gh' pr merge <n>",
+      '\\gh pr merge <n>',
+      '$(which gh) pr merge <n>',
       'command gh pr merge <n> --squash',
+      'c\\ommand gh pr merge <n> --squash',
+      'timeout 10 gh pr merge <n> --squash',
       'env FOO=1 gh pr merge <n> --squash',
       'sudo -n gh api --method=DELETE repos/<owner>/<repo>/issues/<n>/comments/<id>',
       'make host-rule',
+      '/usr/bin/make host-rule',
       'command make host-rule',
     ]) {
       expect(

@@ -709,7 +709,13 @@ export function parseArgs(argv) {
       options.contextOut,
       options.stateRoot,
     ].some((value) => value !== null);
-    if (options.requireIsolation && (coordinateOnly || options.trustPrHead)) {
+    if (
+      options.requireIsolation &&
+      (coordinateOnly ||
+        options.trustPrHead ||
+        options.localOwner ||
+        options.sponsored)
+    ) {
       return {
         error:
           '--execution and approval options apply only to coordinate prepare, not --require-isolation',
@@ -963,8 +969,18 @@ export function gitStatusArgs(root) {
   ];
 }
 
-function runGit(args) {
-  return run('git', [...localFilterOverrides(), ...GIT_HARDENING, ...args]);
+function runGit(args, root = null) {
+  const overrides = root ? localFilterOverrides(root) : localFilterOverrides();
+  return run('git', [...overrides, ...GIT_HARDENING, ...args]);
+}
+
+const MAX_INFO_EXCLUDE_BYTES = 1024 * 1024;
+
+function singleLineOutput(result) {
+  if (result.status !== 0) return null;
+  const trimmed = (result.stdout ?? '').replace(/\r?\n$/, '');
+  if (!trimmed || /[\r\n]/.test(trimmed)) return null;
+  return trimmed;
 }
 
 /**
@@ -974,36 +990,52 @@ function runGit(args) {
  * file, so the gate refuses it instead of reading a steered status.
  */
 export function inspectInfoExclude(root) {
-  let resolved = runGit([
-    '-C',
+  const resolved = runGit(
+    ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
     root,
-    'rev-parse',
-    '--path-format=absolute',
-    '--git-path',
-    'info/exclude',
-  ]);
-  if (resolved.status !== 0 || resolved.stdout.trim() === '') {
-    const fallback = runGit([
-      '-C',
+  );
+  let commonDir = singleLineOutput(resolved);
+  if (!commonDir || !isAbsolute(commonDir)) {
+    // Older git (< 2.31) either exits non-zero or prints two lines
+    // ("--path-format=absolute\n.git") with exit 0; retry without
+    // --path-format and resolve relative output against root.
+    const fallback = runGit(
+      ['-C', root, 'rev-parse', '--git-common-dir'],
       root,
-      'rev-parse',
-      '--git-path',
-      'info/exclude',
-    ]);
-    if (fallback.status !== 0 || fallback.stdout.trim() === '') {
+    );
+    const raw = singleLineOutput(fallback);
+    if (!raw) {
       throw new Error(
         (fallback.stderr || resolved.stderr || '').trim() ||
-          'could not resolve git info/exclude',
+          'could not resolve git common dir for info/exclude',
       );
     }
-    const raw = fallback.stdout.trim();
-    resolved = {
-      ...fallback,
-      stdout: isAbsolute(raw) ? raw : resolve(root, raw),
-    };
+    commonDir = isAbsolute(raw) ? raw : resolve(root, raw);
   }
-  const path = resolved.stdout.trim();
-  if (!existsSync(path)) return { path, hostile: false };
+  const infoDir = join(commonDir, 'info');
+  const path = join(infoDir, 'exclude');
+  try {
+    const dirStat = lstatSync(infoDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      throw new Error(`${infoDir} must be a real directory`);
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return { path, hostile: false };
+    throw error;
+  }
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { path, hostile: false };
+    throw error;
+  }
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new Error(`${path} must be a regular file`);
+  }
+  if (st.size > MAX_INFO_EXCLUDE_BYTES) {
+    throw new Error(`${path} exceeds ${MAX_INFO_EXCLUDE_BYTES} bytes`);
+  }
   const hostile = readFileSync(path, 'utf8')
     .split('\n')
     .some((line) => {
@@ -1018,7 +1050,7 @@ export function hasHostileInfoExclude(root) {
 }
 
 function exactCheckoutError(root, context) {
-  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
+  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD'], root);
   if (treeHead.status !== 0) return 'could not read HEAD in this clone';
   if (treeHead.stdout.trim() !== context.head) {
     return `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`;
@@ -1052,7 +1084,7 @@ function exactCheckoutError(root, context) {
   // git status trusts the index: skip-worktree / assume-unchanged entries
   // (a sparse checkout sets them en masse) hide tracked divergence from it,
   // so refuse anything that is not a plain cached 'H' entry.
-  const flagged = runGit(['-C', root, 'ls-files', '-v']);
+  const flagged = runGit(['-C', root, 'ls-files', '-v'], root);
   if (flagged.status !== 0) {
     const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
     return `could not read the index flags: ${detail}`;
@@ -1511,7 +1543,12 @@ function main(argv) {
     return fail(3, 'not inside a git worktree — run this from the clone');
   }
   const root = toplevel.stdout.trim();
-  const rootFilterOverrides = localFilterOverrides(root);
+  let rootFilterOverrides;
+  try {
+    rootFilterOverrides = localFilterOverrides(root);
+  } catch (error) {
+    return fail(3, error.message);
+  }
   const runGitRoot = (args) =>
     run('git', [...rootFilterOverrides, ...GIT_HARDENING, '-C', root, ...args]);
 
@@ -1563,7 +1600,12 @@ function main(argv) {
   // does not name. Checked before the artifact directory exists, so a refusal
   // leaves nothing behind. The same hardened check runs again after the last
   // network response, immediately before authority writes.
-  const initialTreeError = exactCheckoutError(root, context);
+  let initialTreeError;
+  try {
+    initialTreeError = exactCheckoutError(root, context);
+  } catch (error) {
+    return fail(3, error.message);
+  }
   if (initialTreeError) return fail(3, initialTreeError);
 
   let executionApproval = null;

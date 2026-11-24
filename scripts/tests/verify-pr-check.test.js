@@ -4621,5 +4621,25 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(providerUnrecorded.stdout).toMatch(
       /requires a host-held --execution-record/,
     );
+
+    // 8h. Attested mode:"vm" (without backend:"provider-vm") contradicts a
+    // non-provider-vm host --execution-record, symmetrically with mode:"waived".
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'vm',
+          by: 'wenshao',
+          reason: 'manual VM round',
+          attestation: 'nothing mounted, no host credentials',
+          approval:
+            'https://github.com/QwenLM/qwen-code/pull/17185#issuecomment-1',
+        }),
+        null,
+        {
+          coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+          executionRecord: boundRec,
+        },
+      ).errors.join('\n'),
+    ).toMatch(/boundary\.json mode vm contradicts a host --execution-record/);
   });
 });

@@ -1049,10 +1049,10 @@ export function checkBoundary(
   // A waived host round and an attested VM both run outside an observed
   // container boundary, so both need the maintainer's recorded approval.
   // The VM additionally records what the operator attested (nothing mounted).
-  if (parsed.mode === 'waived' && executionRecord) {
+  if ((parsed.mode === 'waived' || parsed.mode === 'vm') && executionRecord) {
     return {
       errors: [
-        'boundary.json mode waived contradicts a host --execution-record',
+        `boundary.json mode ${parsed.mode} contradicts a host --execution-record`,
       ],
     };
   }

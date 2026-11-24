@@ -37,6 +37,7 @@ import {
   detectIsolation,
   detectMandatoryEscalations,
   gitStatusArgs,
+  inspectInfoExclude,
   localFilterOverrides,
   parseArgs,
   parseRepo,
@@ -3990,7 +3991,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(existsSync(join(realpathSync(linked), 'tmp'))).toBe(false);
   });
 
-  it('falls back to rev-parse --git-path when git rejects --path-format=absolute', () => {
+  it('falls back to rev-parse --git-common-dir when git rejects --path-format=absolute', () => {
     const { dir, base, head } = makeRepo();
     const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
     const shimDir = makeTmpDir();
@@ -4000,18 +4001,20 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       `#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "--path-format=absolute" ]; then
+    if [ "\${FAKE_GIT_TWO_LINE_PATH_FORMAT:-}" = "1" ]; then
+      printf -- '--path-format=absolute\\n.git\\n'
+      exit 0
+    fi
     printf "error: unknown option 'path-format'\\n" >&2
     exit 129
   fi
 done
 if [ "\${FAKE_GIT_RELATIVE_EXCLUDE:-}" = "1" ]; then
-  prev=""
   for arg in "$@"; do
-    if [ "$prev" = "--git-path" ] && [ "$arg" = "info/exclude" ]; then
-      printf '.git/info/exclude\\n'
+    if [ "$arg" = "--git-common-dir" ]; then
+      printf '.git\\n'
       exit 0
     fi
-    prev="$arg"
   done
 fi
 exec ${JSON.stringify(realGit)} "$@"
@@ -4020,29 +4023,76 @@ exec ${JSON.stringify(realGit)} "$@"
     chmodSync(gitShim, 0o755);
 
     const baseEnv = installFakeGh(snapshotFor({ base, head }));
-    const oldGitEnv = {
-      ...baseEnv,
-      PATH: `${shimDir}:${baseEnv.PATH}`,
-      FAKE_GIT_RELATIVE_EXCLUDE: '1',
-    };
+    for (const twoLine of [false, true]) {
+      const oldGitEnv = {
+        ...baseEnv,
+        PATH: `${shimDir}:${baseEnv.PATH}`,
+        FAKE_GIT_RELATIVE_EXCLUDE: '1',
+        ...(twoLine ? { FAKE_GIT_TWO_LINE_PATH_FORMAT: '1' } : {}),
+      };
 
-    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
-    writeFileSync(
-      join(dir, '.git', 'info', 'exclude'),
-      '# default commented exclude\n',
-    );
-    const clean = runPrepare(dir, ['42', '--repo', REPO], oldGitEnv);
-    expect(clean.status, clean.stderr).toBe(0);
+      rmSync(join(dir, 'tmp'), { recursive: true, force: true });
+      mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+      writeFileSync(
+        join(dir, '.git', 'info', 'exclude'),
+        '# default commented exclude\n',
+      );
+      const clean = runPrepare(dir, ['42', '--repo', REPO], oldGitEnv);
+      expect(clean.status, clean.stderr).toBe(0);
 
-    rmSync(join(dir, 'tmp'), { recursive: true, force: true });
-    writeFileSync(join(dir, '.git', 'info', 'exclude'), 'hidden.ts\n');
-    const refused = runPrepare(dir, ['42', '--repo', REPO], oldGitEnv);
-    expect(refused.status).toBe(3);
-    expect(refused.stderr).toContain(
-      join(realpathSync(dir), '.git', 'info', 'exclude'),
+      rmSync(join(dir, 'tmp'), { recursive: true, force: true });
+      writeFileSync(join(dir, '.git', 'info', 'exclude'), 'hidden.ts\n');
+      const refused = runPrepare(dir, ['42', '--repo', REPO], oldGitEnv);
+      expect(refused.status).toBe(3);
+      expect(refused.stderr).toContain(
+        join(realpathSync(dir), '.git', 'info', 'exclude'),
+      );
+      expect(refused.stderr).not.toContain('unknown option');
+      expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+    }
+  });
+
+  it('hardens inspectInfoExclude against non-git cwd, symlinks, EACCES, and rejects coordinate flags on --require-isolation', () => {
+    expect(parseArgs(['--require-isolation', '--local-owner']).error).toMatch(
+      /coordinate prepare/,
     );
-    expect(refused.stderr).not.toContain('unknown option');
-    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+    expect(parseArgs(['--require-isolation', '--sponsored']).error).toMatch(
+      /coordinate prepare/,
+    );
+
+    const { dir } = makeRepo();
+    const excludePath = join(dir, '.git', 'info', 'exclude');
+    writeFileSync(excludePath, 'secret.ts\n');
+
+    // Works when process.cwd() is outside any git repository.
+    const outsideDir = makeTmpDir();
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(outsideDir);
+      expect(inspectInfoExclude(dir).hostile).toBe(true);
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    // Refuses a symlinked info/exclude instead of following it.
+    const decoy = join(makeTmpDir(), 'decoy');
+    writeFileSync(decoy, '# harmless\n');
+    rmSync(excludePath, { force: true });
+    symlinkSync(decoy, excludePath);
+    expect(() => inspectInfoExclude(dir)).toThrow(/regular file/);
+
+    // Fails closed on EACCES rather than treating unreadable .git/info as absent.
+    rmSync(excludePath, { force: true });
+    writeFileSync(excludePath, 'secret.ts\n');
+    if (arePermissionBitsEnforced()) {
+      const infoDir = join(dir, '.git', 'info');
+      chmodSync(infoDir, 0o000);
+      try {
+        expect(() => inspectInfoExclude(dir)).toThrow();
+      } finally {
+        chmodSync(infoDir, 0o700);
+      }
+    }
   });
 
   // git status trusts the index: skip-worktree / assume-unchanged entries
