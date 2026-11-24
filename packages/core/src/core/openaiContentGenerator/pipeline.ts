@@ -1486,6 +1486,9 @@ export class ContentGenerationPipeline {
       baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
         request.config.tools,
         this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+          this.contentGeneratorConfig,
+        ),
       );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's

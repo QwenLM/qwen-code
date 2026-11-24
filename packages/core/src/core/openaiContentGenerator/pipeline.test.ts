@@ -704,10 +704,26 @@ describe('ContentGenerationPipeline', () => {
       expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
         request.config!.tools,
         'auto',
+        false,
       );
       expect(createMock()).toHaveBeenCalledWith(
         expect.objectContaining({ tools: mockTools }),
         expect.objectContaining({ signal: undefined }),
+      );
+    });
+
+    it('opens undeclared object schemas for DashScope endpoints', async () => {
+      const request = userRequest('qwen4-max', {
+        tools: [{ functionDeclarations: [{ name: 'test-function' }] }],
+      });
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([]);
+
+      await executeWith({ baseUrl: DASHSCOPE_URL }, request);
+
+      expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
+        request.config!.tools,
+        'auto',
+        true,
       );
     });
 

@@ -202,6 +202,13 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  * - When the source schema can be validated locally, empty object declarations
  *   and string / array length limits at or above 1999 are dropped because
  *   grammar-based endpoints can turn them into invalid or rejected rules.
+ * - With `openUndeclaredObjects`, an object level that declares properties
+ *   but omits `additionalProperties` gets an explicit
+ *   `additionalProperties: true`. JSON Schema already treats the omission
+ *   as open, but some constrained decoders (DashScope qwen4-max) read it as
+ *   closed: the model then drops the keys the task needs, or repeats the
+ *   declared ones until the token limit. Levels whose source says `false`
+ *   are left closed, even where it is stripped above.
  * - Other constraints pass through untouched; client-side
  *   `validateToolParams` still enforces the full source schema, so the
  *   constraint is relaxed on the wire only.
@@ -211,6 +218,7 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
 export function relaxSchemaForFunctionCalling(
   schema: Record<string, unknown>,
   relaxGrammarConstraints = false,
+  openUndeclaredObjects = false,
 ): Record<string, unknown> {
   const relax = (obj: unknown): unknown => {
     if (typeof obj !== 'object' || obj === null) {
@@ -313,6 +321,18 @@ export function relaxSchemaForFunctionCalling(
         continue;
       }
       target[key] = relax(value);
+    }
+    if (
+      openUndeclaredObjects &&
+      canBeObject &&
+      typeof properties === 'object' &&
+      properties !== null &&
+      !Array.isArray(properties) &&
+      Object.keys(properties).length > 0 &&
+      !('additionalProperties' in source) &&
+      !('unevaluatedProperties' in source)
+    ) {
+      target['additionalProperties'] = true;
     }
     return target;
   };
