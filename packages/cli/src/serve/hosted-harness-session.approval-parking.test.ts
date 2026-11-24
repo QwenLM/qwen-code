@@ -57,6 +57,7 @@ describe('idle suspension', () => {
     prompt: unknown[] = [{ type: 'text', text: 'write notes' }],
     deadlineMs?: number,
     toolProfile = 'hosted-workspace-files/1',
+    definition: Record<string, unknown> = {},
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
@@ -66,6 +67,7 @@ describe('idle suspension', () => {
         toolProfile,
         approvalMode: 'default',
         approvalTimeoutMs: 60_000,
+        ...definition,
       })
       .expect(200);
     const clientId = created.body.clientId as string;
@@ -758,7 +760,7 @@ describe('idle suspension', () => {
   async function allowParkedApproval(
     server: Server,
     clientId: string,
-    loadFlags: Record<string, true>,
+    loadFlags: Record<string, unknown>,
   ): Promise<void> {
     await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
       timeout: 5000,
@@ -1856,6 +1858,144 @@ describe('idle suspension', () => {
     } finally {
       wait.mockRestore();
       state.approvalSelections.clear();
+    }
+  });
+
+  // #18149 Stage 3: a child Session's Turn is a coordinator-dispatched row
+  // like a root's. It runs without the live poll, so its certificate
+  // carries no approval revision.
+  const CHILD_DEFINITION = {
+    lineage: {
+      parentSessionId: '10f4e2c2-93e6-4c26-b24a-b7c8b0f56aa1',
+      rootSessionId: '10f4e2c2-93e6-4c26-b24a-b7c8b0f56aa1',
+      parentChildRunId: 'run-1',
+      depth: 1,
+    },
+  };
+
+  // A public child runs a public Shell profile and repeats it on every load.
+  it.each([
+    ['a lineage', 'hosted-workspace-files/1', {}],
+    [
+      'a public',
+      'hosted-workspace-shell/1',
+      {
+        toolProfile: 'hosted-workspace-shell/1',
+        publicChildAgentsVersion: 1,
+      },
+    ],
+  ])(
+    'parks %s child Session approval and resumes it through cold recovery',
+    async (_kind, toolProfile, publicChild) => {
+      state.wakeDispatch = true;
+      state.actionParking = true;
+      state.wakeStamps.length = 0;
+      mockApprovalTurn();
+      try {
+        const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+        const clientId = await promptApproval(
+          server,
+          undefined,
+          undefined,
+          toolProfile,
+          { ...CHILD_DEFINITION, ...publicChild },
+        );
+        await allowParkedApproval(server, clientId, {
+          driveRuntimeRecovery: true,
+          ...publicChild,
+        });
+        expect(state.wakeStamps[0]).toEqual({
+          pending: false,
+          dueAt: 0,
+          parkedTurn: { promptId: PROMPT_ID, wakeAt: expect.any(Number) },
+        });
+        expect(
+          (state.wakeStamps[0] as { parkedTurn: object }).parkedTurn,
+        ).not.toHaveProperty('approvalRevision');
+        expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(statsOf(server).parkRefusals).toEqual({});
+      } finally {
+        state.wakeDispatch = false;
+        state.actionParking = false;
+      }
+    },
+  );
+
+  it('takes a child Session approval over after its Harness dies in the wait', async () => {
+    mockApprovalTurn();
+    const wait = vi
+      .spyOn(HostedApprovalWaiters.prototype, 'wait')
+      .mockRejectedValueOnce(
+        new HostedToolRecoveryRequiredError('approval writer interrupted'),
+      );
+    try {
+      const original = await app(true);
+      const clientId = await promptApproval(
+        original,
+        undefined,
+        undefined,
+        undefined,
+        CHILD_DEFINITION,
+      );
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(original, clientId)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      await (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed.close();
+      wait.mockRestore();
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      await headers(
+        supertest(replacement).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(replacement, resumedClient)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+    } finally {
+      wait.mockRestore();
     }
   });
 

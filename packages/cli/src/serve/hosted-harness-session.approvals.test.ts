@@ -68,6 +68,7 @@ describe('Hosted Harness tool approvals', () => {
     pinned = true,
     terminal?: 'cancelled' | 'expired' | 'decided',
     timeoutMs = 60_000,
+    child = false,
   ) {
     const runtime = {
       bindingId: 'question-original-binding',
@@ -147,7 +148,18 @@ describe('Hosted Harness tool approvals', () => {
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        toolProfile: files,
+        ...(child
+          ? {
+              toolProfile: 'hosted-workspace-shell/1',
+              publicChildAgentsVersion: 1,
+              lineage: {
+                depth: 1,
+                parentSessionId: '10f4e2c2-93e6-4c26-b24a-b7c8b0f56aa1',
+                rootSessionId: '10f4e2c2-93e6-4c26-b24a-b7c8b0f56aa1',
+                parentChildRunId: 'run-1',
+              },
+            }
+          : { toolProfile: files }),
         approvalMode: 'yolo',
         approvalTimeoutMs: timeoutMs,
       })
@@ -229,7 +241,16 @@ describe('Hosted Harness tool approvals', () => {
         const loaded = await headers(
           supertest(replacement).post(`/session/${SESSION_ID}/load`),
         )
-          .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+          .send({
+            managedSessionStore: store(),
+            driveRuntimeRecovery: true,
+            ...(child
+              ? {
+                  toolProfile: 'hosted-workspace-shell/1',
+                  publicChildAgentsVersion: 1,
+                }
+              : {}),
+          })
           .expect(200);
         return (request: supertest.Test) =>
           headers(request).set(
@@ -308,6 +329,36 @@ describe('Hosted Harness tool approvals', () => {
       ).expect(204);
     },
   );
+
+  // Stage 3 pre-check (#18149): a direct public child's single question hands
+  // its mount back after cold recovery, as a root's does.
+  it('cold question recovery hands a child Session mount back while it waits', async () => {
+    const f = await parkedQuestion(true, undefined, 60_000, true);
+    const authorize = await f.load();
+    await waitFor(() => expect(f.calls).toEqual(['acquire', 'releaseMount']));
+    expect(state.model).not.toHaveBeenCalled();
+    await authorize(
+      supertest(f.replacement).post(
+        `/session/${SESSION_ID}/actions/${f.requestId}/resolve`,
+      ),
+    )
+      .send(questionResponse)
+      .expect(200);
+    await waitFor(async () => {
+      const status = await authorize(
+        supertest(f.replacement).get(`/session/${SESSION_ID}/status`),
+      );
+      expect(status.body).toMatchObject({
+        hasActivePrompt: false,
+        recoveryBlocked: false,
+      });
+    });
+    expect(f.calls).toEqual(['acquire', 'releaseMount', 'acquire', 'model']);
+    expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+    await authorize(
+      supertest(f.replacement).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+  });
 
   it.each(['cancelled', 'expired'] as const)(
     'cold question recovery settles %s without acquiring a Runtime',
