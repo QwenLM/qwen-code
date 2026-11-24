@@ -905,6 +905,58 @@ describe('LlmContentGenerator', () => {
     });
   });
 
+  it('handles case-insensitive audio/video MIME types, raw string entries, unknown nested fields, and non-string response.notes', async () => {
+    const functionResponse = await sentFunctionResponse(
+      [
+        {
+          inlineData: {
+            mimeType: ' VIDEO/WEBM ',
+            data: 'webmdata',
+            displayName: 'clip.webm',
+          },
+        },
+        {
+          fileData: {
+            mimeType: 'Audio/MP3',
+            fileUri: 'gs://bucket/a.mp3',
+          },
+        },
+        'legacy string note' as unknown as Part,
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'pngdata',
+            displayName: 'shot.png',
+            extraKey: 'must-not-leak',
+          } as Part['inlineData'],
+          fileData: {
+            mimeType: 'application/pdf',
+            fileUri: 'gs://bucket/doc.pdf',
+            displayName: 'doc.pdf',
+            extraKey: 'must-not-leak',
+          } as Part['fileData'],
+        },
+      ],
+      { output: { ok: true }, notes: ['existing-note'] },
+    );
+
+    expect(functionResponse.parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: 'pngdata' } },
+      {
+        fileData: {
+          fileUri: 'gs://bucket/doc.pdf',
+          mimeType: 'application/pdf',
+        },
+      },
+    ]);
+    expect(functionResponse.response).toEqual({
+      output: { ok: true },
+      notes: ['existing-note'],
+      _notes:
+        'Unsupported media type for Gemini: VIDEO/WEBM (clip.webm).\nUnsupported media type for Gemini: Audio/MP3.\nlegacy string note',
+    });
+  });
+
   // https://github.com/QwenLM/qwen-code/issues/9453
   //
   // The OpenAI Responses generator stashes an opaque reasoning-replay payload

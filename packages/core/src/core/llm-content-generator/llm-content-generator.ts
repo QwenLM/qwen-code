@@ -579,29 +579,43 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     // Gemini's FunctionResponsePart schema only permits `inlineData` and
-    // `fileData` — never `text`. Convert unsupported audio/video to notes and
-    // move all text entries (including compaction placeholders / disclosures)
-    // into `functionResponse.response` so no `text` field reaches the wire in
+    // `fileData` (oneof data, without displayName or unknown fields) — never
+    // `text`. Convert unsupported audio/video to notes and move all text
+    // entries (including compaction placeholders / disclosures) into
+    // `functionResponse.response` so no invalid field reaches the wire in
     // `function_response.parts`.
     if (result.functionResponse?.parts) {
       const retainedParts: FunctionResponsePart[] = [];
       const extractedTexts: string[] = [];
 
-      for (const nestedPart of result.functionResponse.parts as Part[]) {
+      for (const nestedPart of result.functionResponse.parts as ReadonlyArray<
+        Part | string
+      >) {
+        if (typeof nestedPart === 'string') {
+          if (nestedPart.length > 0) extractedTexts.push(nestedPart);
+          continue;
+        }
         const converted = this.convertUnsupportedMediaToText(nestedPart);
         if (typeof converted.text === 'string' && converted.text.length > 0) {
           extractedTexts.push(converted.text);
         }
-        if (converted.inlineData || converted.fileData) {
-          const stripped = this.stripPartFields(converted);
-          const sanitizedPart: FunctionResponsePart = {};
-          if (stripped.inlineData) {
-            sanitizedPart.inlineData = stripped.inlineData;
-          }
-          if (stripped.fileData) {
-            sanitizedPart.fileData = stripped.fileData;
-          }
-          retainedParts.push(sanitizedPart);
+        if (converted.inlineData) {
+          const { mimeType, data } = converted.inlineData;
+          retainedParts.push({
+            inlineData: {
+              ...(mimeType !== undefined ? { mimeType } : {}),
+              ...(data !== undefined ? { data } : {}),
+            },
+          });
+        }
+        if (converted.fileData) {
+          const { fileUri, mimeType } = converted.fileData;
+          retainedParts.push({
+            fileData: {
+              ...(fileUri !== undefined ? { fileUri } : {}),
+              ...(mimeType !== undefined ? { mimeType } : {}),
+            },
+          });
         }
       }
 
@@ -628,12 +642,19 @@ export class LlmContentGenerator implements ContentGenerator {
             output: joinedText,
           };
         } else {
-          const existingNotes = existingResponse['notes'];
+          let noteKey = 'notes';
+          while (
+            existingResponse[noteKey] !== undefined &&
+            typeof existingResponse[noteKey] !== 'string'
+          ) {
+            noteKey = `_${noteKey}`;
+          }
+          const existingNote = existingResponse[noteKey];
           nextFunctionResponse.response = {
             ...existingResponse,
-            notes:
-              typeof existingNotes === 'string' && existingNotes
-                ? `${existingNotes}\n${joinedText}`
+            [noteKey]:
+              typeof existingNote === 'string' && existingNote
+                ? `${existingNote}\n${joinedText}`
                 : joinedText,
           };
         }
@@ -651,12 +672,14 @@ export class LlmContentGenerator implements ContentGenerator {
   private convertUnsupportedMediaToText(part: Part): Part {
     if (typeof part === 'string') return part;
 
-    const inlineMimeType = part.inlineData?.mimeType || '';
-    const fileMimeType = part.fileData?.mimeType || '';
+    const inlineMimeType = (part.inlineData?.mimeType || '').trim();
+    const fileMimeType = (part.fileData?.mimeType || '').trim();
+    const normalizedInlineMime = inlineMimeType.toLowerCase();
+    const normalizedFileMime = fileMimeType.toLowerCase();
 
     if (
-      inlineMimeType.startsWith('audio/') ||
-      inlineMimeType.startsWith('video/')
+      normalizedInlineMime.startsWith('audio/') ||
+      normalizedInlineMime.startsWith('video/')
     ) {
       const displayName = (part.inlineData as { displayName?: string })
         ?.displayName;
@@ -667,8 +690,8 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     if (
-      fileMimeType.startsWith('audio/') ||
-      fileMimeType.startsWith('video/')
+      normalizedFileMime.startsWith('audio/') ||
+      normalizedFileMime.startsWith('video/')
     ) {
       const displayName = (part.fileData as { displayName?: string })
         ?.displayName;
