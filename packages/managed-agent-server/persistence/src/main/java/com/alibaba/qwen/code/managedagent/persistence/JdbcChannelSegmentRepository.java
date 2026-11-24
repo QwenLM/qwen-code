@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -43,8 +44,6 @@ public final class JdbcChannelSegmentRepository
         ChannelStoreSupport.requireId(tenantId, "tenantId");
         ChannelStoreSupport.requireId(channelInstanceId, "channelInstanceId");
         ChannelStoreSupport.requireId(deliveryId, "deliveryId");
-        String key = JdbcChannelDeliveryRepository.deliveryKey(tenantId,
-                channelInstanceId, deliveryId);
         for (SegmentLedger segment : segments) {
             ChannelStoreSupport.requireId(segment.segmentId(), "segmentId");
             if (segment.ordinal() < 0) {
@@ -60,7 +59,7 @@ public final class JdbcChannelSegmentRepository
         // construction at the 64-segment bound (#16818 B). Cutting wire round
         // trips as well would need the driver's rewriteBatchedStatements.
         int[] inserted = jdbc.batchUpdate(
-                "INSERT IGNORE INTO ma_channel_segment (delivery_key,"
+                "INSERT IGNORE INTO ma_channel_segment (delivery_id,"
                         + " tenant_id, channel_id, segment_id, segment_ordinal,"
                         + " provider_receipt_json, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -69,7 +68,7 @@ public final class JdbcChannelSegmentRepository
                     public void setValues(PreparedStatement statement, int index)
                             throws SQLException {
                         SegmentLedger segment = segments.get(index);
-                        statement.setString(1, key);
+                        statement.setString(1, deliveryId);
                         statement.setString(2, tenantId);
                         statement.setString(3, channelInstanceId);
                         statement.setString(4, segment.segmentId());
@@ -100,15 +99,18 @@ public final class JdbcChannelSegmentRepository
         }
         if (!backfill.isEmpty()) {
             jdbc.batchUpdate("UPDATE ma_channel_segment SET provider_receipt_json = ?,"
-                            + " gmt_modified = ? WHERE delivery_key = ?"
+                            + " gmt_modified = ? WHERE delivery_id = ?"
+                            + " AND tenant_id = ? AND channel_id = ?"
                             + " AND segment_ordinal = ? AND provider_receipt_json IS NULL",
                     backfill, backfill.size(),
                     (statement, segment) -> {
                         statement.setString(1, JdbcChannelDeliveryRepository
                                 .receiptJson(segment.providerReceipt()));
                         statement.setLong(2, now);
-                        statement.setString(3, key);
-                        statement.setInt(4, segment.ordinal());
+                        statement.setString(3, deliveryId);
+                        statement.setString(4, tenantId);
+                        statement.setString(5, channelInstanceId);
+                        statement.setInt(6, segment.ordinal());
                     });
         }
     }
@@ -123,22 +125,25 @@ public final class JdbcChannelSegmentRepository
         if (ordinal < 0) {
             throw new IllegalArgumentException("ordinal must not be negative");
         }
-        String key = JdbcChannelDeliveryRepository.deliveryKey(tenantId,
-                channelInstanceId, deliveryId);
-        return receiptOnce(key, ordinal, providerReceipt);
+        return receiptOnce(tenantId, channelInstanceId, deliveryId, ordinal,
+                providerReceipt);
     }
 
-    private boolean receiptOnce(String key, int ordinal, String providerReceipt) {
-        return receiptOnce(key, ordinal, providerReceipt, databaseNow());
+    private boolean receiptOnce(String tenantId, String channelInstanceId,
+            String deliveryId, int ordinal, String providerReceipt) {
+        return receiptOnce(tenantId, channelInstanceId, deliveryId, ordinal,
+                providerReceipt, databaseNow());
     }
 
-    private boolean receiptOnce(String key, int ordinal, String providerReceipt,
-            long now) {
+    private boolean receiptOnce(String tenantId, String channelInstanceId,
+            String deliveryId, int ordinal, String providerReceipt, long now) {
         return jdbc.update("UPDATE ma_channel_segment SET provider_receipt_json = ?,"
-                        + " gmt_modified = ? WHERE delivery_key = ?"
+                        + " gmt_modified = ? WHERE delivery_id = ?"
+                        + " AND tenant_id = ? AND channel_id = ?"
                         + " AND segment_ordinal = ? AND provider_receipt_json IS NULL",
                 JdbcChannelDeliveryRepository.receiptJson(providerReceipt),
-                now, key, ordinal) == 1;
+                now, deliveryId, tenantId,
+                channelInstanceId, ordinal) == 1;
     }
 
     @Override
@@ -147,12 +152,12 @@ public final class JdbcChannelSegmentRepository
         ChannelStoreSupport.requireId(tenantId, "tenantId");
         ChannelStoreSupport.requireId(channelInstanceId, "channelInstanceId");
         ChannelStoreSupport.requireId(deliveryId, "deliveryId");
-        String key = JdbcChannelDeliveryRepository.deliveryKey(tenantId,
-                channelInstanceId, deliveryId);
         return jdbc.query("SELECT segment_id, segment_ordinal, provider_receipt_json"
-                        + " FROM ma_channel_segment WHERE delivery_key = ?"
+                        + " FROM ma_channel_segment WHERE delivery_id = ?"
+                        + " AND tenant_id = ? AND channel_id = ?"
                         + " ORDER BY segment_ordinal",
-                MAPPER, key);
+                MAPPER, deliveryId, tenantId,
+                channelInstanceId);
     }
 
     @Override
@@ -164,33 +169,37 @@ public final class JdbcChannelSegmentRepository
         if (deliveryIds.isEmpty()) {
             return byDelivery;
         }
-        Map<String, String> keyToDelivery = new LinkedHashMap<>();
         for (String deliveryId : deliveryIds) {
             ChannelStoreSupport.requireId(deliveryId, "deliveryId");
-            keyToDelivery.put(JdbcChannelDeliveryRepository.deliveryKey(
-                    tenantId, channelInstanceId, deliveryId), deliveryId);
             byDelivery.put(deliveryId, new ArrayList<>());
         }
         // One query for the whole page instead of a segment query per delivery
         // row (#16818 B). Every requested deliveryId keeps an entry, empty
         // when it holds no segments.
         String placeholders = String.join(",",
-                Collections.nCopies(keyToDelivery.size(), "?"));
-        return jdbc.query("SELECT delivery_key, segment_id, segment_ordinal,"
+                Collections.nCopies(byDelivery.size(), "?"));
+        List<Object> arguments = new ArrayList<>();
+        for (String deliveryId : byDelivery.keySet()) {
+            arguments.add(deliveryId);
+        }
+        arguments.add(tenantId);
+        arguments.add(channelInstanceId);
+        return jdbc.query("SELECT delivery_id, segment_id, segment_ordinal,"
                         + " provider_receipt_json FROM ma_channel_segment"
-                        + " WHERE delivery_key IN (" + placeholders + ")"
-                        + " ORDER BY delivery_key, segment_ordinal",
+                        + " WHERE delivery_id IN (" + placeholders + ")"
+                        + " AND tenant_id = ? AND channel_id = ?"
+                        + " ORDER BY delivery_id, segment_ordinal",
                 resultSet -> {
                     while (resultSet.next()) {
                         // The same mapper list uses, so the two read paths can
                         // never publish different segments for one delivery.
-                        byDelivery.get(keyToDelivery.get(
-                                resultSet.getString("delivery_key")))
+                        byDelivery.get(ManagedSchemaRows.identity(
+                                resultSet, "delivery_id"))
                                 .add(MAPPER.mapRow(resultSet, 0));
                     }
                     return byDelivery;
                 },
-                keyToDelivery.keySet().toArray());
+                arguments.toArray());
     }
 
     private long databaseNow() {

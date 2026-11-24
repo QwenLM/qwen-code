@@ -791,6 +791,7 @@ interface SessionEntry {
   recordingDegraded: boolean;
   /** Set synchronously while agent-owned state and its writer lease close. */
   closing: boolean;
+  deleteCloseUnconfirmed?: boolean;
   /** Tail of cwd changes that direct shell commands must not overtake. */
   cwdChangeQueue: Promise<void>;
   /** Odd during a physical cd; advances again on settlement. */
@@ -4041,13 +4042,24 @@ export function createSessionControlPlane(
     if (owner) drainQuarantinedChannel(owner);
   }
 
+  function assertSessionAdmitsSideRequest(entry: SessionEntry): void {
+    if (isClosingOrAuthorizingClose(entry)) {
+      throw new SessionNotFoundError(
+        entry.sessionId,
+        'The session is closing; retry after close completes',
+        'session_closing',
+      );
+    }
+    assertChannelAdmitsPrompts(entry);
+  }
+
   /**
    * Admit a request for a Session that is not a turn but still starts work in
    * the child, the way a prompt is admitted, and count it until it answers so
    * idle cleanup and quarantine drains do not close the Session under it.
    */
   function beginSideRequest(entry: SessionEntry): () => void {
-    assertChannelAdmitsPrompts(entry);
+    assertSessionAdmitsSideRequest(entry);
     entry.sideRequestCount += 1;
     let ended = false;
     return () => {
@@ -10130,7 +10142,8 @@ export function createSessionControlPlane(
       assertRuntimeNotStopping();
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
-    if (entry.closing) {
+    const forDeletion = closeOpts?.forDeletion === true;
+    if (entry.closing && !(forDeletion && entry.deleteCloseUnconfirmed)) {
       throw new SessionNotFoundError(
         sessionId,
         'The session is already closing',
@@ -10165,6 +10178,7 @@ export function createSessionControlPlane(
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
     }
     entry.closing = true;
+    delete entry.deleteCloseUnconfirmed;
     // DAEMON-005: remember the deferred-close stamp before clearing it. If the
     // child refuses the close, the session is still alive and may need the
     // grace window again once the prompt settles and no subscriber remains.
@@ -10217,19 +10231,19 @@ export function createSessionControlPlane(
         'closeSession',
         {
           throwOnFailure: true,
-          requireFlush: closeOpts?.requireAgentClose === true,
+          requireFlush: forDeletion || closeOpts?.requireAgentClose === true,
           onlyIfUnheld: requireIdle,
           cancelReason:
             closeOpts?.cause === 'workspace_runtime_stop'
               ? undefined
               : closeOpts?.cancelReason,
-          ...(closeOpts?.agentCloseTimeoutMs !== undefined
+          ...(!forDeletion && closeOpts?.agentCloseTimeoutMs !== undefined
             ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
             : {}),
         },
       );
       if (
-        closeOpts?.cause === 'workspace_runtime_stop' &&
+        (forDeletion || closeOpts?.cause === 'workspace_runtime_stop') &&
         !agentSessionClosed
       ) {
         throw new RequestError(
@@ -10255,6 +10269,8 @@ export function createSessionControlPlane(
         if (deferredCloseStamp !== null) {
           entry.promptSettledAt = deferredCloseStamp;
         }
+      } else if (forDeletion) {
+        entry.deleteCloseUnconfirmed = true;
       } else if (ci) {
         await harness.killChannelWithLog(
           ci.harness,
@@ -13779,7 +13795,16 @@ export function createSessionControlPlane(
     },
 
     async closeSession(sessionId, context, closeOpts) {
-      return closeSessionImpl(sessionId, context, closeOpts);
+      const close = closeSessionImpl(sessionId, context, closeOpts);
+      // Keep processing a late acknowledgement while blocking new work for
+      // this session. Deleting after a timeout requires a fresh request.
+      return closeOpts?.forDeletion
+        ? withTimeout(
+            close,
+            closeOpts.agentCloseTimeoutMs ?? initTimeoutMs,
+            'closeSession',
+          )
+        : close;
     },
 
     async ensureDefaultSessionPersisted(sessionId) {
@@ -16572,8 +16597,7 @@ export function createSessionControlPlane(
       const endSideRequest = beginSideRequest(entry);
       return entry.promptQueue.then(async () => {
         try {
-          // A quarantine that began while this waited still refuses it.
-          assertChannelAdmitsPrompts(entry);
+          assertSessionAdmitsSideRequest(entry);
           return await launchForkAgent();
         } finally {
           endSideRequest();
@@ -16608,7 +16632,7 @@ export function createSessionControlPlane(
       // session is the checkout itself — the strongest writer vector on the
       // superseded session, not a workspace-cwd one.
       assertSessionResetNotPending(sessionId);
-      assertChannelAdmitsPrompts(entry);
+      assertSessionAdmitsSideRequest(entry);
 
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
@@ -16634,6 +16658,7 @@ export function createSessionControlPlane(
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
       }
+      assertSessionAdmitsSideRequest(entry);
       const cwd = entry.effectiveCwd;
 
       entry.events.publish({

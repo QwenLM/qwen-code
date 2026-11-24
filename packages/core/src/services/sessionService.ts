@@ -23,6 +23,7 @@ import { getProjectHash } from '../utils/paths.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
@@ -56,9 +57,14 @@ import {
 import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '../utils/no-follow-open.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
+  extractLastJsonStringFields,
   isManagedExecutionTranscriptSync,
   isManagedOwnerRecord,
   isManagedSessionTranscriptSync,
@@ -400,6 +406,14 @@ export interface ListSessionsOptions {
   signal?: AbortSignal;
   /** Omits records carrying any of these immutable creator attributions. */
   excludeSourceTypes?: readonly string[];
+  /** Use the bounded reader for daemon catalog scans. */
+  forCatalog?: boolean;
+}
+
+interface CatalogTranscriptMetadata {
+  records: ChatRecord[];
+  source: { parentSessionId?: string; sourceType?: string; sourceId?: string };
+  title: { title?: string; source?: TitleSource };
 }
 
 /**
@@ -416,6 +430,8 @@ export interface ListSessionsResult {
   nextCursor?: number | string;
   /** Whether there are more items after this page */
   hasMore: boolean;
+  /** Count of transcripts handled by the legacy reader during a catalog scan. */
+  catalogReadFallbacks?: number;
 }
 
 /**
@@ -2482,6 +2498,7 @@ export class SessionService {
     records: ChatRecord[],
     tailBuffer?: Buffer,
     knownManaged?: boolean,
+    catalogTailSource?: CatalogTranscriptMetadata['source'],
   ): {
     parentSessionId?: string;
     sourceType?: string;
@@ -2490,7 +2507,8 @@ export class SessionService {
     const metadata = this.extractCreationMetadataFromRecords(records);
     if (metadata.sourceType !== undefined) return metadata;
 
-    const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer);
+    const tailSource =
+      catalogTailSource ?? this.readSessionSourceFromTail(filePath, tailBuffer);
     if (tailSource.sourceType === undefined) {
       const managedSource =
         knownManaged === false
@@ -2513,10 +2531,11 @@ export class SessionService {
   private readSessionSourceFromTail(
     filePath: string,
     scratchBuffer?: Buffer,
+    verifiedFile?: { fd: number; size: number },
   ): { sourceType?: string; sourceId?: string } {
-    let fd: number | undefined;
+    let fd = verifiedFile?.fd;
     try {
-      const fileSize = fs.statSync(filePath).size;
+      const fileSize = verifiedFile?.size ?? fs.statSync(filePath).size;
       if (fileSize === 0) return {};
       const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
       const readLength = Math.min(fileSize, TAIL_READ_SIZE);
@@ -2525,7 +2544,7 @@ export class SessionService {
           ? scratchBuffer
           : Buffer.alloc(readLength);
 
-      fd = fs.openSync(filePath, 'r');
+      fd ??= fs.openSync(filePath, 'r');
       const bytesRead = fs.readSync(fd, buffer, 0, readLength, readStart);
       let firstSegmentIsPartial = false;
       if (readStart > 0) {
@@ -2534,36 +2553,14 @@ export class SessionService {
         firstSegmentIsPartial = peek[0] !== 0x0a;
       }
 
-      const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
-      if (firstSegmentIsPartial) lines.shift();
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const trimmed = lines[i].trim();
-        if (!trimmed) continue;
-        let record: ChatRecord;
-        try {
-          record = JSON.parse(trimmed) as ChatRecord;
-        } catch {
-          continue;
-        }
-        if (record.type !== 'system' || record.subtype !== 'session_source') {
-          continue;
-        }
-        const payload = record.systemPayload as
-          | { sourceType?: unknown; sourceId?: unknown }
-          | undefined;
-        if (typeof payload?.sourceType !== 'string') continue;
-        return {
-          sourceType: payload.sourceType,
-          ...(typeof payload.sourceId === 'string'
-            ? { sourceId: payload.sourceId }
-            : {}),
-        };
-      }
-      return {};
+      return this.extractSessionSourceFromTail(
+        buffer.toString('utf8', 0, bytesRead),
+        firstSegmentIsPartial,
+      );
     } catch {
       return {};
     } finally {
-      if (fd !== undefined) {
+      if (fd !== undefined && verifiedFile === undefined) {
         try {
           fs.closeSync(fd);
         } catch {
@@ -2571,6 +2568,38 @@ export class SessionService {
         }
       }
     }
+  }
+
+  private extractSessionSourceFromTail(
+    tail: string,
+    firstSegmentIsPartial: boolean,
+  ): { sourceType?: string; sourceId?: string } {
+    const lines = tail.split('\n');
+    const start = firstSegmentIsPartial ? 1 : 0;
+    for (let i = lines.length - 1; i >= start; i--) {
+      const trimmed = lines[i].trim();
+      if (!trimmed) continue;
+      let record: ChatRecord;
+      try {
+        record = JSON.parse(trimmed) as ChatRecord;
+      } catch {
+        continue;
+      }
+      if (record.type !== 'system' || record.subtype !== 'session_source') {
+        continue;
+      }
+      const payload = record.systemPayload as
+        | { sourceType?: unknown; sourceId?: unknown }
+        | undefined;
+      if (typeof payload?.sourceType !== 'string') continue;
+      return {
+        sourceType: payload.sourceType,
+        ...(typeof payload.sourceId === 'string'
+          ? { sourceId: payload.sourceId }
+          : {}),
+      };
+    }
+    return {};
   }
 
   /**
@@ -2961,6 +2990,195 @@ export class SessionService {
     }
   }
 
+  private async readCatalogTranscript(
+    filePath: string,
+    buffer: Buffer,
+    signal?: AbortSignal,
+  ): Promise<CatalogTranscriptMetadata | null | undefined> {
+    let handle: FileHandle | undefined;
+    try {
+      signal?.throwIfAborted();
+      handle = await openNoFollow(filePath, { nonBlocking: true });
+      signal?.throwIfAborted();
+      const initial = await handle.stat();
+      if (!initial.isFile()) return null;
+      if (initial.size === 0) return undefined;
+
+      const fits = initial.size <= LITE_READ_BUF_SIZE * 2;
+      const headLength = fits ? initial.size : LITE_READ_BUF_SIZE;
+      const headRead = await handle.read(buffer, 0, headLength, 0);
+      signal?.throwIfAborted();
+      if (headRead.bytesRead !== headLength) return undefined;
+
+      const head = buffer.toString(
+        'utf8',
+        0,
+        Math.min(headLength, LITE_READ_BUF_SIZE),
+      );
+      const headComplete = initial.size <= LITE_READ_BUF_SIZE;
+      const headRecords = headComplete
+        ? head
+        : head.slice(
+            0,
+            Math.max(head.lastIndexOf('\n'), head.lastIndexOf('\r')) + 1,
+          );
+      const records: ChatRecord[] = [];
+      for (const line of headRecords.split(/\r\n|[\r\n]/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const parsed = jsonl.parseLineTolerantWithIntegrity<ChatRecord>(
+          trimmed,
+          filePath,
+        );
+        if (!parsed.complete || parsed.records.length !== 1) return undefined;
+        if (records.length === 0 && isManagedFirstRecord(parsed.records[0])) {
+          return undefined;
+        }
+        records.push(parsed.records[0]);
+        if (records.length === MAX_PROMPT_SCAN_LINES) break;
+      }
+      if (!headComplete && records.length < MAX_PROMPT_SCAN_LINES) {
+        return undefined;
+      }
+      if (records.length === 0) return null;
+      const { sessionId, cwd } = records[0];
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, cwd, signal))
+      ) {
+        return null;
+      }
+
+      let tailOffset = Math.max(0, initial.size - LITE_READ_BUF_SIZE);
+      let tailEnd = headLength;
+      if (!fits) {
+        // Keep the byte before the tail to distinguish a complete first line
+        // from the continuation of a record that started outside the window.
+        const tailRead = await handle.read(
+          buffer,
+          0,
+          LITE_READ_BUF_SIZE + 1,
+          tailOffset - 1,
+        );
+        if (tailRead.bytesRead !== LITE_READ_BUF_SIZE + 1) return undefined;
+        tailOffset = 1;
+        tailEnd = tailRead.bytesRead;
+      }
+      signal?.throwIfAborted();
+      const current = await handle.stat();
+      if (
+        current.size !== initial.size ||
+        current.mtimeMs !== initial.mtimeMs ||
+        current.ctimeMs !== initial.ctimeMs
+      ) {
+        return undefined;
+      }
+
+      const tail = buffer.toString('utf8', tailOffset, tailEnd);
+      const source = this.extractCreationMetadataFromRecords(records);
+      if (
+        source.sourceType === undefined &&
+        (!headComplete ||
+          records.length === MAX_PROMPT_SCAN_LINES ||
+          records.some(
+            (record) =>
+              record.type === 'system' && record.subtype === 'session_source',
+          ))
+      ) {
+        Object.assign(
+          source,
+          this.extractSessionSourceFromTail(
+            tail,
+            tailOffset > 0 && buffer[tailOffset - 1] !== 0x0a,
+          ),
+        );
+      }
+
+      const titleLine = '"subtype":"custom_title"';
+      const titleFields = ['titleSource'];
+      let title = extractLastJsonStringFields(
+        tail,
+        'customTitle',
+        titleFields,
+        titleLine,
+      );
+      if (title['customTitle'] === undefined && !headComplete) {
+        title = extractLastJsonStringFields(
+          head.slice(0, head.lastIndexOf('\n') + 1),
+          'customTitle',
+          titleFields,
+          titleLine,
+        );
+      }
+      const titleSource = title['titleSource'];
+      return {
+        records,
+        source,
+        title: title['customTitle']
+          ? {
+              title: title['customTitle'],
+              source:
+                titleSource === 'manual' || titleSource === 'auto'
+                  ? titleSource
+                  : undefined,
+            }
+          : {},
+      };
+    } catch (error) {
+      signal?.throwIfAborted();
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code === 'ENOENT' ||
+        code === 'ELOOP' ||
+        isUnverifiableIdentityError(error)
+      ) {
+        return null;
+      }
+      return undefined;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  private async readCatalogTranscriptFallback(
+    filePath: string,
+    tailBuffer: Buffer,
+    signal?: AbortSignal,
+  ): Promise<
+    | {
+        records: ChatRecord[];
+        complete: boolean;
+        tailSource: CatalogTranscriptMetadata['source'];
+      }
+    | undefined
+  > {
+    let handle: FileHandle | undefined;
+    try {
+      signal?.throwIfAborted();
+      handle = await openNoFollow(filePath, { nonBlocking: true });
+      const stat = await handle.stat();
+      signal?.throwIfAborted();
+      if (!stat.isFile()) return undefined;
+      const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer, {
+        fd: handle.fd,
+        size: stat.size,
+      });
+      const stream = handle.createReadStream();
+      // The line reader closes the stream and its handle.
+      handle = undefined;
+      const result = await jsonl.readLinesWithIntegrity<ChatRecord>(
+        filePath,
+        MAX_PROMPT_SCAN_LINES,
+        { signal, stream },
+      );
+      return { ...result, tailSource };
+    } catch {
+      signal?.throwIfAborted();
+      return undefined;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
   /**
    * Lists sessions for the current project with pagination.
    *
@@ -2983,6 +3201,7 @@ export class SessionService {
       archiveState = 'active',
       signal,
       excludeSourceTypes,
+      forCatalog,
     } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
@@ -3012,7 +3231,11 @@ export class SessionService {
     } catch (error) {
       signal?.throwIfAborted();
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { items: [], hasMore: false };
+        return {
+          items: [],
+          hasMore: false,
+          ...(forCatalog ? { catalogReadFallbacks: 0 } : {}),
+        };
       }
       throw error;
     }
@@ -3046,13 +3269,19 @@ export class SessionService {
     let lastProcessedMtime: number | undefined;
     let lastProcessedName: string | undefined;
     let hasMoreFiles = false;
+    let catalogReadFallbacks = 0;
 
     // Pre-allocate the tail-read buffer once and pass it to every
     // per-file metadata read. Without pooling, each session in the
     // page allocs+GCs a fresh 64KB Buffer; for a typical page of 20
     // that's ~1.3MB churn per /resume open. The helper reuses this
     // same scratch buffer for its bounded tail and head-window reads.
-    const tailBuffer = Buffer.alloc(LITE_READ_BUF_SIZE);
+    const catalogBuffer = forCatalog
+      ? Buffer.alloc(LITE_READ_BUF_SIZE * 2)
+      : undefined;
+    const tailBuffer =
+      catalogBuffer?.subarray(0, LITE_READ_BUF_SIZE) ??
+      Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const file of files) {
       signal?.throwIfAborted();
@@ -3073,18 +3302,37 @@ export class SessionService {
       lastProcessedName = file.name;
 
       const filePath = path.join(chatsDir, file.name);
-      const readResult = signal
-        ? await jsonl.readLinesWithIntegrity<ChatRecord>(
-            filePath,
-            MAX_PROMPT_SCAN_LINES,
-            {
-              signal,
-            },
-          )
-        : await jsonl.readLinesWithIntegrity<ChatRecord>(
-            filePath,
-            MAX_PROMPT_SCAN_LINES,
-          );
+      const catalog = catalogBuffer
+        ? await this.readCatalogTranscript(filePath, catalogBuffer, signal)
+        : undefined;
+      signal?.throwIfAborted();
+      if (catalog === null) continue;
+      let readResult;
+      let tailSource: CatalogTranscriptMetadata['source'] | undefined;
+      if (catalog) {
+        readResult = { records: catalog.records, complete: true };
+      } else if (forCatalog) {
+        catalogReadFallbacks++;
+        const fallback = await this.readCatalogTranscriptFallback(
+          filePath,
+          tailBuffer,
+          signal,
+        );
+        if (fallback === undefined) continue;
+        readResult = fallback;
+        tailSource = fallback.tailSource;
+      } else {
+        readResult = signal
+          ? await jsonl.readLinesWithIntegrity<ChatRecord>(
+              filePath,
+              MAX_PROMPT_SCAN_LINES,
+              { signal },
+            )
+          : await jsonl.readLinesWithIntegrity<ChatRecord>(
+              filePath,
+              MAX_PROMPT_SCAN_LINES,
+            );
+      }
       const records = readResult.records.slice(0, MAX_PROMPT_SCAN_LINES);
       signal?.throwIfAborted();
 
@@ -3092,6 +3340,7 @@ export class SessionService {
       const firstRecord = records[0];
 
       if (
+        !catalog &&
         !(await this.sessionBelongsToCurrentProject(
           firstRecord.sessionId,
           firstRecord.cwd,
@@ -3102,12 +3351,15 @@ export class SessionService {
       }
 
       const knownManaged = isManagedFirstRecord(firstRecord);
-      const source = this.extractCreationMetadataFromFile(
-        filePath,
-        records,
-        tailBuffer,
-        knownManaged,
-      );
+      const source =
+        catalog?.source ??
+        this.extractCreationMetadataFromFile(
+          filePath,
+          records,
+          tailBuffer,
+          knownManaged,
+          tailSource,
+        );
       if (
         excludeSourceTypes !== undefined &&
         source.sourceType !== undefined &&
@@ -3117,11 +3369,9 @@ export class SessionService {
       }
       const prompt = this.extractFirstPromptFromRecords(records);
       signal?.throwIfAborted();
-      const titleInfo = this.readSessionTitleInfoFromFile(
-        filePath,
-        tailBuffer,
-        knownManaged,
-      );
+      const titleInfo =
+        catalog?.title ??
+        this.readSessionTitleInfoFromFile(filePath, tailBuffer, knownManaged);
       signal?.throwIfAborted();
       // A transcript can lose its head (rebuilt after a crash, restored into
       // a fresh file, or truncated externally). The sidecar keeps the label
@@ -3144,14 +3394,17 @@ export class SessionService {
       const fallbackTitleSource =
         titleInfo.source ??
         (sidecar && sidecar.source !== 'prompt' ? sidecar.source : undefined);
-      const goalObjective = this.resolveGoalObjective(
-        fallbackPrompt,
-        fallbackTitle,
-        filePath,
-        records,
-        readResult.complete,
-        tailBuffer,
-      );
+      // The catalog response uses the Goal sidecar, not the TUI label fallback.
+      const goalObjective = forCatalog
+        ? undefined
+        : this.resolveGoalObjective(
+            fallbackPrompt,
+            fallbackTitle,
+            filePath,
+            records,
+            readResult.complete,
+            tailBuffer,
+          );
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -3188,6 +3441,7 @@ export class SessionService {
       items,
       nextCursor,
       hasMore: hasMoreFiles,
+      ...(forCatalog ? { catalogReadFallbacks } : {}),
     };
   }
 

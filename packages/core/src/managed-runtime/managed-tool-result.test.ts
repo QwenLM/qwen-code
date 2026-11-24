@@ -122,7 +122,7 @@ const BEYOND_SCHEMA = {
   manifest: [
     'callId-lone-high-surrogate',
     'callId-not-nfc',
-    'callId-over-512-bytes',
+    'callId-over-128',
     'duplicate-stream-id',
     'executionCallId-lone-high-surrogate',
     'executionCallId-not-nfc',
@@ -685,7 +685,8 @@ describe('Managed tool result contract', () => {
       sessionId: longest,
       turnId: longest,
       executionCallId: longest,
-      callId: longest,
+      // callId has its own 128-character tool-call bound, not maxIdBytes.
+      callId: '"'.repeat(128),
       invocationDigest: longest,
       bindingGeneration: '9223372036854775807',
       captureId: 'c'.repeat(128),

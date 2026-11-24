@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -80,10 +79,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage),
+        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_id = o.physical_id WHERE s.tenant_id = ? AND s.storage_id = ?",
                 tenant, storage);
-        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_id"
                 + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
                 tenant, session.get("sessionId"));
         member.put("physicalOwner", physical);
@@ -165,8 +163,8 @@ final class HostedShellOutputProbe implements AutoCloseable {
         for (String key : List.of("binding_id", "runtime_generation", "runtime_session_id")) {
             assertThat(original.get(key)).isEqualTo(row.get(key));
         }
-        assertThat(original.get("execution_storage_key"))
-                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("storage_key"));
+        assertThat(original.get("execution_storage_id"))
+                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("physical_id"));
         assertThat(jdbc.queryForList("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?",
                 String.class, id)).containsExactly("READY");
         return Map.of("state", row.get("execution_state"));
