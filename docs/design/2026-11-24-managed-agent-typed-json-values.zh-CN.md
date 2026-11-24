@@ -12,12 +12,14 @@ Managed Agent 生产源码中有 1,448 行匹配 `Map<String, Object>`。这些 
 不同职责：封闭协议文档、加密数据库 JSON、异构执行结果、开放用户 JSON 和通用
 JDBC 行。全部替换会破坏必要的动态边界，并制造大量全可空 DTO。
 
-以下三个封闭结构已有稳定字段和可枚举消费方，适合现在引入具名 Java 值：
+以下四个封闭结构已有稳定字段和可枚举消费方，适合现在引入具名 Java 值：
 
 1. `SessionModelConfig` 已校验封闭模型配置，但内部仍用 Map 保存并通过字符串读字段。
 2. Runtime 对账在传输协议投影后接收封闭的 `state` 加可选动态 `result` 文档。
 3. `ManagedContextProtocol` 构造并校验封闭的 Boot 和 Ready 文档，但 Java 消费方
    继续以无类型 Map 传递。
+4. AgentDefinition 编译已校验执行字段，却丢弃其中大部分，导致后续 policy 和
+   Harness 消费方重复解析 pinned JSON。
 
 目标是提高可读性并获得编译期字段检查，不是改变产品行为或在全仓消灭 Map。
 
@@ -25,7 +27,7 @@ JDBC 行。全部替换会破坏必要的动态边界，并制造大量全可空
 
 本次将：
 
-- 为上述三个结构引入具名值；
+- 为上述四个结构引入具名值；
 - 保持动态载荷的动态表示，不编造通用 result 或 extension schema；
 - 保持 HTTP JSON、加密数据库明文、规范化摘要、Runtime 错误映射和
   Java/TypeScript 协议行为；
@@ -112,6 +114,25 @@ wire 序列化器。External publication 字段继续位于该封闭核心类型
 envelope 和所有 TypeScript 代码均不变。Java 活跃调用方和两个 archived CSI
 envelope 构造点在仍需要 Map 的位置显式增加 `toWire()`。
 
+### 4. AgentDefinition 执行字段
+
+`AgentDefinitionCompiler.Compiled` 现在暴露 `modelId`、`instructions`、生效的
+`approvalMode` 和 `toolProfile`、规范化后的 `skills`、`mcpServers`、
+`hookCatalog` 以及 `hookCatalogPresent`。Admission 保持现有 model、
+instructions、policy、tools、extension 和 environment 校验顺序。开放
+`metadata` 刻意不进入该值，也不能影响执行。
+
+`fromPinnedContent` 投影已 pin 的 Session，不重新应用当前部署的 model 或工具
+allowlist。审批模式和工具 profile 取自 Session，保留 Hook 字段缺省与
+present-null 的区别，并复用现有规范化扩展值，不再增加一层叶子 Map 到 record
+的转换。创建和存储 JSON 保持前向兼容；本次不是封闭请求 DTO 改造。
+
+`AgentSessionPolicies` 直接消费编译后的 skills、MCP 和 Hook 存在性，不再重复解析
+定义。`QwenHostedHarnessConnector` 每次 create/load 只投影一次 pinned content，
+并在 definition、MCP 和 Hook 构造间共享。Create 仍发布 model、instructions 和
+skills，load 仍只发送 definition identity 及既有 MCP/Hook 值。资源计费和其它
+非执行消费方仍使用完整原始内容。
+
 ## 兼容性与安全不变量
 
 | 范围        | 必须保持的不变量                                                    |
@@ -130,12 +151,14 @@ envelope 构造点在仍需要 Map 的位置显式增加 `toWire()`。
 
 生产改动限定为：
 
-- `contracts`：`SessionModelConfig`、新增 `RuntimeExecutionStatus` 和
-  `ManagedContextProtocol`；
+- `contracts`：`SessionModelConfig`、新增 `RuntimeExecutionStatus`、
+  `ManagedContextProtocol` 和 `AgentDefinitionCompiler`；
 - `runtime-broker`：`RuntimeExecutionReconciler`、`RuntimeBrokerService` 中的
   durable 快捷路径，以及 `RuntimeBrokerSupport` 的共享状态名校验；
 - `runtime-http`、`runtime-local`、`runtime-ssh`、`runtime-external` 和
-  `persistence`：仅迁移 Managed Context 调用方；
+  `persistence`：Managed Context 调用方迁移，以及 `AgentSessionPolicies` 的
+  编译定义消费；
+- `adapters`：`QwenHostedHarnessConnector` 共享编译定义消费；
 - `sdk-java/managed-kubernetes-archive`：两处 Boot `toWire()` 机械调用点更新，
   不恢复或重设计归档。
 
@@ -169,9 +192,18 @@ envelope 构造点在仍需要 Map 的位置显式增加 `toWire()`。
   以及未修改的 TypeScript Worker/conformance 测试。
 - archived CSI 验证单独报告，因为普通 Maven reactor 不构建它。
 
+### AgentDefinition
+
+- 断言全部编译字段、规范化扩展值、空集合，以及 Hook 缺省与 present-null 的
+  存在性区别。
+- 证明 pinned 投影不重新应用当前 allowlist，且 metadata 仍不影响执行。
+- 在同一 create+load 场景核对一致的 model、instructionsRef、skillsRef、MCP、
+  Hook 和 load-only identity，并验证每次操作只读取一次 pinned content。
+- 运行 admission、approval-change、资源计费和 Hosted definition 消费方回归。
+
 ## 验收标准
 
-1. 三个封闭结构在领域消费方暴露具名字段；动态 result 和 extension 载荷仍显式保留。
+1. 四个封闭结构在领域消费方暴露具名字段；动态 result 和 extension 载荷仍显式保留。
 2. 不需要修改 wire JSON、OpenAPI、TypeScript、SQL 或存储格式。
 3. 历史模型配置 JSON 和 digest 仍可按原样解密、解析和比较。
 4. Runtime 对账保持错误码、UNKNOWN/takeover 行为和动态 result 内容。
@@ -183,23 +215,24 @@ envelope 构造点在仍需要 Map 的位置显式增加 `toWire()`。
 
 ## 实现证据与剩余验收
 
-三个切片均已通过显式 wire 投影实现。历史模型 JSON 和 digest 断言先于生产改动在
+四个切片均已通过显式 wire 投影实现。历史模型 JSON 和 digest 断言先于生产改动在
 旧实现上通过。两轮开放式自审和当前会话内的完整 diff 评审均未发现剩余正确性问题。
 
-| 证据                | 观测结果                                                                   | 限制                                                          |
-| ------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| Java 基线           | 236/236 通过；新增模型 golden 随后在旧实现上通过 13/13。                   | 基线证据不能替代改后测试。                                    |
-| 改后聚焦 Java       | 249/249 通过，所有生产源码及 702 个 verification 测试源码均完成编译。      | 这是聚焦套件，不是完整 Maven verify。                         |
-| External 跨语言路径 | 真实 Worker boot contract 通过 2/2；External ownership 通过 13/13。        | Local、SSH 和完整 Hosted/fault profile 未在 Java 预算内运行。 |
-| Checkstyle          | 每个生产模块的两套 execution 均报告 0 violation。                          | verification Checkstyle 因无关类尺寸失败而未运行，仍待验收。  |
-| TypeScript 消费方   | 同一组 4 文件在改前/改后均通过 1,673/1,673；仓库 build 和 typecheck 通过。 | 未修改 TypeScript 源码。                                      |
-| 评审                | `git diff --check` 通过；两轮自审和当前会话内评审未发现 bug。              | 环境没有可用的外部 bugbot 子代理。                            |
+| 证据                | 观测结果                                                                                                                                                        | 限制                                                          |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Java 基线           | 236/236 通过；新增模型 golden 随后在旧实现上通过 13/13。                                                                                                        | 基线证据不能替代改后测试。                                    |
+| 改后聚焦 Java       | 249/249 通过，所有生产源码及 702 个 verification 测试源码均完成编译。                                                                                           | 这是聚焦套件，不是完整 Maven verify。                         |
+| External 跨语言路径 | 真实 Worker boot contract 通过 2/2；External ownership 通过 13/13。                                                                                             | Local、SSH 和完整 Hosted/fault profile 未在 Java 预算内运行。 |
+| AgentDefinition     | 编译器/Connector/admission/approval 核心测试通过 331/331；另有 58 个消费方测试通过；SDK 通过 4/4，TS 消费方通过 3/3。create+load 恰好读取 pinned content 两次。 | 完整 Hosted 和 MySQL profile 仍待验收。                       |
+| Checkstyle          | 每个生产模块及 verification 的两套 execution 均报告 0 violation。                                                                                               | 聚焦执行，不是完整 Maven verify。                             |
+| TypeScript 消费方   | 同一组 4 文件在改前/改后均通过 1,673/1,673；仓库 build 和 typecheck 通过。                                                                                      | 未修改 TypeScript 源码。                                      |
+| 评审                | `git diff --check` 通过；两轮自审和当前会话内评审未发现 bug。                                                                                                   | 环境没有可用的外部 bugbot 子代理。                            |
 
-External/架构组合命令有一个 `ClassSizeRatchetTest` 失败：未修改的
-`AgentSessionPolicies` 为 792>791 行，未修改的 `AgentTurnExecution` 为 798>797。
-这些基线违规没有通过筛选隐藏，也不计为通过。本地 Java 验证预算已耗尽。完整
-Java/H2、SpotBugs、MySQL、Hosted、fault、verification Checkstyle 和 archived CSI
-验收仍待完成；不暗示任何 CI 或归档结果已经通过。
+较早的架构运行报告了 `AgentSessionPolicies` 和 `AgentTurnExecution` 的基线违规。
+AgentDefinition 切片删除重复解析后，`AgentSessionPolicies` 已降回 ceiling 内；
+最近一次运行仍报告未修改的 `AgentTurnExecution` 为 798>797 行。该剩余基线失败
+没有通过筛选隐藏，也不计为通过。完整 Java/H2、SpotBugs、MySQL、Hosted、fault
+和 archived CSI 验收仍待完成；不暗示任何 CI 或归档结果已经通过。
 
 ## 待决问题
 

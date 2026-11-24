@@ -14,7 +14,7 @@ documents, encrypted database JSON, heterogeneous execution results, open user
 JSON, and generic JDBC rows. Replacing all of them would destroy useful dynamic
 boundaries and create large nullable DTOs.
 
-Three closed structures have enough stable fields and bounded consumers to
+Four closed structures have enough stable fields and bounded consumers to
 justify typed Java values now:
 
 1. `SessionModelConfig` already validates a closed model configuration but stores
@@ -23,6 +23,9 @@ justify typed Java values now:
    document after transport-specific projection.
 3. `ManagedContextProtocol` constructs and validates closed Boot and Ready
    documents, while Java consumers continue to pass them as untyped maps.
+4. AgentDefinition compilation validates execution fields but discards most of
+   them, causing later policy and Harness consumers to parse the pinned JSON
+   again.
 
 The goal is readability and compile-time field access, not a change to product
 behavior or a repository-wide elimination of maps.
@@ -31,7 +34,7 @@ behavior or a repository-wide elimination of maps.
 
 The change will:
 
-- introduce named values for the three structures above;
+- introduce named values for the four structures above;
 - keep dynamic payloads dynamic instead of inventing universal result or
   extension schemas;
 - preserve HTTP JSON, encrypted database plaintext, canonical digests, Runtime
@@ -132,6 +135,29 @@ legacy v1/v2 paths, External storage envelopes, and all TypeScript code remain
 unchanged. Live Java callers and the two archived CSI envelope builders add an
 explicit `toWire()` where a map is still required.
 
+### 4. AgentDefinition execution fields
+
+`AgentDefinitionCompiler.Compiled` now exposes `modelId`, `instructions`, the
+effective `approvalMode` and `toolProfile`, normalized `skills`, `mcpServers`,
+`hookCatalog`, and `hookCatalogPresent`. Admission keeps its existing model,
+instructions, policy, tools, extension, and environment validation order. Open
+`metadata` is deliberately absent from this value and cannot affect execution.
+
+`fromPinnedContent` projects an already pinned Session without reapplying the
+current deployment model or tool allowlists. It takes approval and tool profile
+from the Session, keeps absent and present-null Hook entries distinct, and reuses
+the existing normalized extension values rather than introducing another leaf
+Map-to-record conversion layer. Creation and stored JSON remain forward-compatible;
+this is not a closed request DTO change.
+
+`AgentSessionPolicies` consumes the compiled skills, MCP, and Hook presence
+directly instead of parsing the definition again. `QwenHostedHarnessConnector`
+projects pinned content once per create/load and shares it across definition,
+MCP, and Hook construction. Create still publishes model, instructions, and
+skills, while load sends only definition identity plus the existing MCP/Hook
+values. Full raw content remains available to resource accounting and other
+non-execution consumers.
+
 ## Compatibility and security invariants
 
 | Area               | Required invariant                                                                                       |
@@ -150,13 +176,16 @@ explicit `toWire()` where a map is still required.
 
 Production changes are limited to:
 
-- `contracts`: `SessionModelConfig`, new `RuntimeExecutionStatus`, and
-  `ManagedContextProtocol`;
+- `contracts`: `SessionModelConfig`, new `RuntimeExecutionStatus`,
+  `ManagedContextProtocol`, and `AgentDefinitionCompiler`;
 - `runtime-broker`: `RuntimeExecutionReconciler`, the durable shortcut in
   `RuntimeBrokerService`, and the shared state-name check in
   `RuntimeBrokerSupport`;
 - `runtime-http`, `runtime-local`, `runtime-ssh`, `runtime-external`, and
-  `persistence`: Managed Context caller migration only;
+  `persistence`: Managed Context caller migration plus compiled-definition
+  consumption in `AgentSessionPolicies`;
+- `adapters`: shared compiled-definition consumption in
+  `QwenHostedHarnessConnector`;
 - `sdk-java/managed-kubernetes-archive`: two mechanical Boot `toWire()` call-site
   updates, without reactivating or redesigning the archive.
 
@@ -195,9 +224,21 @@ Boot/Ready behavior not already covered.
 - Keep archived CSI verification explicitly separate because the ordinary Maven
   reactor does not build it.
 
+### AgentDefinition
+
+- Assert every compiled field, normalized extension value, empty collections, and
+  absent versus present-null Hook presence.
+- Prove pinned projection does not reapply current allowlists and metadata still
+  has no execution effect.
+- In one create+load scenario, assert identical model, instructionsRef, skillsRef,
+  MCP, Hook, and load-only identity, and verify one pinned-content read per
+  operation.
+- Run admission, approval-change, resource-accounting, and Hosted definition
+  consumer regressions.
+
 ## Acceptance criteria
 
-1. The three closed structures expose named Java fields at their domain
+1. The four closed structures expose named Java fields at their domain
    consumers; dynamic result and extension payloads remain explicit.
 2. No wire JSON, OpenAPI, TypeScript, SQL, or stored-format change is required.
 3. Historical model configuration JSON and digests still decrypt, parse, and
@@ -215,27 +256,28 @@ Boot/Ready behavior not already covered.
 
 ## Implementation evidence and remaining acceptance
 
-The three slices are implemented with explicit wire projections. Historical model
+The four slices are implemented with explicit wire projections. Historical model
 JSON and digest assertions passed against the old implementation before the
 production change. Two open-ended self-audit passes and an in-place diff review
 found no remaining correctness issue.
 
-| Evidence                     | Observed result                                                                                 | Limit                                                                                           |
-| ---------------------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Baseline Java                | 236/236 passed; the new model golden then passed 13/13 on the old implementation.               | Baseline evidence is not a substitute for post-change tests.                                    |
-| Focused post-change Java     | 249/249 passed, including all production and 702 verification test sources compiling.           | This is a focused suite, not full Maven verify.                                                 |
-| External cross-language path | Real Worker boot contract passed 2/2; External ownership passed 13/13.                          | Local, SSH and the complete Hosted/fault profiles were not run within the Java budget.          |
-| Checkstyle                   | Both executions reported zero violations for every production module.                           | Verification Checkstyle did not run after the unrelated class-size failure and remains pending. |
-| TypeScript consumers         | The same four files passed 1,673/1,673 before and after; repository build and typecheck passed. | No TypeScript source was changed.                                                               |
-| Review                       | `git diff --check` passed; two self-audit passes and the in-place review found no bugs.         | No external bugbot subagent was available.                                                      |
+| Evidence                     | Observed result                                                                                                                                                                                   | Limit                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Baseline Java                | 236/236 passed; the new model golden then passed 13/13 on the old implementation.                                                                                                                 | Baseline evidence is not a substitute for post-change tests.                           |
+| Focused post-change Java     | 249/249 passed, including all production and 702 verification test sources compiling.                                                                                                             | This is a focused suite, not full Maven verify.                                        |
+| External cross-language path | Real Worker boot contract passed 2/2; External ownership passed 13/13.                                                                                                                            | Local, SSH and the complete Hosted/fault profiles were not run within the Java budget. |
+| AgentDefinition              | Core compiler/Connector/admission/approval tests passed 331/331; another 58 consumer tests passed; SDK passed 4/4 and the TS consumer passed 3/3. Create+load reads pinned content exactly twice. | Full Hosted and MySQL profiles remain pending.                                         |
+| Checkstyle                   | Both executions reported zero violations for every production module and verification.                                                                                                            | Focused execution, not full Maven verify.                                              |
+| TypeScript consumers         | The same four files passed 1,673/1,673 before and after; repository build and typecheck passed.                                                                                                   | No TypeScript source was changed.                                                      |
+| Review                       | `git diff --check` passed; two self-audit passes and the in-place review found no bugs.                                                                                                           | No external bugbot subagent was available.                                             |
 
-The combined External/architecture command had one failure in
-`ClassSizeRatchetTest`: unchanged `AgentSessionPolicies` is 792>791 lines and
-unchanged `AgentTurnExecution` is 798>797. These baseline violations are not
-hidden by filtering and are not counted as passes. The local Java verification
-budget is exhausted. Full Java/H2, SpotBugs, MySQL, Hosted, fault, verification
-Checkstyle, and archived CSI acceptance remain pending; no CI or archived result
-is implied.
+Earlier architecture runs reported baseline violations in `AgentSessionPolicies`
+and `AgentTurnExecution`. The AgentDefinition slice removed duplicate parsing and
+brought `AgentSessionPolicies` back below its ceiling; the latest run still
+reports unchanged `AgentTurnExecution` at 798>797 lines. This remaining baseline
+failure is not hidden by filtering or counted as a pass. Full Java/H2, SpotBugs,
+MySQL, Hosted, fault, and archived CSI acceptance remain pending; no CI or
+archived result is implied.
 
 ## Open questions
 
