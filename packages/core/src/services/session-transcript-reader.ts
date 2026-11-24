@@ -33,7 +33,10 @@ import {
   localManagedSessionKey,
   readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
-import { readManagedSessionRecordsAndTitle } from '../managed-runtime/managed-session-message-projection.js';
+import {
+  ManagedSessionProjectionLimitError,
+  readManagedSessionRecordsAndTitle,
+} from '../managed-runtime/managed-session-message-projection.js';
 import {
   MANAGED_SESSION_HEADER_SUBTYPE,
   ManagedSessionRecordError,
@@ -4874,6 +4877,7 @@ export class SessionTranscriptReader {
       sessionId,
       index,
       readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
     );
     assertManagedAllReplayBudget(
       records,
@@ -4922,6 +4926,7 @@ export class SessionTranscriptReader {
       sessionId,
       index,
       readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
     );
     assertManagedAllReplayBudget(
       records,
@@ -4944,6 +4949,7 @@ export class SessionTranscriptReader {
     sessionId: string,
     index: TranscriptIndex,
     readOptions: RestoreProjectionReadOptions,
+    maxBodyBytes?: number,
   ): Promise<ChatRecord[]> {
     // Timed as the same stage the index-based path uses for its record reads:
     // for a Managed log the projection is that read, and leaving it untimed
@@ -4987,8 +4993,20 @@ export class SessionTranscriptReader {
             // The index froze a byte length, so the projection answers from
             // the same prefix rather than from records appended since.
             maxBytes: index.snapshotSize,
+            ...(maxBodyBytes !== undefined ? { maxBodyBytes } : {}),
           });
         } catch (error) {
+          if (error instanceof ManagedSessionProjectionLimitError) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              index.snapshotSize,
+              error.maxBytes,
+              {
+                dimension: 'replay',
+                measuredBytes: error.measuredBytes,
+              },
+            );
+          }
           // A missing or corrupt body is the same class of failure as a
           // snapshot that can no longer be served: the page contract maps
           // that to 409, not an untyped 500 from JSON.parse(null).

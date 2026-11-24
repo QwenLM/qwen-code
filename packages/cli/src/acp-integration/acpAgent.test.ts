@@ -33694,12 +33694,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('allows an unpaged bulk load in the 32-63 MiB band under the transport frame ceiling', async () => {
+  it('allows an unpaged bulk load in the 32-64 MiB band under the transport frame ceiling', async () => {
     expect(UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES).toBeLessThan(
       DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes,
     );
     expect(UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES).toBe(
-      DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - 1024 * 1024,
+      DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - 4 * 1024,
     );
 
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
@@ -33711,7 +33711,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const oneMiBChunk = 'a'.repeat(1024 * 1024);
     mockHistoryReplay.mockImplementation(
       async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
-        for (let index = 0; index < 35; index += 1) {
+        for (let index = 0; index < 63; index += 1) {
           await context.sendUpdate({
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: oneMiBChunk },
@@ -33732,13 +33732,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const envelope = (
       response as { _meta?: Record<string, unknown> } | undefined
     )?._meta?.['qwen.session.loadReplay'] as { updates: unknown[] } | undefined;
-    expect(envelope?.updates).toHaveLength(35);
+    expect(envelope?.updates).toHaveLength(63);
 
     mockConnectionState.resolve();
     await agentPromise;
   });
 
-  it('rejects an unpaged bulk load exceeding the 63 MiB transport frame ceiling with transcript_page_too_large', async () => {
+  it('rejects an unpaged bulk load exceeding the 64 MiB transport frame ceiling with transcript_page_too_large', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     bindRestoreMocks({
       sessionExists: true,
@@ -35224,6 +35224,64 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(firstSession.installMods).toHaveBeenCalledTimes(1);
     expect(firstSession.startCronScheduler).toHaveBeenCalledTimes(1);
     expect(firstSession.beginClose.mock.results[0]?.value).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a bulk load whose artifactSnapshot pushes the complete frame over the transport ceiling', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock!;
+    const artifactSnapshot = {
+      v: 1,
+      artifacts: Array.from({ length: 500 }, (_, index) => ({
+        path: `/tmp/artifact-${index}.txt`,
+        description: 'd'.repeat(8000),
+      })),
+      warnings: [],
+    };
+    firstSession.getConfig().getResumedSessionData.mockReturnValue({
+      conversation: { messages },
+      artifactSnapshot,
+    });
+    const oneMiBChunk = 'a'.repeat(1024 * 1024);
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        for (let index = 0; index < 63; index += 1) {
+          await context.sendUpdate({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: oneMiBChunk },
+          });
+        }
+      },
+    );
+
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+      }),
+    ).rejects.toMatchObject({
+      code: -32012,
+      data: {
+        errorKind: 'transcript_page_too_large',
+        sessionId: 'persisted-1',
+        reason: 'bytes',
+        limit: DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - 4 * 1024,
+      },
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

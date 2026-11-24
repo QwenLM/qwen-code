@@ -22,6 +22,7 @@ import {
   MANAGED_MESSAGE_BODY_ENTRY_BYTES,
   ManagedMessageBodyCache,
   ManagedSessionMessageProjection,
+  ManagedSessionProjectionLimitError,
   projectManagedSessionTitleInfo,
   readManagedSessionRecords,
 } from './managed-session-message-projection.js';
@@ -402,6 +403,47 @@ describe('managed session message projection', () => {
       }
     },
   );
+
+  it('stops projecting Managed bodies once the caller byte budget is exceeded', async () => {
+    const harness = await createHarness();
+    try {
+      const third = {
+        ...records[0],
+        uuid: 'rec-user-2',
+        parentUuid: records[1].uuid,
+      } as ChatRecord;
+      for (const [index, record] of [records[0], records[1], third].entries()) {
+        await harness.projection.commit(
+          command('commitMessage', `cmd-budget-${index}`),
+          { record },
+          HOLDS,
+        );
+      }
+      const firstBytes = Buffer.byteLength(JSON.stringify(records[0]), 'utf8');
+      const totalBytes =
+        Buffer.byteLength(JSON.stringify(records[0]), 'utf8') +
+        Buffer.byteLength(JSON.stringify(records[1]), 'utf8') +
+        Buffer.byteLength(JSON.stringify(third), 'utf8');
+      let caught: unknown;
+      try {
+        await readManagedSessionRecords({
+          transcriptPath: harness.transcriptPath,
+          runtimeBaseDir: harness.runtimeBaseDir,
+          sessionKey,
+          maxBodyBytes: firstBytes + 1,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ManagedSessionProjectionLimitError);
+      const error = caught as ManagedSessionProjectionLimitError;
+      expect(error.maxBytes).toBe(firstBytes + 1);
+      expect(error.measuredBytes).toBeGreaterThan(firstBytes);
+      expect(error.measuredBytes).toBeLessThan(totalBytes);
+    } finally {
+      await harness.close();
+    }
+  });
 
   it('rejects an invalid timestamp in a durable reader-facing record', async () => {
     const harness = await createHarness();

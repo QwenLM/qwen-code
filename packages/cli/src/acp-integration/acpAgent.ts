@@ -1303,10 +1303,24 @@ function mapSessionRestoreRequestError(
 
 // Unpaged bulk session/load envelopes (`replay.kind === 'all'`) have no page
 // size and historically relied on the 64 MiB NDJSON frame ceiling
-// (`DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes`). Leave 1 MiB headroom for the
-// outer JSON-RPC response wrapper while paginated loads stay capped at 32 MiB.
+// (`DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes`). Keep only a small wrapper margin
+// here; the complete response (including artifactSnapshot and config data) is
+// checked against the same frame ceiling before it is returned.
+const LOAD_RESPONSE_FRAME_MARGIN_BYTES = 4 * 1024;
 export const UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES =
-  DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - 1024 * 1024;
+  DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - LOAD_RESPONSE_FRAME_MARGIN_BYTES;
+
+function assertLoadResponseFitsFrame(
+  sessionId: string,
+  response: LoadSessionResponse,
+): void {
+  const frameBytes = Buffer.byteLength(JSON.stringify(response), 'utf8');
+  const limit =
+    DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - LOAD_RESPONSE_FRAME_MARGIN_BYTES;
+  if (frameBytes > limit) {
+    throw new HistoryReplayLimitError(sessionId, 'bytes', frameBytes, limit);
+  }
+}
 
 function validateLoadReplayEnvelope(
   sessionId: string,
@@ -6349,7 +6363,9 @@ class QwenAgent implements Agent {
             );
             const replayPage = projection?.replay;
             if (!replayPage || replayPage.records.length === 0) {
-              return withRestoreHint(liveSession, response);
+              const loadResponse = withRestoreHint(liveSession, response);
+              assertLoadResponseFitsFrame(sessionId, loadResponse);
+              return loadResponse;
             }
 
             const bulkReplay = isBulkLoadReplayRequest(params);
@@ -6477,12 +6493,14 @@ class QwenAgent implements Agent {
               renderGoalUpdates(),
               maxReplayBytes,
             );
-            return withRestoreHint(liveSession, {
+            const loadResponse = withRestoreHint(liveSession, {
               ...response,
               _meta: {
                 [LOAD_REPLAY_META_KEY]: envelope,
               },
             });
+            assertLoadResponseFitsFrame(sessionId, loadResponse);
+            return loadResponse;
           },
         );
       });
@@ -6570,24 +6588,28 @@ class QwenAgent implements Agent {
       let streamGoalUpdates: SessionUpdate[] = [];
       let response: LoadSessionResponse | undefined;
       const buildResponse = () =>
-        profiler.timeSync('response_build', () => ({
-          modes: this.buildModesData(config),
-          models: this.buildAvailableModels(config),
-          configOptions: this.buildConfigOptions(
-            config,
-            getDefaultReasoningConfig(config, settings),
-          ),
-          ...(projection?.runtime.artifactSnapshot
-            ? { artifactSnapshot: projection.runtime.artifactSnapshot }
-            : {}),
-          ...(replayEnvelope
-            ? {
-                _meta: {
-                  [LOAD_REPLAY_META_KEY]: replayEnvelope,
-                },
-              }
-            : {}),
-        })) as LoadSessionResponse;
+        profiler.timeSync('response_build', () => {
+          const result = {
+            modes: this.buildModesData(config),
+            models: this.buildAvailableModels(config),
+            configOptions: this.buildConfigOptions(
+              config,
+              getDefaultReasoningConfig(config, settings),
+            ),
+            ...(projection?.runtime.artifactSnapshot
+              ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+              : {}),
+            ...(replayEnvelope
+              ? {
+                  _meta: {
+                    [LOAD_REPLAY_META_KEY]: replayEnvelope,
+                  },
+                }
+              : {}),
+          } as LoadSessionResponse;
+          assertLoadResponseFitsFrame(sessionId, result);
+          return result;
+        });
       try {
         if (!provisionalStandalone) {
           await restoreModel();
