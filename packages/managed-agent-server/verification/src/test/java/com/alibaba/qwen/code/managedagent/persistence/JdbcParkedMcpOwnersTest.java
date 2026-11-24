@@ -7,6 +7,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import javax.sql.DataSource;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -20,11 +22,16 @@ class JdbcParkedMcpOwnersTest {
     private JdbcTemplate jdbc;
     private JdbcParkedMcpOwners owners;
 
-    @BeforeEach
-    void setUp() {
+    protected DataSource dataSource() {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:parked-mcp-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return source;
+    }
+
+    @BeforeEach
+    void setUp() {
+        DataSource source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
         owners = new JdbcParkedMcpOwners(jdbc);
@@ -40,13 +47,17 @@ class JdbcParkedMcpOwnersTest {
     }
 
     private void head(String state, long sealedForMillis) {
+        head(state, sealedForMillis, null);
+    }
+
+    private void head(String state, long sealedForMillis, String parkedPromptId) {
         long now = System.currentTimeMillis();
         jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, "
                 + " head_kind, state, writer_generation, journal_revision, committed_sequence,"
-                + " activation_epoch, gmt_create, gmt_modified) VALUES (?, 'session', 'session',"
-                + " 'MANAGED_SESSION', ?, 1, 0, 0, 0, ?, ?)",
+                + " activation_epoch, gmt_create, gmt_modified, wake_seal_revision, wake_seal_parked_prompt_id)"
+                + " VALUES (?, 'session', 'session', 'MANAGED_SESSION', ?, 1, 0, 0, 0, ?, ?, 0, ?)",
                 TENANT,
-                state, now, now - sealedForMillis);
+                state, now, now - sealedForMillis, parkedPromptId);
     }
 
     private static ParkedMcpOwners.Owner owner() {
@@ -90,6 +101,14 @@ class JdbcParkedMcpOwnersTest {
         Duration sealed = owners.sealedFor(owner()).orElseThrow();
         assertTrue(sealed.compareTo(Duration.ofMinutes(45)) >= 0);
         assertTrue(sealed.compareTo(Duration.ofMinutes(46)) < 0);
+    }
+
+    // Reclaiming the owner would drop the catalog the parked Turn's continuation
+    // pins, so the Turn could no longer resume.
+    @Test
+    void aSealThatParksATurnKeepsItsOwner() {
+        head("SEALED", Duration.ofHours(2).toMillis(), "prompt");
+        assertTrue(owners.sealedFor(owner()).isEmpty());
     }
 
     @Test
