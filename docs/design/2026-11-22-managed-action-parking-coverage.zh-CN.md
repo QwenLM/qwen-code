@@ -2,7 +2,7 @@
 
 [English](2026-11-22-managed-action-parking-coverage.md) | [简体中文](2026-11-22-managed-action-parking-coverage.zh-CN.md)
 
-状态：提案，实现前设计。日期：2026-11-22。本文接续[审批停靠设计](2026-11-21-managed-action-parking.zh-CN.md)（第四阶段，#18115 已合入），对照 `main` 的 `5714ee4c53` 核实。它逐项处理首个增量排除的等待形态，回答其开放问题 4，以及除团队计划审批外的开放问题 3。由 #18149 跟踪，其阶段 0–5 对应 §6 中的切片。下文的代码引用均对应该提交；标为"待验证"的结论来自代码阅读，未经测试证实，必须在对应切片实现前用测试确认。
+状态：提案，实现前设计。日期：2026-11-22。本文接续[审批停靠设计](2026-11-21-managed-action-parking.zh-CN.md)（第四阶段，#18115 已合入），对照 `main` 的 `5714ee4c53` 核实。它逐项处理首个增量排除的等待形态，回答其开放问题 4，以及除团队计划审批外的开放问题 3。由 #18149 跟踪，其阶段 0–5 对应 §6 中的切片。下文的代码引用除各项另行注明外均对应该提交；标为"待验证"的结论来自代码阅读，未经测试证实，必须在对应切片实现前用测试确认。
 
 ## 1. 问题与现状
 
@@ -71,10 +71,10 @@
 ### 4.3 S3：子 Session
 
 - **为什么能复用 CAS。** 子 Session 的 Turn 是协调器分派的 `ma_turn` 行，`ChildResultRelay` 读取它时只对终态和几个特定错误码有动作，`RUNNING` 一律视为等待。停靠后的行仍是 `RUNNING`，`hosted_action_parked` 不命中任何分支。子 Session 不启用 live poll（`hostedApprovalForTurn` 在有 `lineage` 时关闭它，`:997`），因此证书不带 `approvalRevision`。
-- **前置条件。** [无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)的冷启动准入一节把 relay 尝试预算缺口列为第一阶段前置条件：session-message 投递、子结果投递与 automation fire 仍会把等待计入尝试预算，冷启动突发时可能把消息结算为 cancelled/unknown。必须先确认这个缺口已关闭；如果缺口仍在，先在本切片内把它关闭。
+- **前置条件。** [无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)的冷启动准入一节把 relay 尝试预算缺口列为第一阶段前置条件：session-message 投递、子结果投递与 automation fire 仍会把等待计入尝试预算，冷启动突发时可能把消息结算为 cancelled/unknown。测试确认 session-message 投递的缺口仍在：回执、对账或发送方步骤遇到 `hosted_session_closing` 或 `hosted_session_open_busy` 时都会扣一次尝试，而停靠中的子 Session 在每个重新加载它的步骤上都会遇到这两个错误码。本切片在这里按 command 分支已有的做法关闭缺口：relay 在心跳间隔后重试，不扣尝试次数。closing 等待仍由 Harness 设上限：无法完成的 teardown 会升级为 `hosted_session_teardown_blocked`，这个错误码照常扣预算；冷打开名额会自行释放。子结果投递与 automation fire 仍把这些等待计入预算，在该设计中仍记为欠账。子结果投递只在 stop 时调用子 Session 的 Harness，而 stop 已由 #17681 豁免；其他步骤都发往父 Session，而子 Session 自己不会再启动子 Session，所以永远不会是父 Session。
 - **方案。** 资格函数放开 `lineage`，保留其他条件。待处理的 session message 是 wake 所有的输入，有它时不停靠；relay 的重载会把 Session 带回来。
 - **收益说明。** 父 Turn 仍处于 `agent` 调用中并常驻，所以本切片只释放子 Session 的常驻进程。要实现整棵树的零常驻，还需要 §2 非目标中的"父等子"停靠。
-- **待验证。** 子 Session 单问题批次的挂载交还路径（`questionChild`）在冷恢复后行为正确；`MESSAGE_TURN_WAIT_MS` 在长时间停靠期间不会错误结算。
+- **已验证。** 本切片之前，子 Session 的审批在 Harness 于等待中死亡后就已能恢复，所以开放停靠不需要改恢复路径。冷恢复后，直接 public 子 Session 的单问题批次会重新获取原 Runtime，在等待期间交还挂载，收到决定后再次获取，与根 Session 一致（`questionChild`）。`MESSAGE_TURN_WAIT_MS` 只在子 Session 的 Turn 行进入终态后才生效；停靠后的行仍是 `RUNNING`，所以停靠时长超过这个上限、且有消息在等待时，relay 仍然只是等待。放开这一项后，子 Session 中由 wake 启动的 Turn 也按 S4 的条件停靠，而 wake 恢复扫描本来就会选中子 Session 的 head。
 
 ### 4.4 S4：wake 启动的 Turn
 
@@ -92,13 +92,33 @@
 ### 4.5 S5：Hooks
 
 - **已有基础。** `hook_execution` 记录按 `${promptId}:${callId}` 持久化每次 PreToolUse/PermissionRequest 的输入与结果，`orderedHookInput` 能据此重算有效输入，而不重新运行 Hook。被等待的调用在请求人工决定之前，已经跑完了 PreToolUse 和 PermissionRequest。
+- **Runtime owner**（2026-11-24 补充；从这里到 §4.5 结尾，代码引用对应 `main` 的 `f2c689c812`）。Hooks Session 的原生批次不跑在 Turn 作用域的 Runtime session 上。工具 Turn 取的是 Hook owner 的 broker（`this.mcp?.broker ?? this.hooks?.broker ?? …`，`hosted-workspace-tool-turn.ts:2524-2532`）。因此保存的计划里，`runtime.runtimeSessionId` 是 Hook owner 的 id；线上路径通过 `hooks.acquire()` 获取 Runtime（`:3403`），也不登记 Turn 清理欠账，因为 Runtime 由 Hook owner 持有。停靠 teardown 在 owners 步骤关闭 Hook owner（`hooks.close({ terminal: false })`，`hosted-harness-session.ts:5486`），这一步在 lease 步骤之前。关闭之后还剩下什么，取决于 owner 的种类：
+  - **配置作用域 owner**（`extensions-components-<digest(sessionKey, configRevision)>`）。Hook 目录由生效的 extension 包提供。非终态关闭只交还 mount，同一 id 下的行仍可重新获取（R13-1），下一次加载会算出同一个 id。停靠期间配置修订号不会变化（S7，已确认）。所以 `resumeSavedNativeBatch` 的 owner 检查（`broker.runtimeSessionId === plan.runtime.runtimeSessionId`，`:4337`）能通过。随后它按计划中的 binding 与 generation 重新获取，不登记 Turn 清理欠账（`:4360`）。在带 Hook 目录的 Session 上，S7 的 command-step 恢复走的也是这条路径。
+  - **activation 作用域 owner**（`hooks-activation-<digest(activationId, epoch)>`）。Hook 目录由 Session 定义固定。关闭会释放该 owner 的 Runtime session（`broker.release({ drain: true })`）。在 lifecycle v1 下，下一次加载会从自己的 activation 算出新 id，并在首次获取时释放更早的 owner，因此 owner 检查会拒绝。这样的等待在停靠之后无法恢复，崩溃之后同样无法恢复。lifecycle v2 会复用已记录的 id，但一个已释放的行能否按记录的 binding pin 重新获取，目前还不清楚。
+- **决策。** S5 只在配置作用域的 Hook owner 上接受原生 Hooks 等待。
+  - 这一条件放进共享形态函数，因此生产者、停靠资格以及三个恢复入口（接管加载、常驻 redrive、wake 泵）的判断一致。
+  - 其他 Hook owner 一律以新的带类型原因 `hooks_activation_owner` 拒绝，捕获时和形态函数中都是如此，并由 P0 计数。
+  - 要让 activation 作用域 owner 挺过停靠，需要两处改动：owners teardown 步骤在 Action 停靠期间跳过对它的释放，恢复出的批次接管一个更早的 owner。两者都会改变 `releaseEarlierOwners` 依赖的不变量（#13856）。这项推迟到 P0 计数表明 `hooks_activation_owner` 在真实负载中占比可观时再做。
+  - 同时带 MCP 的 Hooks Session 在 S6 之前仍以 `mcp` 拒绝，因为它的 Hook owner 与 MCP 共用 broker。
 - **方案。**
-  1. 生产者：放开 `(this.hooks || this.mcp)` 中的 Hooks 部分。continuation 为每个调用记录等待前已完成的 Hook 发生 ID 及其结果摘要。
-  2. 恢复：`resumeSavedNativeBatch` 接受带 Hooks 的 Session。已完成的发生通过既有的 saved-output 路径读回；有记录但没有结果的发生视为不确定，恢复拒绝（G3 §4.2 第 5 步）。批准之后的 PostToolUse 是新的发生，执行前已证明未开始，正常运行。
-  3. 接管：`takeover` 不再一律排除 `session.hooks`，改由共享资格函数判断。存在可恢复的原生 continuation 时，跳过 `answerResumedTurnCalls`：它会把被中断的调用回答为"从未运行"，和 command-step 的 R9-1 一样会永久破坏 continuation。
-  4. 资格：被等待调用的 PreToolUse 与 PermissionRequest 都已完成，或者可以证明没有配置；第一阶段的"无进行中的 Hook 操作"条件不变。
-  5. 重放：continuation 本来就保存了每个调用经过 Hooks 之后的实际输入（`request.call`）。PreToolUse 与 PermissionRequest 的发生都已完成的恢复调用，跳过 `decideHookInputs`，直接使用这份输入；再判断一次会拿 Hook 修改过的输入去比对原始 Hook 计划，从而抛出 `HostedHookInputConflictError`（`hosted-workspace-tool-turn.ts:4033-4051`）。
-- **待验证。** 冷加载恢复停靠 Turn 时不重新触发 SessionStart 或 UserPromptSubmit（G3 要求"不重新应用启动 Hook"）。
+  1. 生产者：对配置作用域 owner，放开 `(this.hooks || this.mcp)` 中的 Hooks 部分。continuation 为每个调用记录等待前已完成的 Hook 发生 ID 及其结果摘要。
+  2. 恢复：`resumeSavedNativeBatch` 接受配置作用域 owner 的 Hooks Session，并按上文方式重新获取。已完成的发生通过既有的 saved-output 路径读回。有记录但没有结果的发生视为不确定，恢复拒绝（G3 §4.2 第 5 步）。批准之后的 PostToolUse 是新的发生，执行前已证明未开始，正常运行。
+  3. 接管：`takeover`（`!lifecycle && !session.hooks && takeoverFlags`，`hosted-harness-session.ts:8553`）不再一律排除 `session.hooks`，改由共享资格函数判断。Hooks Session 的每次非 lifecycle 加载都会跑一轮 `answerResumedTurnCalls`（`:8584-8608`）。存在可恢复的原生 continuation 时，这一轮必须跳过：它会把被中断的调用回答为"从未运行"，和 command-step 的 R9-1 一样会永久破坏 continuation。跳过条件要和 `commandStepPark` 一样，用在接管臂之前算出的谓词，这样裸加载也无法破坏 continuation。
+  4. 资格：被等待调用的 PreToolUse 与 PermissionRequest 都已完成，或者可以证明没有配置。第一阶段的"无进行中的 Hook 操作"条件不变。
+  5. 重放：continuation 本来就保存了每个调用经过 Hooks 之后的实际输入（`request.call`）。PreToolUse 与 PermissionRequest 的发生都已完成的恢复调用，跳过 `decideHookInputs`，直接使用这份输入。现在只要 `this.hooks` 存在，`decideHookInputs` 就会对每个请求运行，恢复出的请求也不例外（`hosted-workspace-tool-turn.ts:5890`）。再判断一次会拿 Hook 修改过的输入去比对原始 Hook 计划，从而抛出 `HostedHookInputConflictError`（`:4053`）。
+- **已确认：启动 Hook 不会重新触发。** model driver 只在 `resumeFromToolResults` 与 `resumeModel` 都未设置时触发 SessionStart 和 UserPromptSubmit（`hosted-harness-model.ts:842`），而恢复原生批次会设置 `resumeFromToolResults`。model 测试 "resumes tool results without refiring startup Hooks or reapplying their rewrite" 固定了这一点。即使 SessionStart 还没有已完成的发生，恢复时这两个 Hook 也都不会触发，G3"不重新应用启动 Hook"的要求成立。
+- **已确认，且与预期相反：恢复后的轮次看到的是已接受的 Prompt，而不是 Hook 改写后的版本。**
+  - Harness 在 driver 运行之前，就把已接受的 Prompt parts 提交为该 Turn 的 user 记录（`hosted-harness-session.ts:4335-4355`）。
+  - driver 只把 UserPromptSubmit 的 `updatedPrompt` 和启动 Hook 的附加上下文用在线上请求里。对第一条 Prompt，这两者都不会提交；只有排队消息会带着改写结果提交（`hosted-harness-model.ts:1166`）。
+  - 同一个 model 测试表明，线上请求带有改写，而恢复后的历史里只有已接受的文本。下面的 Harness 测试表明，恢复后历史中的 user 记录就是已接受的 Prompt。
+  - 崩溃恢复的 Turn 也是这样，所以停靠与崩溃仍然等价。但只要这些 Hook 改过 Prompt，恢复后的轮次就与线上轮次不同。S5 接受这一点（决策 7）。
+- **已在配置作用域 owner 上确认：mount 交还与恢复后的 owner。** Harness 测试 "hands back a config-scoped Hook owner mount at park and resumes its Hooks on the same owner" 在带 PreToolUse 与 PostToolUse Hook 的 Session 上停靠一个 extension command step。
+  - 停靠时，owner 关闭只交还该 owner 的 mount 一次，不释放该 id 下的任何行。
+  - 批准之后，恢复出的批次在同一个 owner 上按计划中的 binding 与 generation 重新获取。
+  - 等待前已完成的两个 PreToolUse 发生（`skill` 调用的，以及其 command step 的）只读回、不重跑。被批准步骤的 PostToolUse 在该 owner 上恰好运行一次。
+- **仍需在 S5 自己的测试中验证。**
+  - 上面停靠的计划是 command step，批次里没有已派发的原生文件工作。S5 仍需证明，第一阶段的"未结算 Runtime 工作"条件能排除所有会让 mount 交还被 R14-2 拒绝的原生批次。
+  - 恢复后的运行没有为外层 `skill` 调用触发 PostToolUse。目前还没有和未停靠的运行做过对比。
 - **改动面。** 仅 Harness，但触及 G3 生产者与恢复臂，需要 G3 的 A3/A6 故障门禁覆盖 Hooks 变体。
 
 ### 4.6 S6：MCP
@@ -130,6 +150,12 @@
 3. **wake 所有的停靠由扫描唤醒，不新建 `ma_turn` 行。** 为 wake Turn 补建分派行会改变它们的所有权模型，影响 relay 与泵的全部不变量。复用 wake 恢复扫描只需要一列加一个查询条件。
 4. **MCP 停靠绑定 MCP parking。** 不保留目录的 MCP 停靠无法证明恢复时定义不变。
 5. **子 Session 切片不顺带做"父等子"。** 后者是另一种等待（没有 Action、没有审批 continuation），混在一起会扩大 G3 必须证明的范围。
+6. **S5 只在配置作用域的 Hook owner 上停靠。** 停靠 teardown 会释放 activation 作用域 owner 的 Runtime session，而在 lifecycle v1 下，下一次加载算不出该 owner 的 id。保留这类 owner 会改变释放更早 owner 时依赖的不变量。所以 S5 先把它记为 `hooks_activation_owner`，等测量表明值得做时再处理。
+7. **恢复后的 Hooks Turn 在已接受的 Prompt 上继续（S5）。** UserPromptSubmit 的改写和启动 Hook 的附加上下文只进入线上请求，所以恢复后的轮次看到的是已接受的 Prompt（§4.5，已确认）。S5 接受这一点，不为此新增拒绝原因。
+   - 读 `f2c689c812` 的代码可知，凡是 Hooks Session 从日志重建历史的地方，今天都已经是这样。之后的 Turn 读到的是更早 Turn 的已接受 Prompt。今天 Hooks 的崩溃恢复在继续某个 Turn 的 model 轮次时，也是从已接受的 Prompt 开始（`hosted-harness-session.ts:9156-9182`）。
+   - 个人记忆召回的上下文，在今天已上线的停靠中也是如此：它只进入线上请求，恢复时不会重新召回。
+   - 拒绝这类 Turn 会让大多数注入上下文的 Hooks Session 保持常驻，却挡不住上述路径本来就会暴露的内容。
+   - 像排队消息那样把改写后的第一条 Prompt 也提交，会改变之后每个 Turn 的历史。这属于后续工作，不在本设计范围内。
 
 ## 6. 推荐顺序与测量
 
@@ -156,9 +182,9 @@
 - **P0**：没有 Workspace 的 Session 不会打开任何 Action，连 memory 写入也不会，所以永远不会登记可停靠的等待。
 - **S1**：纯图片 Prompt 停靠、冷加载后 Allow，以及它的 Harness 在等待中死掉、由新的 Harness 接管后 Allow，两种情况下工具都只执行一次，恢复后的第一次模型调用都从空文字开始，历史里带着原图。
 - **S2**：停靠期间后台终态到达，解除停靠、Turn 恢复，通知在 Turn 结算后投递；工具与通知各恰好一次。覆盖在 seal 之前、在 seal 与 CAS 之间、在 CAS 之后暂存这三种顺序。
-- **S3**：child Session 的停靠时长超过 relay 的消息 Turn 等待时间，父 Session 仍能收敛；单问题的 child 批次在冷恢复后交还挂载（`questionChild`）。
+- **S3**：child Session 的审批停靠时证书不带审批 revision，冷加载并批准后工具只执行一次；Harness 在等待中死亡后，新的 Harness 以同样方式完成它。停靠的 child Turn 超过 relay 的消息 Turn 等待时间后仍被当作等待；单问题的 child 批次在冷恢复后交还挂载（`questionChild`）；session-message 步骤遇到 closing 或冷打开名额已满的 Session 时不扣尝试次数。
 - **S4**：由 monitor 通知、loop 触发、automation 运行和 child 结果启动的 Turn，各自停靠后分别走决定、模式变更、到期，以及来源支持时的取消，不经协调器都能完成；清除证书后又崩溃的 writer 会把 head 留给扫描；泵不再按崩溃结算 `await_action` 的 wake 输入。wake 停靠 Turn 的待偿清理既不会进入清理欠账扫描，也不会让恢复视图变成 `operator_required`。S4b：channel Turn 与 `pr_event` Turn 在停靠之后、以及其 Harness 在等待中死掉之后，都能经由决定完成；完成的 channel Turn 恰好规划一条回复。
-- **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发；另有单独用例覆盖 PreToolUse 的 `updatedInput`、PermissionRequest 的 `decision.updatedInput`，以及 Hooks 在第一个审批之前已为兄弟调用运行过的批次。
+- **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发；另有单独用例覆盖 PreToolUse 的 `updatedInput`、PermissionRequest 的 `decision.updatedInput`，以及 Hooks 在第一个审批之前已为兄弟调用运行过的批次。extension 包提供的 Hook 目录（配置作用域 owner）能停靠并恢复。Session 定义提供的 Hook 目录（activation 作用域 owner）在捕获时、停靠资格判断时以及三个恢复入口处都以 `hooks_activation_owner` 拒绝。启动 Hook 改过 Prompt 的 Turn 能停靠，并在已接受的 Prompt 上恢复。对原生批次，停靠时的 mount 交还成功，批准之后的 PostToolUse 在恢复出的 Runtime session 上恰好运行一次。
 - **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放；持有审批停靠证书的 owner 经过回收作业的空闲窗口扫描后仍保留原目录。
 - **真实进程与 MySQL 8.4**：每个切片至少一个"停靠 → 换代 Harness → 决定"用例进入必跑 CI 层级；H2 结果不能替代。
 

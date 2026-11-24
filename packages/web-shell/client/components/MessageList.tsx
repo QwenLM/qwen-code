@@ -202,6 +202,7 @@ export interface MessageListProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   failedPromptMessageId?: string;
+  failedPromptStatus?: 'failed' | 'uncertain';
   onRetryFailedPrompt?: () => void;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
@@ -3104,6 +3105,7 @@ export const MessageList = memo(
       showRetryHint = false,
       onRetryClick,
       failedPromptMessageId,
+      failedPromptStatus,
       onRetryFailedPrompt,
       onBranchSession,
       onCanScrollToBottomChange,
@@ -6090,6 +6092,12 @@ export const MessageList = memo(
                 displayItem.message.role === 'user' &&
                 displayItem.message.id === failedPromptMessageId
               }
+              sendFailedStatus={
+                displayItem.message.role === 'user' &&
+                displayItem.message.id === failedPromptMessageId
+                  ? failedPromptStatus
+                  : undefined
+              }
               onRetrySend={onRetryFailedPrompt}
               onBranchSession={onBranchSession}
               branchRecordId={branchRecordId}
@@ -6198,6 +6206,7 @@ export const MessageList = memo(
         showRetryHint,
         onRetryClick,
         failedPromptMessageId,
+        failedPromptStatus,
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
