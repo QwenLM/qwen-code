@@ -479,7 +479,87 @@ describe('git hardening', () => {
       'status',
       '--porcelain',
       '--untracked-files=normal',
+      '--ignore-submodules=dirty',
     ]);
+  });
+
+  it('disables empty-subsection and U+2028 filter names and ignores dirty submodule filters', () => {
+    const { dir } = makeRepo();
+    const markerEmpty = join(dir, 'empty-filter-fired');
+    const markerLineSep = join(dir, 'u2028-filter-fired');
+    execFileSync(
+      'git',
+      ['-C', dir, 'config', '--local', 'filter..clean', `touch ${markerEmpty}`],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-C',
+        dir,
+        'config',
+        '--local',
+        'filter.a\u2028b.clean',
+        `touch ${markerLineSep}`,
+      ],
+      { stdio: 'pipe' },
+    );
+    expect(localFilterOverrides(dir)).toEqual([
+      '-c',
+      'filter..clean=',
+      '-c',
+      'filter.a\u2028b.clean=',
+    ]);
+    writeFileSync(
+      join(dir, '.gitattributes'),
+      'a.txt filter=\nREADME.md filter=a\u2028b\n',
+    );
+    spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(existsSync(markerEmpty)).toBe(false);
+    expect(existsSync(markerLineSep)).toBe(false);
+
+    // Submodule with its own .git/modules/sub/config filter must not execute
+    // during host-side gitStatusArgs.
+    const { dir: subSource } = makeRepo();
+    const { dir: superDir } = makeRepo();
+    execFileSync(
+      'git',
+      [
+        '-C',
+        superDir,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        subSource,
+        'sub',
+      ],
+      { stdio: 'pipe' },
+    );
+    execFileSync('git', ['-C', superDir, 'commit', '-m', 'add sub'], {
+      stdio: 'pipe',
+    });
+    const subMarker = join(superDir, 'sub-filter-fired');
+    const subDir = join(superDir, 'sub');
+    execFileSync(
+      'git',
+      [
+        '-C',
+        subDir,
+        'config',
+        '--local',
+        'filter.subevil.clean',
+        `touch ${subMarker}`,
+      ],
+      { stdio: 'pipe' },
+    );
+    writeFileSync(join(subDir, '.gitattributes'), '* filter=subevil\n');
+    writeFileSync(join(subDir, 'a.txt'), 'dirty\n');
+    const status = spawnSync('git', gitStatusArgs(superDir), {
+      encoding: 'utf8',
+    });
+    expect(status.status).toBe(0);
+    expect(existsSync(subMarker)).toBe(false);
   });
 
   // A filter VALUE may contain newlines; parsing the rendered `key value`

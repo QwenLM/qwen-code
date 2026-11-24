@@ -888,7 +888,7 @@ export const GIT_HARDENING = [
   'core.excludesFile=/dev/null',
 ];
 
-const FILTER_NAME = /^filter\..+\.(clean|smudge|process)$/;
+const FILTER_NAME = /^filter\..*\.(clean|smudge|process)$/s;
 
 /**
  * A filter name git allows (e.g. `filter.a=b.clean`) but `-c key=value`
@@ -949,8 +949,14 @@ export function localFilterOverrides(root) {
       throw new Error('could not enumerate local git filters');
     }
     for (const name of result.stdout.split('\0')) {
-      if (!name || !FILTER_NAME.test(name)) continue;
-      if (name.includes('=')) throw new UnsafeFilterNameError(name);
+      if (!name) continue;
+      if (
+        !FILTER_NAME.test(name) ||
+        name.includes('=') ||
+        /[\r\n]/.test(name)
+      ) {
+        throw new UnsafeFilterNameError(name);
+      }
       overrides.push('-c', `${name}=`);
     }
   }
@@ -966,6 +972,7 @@ export function gitStatusArgs(root) {
     'status',
     '--porcelain',
     '--untracked-files=normal',
+    '--ignore-submodules=dirty',
   ];
 }
 

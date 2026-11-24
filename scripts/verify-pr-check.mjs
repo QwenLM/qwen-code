@@ -1974,9 +1974,7 @@ function main(argv) {
     );
     return 1;
   }
-  const dirPrNumber = /^pr(\d+)-verify-/.exec(
-    normalizeFsPath(basename(canonicalDir)),
-  )?.[1];
+  const dirPrNumber = /^pr(\d+)-verify-/i.exec(basename(canonicalDir))?.[1];
 
   // Walk the raw OS path once without lexically collapsing symlink/.. so we
   // observe: (1) whether any symlink along the path resolved directly to
@@ -2099,7 +2097,7 @@ function main(argv) {
         } else {
           cur = /[\\/]$/.test(cur) ? `${cur}${part}` : `${cur}${sep}${part}`;
         }
-        if (/^pr(\d+)-verify-/.test(normalizeFsPath(basename(cur)))) {
+        if (/^pr(\d+)-verify-/i.test(basename(cur))) {
           sawVerifyRoundSegment = true;
         }
         const st = lstatSync(cur);
