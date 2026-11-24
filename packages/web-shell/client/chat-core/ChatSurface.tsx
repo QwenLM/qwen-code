@@ -258,7 +258,7 @@ export function ChatSurface({
             customInputLabel={askUserFreeTextLabel}
             onAskDetails={askUserDetails}
             onError={reportError}
-            onConfirm={async (id, optionId, answers) => {
+            onConfirm={async (id, optionId, answers, structuredAnswers) => {
               const option = activeQuestion.request.options.find(
                 (candidate) => candidate.id === optionId,
               );
@@ -269,9 +269,12 @@ export function ChatSurface({
                 const result = await controller.respondApproval(id, optionId);
                 return result.admission === 'accepted';
               }
-              const normalized: QuestionAnswer[] = Object.entries(
-                answers ?? {},
-              ).map(([questionId, value]) => ({ questionId, value }));
+              const normalized: QuestionAnswer[] = structuredAnswers
+                ? [...structuredAnswers]
+                : Object.entries(answers ?? {}).map(([questionId, value]) => ({
+                    questionId,
+                    value,
+                  }));
               const result = await controller.respondQuestion(id, normalized);
               return result.admission === 'accepted';
             }}

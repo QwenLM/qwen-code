@@ -62,7 +62,7 @@ class HostedMcpResultDeliveryIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "mcp-delivery-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<ProxyCall> proxyCalls =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
     private final List<Map<String, Object>> wire = new CopyOnWriteArrayList<>();
