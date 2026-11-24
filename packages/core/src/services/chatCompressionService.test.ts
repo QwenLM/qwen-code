@@ -5388,4 +5388,48 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
     );
   });
+
+  it.each([
+    {
+      name: 'candidates=0 and thoughts=maxOut without promptTokenCount',
+      buildUsage: (maxOut: number) => ({
+        candidatesTokenCount: 0,
+        thoughtsTokenCount: maxOut,
+      }),
+    },
+    {
+      name: 'thoughts=maxOut with promptTokenCount and no candidatesTokenCount or totalTokenCount',
+      buildUsage: (maxOut: number) => ({
+        promptTokenCount: 54_000,
+        thoughtsTokenCount: maxOut,
+      }),
+    },
+  ])(
+    'retries clamped budget and reports OUTPUT_TRUNCATED when partial usage reports $name',
+    async ({ buildUsage }) => {
+      configureWindow(65_536);
+      const budgets: number[] = [];
+      const generateText = vi.fn().mockImplementation(async (args) => {
+        const maxOut =
+          args.config?.maxOutputTokens ?? COMPACT_MAX_OUTPUT_TOKENS;
+        budgets.push(maxOut);
+        return {
+          text: '',
+          usage: buildUsage(maxOut),
+        };
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as BaseLlmClient);
+
+      const result = await compressHistory(toolSession(12, 17_500), 54_000);
+
+      expect(budgets).toHaveLength(2);
+      expect(budgets[1]!).toBeGreaterThan(budgets[0]!);
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      );
+    },
+  );
 });

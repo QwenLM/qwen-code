@@ -23,7 +23,10 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import { movePromptContextAheadOfUserText } from '../core/prompt-context-order.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
-import { outputTokenCount } from '../telemetry/gen-ai-usage.js';
+import {
+  outputIncludesThoughts,
+  outputTokenCount,
+} from '../telemetry/gen-ai-usage.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { withModelObservationSource } from '../telemetry/model-observation.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -1331,6 +1334,7 @@ export class ChatCompressionService {
     ): number | undefined => {
       const prompt = usage?.promptTokenCount;
       const reportedCandidates = usage?.candidatesTokenCount;
+      const thoughts = Math.max(0, usage?.thoughtsTokenCount ?? 0);
       if (
         typeof reportedCandidates === 'number' &&
         typeof prompt === 'number'
@@ -1339,20 +1343,25 @@ export class ChatCompressionService {
           {
             input: prompt,
             output: reportedCandidates,
-            thoughts: Math.max(0, usage?.thoughtsTokenCount ?? 0),
+            thoughts,
             total: usage?.totalTokenCount ?? 0,
           },
           compactionAuthType,
         );
-      }
-      if (typeof reportedCandidates === 'number') {
-        return reportedCandidates;
       }
       if (
         typeof usage?.totalTokenCount === 'number' &&
         typeof prompt === 'number'
       ) {
         return Math.max(0, usage.totalTokenCount - prompt);
+      }
+      if (typeof reportedCandidates === 'number') {
+        return outputIncludesThoughts(compactionAuthType)
+          ? Math.max(reportedCandidates, thoughts)
+          : reportedCandidates + thoughts;
+      }
+      if (typeof usage?.thoughtsTokenCount === 'number') {
+        return thoughts;
       }
       return undefined;
     };
@@ -1379,6 +1388,7 @@ export class ChatCompressionService {
       if (slim.stats.thoughtsStripped > 0) {
         coldInputReduced = true;
       }
+      let coldTextReduced = Boolean(opts.requestPayloadTooLarge);
       let coldHistory = slim.slimmedHistory;
       let coldSizing = initialSizing;
       // A request that leaves its summary less than the minimum is reduced
@@ -1392,6 +1402,7 @@ export class ChatCompressionService {
         coldBudgetFor(coldHistory) < minCompactionOutputTokens(budgetWindow)
       ) {
         const reduced = reduceColdInput();
+        coldTextReduced = true;
         if (estimateColdRequest(reduced) < estimateColdRequest(coldHistory)) {
           coldInputReduced = true;
           coldHistory = reduced;
@@ -1462,7 +1473,10 @@ export class ChatCompressionService {
                 `context window; retrying once with a smaller ` +
                 `${sameInput ? 'output budget' : 'request'}: ${String(error)}`,
             );
-          if (!sameInput) coldInputReduced = true;
+          if (!sameInput) {
+            coldInputReduced = true;
+            coldTextReduced = true;
+          }
           coldHistory = retry.history;
           coldSizing = retry.sizing;
           continue;
@@ -1473,6 +1487,7 @@ export class ChatCompressionService {
         // of deadlocking at the same clamped cap on every /compress attempt.
         if (
           attempt === 0 &&
+          !coldTextReduced &&
           coldOutputBudget < compactionOutputReserve(coldWindow)
         ) {
           const candidateText = summaryResult.text;
@@ -1486,6 +1501,7 @@ export class ChatCompressionService {
             spent >= coldOutputBudget
           ) {
             const reduced = reduceColdInput();
+            coldTextReduced = true;
             const reducedBudget = computeCompactionOutputBudget(
               estimateColdRequest(reduced),
               coldWindow,

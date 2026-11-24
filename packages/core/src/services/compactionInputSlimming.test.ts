@@ -1423,5 +1423,26 @@ describe('compactionInputSlimming', () => {
       expect(result.slimmedHistory[2]).toBe(history[2]);
       expect(result.stats.thoughtsStripped).toBe(2);
     });
+
+    it('treats empty-string thoughtSignature as unsigned and preserves sibling functionCall without adding a placeholder', () => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            { text: 'empty sig thought', thought: true, thoughtSignature: '' },
+            { functionCall: { id: 'c1', name: 'read_file', args: { p: 'a' } } },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, undefined, {
+        stripUnsignedThoughts: true,
+      });
+
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { functionCall: { id: 'c1', name: 'read_file', args: { p: 'a' } } },
+      ]);
+      expect(result.stats.thoughtsStripped).toBe(1);
+    });
   });
 });

@@ -349,7 +349,10 @@ export function slimCompactionInput(
       if (
         options?.stripUnsignedThoughts &&
         part.thought === true &&
-        typeof part.thoughtSignature !== 'string'
+        !(
+          typeof part.thoughtSignature === 'string' &&
+          part.thoughtSignature.length > 0
+        )
       ) {
         stats.thoughtsStripped++;
         touched = true;

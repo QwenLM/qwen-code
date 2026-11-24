@@ -1499,6 +1499,101 @@ describe('ContentGenerationPipeline', () => {
       expect(calls[1][0].enable_thinking).toBe(true);
     });
 
+    it('drops conflicting extra_body.enable_thinking when a gateway-native disable switch is already emitted', async () => {
+      const model = 'deepseek-chat';
+      providerAdds({
+        enable_thinking: true,
+        chat_template_kwargs: { enable_thinking: true },
+      });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://api.deepseek.com/v1',
+          model,
+          extra_body: {
+            enable_thinking: true,
+            chat_template_kwargs: { enable_thinking: true },
+          },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.chat_template_kwargs).toBeUndefined();
+    });
+
+    it('drops conflicting chat_template_kwargs.enable_thinking on OpenRouter while keeping sibling keys', async () => {
+      const model = 'anthropic/claude-sonnet-4';
+      providerAdds({
+        enable_thinking: true,
+        chat_template_kwargs: { enable_thinking: true, keep_me: 1 },
+      });
+
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://openrouter.ai/api/v1',
+          model,
+          extra_body: {
+            enable_thinking: true,
+            chat_template_kwargs: { enable_thinking: true, keep_me: 1 },
+          },
+        },
+        sideQuery(model),
+      );
+
+      expect(apiCall.reasoning).toEqual({ enabled: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.chat_template_kwargs).toEqual({ keep_me: 1 });
+    });
+
+    it('flips enable_thinking and retries on required-thinking error during executeStream', async () => {
+      const model = 'custom-stream-mandatory-model';
+      pipelineWith({
+        baseUrl: 'https://custom-gateway.example.com/v1',
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      convertChunksTo(finishOf([{ text: 'ok' }]));
+      createMock()
+        .mockRejectedValueOnce(
+          requiredThinkingError('enable_thinking must be true for this model'),
+        )
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              id: 'chatcmpl-stream-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: 'ok' },
+                  finish_reason: 'stop',
+                },
+              ],
+            };
+          })(),
+        );
+
+      const stream = await pipeline.executeStream(
+        sideQuery(model),
+        'side-query:chat-compression',
+      );
+      const chunks = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+
+      const calls = createMock().mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0].enable_thinking).toBe(false);
+      expect(calls[1][0].enable_thinking).toBe(true);
+      expect(chunks.length).toBeGreaterThan(0);
+    });
+
     it.each([
       ['max_tokens', 111, 8],
       ['max_completion_tokens', 111, 8],
