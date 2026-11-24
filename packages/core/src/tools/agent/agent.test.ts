@@ -53,6 +53,7 @@ import {
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
+  appendSubagentStartContext,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import {
@@ -65,6 +66,7 @@ import type {
 } from '../../agents/runtime/agent-events.js';
 import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
+import { TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE } from '../../core/tool-hook-context.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import {
   MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
@@ -309,6 +311,16 @@ vi.mock('../../telemetry/index.js', async (importOriginal) => {
 
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
+// The module is automocked, so the prompt append under test would be a stub:
+// it keeps the real implementation.
+const actualAppendSubagentStartContext = await vi
+  .importActual<
+    typeof import('../../agents/runtime/agent-headless.js')
+  >('../../agents/runtime/agent-headless.js')
+  .then((actual) => actual.appendSubagentStartContext);
+vi.mocked(appendSubagentStartContext).mockImplementation(
+  actualAppendSubagentStartContext,
+);
 
 describe('AgentTool', () => {
   let config: Config;
@@ -474,7 +486,10 @@ describe('AgentTool', () => {
       .mockResolvedValue(mockSubagents[0]);
   /** A fresh ContextState that every `new ContextState()` returns. */
   const newContextState = () => {
-    const state = { set: vi.fn() } as unknown as ContextState;
+    const state = {
+      set: vi.fn(),
+      get: vi.fn(() => undefined),
+    } as unknown as ContextState;
     MockedContextState.mockImplementation(() => state);
     return state;
   };
@@ -4444,6 +4459,12 @@ describe('AgentTool', () => {
         'hook_context',
         'Extra context from hook',
       );
+      // No task_prompt exists in this fixture: the context is stored on its
+      // own, not after the string `undefined`.
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Extra context from hook',
+      );
     });
 
     it('appends additionalContext to the initial task prompt', async () => {
@@ -4460,10 +4481,12 @@ describe('AgentTool', () => {
       );
     });
 
-    it('caps additionalContext before appending it to the task prompt', async () => {
-      const longContext = 'x'.repeat(
-        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH + 100,
-      );
+    it('bounds additionalContext like other hook context before appending it', async () => {
+      const cut =
+        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH -
+        TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE.length;
+      // The cut would land between the halves of the emoji.
+      const longContext = 'x'.repeat(cut - 1) + '😀' + 'y'.repeat(200);
       startOutput(longContext);
       mockContextState.get = vi.fn((key: string) =>
         key === 'task_prompt' ? 'Original task' : undefined,
@@ -4471,9 +4494,16 @@ describe('AgentTool', () => {
 
       await runFg();
 
-      expect(mockContextState.set).toHaveBeenCalledWith(
-        'task_prompt',
-        `Original task\n\n${'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)}`,
+      const appended = String(
+        vi
+          .mocked(mockContextState.set)
+          .mock.calls.filter(([key]) => key === 'task_prompt')
+          .pop()?.[1],
+      );
+      // The emoji straddles the cut, so one code unit is backed off: the
+      // context ends in the notice and never in a lone surrogate.
+      expect(appended).toBe(
+        `Original task\n\n${'x'.repeat(cut - 1)}${TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE}`,
       );
     });
 
@@ -4486,10 +4516,13 @@ describe('AgentTool', () => {
         'hook_context',
         expect.stringMatching(/.+/),
       );
-      expect(mockContextState.set).not.toHaveBeenCalledWith(
-        'task_prompt',
-        expect.stringContaining('undefined'),
-      );
+      // The dispatch wrote the task prompt once; with no context the hook
+      // adds nothing, not even a bare separator.
+      expect(
+        vi
+          .mocked(mockContextState.set)
+          .mock.calls.filter(([key]) => key === 'task_prompt'),
+      ).toHaveLength(1);
     });
 
     it('should continue execution when SubagentStart hook fails', async () => {

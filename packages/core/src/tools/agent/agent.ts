@@ -38,6 +38,7 @@ import type {
 } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
+  appendSubagentStartContext,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { SubagentExecutor } from '../../agents/runtime/subagent-executor.js';
@@ -111,10 +112,7 @@ import {
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
 } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import {
-  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
-  PermissionMode,
-} from '../../hooks/types.js';
+import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
 import {
   backgroundFixAt,
@@ -2494,21 +2492,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     };
   }
 
-  private appendSubagentStartContext(
-    contextState: ContextState,
-    additionalContext: string,
-  ): void {
-    // hook_context feeds systemPrompt; the user turn needs the context too.
-    const boundedContext = additionalContext.slice(
-      0,
-      MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
-    );
-    contextState.set(
-      'task_prompt',
-      `${String(contextState.get('task_prompt'))}\n\n${boundedContext}`,
-    );
-  }
-
   /**
    * Runs a subagent with start/stop hook lifecycle, updating the display
    * as execution progresses.
@@ -2556,7 +2539,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const additionalContext = startHookOutput?.getAdditionalContext();
           if (additionalContext) {
             contextState.set('hook_context', additionalContext);
-            this.appendSubagentStartContext(contextState, additionalContext);
+            appendSubagentStartContext(contextState, additionalContext);
           }
         } catch (hookError) {
           debugLogger.warn(
@@ -3918,7 +3901,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const additionalContext = startHookOutput?.getAdditionalContext();
             if (additionalContext) {
               contextState.set('hook_context', additionalContext);
-              this.appendSubagentStartContext(contextState, additionalContext);
+              appendSubagentStartContext(contextState, additionalContext);
             }
             subagentStartHookCompleted = true;
           } catch (hookError) {
@@ -4354,7 +4337,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     startHookOutput?.getAdditionalContext();
                   if (additionalContext) {
                     turnContextState.set('hook_context', additionalContext);
-                    this.appendSubagentStartContext(
+                    appendSubagentStartContext(
                       turnContextState,
                       additionalContext,
                     );

@@ -16,7 +16,11 @@ import {
   type AgentToolCallEvent,
 } from './runtime/agent-events.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
-import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
+import {
+  AgentHeadless,
+  appendSubagentStartContext,
+  ContextState,
+} from './runtime/agent-headless.js';
 import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
   buildAgentTranscriptAttach,
@@ -39,7 +43,6 @@ import {
   getInitialChatHistory,
 } from '../core/environmentContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
-import { MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH } from '../hooks/types.js';
 import type { PermissionMode, StopHookOutput } from '../hooks/types.js';
 import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 import {
@@ -1928,21 +1931,6 @@ export class BackgroundAgentResumeService {
     );
   }
 
-  private appendSubagentStartContext(
-    contextState: ContextState,
-    additionalContext: string,
-  ): void {
-    // hook_context feeds systemPrompt; the user turn needs the context too.
-    const boundedContext = additionalContext.slice(
-      0,
-      MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
-    );
-    contextState.set(
-      'task_prompt',
-      `${String(contextState.get('task_prompt'))}\n\n${boundedContext}`,
-    );
-  }
-
   private async applySubagentStartHook(
     contextState: ContextState,
     opts: {
@@ -1968,7 +1956,7 @@ export class BackgroundAgentResumeService {
       const additionalContext = startHookOutput?.getAdditionalContext();
       if (additionalContext) {
         contextState.set('hook_context', additionalContext);
-        this.appendSubagentStartContext(contextState, additionalContext);
+        appendSubagentStartContext(contextState, additionalContext);
       }
     } catch (hookError) {
       debugLogger.warn(
