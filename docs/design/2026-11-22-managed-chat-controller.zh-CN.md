@@ -159,8 +159,8 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
 
 ## 延后（切片 3b–3c 与后续）
 
-- **切片 3b —— `useManagedChatController` 绑定 hook**：将 `useManagedSession`、
-  `useManagedPendingActions` 与 `ManagedAgentProvider` 接入
+- **[切片 3b —— `useManagedChatController` 绑定 hook](2026-11-24-managed-chat-controller-binding.zh-CN.md)**：
+  将 `useManagedSession`、`useManagedActions` 与 `ManagedAgentProvider` 接入
   `createManagedChatController`。
 - **切片 3c —— `ManagedSessionsPage` 切换至 `ChatSurface`** 并过浏览器级视觉前后
   对比门（实现双模式首个真实 UI 收敛）。切换前让共享 `AskUserQuestion` 卡片学习

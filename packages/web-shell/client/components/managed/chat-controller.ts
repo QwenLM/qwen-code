@@ -554,7 +554,6 @@ export function createManagedChatController(
     let matched = false;
     for (const entry of tracked) {
       if (entry.backendOperationId !== event.operationId) continue;
-      if (isTerminalOperation(entry.state)) continue;
       matched = true;
       applyState(entry, next);
     }
@@ -569,7 +568,6 @@ export function createManagedChatController(
   const settleByTurnId = (event: ManagedTurnSettlement): void => {
     for (const entry of tracked) {
       if (entry.boundTurnId !== event.turnId) continue;
-      if (isTerminalOperation(entry.state)) continue;
       applyState(entry, projectTurnOutcomeForKind(entry.kind, event.outcome));
     }
     // A turn id is unknown until submit's transport response arrives, so tag
@@ -588,9 +586,10 @@ export function createManagedChatController(
       event.outcome === 'resolved' ? 'established' : 'failed';
     for (const entry of tracked) {
       if (entry.boundActionId !== event.actionId) continue;
-      if (isTerminalOperation(entry.state)) continue;
       applyState(entry, next);
     }
+    // Only keep an early buffer entry while this action itself is in flight;
+    // cross-attempt isolation is independently enforced by dispatchSequence.
     if (inFlightActionIds.has(event.actionId)) {
       bufferedActionOutcome.set(event.actionId, {
         outcome: event.outcome,
@@ -730,7 +729,6 @@ export function createManagedChatController(
         action.kind,
         action.inputRevision,
         action.policyRevision,
-        action.expiresAt,
         request,
       ]);
       const previous = pendingProjection?.requests.get(action.actionId);
