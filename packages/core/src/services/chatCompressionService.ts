@@ -1503,7 +1503,9 @@ export class ChatCompressionService {
           !coldTextReduced &&
           coldOutputBudget < compactionOutputReserve(coldWindow)
         ) {
-          const candidateText = summaryResult.text;
+          const candidateText = stripCompactionTranscriptHint(
+            summaryResult.text ?? '',
+          );
           const candidateVisible = candidateText
             ? stripAnalysisBlock(candidateText).trim()
             : '';
