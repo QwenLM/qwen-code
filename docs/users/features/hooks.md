@@ -1265,7 +1265,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 - `hookSpecificOutput.decision`: structured object with permission decision details:
   - `behavior`: "allow" or "deny"
   - `updatedInput`: modified tool input (optional)
-  - `updatedPermissions`: modified permissions (optional)
+  - `updatedPermissions`: permission rules to add when the hook allows the call (optional, see below)
   - `message`: message to show to user (optional)
   - `interrupt`: whether to interrupt the workflow (optional)
 
@@ -1282,6 +1282,32 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
   }
 }
 ```
+
+**Adding permission rules**: when the hook allows the call, each `updatedPermissions` entry of type `addRules` adds rules the same way an "Always allow" choice does, so later matching calls are decided without asking again:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionRequest",
+    "decision": {
+      "behavior": "allow",
+      "updatedPermissions": [
+        {
+          "type": "addRules",
+          "rules": [{ "toolName": "Bash", "ruleContent": "npm test" }],
+          "behavior": "allow",
+          "destination": "session"
+        }
+      ]
+    }
+  }
+}
+```
+
+- `rules`: each `{ toolName, ruleContent }` becomes the permission rule `toolName(ruleContent)`, or `toolName` when `ruleContent` is omitted. If present, `ruleContent` must be a non-blank string. Tool names follow the same rules as `permissions` settings, so `Bash` and `run_shell_command` both work.
+- `behavior`: `"allow"`, `"deny"` or `"ask"`.
+- `destination`: `"session"` keeps the rules in memory for this session. `"projectSettings"` and `"localSettings"` write them to the project's `.qwen/settings.json`, and `"userSettings"` to `~/.qwen/settings.json`. Standalone sessions skip both project destinations.
+- Entries apply when the merged hook decision grants the final tool input and the call passes its pre-execution checks. A call that requires human approval does not apply hook permission updates. Unsupported entry types such as `setMode` or `replaceRules` are skipped.
 
 #### PermissionDenied
 

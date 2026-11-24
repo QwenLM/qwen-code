@@ -48282,14 +48282,143 @@ describe('Session', () => {
       );
     });
 
+    it.each(['ordinary', 'standalone'] as const)(
+      'adds permitted rules from a PermissionRequest hook in a %s session',
+      async (sourceType) => {
+        if (sourceType === 'standalone') {
+          session.dispose();
+          vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+            'standalone',
+          );
+          vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+          const expectation = {
+            canonicalSessionId: 'test-session-id',
+            root: { canonicalPath: '/managed', device: 1, inode: 2 },
+            child: {
+              name: 'child',
+              canonicalPath: '/managed/child',
+              device: 1,
+              inode: 3,
+            },
+          };
+          session.installPendingManagedConversationBinding(
+            expectation,
+            vi.fn().mockResolvedValue(undefined),
+          );
+          await session.commitManagedConversationBinding(expectation);
+          await session.releaseManagedConversationBinding(expectation);
+        }
+        const hookSpy = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: true,
+            updatedPermissions: [
+              'projectSettings',
+              'localSettings',
+              'userSettings',
+            ].map((destination) => ({
+              type: 'addRules',
+              rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+              behavior: 'allow',
+              destination,
+            })),
+          });
+        const persistRule = vi.fn().mockResolvedValue(undefined);
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        const invocation = {
+          params: { command: 'npm test' },
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: 'npm test',
+            rootCommand: 'npm',
+            onConfirm: vi.fn().mockResolvedValue(undefined),
+          }),
+          getDescription: vi.fn().mockReturnValue('npm test'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.SHELL,
+          kind: core.Kind.Execute,
+          build: vi.fn().mockReturnValue(invocation),
+        });
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-hook-permission-updates',
+                    name: core.ToolNames.SHELL,
+                    args: { command: 'npm test' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'run the tests' }],
+          });
+        } finally {
+          hookSpy.mockRestore();
+        }
+
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(persistRule.mock.calls).toEqual(
+          sourceType === 'standalone'
+            ? [['user', 'allow', 'Bash(npm test)']]
+            : [
+                ['project', 'allow', 'Bash(npm test)'],
+                ['project', 'allow', 'Bash(npm test)'],
+                ['user', 'allow', 'Bash(npm test)'],
+              ],
+        );
+        expect(executeSpy).toHaveBeenCalledOnce();
+      },
+    );
+
     it('rejects permission-hook rewrites of unknown Plan shell commands', async () => {
       const rawCommand = "python -c 'print(1)'";
+      const persistRule = vi.fn().mockResolvedValue(undefined);
       const hookSpy = vi
         .spyOn(core, 'firePermissionRequestHook')
         .mockResolvedValue({
           hasDecision: true,
           shouldAllow: true,
           updatedInput: { command: 'touch changed.txt' },
+          updatedPermissions: [
+            {
+              type: 'addRules',
+              rules: [{ toolName: 'WebFetch' }],
+              behavior: 'allow',
+              destination: 'userSettings',
+            },
+          ],
         });
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const executeSpy = vi.fn();
@@ -48315,6 +48444,7 @@ describe('Session', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
@@ -48351,6 +48481,7 @@ describe('Session', () => {
         }),
       );
       expect(executeSpy).not.toHaveBeenCalled();
+      expect(persistRule).not.toHaveBeenCalled();
     });
 
     it('rejects ACP shell args mutated while building the invocation', async () => {
@@ -51762,6 +51893,29 @@ describe('Session', () => {
           });
 
           describe('from a PermissionRequest hook', () => {
+            const replacementInput = { path: '/tmp/c.txt' };
+
+            function mockHookPermissionUpdates(
+              updatedInput?: Record<string, unknown>,
+            ) {
+              const persistRule = vi.fn().mockResolvedValue(undefined);
+              mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+              vi.mocked(core.firePermissionRequestHook).mockResolvedValue({
+                hasDecision: true,
+                shouldAllow: true,
+                updatedInput,
+                updatedPermissions: [
+                  {
+                    type: 'addRules',
+                    rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+                    behavior: 'allow',
+                    destination: 'userSettings',
+                  },
+                ],
+              });
+              return persistRule;
+            }
+
             beforeEach(() => {
               vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
                 shouldProceed: true,
@@ -51769,11 +51923,12 @@ describe('Session', () => {
               vi.spyOn(core, 'firePermissionRequestHook').mockResolvedValue({
                 hasDecision: true,
                 shouldAllow: true,
-                updatedInput: { path: '/tmp/c.txt' },
+                updatedInput: replacementInput,
               });
             });
 
             it('runs a valid replacement with its own confirmation', async () => {
+              const persistRule = mockHookPermissionUpdates(replacementInput);
               const { tool, executed, confirmed } = writeTool();
               await promptWith({ path: '/tmp/a.txt' });
 
@@ -51782,9 +51937,78 @@ describe('Session', () => {
                 ['/tmp/c.txt', core.ToolConfirmationOutcome.ProceedOnce],
               ]);
               expect(executed).toEqual(['/tmp/c.txt']);
+              expect(persistRule).toHaveBeenCalledExactlyOnceWith(
+                'user',
+                'allow',
+                'Bash(npm test)',
+              );
               expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
               expect(mockClient.requestPermission).not.toHaveBeenCalled();
             });
+
+            it.each(['tool policy', 'YOLO'])(
+              'skips rule updates when %s allows the replacement',
+              async (allowedBy) => {
+                const persistRule = mockHookPermissionUpdates(replacementInput);
+                const { executed, confirmed } = writeTool((params) => ({
+                  getDefaultPermission: async () => {
+                    if (params['path'] !== replacementInput.path) return 'ask';
+                    if (allowedBy === 'YOLO') {
+                      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+                        ApprovalMode.YOLO,
+                      );
+                      return 'ask';
+                    }
+                    return 'allow';
+                  },
+                }));
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual([replacementInput.path]);
+                expect(confirmed).toEqual([
+                  [
+                    replacementInput.path,
+                    core.ToolConfirmationOutcome.ProceedOnce,
+                  ],
+                ]);
+                expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+                expect(mockClient.requestPermission).not.toHaveBeenCalled();
+                expect(persistRule).not.toHaveBeenCalled();
+              },
+            );
+
+            it.each([false, true])(
+              'skips rule updates when AUTO_EDIT allows the final input (replacement: %s)',
+              async (replaceInput) => {
+                const originalInput = { path: '/tmp/a.txt' };
+                const persistRule = mockHookPermissionUpdates(
+                  replaceInput ? replacementInput : undefined,
+                );
+                if (replaceInput) {
+                  mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+                    isToolEnabled: vi.fn().mockResolvedValue(true),
+                    hasRelevantRules: () => true,
+                    hasMatchingAskRule: (ctx: { filePath?: string }) =>
+                      ctx.filePath === originalInput.path,
+                    evaluate: async (ctx: { filePath?: string }) =>
+                      ctx.filePath === originalInput.path ? 'ask' : 'default',
+                  });
+                }
+                const { executed, confirmed } = writeTool();
+                const finalInput = replaceInput
+                  ? replacementInput
+                  : originalInput;
+                await promptWith(originalInput, ApprovalMode.AUTO_EDIT);
+
+                expect(executed).toEqual([finalInput.path]);
+                expect(confirmed).toEqual([
+                  [finalInput.path, core.ToolConfirmationOutcome.ProceedOnce],
+                ]);
+                expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+                expect(mockClient.requestPermission).not.toHaveBeenCalled();
+                expect(persistRule).not.toHaveBeenCalled();
+              },
+            );
 
             it('denies a replacement that a permission rule denies', async () => {
               mockConfig.getPermissionManager = vi.fn().mockReturnValue({
@@ -51816,20 +52040,23 @@ describe('Session', () => {
             });
 
             it.each([
-              ['blocked', { shouldBlock: true, unavailable: false }, []],
+              ['blocked', { shouldBlock: true, unavailable: false }, [], 0],
               [
                 'approved',
                 { shouldBlock: false, unavailable: false },
                 ['/tmp/c.txt'],
+                0,
               ],
               [
                 'unavailable',
                 { shouldBlock: true, unavailable: true },
                 ['/tmp/c.txt'],
+                1,
               ],
             ])(
               'classifies a replacement in AUTO mode (%s) before its one-time allow',
-              async (_label, verdict, expectedExecuted) => {
+              async (_label, verdict, expectedExecuted, expectedWrites) => {
+                const persistRule = mockHookPermissionUpdates(replacementInput);
                 let denialState: core.AutoModeDenialState = {
                   consecutiveBlock: 0,
                   consecutiveUnavailable: 0,
@@ -51872,6 +52099,7 @@ describe('Session', () => {
                 expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
                 expect(core.firePreToolUseHook).toHaveBeenCalledOnce();
                 expect(executed).toEqual(expectedExecuted);
+                expect(persistRule).toHaveBeenCalledTimes(expectedWrites);
                 if (expectedExecuted.length === 0) {
                   recordedError('test decision');
                 }
