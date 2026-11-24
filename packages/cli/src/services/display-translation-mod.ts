@@ -58,14 +58,29 @@ async function inspectMarkdown(text: string) {
   }> = [];
   // Translation may reorder spans and links, but must keep each one.
   const spans: string[] = [];
+  const definitions = new Map<string, string>();
+  const references: Array<{ kind: 'link' | 'image'; identifier: string }> = [];
   const punctuationOffsets: number[] = [];
-  walkMarkdown(root, ({ type, value, lang, meta, url, children, position }) => {
+  walkMarkdown(root, (node) => {
+    const { type, value, lang, meta, url, identifier, children, position } =
+      node;
     if (type === 'text' && value) words.push(value);
     else if (type === 'code') fences.push({ value, lang, meta });
     else if (type === 'inlineCode') spans.push(`code:${value}`);
     else if (type === 'math' || type === 'inlineMath' || type === 'html')
       spans.push(`${type}:${value}`);
-    else if (url !== undefined) {
+    else if (type === 'linkReference' || type === 'imageReference') {
+      if (identifier) {
+        references.push({
+          kind: type === 'linkReference' ? 'link' : 'image',
+          identifier,
+        });
+      }
+    } else if (url !== undefined) {
+      if (type === 'definition' && identifier && !definitions.has(identifier)) {
+        // CommonMark uses the first definition for an identifier.
+        definitions.set(identifier, url);
+      }
       // CJK punctuation after a bare URL parses as part of it.
       let kept = url;
       const start = position?.start.offset;
@@ -90,14 +105,42 @@ async function inspectMarkdown(text: string) {
           }
         }
       }
-      spans.push(`url:${kept}`);
+      spans.push(`${type}:${kept}`);
     }
   });
+  const referenceTargets = new Map<string, string>();
+  for (const { kind, identifier } of references) {
+    const url = definitions.get(identifier);
+    if (url !== undefined) {
+      referenceTargets.set(identifier, url);
+      spans.push(`${kind}:${url}`);
+    }
+  }
   return {
     prose: words.join(' '),
     code: { fences, spans: spans.sort() },
+    referenceTargets,
     punctuationOffsets,
   };
+}
+
+type MarkdownInspection = NonNullable<
+  Awaited<ReturnType<typeof inspectMarkdown>>
+>;
+
+function preservesMarkdown(
+  original: MarkdownInspection,
+  candidate: MarkdownInspection | undefined,
+): candidate is MarkdownInspection {
+  if (!candidate || !isDeepStrictEqual(original.code, candidate.code))
+    return false;
+  // Reordering links is fine, but a retained identifier must still point to
+  // the same destination even when both URLs still appear in the reply.
+  for (const [identifier, url] of candidate.referenceTargets) {
+    if ((original.referenceTargets.get(identifier) ?? url) !== url)
+      return false;
+  }
+  return true;
 }
 
 async function terminalMarkdown() {
@@ -231,8 +274,7 @@ export async function translateDisplayText(
     const terminal =
       surface === 'terminal' ? await terminalMarkdown() : undefined;
     if (
-      !translated ||
-      !isDeepStrictEqual(source.code, translated.code) ||
+      !preservesMarkdown(source, translated) ||
       (terminal && !isDeepStrictEqual(terminal(original), terminal(text)))
     ) {
       logger.debug('Left untranslated: code changed');
@@ -253,9 +295,8 @@ export async function translateDisplayText(
     // Adding a delimiter can make GFM drop adjacent ASCII URL characters too.
     const displayed = await inspectMarkdown(separated);
     return !signal.aborted &&
-      displayed &&
-      !displayed.punctuationOffsets.length &&
-      isDeepStrictEqual(translated.code, displayed.code)
+      preservesMarkdown(translated, displayed) &&
+      !displayed.punctuationOffsets.length
       ? separated
       : undefined;
   } catch (error) {

@@ -7897,7 +7897,10 @@ export class Session implements SessionContext {
                   // `/clear` swaps in a new Goal runtime under this
                   // long-lived Session; without this the goal-state
                   // subscription stays on the disposed instance.
-                  startNewSession: () => this.rebindGoalRuntimeForNewSession(),
+                  startNewSession: () => {
+                    this.mods?.invalidateTools();
+                    this.rebindGoalRuntimeForNewSession();
+                  },
                 },
                 this.slashCommandPolicy,
               );

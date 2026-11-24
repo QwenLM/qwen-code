@@ -262,6 +262,10 @@ export class AcpModSession {
     return turn ? new AcpModTurn(turn) : undefined;
   }
 
+  invalidateTools(): void {
+    this.session.invalidateTools();
+  }
+
   /** Ends the Mods' session after `/clear` gave the Config a new one. */
   syncSession(): Promise<void> {
     return this.session.syncSession('clear');

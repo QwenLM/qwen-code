@@ -193,6 +193,52 @@ describe('translateDisplayText', () => {
 
   it.each([
     [
+      'See [the release notes][release].\n\n[release]: https://example.test/releases',
+      '详见[发行说明][版本]。\n\n[release]: https://example.test/releases',
+    ],
+    [
+      'See [the diagram][diagram].\n\n[diagram]: https://example.test/diagram.svg',
+      '详见![示意图][diagram]。\n\n[diagram]: https://example.test/diagram.svg',
+    ],
+    [
+      'See [the diagram](https://example.test/diagram.svg).',
+      '详见![示意图](https://example.test/diagram.svg)。',
+    ],
+    [
+      'See [the release notes][release].\n\n[release]: https://example.test/releases\n[docs]: https://example.test/docs',
+      '详见[发行说明][release]。\n\n[release]: https://example.test/docs\n[docs]: https://example.test/releases',
+    ],
+    [
+      'See [the release notes][release] and [the guide][docs].\n\n[release]: https://example.test/releases\n[docs]: https://example.test/docs',
+      '详见[发行说明][release]和[指南][docs]。\n\n[release]: https://example.test/docs\n[docs]: https://example.test/releases',
+    ],
+    [
+      'See [the release notes][release].\n\n[release]: https://example.test/releases\n[release]: https://example.test/docs',
+      '详见[发行说明][release]。\n\n[release]: https://example.test/docs\n[release]: https://example.test/releases',
+    ],
+  ])(
+    'rejects changes to rendered link or image targets in %s',
+    async (original, translated) => {
+      const complete = answer(translated);
+      await expect(
+        translateDisplayText(original, 'zh-CN', complete, signal),
+      ).resolves.toBeUndefined();
+      expect(complete).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('accepts translated labels for references with the same destinations', async () => {
+    const original =
+      'See [release notes][Release] and ![the diagram][diagram].\n\n[release]: https://example.test/releases\n[diagram]: https://example.test/diagram.svg';
+    const translated =
+      '详见[发行说明][release]和![示意图][Diagram]。\n\n[DIAGRAM]: https://example.test/diagram.svg\n[RELEASE]: https://example.test/releases';
+    await expect(
+      translateDisplayText(original, 'zh-CN', answer(translated), signal),
+    ).resolves.toBe(translated);
+  });
+
+  it.each([
+    [
       'See <https://example.test/releases_>.',
       '详见 https://example.test/releases_。',
     ],

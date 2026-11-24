@@ -135,6 +135,7 @@ import {
   REPEATED_TOOL_FAILURE_STOP_MESSAGE,
 } from './repeated-tool-failure-guard.js';
 import type { DaemonTodoStopGuard } from './daemon-todo-stop-guard.js';
+import { AcpModSession } from './acp-mod-session.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const readActualSettingsSnapshot = settingsModule.readSettingsSnapshot;
@@ -42970,6 +42971,59 @@ describe('Session', () => {
             'goalState'
           ],
         ).toMatchObject({ goal: { goalId: 'goal-2' } });
+      });
+
+      it('cancels old Mod work when /clear switches sessions', async () => {
+        const invalidateTools = vi.fn();
+        const syncSession = vi.fn().mockResolvedValue(undefined);
+        const createMods = vi.spyOn(AcpModSession, 'create').mockReturnValue({
+          admit: vi.fn().mockResolvedValue(undefined),
+          invalidateTools,
+          syncSession,
+          close: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AcpModSession);
+        session.installMods();
+        createMods.mockRestore();
+
+        let finishSwitch!: () => void;
+        const switched = new Promise<void>((resolve) => {
+          finishSwitch = resolve;
+        });
+        let finishReset!: () => void;
+        const reset = new Promise<void>((resolve) => {
+          finishReset = resolve;
+        });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(
+          async (_query, _abort, _config, _settings, hooks) => {
+            vi.mocked(mockConfig.getSessionId).mockReturnValue(
+              'new-session-id',
+            );
+            hooks?.startNewSession?.('new-session-id');
+            finishSwitch();
+            await reset;
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Cleared.',
+            };
+          },
+        );
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/clear' }],
+        });
+        try {
+          await Promise.race([switched, prompt]);
+          expect(invalidateTools).toHaveBeenCalledOnce();
+          expect(syncSession).not.toHaveBeenCalled();
+        } finally {
+          finishReset();
+          await prompt;
+        }
+        expect(syncSession).toHaveBeenCalledOnce();
       });
 
       // R20-9: `/clear` swaps in a fresh recorder inside its action, so its
