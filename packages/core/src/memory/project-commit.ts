@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { openNoFollow } from '../utils/no-follow-open.js';
-import { realpathNearestExisting } from '../utils/paths.js';
+import { isSubpath, realpathNearestExisting } from '../utils/paths.js';
 import {
   AUTO_MEMORY_EXTRACT_CURSOR_FILENAME,
   AUTO_MEMORY_METADATA_FILENAME,
@@ -17,6 +17,7 @@ import {
   getMemoryRootTrustedAnchor,
   type ProjectMemoryOwner,
 } from './paths.js';
+import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import type { AutoMemoryExtractCursor, AutoMemoryMetadata } from './types.js';
 
 const pending = new Map<string, Promise<unknown>>();
@@ -27,31 +28,18 @@ async function trustedStateDirectory(
   owner?: ProjectMemoryOwner,
 ): Promise<string> {
   const anchor = getMemoryRootTrustedAnchor(root, owner);
-  if (create) await fs.mkdir(anchor, { recursive: true });
-  let directory = await fs.realpath(anchor);
-  const parent = path.dirname(root);
-  const relative = path.relative(anchor, parent);
-  if (
-    path.isAbsolute(relative) ||
-    relative === '..' ||
-    relative.startsWith(`..${path.sep}`)
-  ) {
+  const directory = path.dirname(root);
+  const trusted = await resolveTrustedMemoryRoot(directory, anchor, {
+    followRootSymlink: path.relative(anchor, directory) === '',
+  });
+  if (trusted || !create) return trusted ?? directory;
+
+  const resolved = realpathNearestExisting(directory);
+  if (!isSubpath(realpathNearestExisting(anchor), resolved)) {
     throw new Error('Project memory state is outside its runtime directory.');
   }
-  for (const component of relative.split(path.sep).filter(Boolean)) {
-    directory = path.join(directory, component);
-    if (create) {
-      await fs.mkdir(directory).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      });
-    }
-    if (!(await fs.lstat(directory)).isDirectory()) {
-      throw new Error(
-        `Project memory state requires a real directory: ${directory}`,
-      );
-    }
-  }
-  return directory;
+  await fs.mkdir(resolved, { recursive: true });
+  return resolved;
 }
 
 async function readState<T>(
@@ -61,9 +49,6 @@ async function readState<T>(
 ): Promise<T> {
   const directory = await trustedStateDirectory(root, false, owner);
   const file = path.join(directory, filename);
-  if (!(await fs.lstat(file)).isFile()) {
-    throw new Error(`Project memory state requires a regular file: ${file}`);
-  }
   const handle = await openNoFollow(file, { nonBlocking: true });
   try {
     if (!(await handle.stat()).isFile()) {

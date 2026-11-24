@@ -13,10 +13,7 @@ import {
   rebuildProjectMemoryIndexLocked,
   recoverProjectMemoryIndex,
 } from './indexer.js';
-import {
-  readProjectMemoryCursor,
-  withProjectMemoryCommit,
-} from './project-commit.js';
+import { withProjectMemoryCommit } from './project-commit.js';
 import {
   AUTO_MEMORY_EXTRACT_CURSOR_FILENAME,
   AUTO_MEMORY_INDEX_FILENAME,
@@ -177,29 +174,14 @@ export async function readAutoMemoryIndexWithStats(
 ): Promise<AutoMemoryIndexRead | null> {
   const root = getAutoMemoryRoot(projectRoot, owner);
   const anchor = getMemoryRootTrustedAnchor(root, owner);
-  const readIndex = async () => {
-    const trustedRoot = await resolveTrustedMemoryRoot(root, anchor);
-    return trustedRoot
-      ? readMemoryIndexWithStats(
-          path.join(trustedRoot, AUTO_MEMORY_INDEX_FILENAME),
-          true,
-        )
-      : null;
-  };
-  const recovered = await recoverProjectMemoryIndex(root, owner);
-  const index = await readIndex();
-  if (
-    !(await readProjectMemoryCursor(root, owner))?.projectIndexRebuildPending
-  ) {
-    return index;
-  }
-  if (recovered) return null;
   await recoverProjectMemoryIndex(root, owner);
-  const repaired = await readIndex();
-  return (await readProjectMemoryCursor(root, owner))
-    ?.projectIndexRebuildPending
-    ? null
-    : repaired;
+  const trustedRoot = await resolveTrustedMemoryRoot(root, anchor);
+  return trustedRoot
+    ? readMemoryIndexWithStats(
+        path.join(trustedRoot, AUTO_MEMORY_INDEX_FILENAME),
+        true,
+      )
+    : null;
 }
 
 /**

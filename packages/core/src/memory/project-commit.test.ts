@@ -90,16 +90,22 @@ it('writes scaffold state to the explicit owner instead of the active checkout',
   ).toBeUndefined();
 });
 
-it.skipIf(process.platform === 'win32')(
-  'supports a runtime base alias and rejects a symlinked project index',
-  async () => {
-    const alias = path.join(fixture, 'runtime-alias');
+it.skipIf(process.platform === 'win32').each([false, true])(
+  'supports a runtime base alias and rejects a symlinked index (local: %s)',
+  async (local) => {
+    const alias = local
+      ? path.join(project, '.qwen')
+      : path.join(fixture, 'runtime-alias');
     await fs.symlink(path.join(fixture, 'runtime'), alias, 'dir');
     vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', alias);
+    if (local) {
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+      await ensureAutoMemoryScaffold(project, new Date(0));
+    }
     expect(await readAutoMemoryIndex(project)).toBe('');
     const target = path.join(fixture, 'other-index.md');
     await fs.writeFile(target, 'Outside project memory');
-    const index = path.join(memory, 'MEMORY.md');
+    const index = path.join(getAutoMemoryRoot(project), 'MEMORY.md');
     await fs.unlink(index);
     await fs.symlink(target, index);
     await expect(readAutoMemoryIndex(project)).rejects.toMatchObject({
@@ -174,40 +180,48 @@ it('repairs a topic write when the generated index could not be published', asyn
 });
 
 it.each([false, true])(
-  'bounds index recovery when the store becomes dirty during read (repeat: %s)',
-  async (repeat) => {
+  'keeps the published catalog during a new write (repair before read: %s)',
+  async (needsRepair) => {
+    await commitProjectMemoryWrite(
+      memory,
+      path.join(memory, 'kept.md'),
+      null,
+      topic('kept'),
+    );
+    if (needsRepair) {
+      await withProjectMemoryCommit(memory, () =>
+        markProjectMemoryIndexPendingLocked(memory),
+      );
+    }
     const open = noFollowOpen.openNoFollow;
-    let writes = 0;
+    let racingWriteStarted = false;
     const spy = vi
       .spyOn(noFollowOpen, 'openNoFollow')
       .mockImplementation(async (file, options) => {
         const handle = await open(file, options);
-        if (writes < (repeat ? 2 : 1) && path.basename(file) === 'MEMORY.md') {
-          writes++;
+        if (!racingWriteStarted && path.basename(file) === 'MEMORY.md') {
+          racingWriteStarted = true;
           await withProjectMemoryCommit(memory, async () => {
             await markProjectMemoryIndexPendingLocked(memory);
-            await fs.writeFile(
-              path.join(memory, `raced-${writes}.md`),
-              topic('raced'),
-            );
+            await fs.writeFile(path.join(memory, 'raced.md'), topic('raced'));
           });
         }
         return handle;
       });
     try {
       const result = await readAutoMemoryIndex(project);
-      const pending = (await readProjectMemoryCursor(memory))
-        ?.projectIndexRebuildPending;
-      if (repeat) {
-        expect(result).toBeNull();
-        expect(pending).toBe(true);
-      } else {
-        expect(result).toContain('[raced](raced-1.md)');
-        expect(pending).toBeUndefined();
-      }
+      expect(result).toContain('[kept](kept.md)');
+      expect(result).not.toContain('raced.md');
+      expect(await readProjectMemoryCursor(memory)).toMatchObject({
+        projectIndexRebuildPending: true,
+      });
     } finally {
       spy.mockRestore();
     }
+    expect(await readAutoMemoryIndex(project)).toContain('[raced](raced.md)');
+    expect(await readProjectMemoryCursor(memory)).not.toHaveProperty(
+      'projectIndexRebuildPending',
+    );
   },
 );
 
@@ -278,17 +292,27 @@ it.skipIf(process.platform === 'win32')(
     await fs.writeFile(outsideCursor, '{}');
     await fs.rm(cursorPath);
     await fs.symlink(outsideCursor, cursorPath);
-    await expect(readProjectMemoryCursor(memory)).rejects.toThrow(
-      'requires a regular file',
-    );
+    await expect(readProjectMemoryCursor(memory)).rejects.toMatchObject({
+      code: 'ELOOP',
+    });
 
     const parent = path.dirname(memory);
     await fs.rm(parent, { recursive: true });
     await fs.symlink(outside, parent);
     const mutate = vi.fn();
     await expect(withProjectMemoryCommit(memory, mutate)).rejects.toThrow(
-      'requires a real directory',
+      'Refusing symlinked memory root',
     );
+
+    const projects = path.dirname(parent);
+    await fs.rm(projects, { recursive: true });
+    await fs.symlink(outside, projects, 'dir');
+    await expect(withProjectMemoryCommit(memory, mutate)).rejects.toThrow(
+      'outside its runtime directory',
+    );
+    await expect(
+      fs.stat(path.join(outside, path.basename(parent))),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
     expect(mutate).not.toHaveBeenCalled();
   },
 );

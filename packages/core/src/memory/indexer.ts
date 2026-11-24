@@ -466,9 +466,9 @@ export async function rebuildProjectMemoryIndexLocked(
 export async function recoverProjectMemoryIndex(
   root: string,
   owner?: ProjectMemoryOwner,
-): Promise<boolean> {
+): Promise<void> {
   if (!(await readProjectMemoryCursor(root, owner))?.projectIndexRebuildPending)
-    return false;
+    return;
   await withProjectMemoryCommit(
     root,
     async () => {
@@ -480,7 +480,6 @@ export async function recoverProjectMemoryIndex(
     },
     owner,
   );
-  return true;
 }
 
 export async function rebuildAutoMemoryIndexAtRoot(
