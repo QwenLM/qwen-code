@@ -1962,7 +1962,7 @@ fi
         [
           {
             ...botIssue(42),
-            author: { login: 'github-actions[bot]' },
+            author: { is_bot: true, login: 'app/github-actions' },
           },
         ],
         { botPat: '' },

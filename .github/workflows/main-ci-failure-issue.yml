@@ -594,9 +594,12 @@ jobs:
           if [[ -n "${BOT_PAT:-}" ]]; then
             export GH_TOKEN="${BOT_PAT}"
             BOT_LOGIN="${CONFIGURED_BOT_LOGIN}"
+            LIST_BOT_LOGIN="${BOT_LOGIN}"
           else
             export GH_TOKEN="${WORKFLOW_TOKEN}"
             BOT_LOGIN='github-actions[bot]'
+            # gh issue list formats GitHub App authors differently from REST.
+            LIST_BOT_LOGIN='app/github-actions'
             echo '::warning::CI_DEV_BOT_PAT is not configured; recording this failure as github-actions[bot] with the workflow token.'
           fi
           if [[ "${PROVISIONAL}" == 'true' ]]; then
@@ -659,7 +662,7 @@ jobs:
           done
           [[ "${lookup_ok}" == true ]] || exit 1
           family_tsv="${RUNNER_TEMP}/family.tsv"
-          if ! jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" \
+          if ! jq -r --arg bot "${LIST_BOT_LOGIN}" --arg title "${title}" \
             "${title_filter}" "${open_issues}" > "${family_tsv}"; then
             # An unreadable listing must not read as an empty family: the
             # signature route would certify a false miss and file a duplicate.
@@ -766,7 +769,7 @@ jobs:
               if [[ "${lookup_ok}" != true ]]; then
                 echo '::warning::Could not scan closed issues for the test markers; the signature route cannot certify a miss.'
                 signature_unresolved=true
-              elif ! existing_issue="$(jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
+              elif ! existing_issue="$(jq -r --arg bot "${LIST_BOT_LOGIN}" --arg title "${title}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
                 map(select(.author.login == $bot)
                   | select(.title == $title or (.title | startswith($title + " — ")) or ((.body // "") | contains($scope)))
                   | select((.body // "") as $b | any($ms[]; . as $m | $b | contains($m))))
@@ -983,7 +986,7 @@ jobs:
             # (test markers, no workflow marker) is never reopened as one.
             issue_match="$(gh issue list --repo "${REPO}" --state closed \
               --json number,title,author,body --limit 1000 \
-              | jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" --arg marker "${marker}" '
+              | jq -r --arg bot "${LIST_BOT_LOGIN}" --arg title "${title}" --arg marker "${marker}" '
                 map(select(.author.login == $bot) | select(
                   .title == $title or
                   (.title | startswith($title + " on ")) or

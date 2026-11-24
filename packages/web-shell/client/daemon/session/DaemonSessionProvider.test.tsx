@@ -23082,6 +23082,8 @@ describe('DaemonSessionProvider', () => {
   it.each(['idle_timeout', 'last_client_detached'] as const)(
     'does NOT stop reconnect on session_closed with reason "%s"',
     async (reason) => {
+      const onReconnect = createDeferred<void>();
+      let subscriptions = 0;
       // session_closed with idle_timeout or last_client_detached should
       // NOT prevent reconnection — these are server-initiated closes,
       // not user deletions. The provider should preserve the session
@@ -23090,13 +23092,17 @@ describe('DaemonSessionProvider', () => {
         events: async function* nonClientCloseEvents(
           opts: { signal?: AbortSignal } = {},
         ) {
+          if (subscriptions++ > 0) {
+            onReconnect.resolve();
+            await untilAborted(opts.signal);
+            return;
+          }
           yield {
             id: 1,
             v: 1,
             type: 'session_closed',
             data: { reason },
           };
-          await untilAborted(opts.signal);
         },
       });
       sdkMocks.sessions.push(session);
@@ -23118,7 +23124,7 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
       await act(async () => {
-        await wait(50);
+        await onReconnect.promise;
         await flushPromises();
       });
 
@@ -23133,17 +23139,23 @@ describe('DaemonSessionProvider', () => {
     // Defensive: if the server sends session_closed without a reason
     // field (older daemon versions), treat it as non-client_close and
     // let the normal reconnect path handle it.
+    const onReconnect = createDeferred<void>();
+    let subscriptions = 0;
     const session = createMockSession({
       events: async function* noReasonEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
+        if (subscriptions++ > 0) {
+          onReconnect.resolve();
+          await untilAborted(opts.signal);
+          return;
+        }
         yield {
           id: 1,
           v: 1,
           type: 'session_closed',
           data: {},
         };
-        await untilAborted(opts.signal);
       },
     });
     sdkMocks.sessions.push(session);
@@ -23165,7 +23177,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
     await act(async () => {
-      await wait(50);
+      await onReconnect.promise;
       await flushPromises();
     });
 
