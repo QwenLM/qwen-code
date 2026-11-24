@@ -488,7 +488,7 @@ pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL �
 
 ### actor 列
 
-- raw actor（≤36 code points）授权/幂等键列统一 `VARCHAR(36)`：ma_user_message、
+- raw actor（≤36 个 UTF-16 单元）授权/幂等键列统一 `VARCHAR(36)`：ma_user_message、
   ma_user_message_command、ma_workspace_access、ma_schedule、ma_client_files_binding，
   以及既有 ma_session.creator/owner_actor_key、ma_operation、ma_session_record、
   extension、delivery、memory_store、session_worktree。
@@ -506,9 +506,9 @@ pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL �
 
 ### 跨引擎注意
 
-- H2 2.3.232 的 `VARCHAR(n)` 按 UTF-16 unit 计长，MySQL 按 code point 计长；36 code point
-  的补充平面字符（emoji）在 H2 会超 36 unit。actor 边界测试用 BMP 字符（CJK）覆盖
-  36 code point 预算；生产目标 MySQL 按 code point 计。
+- H2 2.3.232 的 `VARCHAR(n)` 按 UTF-16 单元计长，MySQL 按码点计长。actor 准入上限为
+  36 个 UTF-16 单元，确保值可存入两种数据库。边界测试验证 36 个 BMP 字符或 18 个补充平面字符
+  可以通过，两种情况各多一个字符都会被拒绝。
 
 ### 仍未完成
 
@@ -519,3 +519,42 @@ pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL �
   （统一拒绝尾随空格）、N9 schema gate 空匹配。N7 `lockPlacementDomain` 锁序已实现，
   其 MySQL 死锁/竞态证据 pending CI。
 - 与 #18048 语义合并冲突；完整 H2、MySQL 8.4 门/竞态/性能 pending CI。
+
+## 2026-11-23 跟进：身份列的混合类型连接
+
+MySQL 比较 `VARCHAR` 与 `VARBINARY` 操作数时按二进制串比较。用二进制值去探测
+`VARBINARY` 列的索引不受影响；用二进制值去探测 `VARCHAR` 列的索引时，该列会退出
+索引查找：连接只剩前导的 tenant/Session 前缀，并扫描其下的全部行。常量不受影响，
+包括绑定到 `VARCHAR` 列的 `byte[]` 参数；外层行经唯一键解析为单个常量行时同样不受影响。
+基于 V1 DDL 在 MySQL 8.4 上的实测：
+
+| 连接                                                                                                   | 修复前                                                             | 修复后                                 |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ | -------------------------------------- |
+| `ma_resource.resource_id = ma_session_record.record_resource_id`（MCP 引用、Session 列表的模型上下文） | 仅用前缀 `(tenant_id, session_id)`；50 条记录 × 2 万资源耗时 2.8 s | 完整 `uk_ma_resource_id`，2.7 ms       |
+| `ma_operation.operation_id = ma_artifact.result_id`（artifact 分页）                                   | 先读取全部 `TOOL_RESULT_PROJECTION` 行                             | 每个 artifact 单行查找                 |
+| `CAST(target_id AS BINARY(512)) = CAST(binding_id AS BINARY(512))`（恢复候选）                         | 丢失 `idx_ma_operation_target` 查找，物化全部 operator recovery    | `idx_ma_operation_target` 覆盖索引查找 |
+
+决策：
+
+- `ma_session_record.record_resource_id` 改为 `VARCHAR(256)`，`ma_artifact.result_id`
+  改为 `VARCHAR(128)`，即它们所引用身份（`ma_resource.resource_id`、
+  `ma_operation.operation_id`）的宽度。每个写入方写入的 id 都已存在于被引用列中，
+  因此不会丢失任何已接受的值。本节取代前文“`record_resource_id` 保留 `VARBINARY`”的表述。
+- `ma_operation.target_id` 保持 `VARBINARY(512)`：它是多态的（Turn、binding、storage、
+  Workspace、item 与 execution 目标），改为 `VARCHAR(512)` 会使
+  `uk_ma_operation_request` 超过 3072 字节。连接让二进制一侧作为被探测方
+  （`binaryIdentity`）；唯一一处用它探测 `VARCHAR` 键的连接（cancel evidence → `ma_turn`）
+  改为把目标转换为文本。
+- 从不与 `VARCHAR` 列比较的列在本次变更中保持原类型：canonical ref（按设计）、
+  `ma_runtime_stage`（单独的去哈希跟进）、receipt、Session 记录与工具执行中的
+  `turn_id`，以及 checkpoint/admission/terminal/side query 输入的资源 id。转换最后
+  一组还需要收紧准入上限。
+- 列与参数之间的 `CAST(column AS BINARY(n))` 比较是 PAD SPACE 下的字节精确保护，
+  不是类型转换，予以保留。每个被保护的列还需要一个普通等值条件，索引才能生效。
+  Runtime retention guard 中的 settled child run 检查丢失了 `record_key` 查找，
+  `domain` 与 `record_id` 只出现在 cast 中，因而扫描父 Session 的全部记录
+  （5 千条记录：3 ms，并随 Session 增长）；补上普通等值条件后变为唯一键查找。
+
+验收：`IdentityJoinScaleMySqlIT` 在 MySQL 上断言完整资源键、有界的 artifact 分页、
+`idx_ma_operation_target` 探测，以及 settled child run 检查使用完整记录键；schema 门
+与受影响的 H2 测试保持通过。

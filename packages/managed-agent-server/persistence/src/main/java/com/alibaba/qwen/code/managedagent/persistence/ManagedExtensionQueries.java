@@ -78,8 +78,7 @@ final class ManagedExtensionQueries {
         arguments.addAll(extra);
         return jdbc.query("SELECT r.record_resource_id, u.kind, u.schema_version, u.byte_length, u.sha256"
                         + " FROM ma_session_record r LEFT JOIN ma_resource u ON"
-                        + " " + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id")
-                        + " = r.record_resource_id AND u.tenant_id = r.tenant_id AND u.session_id = r.session_id"
+                        + " u.resource_id = r.record_resource_id AND u.tenant_id = r.tenant_id AND u.session_id = r.session_id"
                         + " AND u.workspace_id = r.workspace_id WHERE r.record_kind = 'DOMAIN'"
                         + " AND r.tenant_id = ? AND r.session_id = ?" + suffix,
                 (row, index) -> (JsonNode) JsonNodeFactory.instance.objectNode().put("resourceId", row.getString("record_resource_id"))
