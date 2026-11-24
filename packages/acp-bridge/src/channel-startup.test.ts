@@ -7,6 +7,7 @@
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { makeBridge, makeChannel } from './internal/testUtils.js';
+import { CHANNEL_STARTUP_PROFILE_META_KEY } from './bridgeTypes.js';
 import type { AcpChannel } from './channel.js';
 import { BridgeTimeoutError } from './status.js';
 
@@ -137,6 +138,98 @@ describe('channel startup', () => {
     } finally {
       releaseFactory(handle.channel);
       await bridge.shutdown();
+    }
+  });
+
+  it('reports elapsed time and budget when a startup fails', async () => {
+    // A bare "initialize timed out" line cannot distinguish "the child never
+    // answered" from "the transport was slow": the budget is the other half of
+    // that comparison, so both numbers must appear together.
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    const handle = makeChannel({
+      initializeImpl: () => new Promise(() => {}),
+    });
+    const bridge = makeBridge({
+      initializeTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+
+    try {
+      const startup = bridge.preheat().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(await startup).toBeInstanceOf(BridgeTimeoutError);
+      const line = writes.find((entry) =>
+        entry.includes('channel startup failed'),
+      );
+      expect(line).toContain('init_timeout_ms=20');
+      expect(line).toContain('elapsed_ms=');
+      expect(line).toContain('initialize timed out');
+    } finally {
+      write.mockRestore();
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs the phase breakdown only for startup slow enough to matter', async () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    let finishInitialize!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finishInitialize = resolve;
+    });
+    const handle = makeChannel({
+      initializeImpl: async () => {
+        await gate;
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          _meta: {
+            [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+              v: 1,
+              complete: false,
+              responseBuiltAtEpochMs: Date.now(),
+              processToResponseMs: 2_500,
+              phases: { settingsLoadMs: 20 },
+              config: { toolWarmupMs: 2_400 },
+            },
+          },
+        };
+      },
+    });
+    const bridge = makeBridge({
+      initializeTimeoutMs: 10_000,
+      channelFactory: async () => handle.channel,
+    });
+
+    try {
+      const startup = bridge.preheat();
+      await vi.advanceTimersByTimeAsync(2_500);
+      finishInitialize();
+      await startup;
+
+      const line = writes.find((entry) =>
+        entry.includes('channel startup total_ms='),
+      );
+      expect(line).toContain('config.tool_warmup_ms=2400');
+      expect(line).toContain('phase.settings_load_ms=20');
+    } finally {
+      write.mockRestore();
+      await bridge.shutdown();
+      vi.useRealTimers();
     }
   });
 });
