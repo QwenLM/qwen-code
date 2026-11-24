@@ -33,12 +33,12 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
-import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
@@ -57,13 +57,16 @@ import {
   isAnyAutoMemPath,
   isTeamAutoMemPath,
   isUserAutoMemPath,
+  runWithProjectMemoryOwner,
 } from './paths.js';
-import {
-  getAutoMemoryConsolidationLockPath,
-  getAutoMemoryMetadataPath,
-} from './paths.js';
+import { getAutoMemoryConsolidationLockPath } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
+import {
+  getProjectMemoryQueueKey,
+  readProjectMemoryMetadata,
+  updateProjectMemoryMetadata,
+} from './project-commit.js';
 import {
   EXTRACT_CADENCE_MAX_PENDING_ENTRIES,
   EXTRACT_TAIL_ENTRIES,
@@ -547,22 +550,7 @@ function isProcessRunning(pid: number): boolean {
 async function readDreamMetadata(
   projectRoot: string,
 ): Promise<AutoMemoryMetadata> {
-  const content = await fs.readFile(
-    getAutoMemoryMetadataPath(projectRoot),
-    'utf-8',
-  );
-  return JSON.parse(content) as AutoMemoryMetadata;
-}
-
-async function writeDreamMetadata(
-  projectRoot: string,
-  metadata: AutoMemoryMetadata,
-): Promise<void> {
-  await atomicWriteFile(
-    getAutoMemoryMetadataPath(projectRoot),
-    `${JSON.stringify(metadata, null, 2)}\n`,
-    { encoding: 'utf-8' },
-  );
+  return readProjectMemoryMetadata(projectRoot);
 }
 
 function hoursSince(lastDreamAt: string | undefined, now: Date): number | null {
@@ -659,6 +647,14 @@ async function releaseUserDreamLock(): Promise<void> {
 
 // ─── MemoryManager ────────────────────────────────────────────────────────────
 
+function withPinnedProjectMemoryOwner<T>(
+  config: Config | undefined,
+  run: () => T,
+): T {
+  const owner = config?.getProjectMemoryOwner?.();
+  return owner ? runWithProjectMemoryOwner(() => owner, run) : run();
+}
+
 /**
  * MemoryManager owns all runtime state for the memory subsystem and exposes a
  * clean, stable API. It is created once per Config instance and returned by
@@ -683,11 +679,16 @@ export class MemoryManager {
   private readonly inFlight = new Map<string, Promise<unknown>>();
 
   // ── Extract scheduling state ─────────────────────────────────────────────────
-  private readonly extractRunning = new Set<string>();
-  private readonly extractCurrentTaskId = new Map<string, string>();
-  private readonly extractQueued = new Map<
+  private static readonly activeExtracts = new Map<
     string,
-    { taskId: string; params: ScheduleExtractParams; epoch: number }
+    { taskId: string; owner: MemoryManager }
+  >();
+  private static readonly extractQueued = new Map<
+    string,
+    Map<
+      string,
+      { taskId: string; owner: MemoryManager; run: () => Promise<unknown> }
+    >
   >();
   // #13004 cadence, per session and in memory only. A session switch drops
   // both ids' entries (discardExtractCadence), so /clear, /resume and /branch
@@ -922,7 +923,15 @@ export class MemoryManager {
     return promise;
   }
 
-  async scheduleMetadataMigration(
+  scheduleMetadataMigration(
+    params: ScheduleMetadataMigrationParams,
+  ): Promise<MetadataMigrationScheduleResult> {
+    return withPinnedProjectMemoryOwner(params.config, () =>
+      this.scheduleMetadataMigrationForOwner(params),
+    );
+  }
+
+  private async scheduleMetadataMigrationForOwner(
     params: ScheduleMetadataMigrationParams,
   ): Promise<MetadataMigrationScheduleResult> {
     // The migration's only consumer is the structured recall protocol, so an
@@ -1188,7 +1197,16 @@ export class MemoryManager {
    * The trailing request starts automatically when the active extraction
    * completes.
    */
-  async scheduleExtract(
+  scheduleExtract(
+    params: ScheduleExtractParams,
+    options: { bypassCadence?: boolean } = {},
+  ): Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>> {
+    return withPinnedProjectMemoryOwner(params.config, () =>
+      this.scheduleExtractForOwner(params, options),
+    );
+  }
+
+  private async scheduleExtractForOwner(
     params: ScheduleExtractParams,
     options: { bypassCadence?: boolean } = {},
   ): Promise<
@@ -1316,29 +1334,25 @@ export class MemoryManager {
     // never by history length (#13004).
     params = this.stampExtractSeq(params);
 
-    if (this.extractRunning.has(params.projectRoot)) {
-      const currentTaskId = this.extractCurrentTaskId.get(params.projectRoot);
-      if (!currentTaskId) {
-        return {
-          touchedTopics: [],
-          skippedReason: 'already_running' as const,
-          cursor: {
-            sessionId: params.sessionId,
-            updatedAt: (params.now ?? new Date()).toISOString(),
-          },
-        } as never;
-      }
-
-      const queued = this.extractQueued.get(params.projectRoot);
+    const memoryRoot = getProjectMemoryQueueKey(
+      getAutoMemoryRoot(params.projectRoot),
+    );
+    const currentTaskId = MemoryManager.activeExtracts.get(memoryRoot)?.taskId;
+    if (currentTaskId) {
+      const queue = MemoryManager.extractQueued.get(memoryRoot) ?? new Map();
+      const queued = queue.get(params.sessionId);
+      const owner = queued?.owner ?? this;
+      const requestEpoch = owner.cadenceDiscardEpoch;
       if (queued) {
-        // Supersede the existing queued request with newer params, and refresh
-        // the epoch: a turn arriving after a switch must not be judged by one
-        // captured before it.
-        queued.params = params;
-        queued.epoch = this.cadenceDiscardEpoch;
-        const queuedRecord = this.tasks.get(queued.taskId);
+        queued.run = AsyncLocalStorage.bind(() =>
+          owner.track(
+            queued.taskId,
+            owner.runExtract(queued.taskId, params, requestEpoch),
+          ),
+        );
+        const queuedRecord = owner.tasks.get(queued.taskId);
         if (queuedRecord) {
-          this.update(queuedRecord, {
+          owner.update(queuedRecord, {
             status: 'pending',
             progressText:
               'Updated trailing managed auto-memory extraction request while another extraction is running.',
@@ -1365,11 +1379,17 @@ export class MemoryManager {
             historyLength: params.history.length,
           },
         });
-        this.extractQueued.set(params.projectRoot, {
+        queue.set(params.sessionId, {
           taskId: record.id,
-          params,
-          epoch: this.cadenceDiscardEpoch,
+          owner: this,
+          run: AsyncLocalStorage.bind(() =>
+            this.track(
+              record.id,
+              this.runExtract(record.id, params, requestEpoch),
+            ),
+          ),
         });
+        MemoryManager.extractQueued.set(memoryRoot, queue);
       }
 
       return {
@@ -1589,7 +1609,9 @@ export class MemoryManager {
     let entry = this.extractFlushRuns.get(sessionId);
     if (!entry || entry.pending !== pending) {
       const deadline = Date.now() + timeoutMs;
-      const run = this.runPendingExtractFlush(sessionId, pending, deadline);
+      const run = withPinnedProjectMemoryOwner(pending.config, () =>
+        this.runPendingExtractFlush(sessionId, pending, deadline),
+      );
       entry = { pending, run };
       this.extractFlushRuns.set(sessionId, entry);
       const started = entry;
@@ -1684,11 +1706,14 @@ export class MemoryManager {
       // slot, and so can a run recorded for a session this Config has since
       // left: `startNewSession()` mutates one canonical Config in place, so
       // this manager outlives the session id, and both maps are keyed by
-      // projectRoot/taskId rather than by session. Wait for it and for any
+      // memory root/taskId rather than by session. Wait for it and for any
       // trailing request it starts.
+      const memoryRoot = getProjectMemoryQueueKey(
+        getAutoMemoryRoot(pending.projectRoot),
+      );
       for (;;) {
-        const taskId = this.extractCurrentTaskId.get(pending.projectRoot);
-        const active = taskId ? this.inFlight.get(taskId) : undefined;
+        const running = MemoryManager.activeExtracts.get(memoryRoot);
+        const active = running?.owner.inFlight.get(running.taskId);
         if (!active) break;
         await active.catch(() => undefined);
       }
@@ -1868,8 +1893,10 @@ export class MemoryManager {
       });
     }
 
-    this.extractCurrentTaskId.set(params.projectRoot, taskId);
-    this.extractRunning.add(params.projectRoot);
+    const memoryRoot = getProjectMemoryQueueKey(
+      getAutoMemoryRoot(params.projectRoot),
+    );
+    MemoryManager.activeExtracts.set(memoryRoot, { taskId, owner: this });
     this.update(record, {
       status: 'running',
       progressText: 'Running managed auto-memory extraction.',
@@ -1880,7 +1907,7 @@ export class MemoryManager {
     const cadenceEpoch = queuedEpoch ?? this.cadenceDiscardEpoch;
     try {
       // Memory-pressure gate. Checked inside try so the finally block
-      // always runs — extractRunning/extractCurrentTaskId are cleaned up
+      // always runs — activeExtracts is cleaned up
       // and startQueuedExtract is called regardless of the gate outcome.
       if (this.isUnderMemoryPressure(params.config)) {
         debugLogger.warn('Skipping extract: memory pressure too high.');
@@ -1974,32 +2001,31 @@ export class MemoryManager {
       }
       throw error;
     } finally {
-      this.extractCurrentTaskId.delete(params.projectRoot);
-      this.extractRunning.delete(params.projectRoot);
+      if (MemoryManager.activeExtracts.get(memoryRoot)?.taskId === taskId) {
+        MemoryManager.activeExtracts.delete(memoryRoot);
+      }
       // A queued extraction has no caller left to inform: scheduleExtract
       // already returned a 'queued' result, and the task record plus the
       // telemetry event carry the failure. Without this handler the rejection
       // reaches the process-wide unhandledRejection handler.
-      void this.startQueuedExtract(params.projectRoot).catch(
-        (error: unknown) => {
-          debugLogger.warn(
-            'Failed to run queued managed auto-memory extraction.',
-            error,
-          );
-        },
-      );
+      void this.startQueuedExtract(memoryRoot).catch((error: unknown) => {
+        debugLogger.warn(
+          'Failed to run queued managed auto-memory extraction.',
+          error,
+        );
+      });
     }
   }
 
-  private async startQueuedExtract(projectRoot: string): Promise<void> {
-    if (this.extractRunning.has(projectRoot)) return;
-    const queued = this.extractQueued.get(projectRoot);
-    if (!queued) return;
-    this.extractQueued.delete(projectRoot);
-    await this.track(
-      queued.taskId,
-      this.runExtract(queued.taskId, queued.params, queued.epoch),
-    );
+  private async startQueuedExtract(memoryRoot: string): Promise<void> {
+    if (MemoryManager.activeExtracts.has(memoryRoot)) return;
+    const queue = MemoryManager.extractQueued.get(memoryRoot);
+    const next = queue?.entries().next().value;
+    if (!queue || !next) return;
+    const [sessionId, request] = next;
+    queue.delete(sessionId);
+    if (queue.size === 0) MemoryManager.extractQueued.delete(memoryRoot);
+    await request.run();
   }
 
   // ─── Skill review ─────────────────────────────────────────────────────────────
@@ -2135,7 +2161,13 @@ export class MemoryManager {
    * Returns immediately if preconditions aren't met (time gate, session count,
    * lock, or duplicate).
    */
-  async scheduleDream(
+  scheduleDream(params: ScheduleDreamParams): Promise<DreamScheduleResult> {
+    return withPinnedProjectMemoryOwner(params.config, () =>
+      this.scheduleDreamForOwner(params),
+    );
+  }
+
+  private async scheduleDreamForOwner(
     params: ScheduleDreamParams,
   ): Promise<DreamScheduleResult> {
     // `params.config` is optional only because some test paths omit it;
@@ -2623,20 +2655,20 @@ export class MemoryManager {
         // bumped lastDreamAt and may re-fire — same trade as the
         // original best-effort behavior.
         try {
-          const nextMetadata = await readDreamMetadata(params.projectRoot);
-          nextMetadata.lastDreamAt = now.toISOString();
-          nextMetadata.lastDreamSessionId = params.sessionId;
-          nextMetadata.updatedAt = now.toISOString();
-          nextMetadata.lastDreamTouchedTopics = result.touchedTopics;
-          nextMetadata.lastDreamStatus =
-            result.touchedTopics.length > 0 ? 'updated' : 'noop';
-          // Mirror the manual /dream path's reset so the two write
-          // sites don't drift. The field is currently dead code on
-          // main (only ever written, never read) but keeping the two
-          // paths in sync avoids surprises if a future change starts
-          // reading it.
-          nextMetadata.recentSessionIdsSinceDream = [];
-          await writeDreamMetadata(params.projectRoot, nextMetadata);
+          await updateProjectMemoryMetadata(
+            params.projectRoot,
+            now,
+            (metadata) => {
+              const iso = now.toISOString();
+              if (metadata.lastDreamAt && metadata.lastDreamAt > iso) return;
+              metadata.lastDreamAt = iso;
+              metadata.lastDreamSessionId = params.sessionId;
+              metadata.lastDreamTouchedTopics = result.touchedTopics;
+              metadata.lastDreamStatus =
+                result.touchedTopics.length > 0 ? 'updated' : 'noop';
+              metadata.recentSessionIdsSinceDream = [];
+            },
+          );
         } catch (metaError) {
           const message =
             metaError instanceof Error ? metaError.message : String(metaError);
@@ -2987,7 +3019,9 @@ export class MemoryManager {
       scope?: AutoMemoryStorageScope;
     } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
-    return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
+    return withPinnedProjectMemoryOwner(options.config, () =>
+      selectManagedAutoMemoryForgetCandidates(projectRoot, query, options),
+    );
   }
 
   /** Remove the selected memory entries (step 2 of forget). */
@@ -2997,11 +3031,8 @@ export class MemoryManager {
     now?: Date,
     options: { config?: Config; abortSignal?: AbortSignal } = {},
   ): Promise<AutoMemoryForgetResult> {
-    const result = await forgetManagedAutoMemoryMatches(
-      projectRoot,
-      matches,
-      now,
-      options,
+    const result = await withPinnedProjectMemoryOwner(options.config, () =>
+      forgetManagedAutoMemoryMatches(projectRoot, matches, now, options),
     );
     if (result.touchedScopes.includes('user') && options.config) {
       await this.recordUserMutation(
@@ -3024,11 +3055,8 @@ export class MemoryManager {
     } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
-    const result = await forgetManagedAutoMemoryEntries(
-      projectRoot,
-      query,
-      options,
-      now,
+    const result = await withPinnedProjectMemoryOwner(options.config, () =>
+      forgetManagedAutoMemoryEntries(projectRoot, query, options, now),
     );
     if (result.touchedScopes.includes('user') && options.config) {
       await this.recordUserMutation(
@@ -3070,12 +3098,32 @@ export class MemoryManager {
    * Takes the same consolidation lock the scheduled path does so a manual
    * run never writes concurrently with a background dream.
    */
-  async runManualDream(
+  runManualDream(
     projectRoot: string,
     config: Config,
     sessionId: string,
     now = new Date(),
+    abortSignal?: AbortSignal,
   ): Promise<AutoMemoryDreamResult> {
+    return withPinnedProjectMemoryOwner(config, () =>
+      this.runManualDreamForOwner(
+        projectRoot,
+        config,
+        sessionId,
+        now,
+        abortSignal,
+      ),
+    );
+  }
+
+  private async runManualDreamForOwner(
+    projectRoot: string,
+    config: Config,
+    sessionId: string,
+    now = new Date(),
+    abortSignal?: AbortSignal,
+  ): Promise<AutoMemoryDreamResult> {
+    abortSignal?.throwIfAborted();
     await ensureAutoMemoryScaffold(projectRoot, now);
     const alreadyRunning: AutoMemoryDreamResult = {
       touchedTopics: [],
@@ -3123,7 +3171,7 @@ export class MemoryManager {
         projectRoot,
         now,
         config,
-        undefined,
+        abortSignal,
         {
           trigger: 'manual',
           recordMetadata: true,
@@ -3165,9 +3213,8 @@ export class MemoryManager {
 
   /** Reset all extract scheduling state. Call from afterEach in tests. */
   resetExtractStateForTests(): void {
-    this.extractRunning.clear();
-    this.extractCurrentTaskId.clear();
-    this.extractQueued.clear();
+    MemoryManager.activeExtracts.clear();
+    MemoryManager.extractQueued.clear();
     this.extractCadence.clear();
     this.extractFlushRuns.clear();
     // Bump (never re-zero) the discard epoch: a run that started before the

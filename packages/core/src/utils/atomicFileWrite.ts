@@ -48,6 +48,8 @@ export interface AtomicWriteFileOptions extends AtomicWriteOptions {
    * semantics. Default: false (follow symlinks). See PR #4333 review.
    */
   noFollow?: boolean;
+  /** Reject writes that would require a non-atomic fallback. */
+  requireAtomic?: boolean;
   /** Reject the write immediately before its irreversible commit step. */
   assertCanCommit?: () => void;
 }
@@ -132,7 +134,7 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * Falls back to in-place write when the existing file's uid differs
  * from the process's euid — POSIX rename would reset ownership.
  * Also falls back on EXDEV (cross-device). Both fallbacks lose crash
- * atomicity but preserve the existing inode's uid.
+ * atomicity. Pass `requireAtomic` to reject these fallbacks.
  *
  * The parent directory of `filePath` must already exist.
  */
@@ -259,6 +261,15 @@ export async function atomicWriteFile(
     existingStat.isFile() &&
     ownershipWouldChange()
   ) {
+    if (options?.requireAtomic) {
+      throw annotateWriteError(
+        Object.assign(
+          new Error('Cannot atomically replace a file owned by another user.'),
+          { code: 'EACCES' },
+        ),
+        targetPath,
+      );
+    }
     options?.assertCanCommit?.();
     await fs.writeFile(targetPath, data, writeOptions);
     await tryChmod(targetPath);
@@ -293,7 +304,11 @@ export async function atomicWriteFile(
     }
 
     // EXDEV: cross-device rename not supported — fall back to direct write.
-    if (isNodeError(error) && error.code === 'EXDEV') {
+    if (
+      !options?.requireAtomic &&
+      isNodeError(error) &&
+      error.code === 'EXDEV'
+    ) {
       try {
         options?.assertCanCommit?.();
         if (options?.noFollow) {
@@ -592,7 +607,11 @@ export function atomicWriteFileSync(
       // Ignore cleanup errors.
     }
 
-    if (isNodeError(error) && error.code === 'EXDEV') {
+    if (
+      !options?.requireAtomic &&
+      isNodeError(error) &&
+      error.code === 'EXDEV'
+    ) {
       try {
         options?.assertCanCommit?.();
         if (options?.noFollow) {

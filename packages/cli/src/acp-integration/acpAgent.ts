@@ -1067,7 +1067,8 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     config.storage.getProjectTempDir(),
     path.join(config.storage.getProjectDir(), 'subagents'),
     path.join(config.getSessionRuntimeBaseDir(), 'tmp'),
-    getAutoMemoryRoot(config.getTargetDir()),
+    config.getProjectAutoMemoryRoot?.() ??
+      getAutoMemoryRoot(config.getTargetDir()),
     getUserAutoMemoryRoot(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
@@ -7096,7 +7097,18 @@ class QwenAgent implements Agent {
         sessionPath,
         (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
         config.getSessionId(),
+        this.isTrustedManagedParent() ? undefined : config.getTargetDir(),
       );
+      if (
+        restored.session &&
+        restored.canonicalWorktree &&
+        !this.isTrustedManagedParent()
+      ) {
+        await config.enterProjectWorktree(
+          restored.session.worktreePath,
+          restored.canonicalWorktree,
+        );
+      }
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
       }
@@ -10586,15 +10598,35 @@ class QwenAgent implements Agent {
       }
       case 'qwen/settings/getMemoryPaths': {
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const sessionConfig =
+          !requestedCwd && typeof params['sessionId'] === 'string'
+            ? this.sessions.get(params['sessionId'])?.getConfig()
+            : undefined;
+        const memoryConfig =
+          sessionConfig ??
+          (this.isTrustedManagedParent() &&
+          process.env[QWEN_CODE_SERVE_ENV] === '1'
+            ? this.config
+            : undefined);
         const projectRoot =
+          !this.isTrustedManagedParent() &&
           typeof params['projectRoot'] === 'string'
             ? params['projectRoot']
             : settingsCwd;
         return {
-          paths: await resolveQwenMemoryPaths({
-            cwd: settingsCwd,
-            projectRoot,
-          }),
+          paths: await this.runWithPinnedRuntimeBaseDirForRequest(
+            settingsCwd,
+            () => {
+              const readPaths = () =>
+                resolveQwenMemoryPaths({
+                  cwd: settingsCwd,
+                  projectRoot: memoryConfig?.getProjectRoot() ?? projectRoot,
+                });
+              return memoryConfig?.runWithProjectMemoryOwner
+                ? memoryConfig.runWithProjectMemoryOwner(readPaths)
+                : readPaths();
+            },
+          ),
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
@@ -17183,6 +17215,16 @@ class QwenAgent implements Agent {
         ? undefined
         : () => getProjectHooksForApproval(settings),
     );
+    if (
+      this.isTrustedManagedParent() &&
+      process.env[QWEN_CODE_SERVE_ENV] === '1' &&
+      !provisionalWorkspace &&
+      !agentHostReadOnly
+    ) {
+      config.bindProjectMemoryToWorkspace(
+        this.config.getProjectMemoryOwner().memoryBaseDir,
+      );
+    }
     workflowAncestorTrustSession.config = config;
     // /clear rotates the recording ID while the ACP transport keeps its ID.
     workflowAncestorTrustSession.sessionId = normalizeSessionIdForLookup(
@@ -17754,7 +17796,11 @@ class QwenAgent implements Agent {
       this.clientCapabilities.fs,
       config.getFileSystemService(),
       {
-        localReadRoots: buildAcpLocalReadRoots(config),
+        localReadRoots: () =>
+          Storage.runWithResolvedRuntimeBaseDir(
+            config.getSessionRuntimeBaseDir(),
+            () => buildAcpLocalReadRoots(config),
+          ),
       },
     );
     config.setFileSystemService(acpFileSystemService);

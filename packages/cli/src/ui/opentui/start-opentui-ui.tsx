@@ -57,6 +57,7 @@ import {
   ToolConfirmationOutcome,
   type Config,
 } from '@qwen-code/qwen-code-core';
+import { restoreWorktreeContext } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   VimModeProvider,
@@ -703,6 +704,28 @@ export async function startOpenTuiUI(
     () => renderer.root,
   );
   try {
+    if (
+      config.getResumedSessionData?.() &&
+      !config.getShellExecutionSandbox?.()
+    ) {
+      try {
+        const sessionId = config.getSessionId();
+        const restored = await restoreWorktreeContext(
+          config.getSessionService().getWorktreeSessionPath(sessionId),
+          (error) => debugLogger.warn('Worktree restore warning:', error),
+          sessionId,
+          config.getTargetDir(),
+        );
+        if (restored.session && restored.canonicalWorktree) {
+          await config.enterProjectWorktree(
+            restored.session.worktreePath,
+            restored.canonicalWorktree,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn('Worktree restore failed:', error);
+      }
+    }
     // Start the one shared initialization flight before anything can load
     // commands or submit; the turn path and the registry loader both await
     // (or join) this same flight via ensureConfigInitialized.

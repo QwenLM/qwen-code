@@ -371,6 +371,10 @@ describe('AgentTool', () => {
     };
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getProjectMemoryOwner: () => ({
+        cwd: '/test/project',
+        memoryBaseDir: '/test/runtime',
+      }),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getCwd: vi.fn().mockReturnValue('/test/project'),
       getWorkingDir: vi.fn().mockReturnValue('/test/project'),

@@ -226,6 +226,8 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
       );
     }
 
+    await this.config.enterProjectWorktree(result.worktree.path);
+
     const output: EnterWorktreeOutput = {
       worktreePath: result.worktree.path,
       worktreeBranch: result.worktree.branch,

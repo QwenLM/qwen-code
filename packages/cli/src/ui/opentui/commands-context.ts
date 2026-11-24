@@ -89,7 +89,10 @@ export interface OpenTuiCommandHost {
     commands: readonly string[],
   ): Promise<ShellConfirmationResolution>;
   /** Presents a yes/no confirmation; resolves like ink's dialog. */
-  presentActionConfirmation(prompt: ReactNode): Promise<boolean>;
+  presentActionConfirmation(
+    prompt: ReactNode,
+    options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent' | 'reviewText'>,
+  ): Promise<boolean>;
   /** Parity of `actions.handleResume` — awaited like the ink processor. */
   handleResume(sessionId: string): Promise<void>;
   /** Parity of `actions.handleBranch` — awaited like the ink processor. */

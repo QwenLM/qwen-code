@@ -41,10 +41,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/memory-import.ts',
     {
       reason:
-        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them. Project scope uses the selected runtime snapshot; only parent-process runtimes without a snapshot use the process environment.',
+        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them.',
       accesses: {
         'computed:key': 1,
-        'key:QWEN_CODE_MEMORY_PROJECT_SCOPE': 1,
       },
     },
   ],

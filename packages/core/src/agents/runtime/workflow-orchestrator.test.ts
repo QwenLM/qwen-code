@@ -3080,6 +3080,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
       getSessionId: () => 'sess_fake_test_id',
       getProjectRoot: () => opts.transcriptDir ?? '/fake/repo',
+      getProjectMemoryOwner: () => ({
+        cwd: opts.transcriptDir ?? '/fake/repo',
+        memoryBaseDir: '/fake/runtime',
+      }),
       getCliVersion: () => '9.9.9',
       storage: opts.transcriptDir
         ? { getProjectDir: () => opts.transcriptDir }

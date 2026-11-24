@@ -4,15 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs/promises';
 import { type MemoryManager, type MemoryTaskRecord } from './manager.js';
+import { getAutoMemoryIndexPath, getAutoMemoryRoot } from './paths.js';
 import {
-  getAutoMemoryExtractCursorPath,
-  getAutoMemoryIndexPath,
-  getAutoMemoryMetadataPath,
-  getAutoMemoryRoot,
-} from './paths.js';
+  readProjectMemoryCursor,
+  readProjectMemoryMetadata,
+} from './project-commit.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { readAutoMemoryIndex } from './store.js';
 import type {
   AutoMemoryExtractCursor,
   AutoMemoryMetadata,
@@ -40,15 +39,6 @@ export interface ManagedAutoMemoryStatus {
   migrationTasks: MemoryTaskRecord[];
 }
 
-async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(content) as T;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function getManagedAutoMemoryStatus(
   projectRoot: string,
   manager: MemoryManager,
@@ -56,12 +46,10 @@ export async function getManagedAutoMemoryStatus(
   const root = getAutoMemoryRoot(projectRoot);
   const indexPath = getAutoMemoryIndexPath(projectRoot);
 
-  const [indexContent, cursor, metadata, docs] = await Promise.all([
-    fs.readFile(indexPath, 'utf-8').catch(() => ''),
-    readJsonFile<AutoMemoryExtractCursor>(
-      getAutoMemoryExtractCursorPath(projectRoot),
-    ),
-    readJsonFile<AutoMemoryMetadata>(getAutoMemoryMetadataPath(projectRoot)),
+  const indexContent = await readAutoMemoryIndex(projectRoot).catch(() => '');
+  const [cursor, metadata, docs] = await Promise.all([
+    readProjectMemoryCursor(root).catch(() => undefined),
+    readProjectMemoryMetadata(projectRoot).catch(() => undefined),
     scanAutoMemoryTopicDocuments(projectRoot),
   ]);
 
@@ -91,7 +79,7 @@ export async function getManagedAutoMemoryStatus(
   return {
     root,
     indexPath,
-    indexContent,
+    indexContent: indexContent ?? '',
     cursor,
     metadata,
     extractionRunning: manager

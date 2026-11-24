@@ -12,10 +12,12 @@ import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { t } from '../../i18n/index.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { useConfirmationPreview } from '../hooks/use-confirmation-preview.js';
 
 type ConsentPromptProps = {
   // If a simple string is given, it will render using markdown by default.
   prompt: ReactNode;
+  reviewText?: string;
   onConfirm: (value: boolean) => void;
   dismissOnEscape?: boolean;
   terminalWidth: number;
@@ -28,23 +30,31 @@ const CONSENT_PROMPT_CHROME_ROWS = 7;
 export const ConsentPrompt = (props: ConsentPromptProps) => {
   const {
     prompt,
+    reviewText,
     onConfirm,
     dismissOnEscape = false,
     terminalWidth,
     availableTerminalHeight,
   } = props;
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') onConfirm(false);
-    },
-    { isActive: dismissOnEscape },
-  );
   const constrainedHeight = clampDialogHeight(availableTerminalHeight);
   const availablePromptRows =
     constrainedHeight === undefined
       ? undefined
       : Math.max(1, constrainedHeight - CONSENT_PROMPT_CHROME_ROWS);
+  const preview = useConfirmationPreview(
+    reviewText,
+    terminalWidth - 6,
+    (availablePromptRows ?? 20) - 2,
+  );
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape' && dismissOnEscape) onConfirm(false);
+      if (reviewText !== undefined) preview.handleKey(key.name);
+    },
+    { isActive: dismissOnEscape || reviewText !== undefined },
+  );
   const showPromptTruncationNotice =
+    reviewText === undefined &&
     typeof prompt === 'string' &&
     availablePromptRows !== undefined &&
     availablePromptRows <= 2;
@@ -64,7 +74,13 @@ export const ConsentPrompt = (props: ConsentPromptProps) => {
       overflow="hidden"
     >
       <Box flexDirection="column" flexShrink={1} overflow="hidden">
-        {typeof prompt === 'string' ? (
+        {reviewText !== undefined ? (
+          <>
+            {typeof prompt === 'string' ? <Text>{prompt}</Text> : prompt}
+            <Text wrap="truncate-end">{preview.text}</Text>
+            {preview.hint && <Text dimColor>{preview.hint}</Text>}
+          </>
+        ) : typeof prompt === 'string' ? (
           <MarkdownDisplay
             isPending={true}
             text={prompt}

@@ -10038,6 +10038,62 @@ describe('Server Config (config.ts)', () => {
     skipArtifactMigration: true,
   };
 
+  it('keeps worktree memory and transcript ownership during entry and a nested cd', async () => {
+    const config = makeConfig({ experimentalZedIntegration: true });
+    const owner = config.getProjectMemoryOwner();
+    const originalStorage = config.storage;
+    const nested = path.join(NEW_DIR, 'nested');
+
+    await config.enterProjectWorktree(NEW_DIR);
+    expect(config.getWorkingDir()).toBe(NEW_DIR);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+    expect(config.storage).toBe(originalStorage);
+    expect(
+      deriveWorktreeConfig(
+        config,
+        path.join(NEW_DIR, 'child'),
+      ).getProjectMemoryOwner(),
+    ).toEqual(owner);
+
+    await config.relocateWorkingDirectory(
+      nested,
+      nested,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getWorkingDir()).toBe(nested);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+
+    const derivedWorktree = path.join(NEW_DIR, '.qwen', 'worktrees', 'child');
+    await config.enterProjectWorktree(derivedWorktree);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+    await config.exitProjectWorktree(derivedWorktree);
+    expect(config.getWorkingDir()).toBe(nested);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+
+    const outside = path.join(path.dirname(NEW_DIR), 'different-workspace');
+    await config.relocateWorkingDirectory(
+      outside,
+      outside,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getProjectMemoryOwner().cwd).toBe(outside);
+    expect(config.storage).toBe(originalStorage);
+  });
+
+  it('keeps the registered workspace memory owner through daemon relocations', async () => {
+    const config = makeConfig();
+    const memoryBaseDir = path.resolve('/bound/workspace-memory-base');
+    const owner = { ...config.getProjectMemoryOwner(), memoryBaseDir };
+    config.bindProjectMemoryToWorkspace(memoryBaseDir);
+    await config.relocateWorkingDirectory(
+      NEW_DIR,
+      NEW_DIR,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getWorkingDir()).toBe(NEW_DIR);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+  });
+
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
     const refreshFileWatchingForWorkingDirectory = vi

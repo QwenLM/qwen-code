@@ -316,6 +316,7 @@ interface ActionModal {
   kind: 'action';
   id: number;
   prompt: ReactNode;
+  reviewText?: string;
   resolve: (confirmed: boolean) => void;
 }
 
@@ -685,7 +686,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }),
       presentAction: (
         prompt: ReactNode,
-        options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
+        options?: Pick<
+          ConfirmationRequest,
+          'signal' | 'isCurrent' | 'reviewText'
+        >,
       ) =>
         new Promise<boolean>((resolve) => {
           const signal = options?.signal;
@@ -720,6 +724,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               kind: 'action',
               id,
               prompt,
+              reviewText: options?.reviewText,
               resolve: (confirmed) => finish(confirmed),
             },
           ]);
@@ -1954,6 +1959,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               <OpenTuiActionConfirmation
                 key={`action-${activeModal.id}`}
                 prompt={activeModal.prompt}
+                reviewText={activeModal.reviewText}
+                availableTerminalHeight={dialogRegionHeight}
                 onResolve={(confirmed) =>
                   closeActionModal(activeModal, confirmed)
                 }

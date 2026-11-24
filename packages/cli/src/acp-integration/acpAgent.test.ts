@@ -863,6 +863,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     getUserExtensionsDir: vi.fn(() => '/tmp/qwen-extensions'),
     getUserWorkflowsDir: vi.fn(() => '/home/test/.qwen/workflows'),
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
+    runWithResolvedRuntimeBaseDir: vi.fn(
+      (_runtimeBaseDir: string, operation: () => unknown) => operation(),
+    ),
     runWithRuntimeBaseDir: vi.fn(
       (
         _runtimeBaseDir: string,
@@ -6197,6 +6200,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/project'),
       getSessionId: vi.fn().mockReturnValue(sessionId),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue(runtimeBaseDir),
+      getProjectAutoMemoryRoot: vi
+        .fn()
+        .mockReturnValue('/project/.qwen/memory'),
       getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
       setFileSystemService: vi.fn(),
       storage: {
@@ -6252,9 +6258,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         fsCapabilities,
         fallbackFileSystem,
         {
-          localReadRoots: expectedLocalReadRoots,
+          localReadRoots: expect.any(Function),
         },
       );
+      const localReadRoots = vi
+        .mocked(AcpFileSystemService)
+        .mock.calls.at(-1)?.[4]?.localReadRoots;
+      if (typeof localReadRoots !== 'function') {
+        throw new Error('Expected a session-scoped read root resolver.');
+      }
+      expect(localReadRoots()).toEqual(expectedLocalReadRoots);
+      expect(Storage.runWithResolvedRuntimeBaseDir).toHaveBeenCalledWith(
+        runtimeBaseDir,
+        expect.any(Function),
+      );
+      innerConfig.getProjectAutoMemoryRoot.mockReturnValue('/next/memory');
+      expect(localReadRoots()).toContain('/next/memory');
+      expect(localReadRoots()).not.toContain('/project/.qwen/memory');
       expect(innerConfig.setFileSystemService).toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
@@ -22579,6 +22599,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getTargetDir: vi
             .fn()
             .mockReturnValue(`${worktreeRoot}/packages/core`),
+          getProjectRoot: () => `${worktreeRoot}/packages/core`,
           storage: { getProjectRoot: () => worktreeRoot },
         }),
       },

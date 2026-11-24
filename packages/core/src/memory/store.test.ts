@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAutoMemoryConsolidationLockPath,
@@ -15,6 +16,7 @@ import {
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
   getAutoMemoryTopicPath,
+  runWithProjectMemoryOwner,
   clearAutoMemoryRootCache,
 } from './paths.js';
 import {
@@ -59,6 +61,7 @@ describe('auto-memory storage scaffold', () => {
     resetMemoryState();
 
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-'));
+    tempDir = await fs.realpath(tempDir);
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
   });
@@ -87,7 +90,8 @@ describe('auto-memory storage scaffold', () => {
   const makeCheckout = async (...names: string[]) => {
     const repo = path.join(tempDir, 'repo');
     const workspaces = names.map((name) => path.join(repo, 'workspaces', name));
-    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(repo);
+    execFileSync('git', ['init', '--quiet', repo], { stdio: 'pipe' });
     for (const workspace of workspaces) {
       await fs.mkdir(workspace, { recursive: true });
     }
@@ -128,58 +132,48 @@ describe('auto-memory storage scaffold', () => {
     );
   });
 
-  it('shares managed auto-memory across nested directories in the same git checkout by default', async () => {
-    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
-    const runtimeDir = useRuntimeDir();
-    const [repo, workspaceA, workspaceB] = await makeCheckout('agent', 'nambz');
-
-    expect(getAutoMemoryRoot(workspaceA)).toBe(managedRoot(runtimeDir, repo));
-    expect(getAutoMemoryRoot(workspaceB)).toBe(managedRoot(runtimeDir, repo));
-  });
-
-  it('isolates managed auto-memory by exact workspace when workspace scope is enabled', async () => {
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
-    const runtimeDir = useRuntimeDir();
-    const [, workspaceA, workspaceB] = await makeCheckout('agent', 'nambz');
-
-    expect(getAutoMemoryRoot(workspaceA)).toBe(
-      managedRoot(runtimeDir, workspaceA),
-    );
-    expect(getAutoMemoryRoot(workspaceB)).toBe(
-      managedRoot(runtimeDir, workspaceB),
-    );
-  });
-
-  it('normalizes the memory project scope value case-insensitively', async () => {
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = '  Workspace  ';
-    const runtimeDir = useRuntimeDir();
-    const [, workspaceA] = await makeCheckout('agent');
-
-    expect(getAutoMemoryRoot(workspaceA)).toBe(
-      managedRoot(runtimeDir, workspaceA),
-    );
-  });
-
-  it('falls back to git-root scope and warns once on an unrecognized scope value', async () => {
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'exact';
-    const runtimeDir = useRuntimeDir();
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    try {
-      const [repo, workspaceA] = await makeCheckout('agent');
-
-      expect(getAutoMemoryRoot(workspaceA)).toBe(managedRoot(runtimeDir, repo));
-      expect(getAutoMemoryRoot(workspaceA)).toBe(managedRoot(runtimeDir, repo));
-      expect(warnSpy).toHaveBeenCalledTimes(1);
-      expect(String(warnSpy.mock.calls[0]?.[0])).toContain(
-        'QWEN_CODE_MEMORY_PROJECT_SCOPE',
+  it.each([undefined, 'workspace', 'git-root'])(
+    'keys nested workspaces by their exact path with legacy scope %s',
+    async (legacyScope) => {
+      vi.stubEnv('QWEN_CODE_MEMORY_PROJECT_SCOPE', legacyScope);
+      const runtimeDir = useRuntimeDir();
+      const [repo, workspaceA, workspaceB] = await makeCheckout(
+        'agent',
+        'nambz',
       );
-    } finally {
-      warnSpy.mockRestore();
-    }
+
+      expect(getAutoMemoryRoot(repo)).toBe(managedRoot(runtimeDir, repo));
+      expect(getAutoMemoryRoot(workspaceA)).toBe(
+        managedRoot(runtimeDir, workspaceA),
+      );
+      expect(getAutoMemoryRoot(workspaceB)).toBe(
+        managedRoot(runtimeDir, workspaceB),
+      );
+    },
+  );
+
+  it('applies the scoped owner and its runtime base only to managed memory', () => {
+    useRuntimeDir();
+    const owner = {
+      cwd: path.join(tempDir, 'owner'),
+      memoryBaseDir: path.join(tempDir, 'owner-runtime'),
+    };
+    const worktree = path.join(tempDir, 'worktree');
+    runWithProjectMemoryOwner(
+      () => owner,
+      () => {
+        expect(getAutoMemoryRoot(worktree)).toBe(
+          managedRoot(owner.memoryBaseDir, owner.cwd),
+        );
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+        expect(getAutoMemoryRoot(worktree)).toBe(
+          path.join(worktree, '.qwen', 'memory'),
+        );
+      },
+    );
   });
 
-  it('gives a linked git worktree its own memory root, separate from the main checkout', async () => {
+  it('keeps unverified linked worktrees separate from the purported main checkout', async () => {
     const runtimeDir = useRuntimeDir();
     clearAutoMemoryRootCache();
 

@@ -110,6 +110,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   buildConfirmationPrompt,
+  OpenTuiActionConfirmation,
   OpenTuiProjectHooksApprovalDialog,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
@@ -301,6 +302,35 @@ describe('buildConfirmationPrompt', () => {
       ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
     );
   });
+});
+
+it('allows paging through a long action review on a small terminal', () => {
+  mocks.state.dimensions = { width: 80, height: 24 };
+  const review = Array.from(
+    { length: 28 },
+    (_, index) => `Topic ${index + 1}`,
+  ).join('\n');
+  const onResolve = vi.fn();
+  const { container } = render(
+    <OpenTuiActionConfirmation
+      prompt="Apply these changes?"
+      reviewText={review}
+      availableTerminalHeight={19}
+      onResolve={onResolve}
+    />,
+  );
+  expect(container.textContent).toContain('Page 1/4');
+  const press = (name: string) => {
+    act(() => {
+      for (const handle of mocks.state.keyboardHandlers) handle({ name });
+    });
+  };
+  for (let page = 0; page < 3; page++) press('pagedown');
+  expect(container.textContent).toContain('Topic 28');
+  expect(container.textContent).toContain('Page 4/4');
+  expect(onResolve).not.toHaveBeenCalled();
+  press('pageup');
+  expect(container.textContent).toContain('Page 3/4');
 });
 
 describe('OpenTuiToolConfirmation', () => {

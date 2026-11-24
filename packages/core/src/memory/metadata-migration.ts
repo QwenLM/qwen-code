@@ -24,7 +24,9 @@ import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { stringify as stringifyYaml } from '../utils/yaml-parser.js';
 import {
   rebuildAutoMemoryIndexAtRoot,
+  rebuildProjectMemoryIndexLocked,
   rebuildTeamAutoMemoryIndex,
+  recoverProjectMemoryIndex,
 } from './indexer.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -52,6 +54,11 @@ import {
 } from './types.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import { MEMORY_METADATA_ITEM_BOUNDS } from './prompt.js';
+import {
+  assertProjectMemoryCommit,
+  markProjectMemoryIndexPendingLocked,
+  withProjectMemoryCommit,
+} from './project-commit.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MIGRATION');
 
@@ -412,45 +419,71 @@ export async function commitMigratedMemoryMetadata(
 ): Promise<'committed' | 'conflict' | 'invalid'> {
   const merged = mergeMetadata(candidate, metadata);
   if (!merged || !merged.validation.valid) return 'invalid';
-  if (!canCommit()) return 'conflict';
-  const trustedFile = await resolveTrustedMemoryFile(
-    candidate.root,
-    getMemoryRootTrustedAnchor(candidate.root),
-    candidate.relativePath,
-  );
-  if (
-    !trustedFile ||
-    (await fs.realpath(candidate.filePath).catch(() => undefined)) !==
-      trustedFile
-  ) {
-    return 'conflict';
-  }
-  const current = await fs.readFile(trustedFile, 'utf-8').catch(() => null);
-  if (current === null || hash(current) !== candidate.sourceHash) {
-    return 'conflict';
-  }
-  try {
-    await atomicWriteFile(trustedFile, merged.content, {
-      encoding: 'utf-8',
-      noFollow: true,
-      assertCanCommit: () => {
-        if (!canCommit()) throw new MigrationConflictError();
-        let latest: string;
-        try {
-          latest = fsSync.readFileSync(trustedFile, 'utf-8');
-        } catch {
-          throw new MigrationConflictError();
-        }
-        if (hash(latest) !== candidate.sourceHash) {
-          throw new MigrationConflictError();
-        }
-      },
-    });
-  } catch (error) {
-    if (error instanceof MigrationConflictError) return 'conflict';
-    throw error;
-  }
-  return 'committed';
+  const commit = async (): Promise<'committed' | 'conflict'> => {
+    if (!canCommit()) return 'conflict';
+    const trustedFile = await resolveTrustedMemoryFile(
+      candidate.root,
+      getMemoryRootTrustedAnchor(candidate.root),
+      candidate.relativePath,
+    );
+    if (
+      !trustedFile ||
+      (await fs.realpath(candidate.filePath).catch(() => undefined)) !==
+        trustedFile
+    ) {
+      return 'conflict';
+    }
+    const current = await fs.readFile(trustedFile, 'utf-8').catch(() => null);
+    if (current === null || hash(current) !== candidate.sourceHash) {
+      return 'conflict';
+    }
+    if (candidate.scope === 'project') {
+      await markProjectMemoryIndexPendingLocked(candidate.root);
+    }
+    try {
+      await atomicWriteFile(trustedFile, merged.content, {
+        encoding: 'utf-8',
+        noFollow: true,
+        requireAtomic: candidate.scope === 'project',
+        assertCanCommit: () => {
+          if (candidate.scope === 'project') assertProjectMemoryCommit();
+          if (!canCommit()) throw new MigrationConflictError();
+          let latest: string;
+          try {
+            if (
+              fsSync.realpathSync(candidate.filePath) !== trustedFile ||
+              !fsSync.lstatSync(candidate.filePath).isFile()
+            ) {
+              throw new MigrationConflictError();
+            }
+            latest = fsSync.readFileSync(trustedFile, 'utf-8');
+          } catch {
+            throw new MigrationConflictError();
+          }
+          if (hash(latest) !== candidate.sourceHash) {
+            throw new MigrationConflictError();
+          }
+        },
+      });
+    } catch (error) {
+      if (error instanceof MigrationConflictError) return 'conflict';
+      throw error;
+    }
+    if (candidate.scope === 'project') {
+      try {
+        await rebuildProjectMemoryIndexLocked(candidate.root);
+      } catch (error) {
+        debugLogger.warn(
+          'Topic metadata was saved but index repair is pending:',
+          error,
+        );
+      }
+    }
+    return 'committed';
+  };
+  return candidate.scope === 'project'
+    ? withProjectMemoryCommit(candidate.root, commit)
+    : commit();
 }
 
 function parseAgentMetadata(text: string | undefined): GeneratedMemoryMetadata {
@@ -625,6 +658,8 @@ export async function runMemoryMetadataMigration(params: {
     if (!canCommit() || indexRoots.length === 0) return;
     if (params.scope === 'team') {
       await rebuildTeamAutoMemoryIndex(params.projectRoot);
+    } else if (params.scope === 'project') {
+      await Promise.all(indexRoots.map(recoverProjectMemoryIndex));
     } else {
       await Promise.all(
         indexRoots.map((root) =>

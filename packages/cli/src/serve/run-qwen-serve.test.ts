@@ -5334,9 +5334,7 @@ describe('runQwenServe daemon logger wiring', () => {
 
     // Point daemon logger at our temp debug dir
     const origEnv = process.env['QWEN_RUNTIME_DIR'];
-    const originalScope = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
     process.env['QWEN_RUNTIME_DIR'] = tmpDir;
-    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
 
     try {
       const handle = await runQwenServe(
@@ -5370,10 +5368,6 @@ describe('runQwenServe daemon logger wiring', () => {
       expect(logContent).toContain(
         `workspace=${fs.realpathSync.native(workspace)}`,
       );
-      expect(logContent).toContain('project memory scope resolved');
-      expect(logContent).toContain('projectMemoryScope=workspace');
-      expect(logContent).toContain('projectMemoryScopeSource=default');
-      expect(logContent).toContain('projectMemoryScopeRaw=workspace');
 
       await Promise.all(
         Array.from({ length: 70 }, (_, index) =>
@@ -5405,11 +5399,6 @@ describe('runQwenServe daemon logger wiring', () => {
       delete process.env['QWEN_RUNTIME_DIR'];
       if (origEnv !== undefined) {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
-      }
-      if (originalScope === undefined) {
-        delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
-      } else {
-        process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = originalScope;
       }
     }
   }, 10_000);
@@ -10609,43 +10598,13 @@ describe('runQwenServe runtime startup failures', () => {
   });
 
   it.each([
+    ['boots without injecting a memory scope override', undefined, undefined],
     [
-      'defaults every runtime to workspace project-memory scope',
-      undefined,
-      undefined,
-      'workspace',
-    ],
-    [
-      'applies memoryProjectScope to every runtime without mutating process.env',
+      'accepts the deprecated memory scope option without replacing the environment',
       'workspace',
       'git-root',
-      'git-root',
     ],
-    [
-      'preserves the launch environment scope when the option is omitted',
-      'git-root',
-      undefined,
-      'git-root',
-    ],
-    [
-      'treats a blank launch environment scope as unset',
-      '',
-      undefined,
-      'workspace',
-    ],
-    [
-      'treats a whitespace-only launch environment scope as unset',
-      '   ',
-      undefined,
-      'workspace',
-    ],
-    [
-      'passes an unrecognized launch environment scope through unchanged',
-      'workspce',
-      undefined,
-      'workspce',
-    ],
-  ] as const)('%s', async (_name, launchScope, optionScope, expectedScope) => {
+  ] as const)('%s', async (_name, launchScope, optionScope) => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-memory-project-scope-')),
     );
@@ -10711,7 +10670,7 @@ describe('runQwenServe runtime startup failures', () => {
       for (const runtime of workspaceRegistry?.list() ?? []) {
         expect(
           runtime.env.effectiveEnv?.['QWEN_CODE_MEMORY_PROJECT_SCOPE'],
-        ).toBe(expectedScope);
+        ).toBe(launchScope);
       }
       expect(process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']).toBe(launchScope);
     } finally {
@@ -10729,7 +10688,9 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-reload-')),
     );
     const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     delete process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     const originalBase = process.env['QWEN_TEST_BOOT_BASE'];
     const originalLeak = process.env['QWEN_TEST_RELOAD_LEAK'];
     const originalRemoved = process.env['QWEN_TEST_REMOVED_FROM_DOTENV'];
@@ -10757,6 +10718,9 @@ describe('runQwenServe runtime startup failures', () => {
               QWEN_TEST_RUNTIME_VALUE: runtimeMounted
                 ? reloadedRuntimeValue
                 : 'boot',
+              ...(runtimeMounted
+                ? { QWEN_CODE_MEMORY_BASE_DIR: '.reload-memory-base' }
+                : {}),
             },
           },
         }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
@@ -10835,6 +10799,9 @@ describe('runQwenServe runtime startup failures', () => {
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
+      expect(capturedRuntimeEnv).not.toHaveProperty(
+        'QWEN_CODE_MEMORY_BASE_DIR',
+      );
 
       vi.mocked(settingsRuntime.reloadEnvironment).mockClear();
       await workspace!.reloadModelProviders({
@@ -10862,6 +10829,9 @@ describe('runQwenServe runtime startup failures', () => {
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(false);
+      expect(capturedRuntimeEnv).not.toHaveProperty(
+        'QWEN_CODE_MEMORY_BASE_DIR',
+      );
 
       reloadedRuntimeValue = 'hot-synced';
       await expect(
@@ -10871,6 +10841,9 @@ describe('runQwenServe runtime startup failures', () => {
         }),
       ).resolves.toEqual({ status: 'applied' });
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('hot-synced');
+      expect(capturedRuntimeEnv).not.toHaveProperty(
+        'QWEN_CODE_MEMORY_BASE_DIR',
+      );
       expect(bridge.invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/model-providers/reload',
         { cwd: tmpDir },
@@ -10926,6 +10899,11 @@ describe('runQwenServe runtime startup failures', () => {
         delete process.env['QWEN_RUNTIME_DIR'];
       } else {
         process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+      }
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
       }
       await handle.close();
     }
@@ -11119,13 +11097,15 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-secondary-env-reload-')),
     );
-    const primary = path.join(tmpDir, 'primary');
-    const secondary = path.join(tmpDir, 'secondary');
+    const primary = path.join(tmpDir, 'apps-api');
+    const secondary = path.join(tmpDir, 'apps', 'api');
     const dynamic = path.join(tmpDir, 'dynamic');
     const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     delete process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     fs.mkdirSync(primary);
-    fs.mkdirSync(secondary);
+    fs.mkdirSync(secondary, { recursive: true });
     fs.mkdirSync(dynamic);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
@@ -11162,6 +11142,13 @@ describe('runQwenServe runtime startup failures', () => {
                     ? 'provider-reloaded'
                     : 'reloaded'
                 : 'boot',
+              ...(isSecondary
+                ? {
+                    QWEN_CODE_MEMORY_BASE_DIR: runtimeMounted
+                      ? path.join(primary, '.primary-runtime')
+                      : '.boot-memory-base',
+                  }
+                : {}),
             },
           },
         } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
@@ -11254,6 +11241,10 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      const pinnedMemoryBase = path.join(secondary, '.boot-memory-base');
+      expect(env.effectiveEnv?.['QWEN_CODE_MEMORY_BASE_DIR']).toBe(
+        pinnedMemoryBase,
+      );
       expect(env.workflowsEnabledBySettings).toBe(true);
 
       await expect(
@@ -11272,6 +11263,9 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.effectiveEnv?.['QWEN_CODE_MEMORY_BASE_DIR']).toBe(
+        pinnedMemoryBase,
+      );
       expect(env.workflowsEnabledBySettings).toBe(false);
 
       const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
@@ -11296,6 +11290,9 @@ describe('runQwenServe runtime startup failures', () => {
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
         'provider-reloaded',
       );
+      expect(env.effectiveEnv?.['QWEN_CODE_MEMORY_BASE_DIR']).toBe(
+        pinnedMemoryBase,
+      );
 
       failEnvFileRead = true;
       await expect(
@@ -11312,6 +11309,11 @@ describe('runQwenServe runtime startup failures', () => {
       expect(env.envFileReadFailures).toEqual([]);
     } finally {
       await handle.close();
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
       if (originalRuntimeDir === undefined) {
         delete process.env['QWEN_RUNTIME_DIR'];
       } else {

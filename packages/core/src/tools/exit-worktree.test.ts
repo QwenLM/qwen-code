@@ -40,6 +40,7 @@ function makeMockConfig(targetDir = process.cwd()): Config {
     // Phase D-2: EnterWorktreeTool (used here for setup) reads this setting
     // when creating a worktree; empty makes the symlink loop a no-op.
     getWorktreeSymlinkDirectories: vi.fn(() => []),
+    exitProjectWorktree: vi.fn().mockResolvedValue(undefined),
   } as unknown as Config;
 }
 
@@ -62,7 +63,7 @@ const listBranches = (cwd: string) =>
   execFileSync('git', ['branch', '--list'], { cwd, encoding: 'utf8' });
 
 const exitWith = (config: Config, params: ExitParams) =>
-  new ExitWorktreeTool(config)
+  new ExitWorktreeTool(Object.assign(makeMockConfig(), config))
     .build(params)
     .execute(new AbortController().signal);
 
@@ -188,6 +189,7 @@ describe('ExitWorktreeTool', () => {
         getTargetDir: () => repoRoot,
         getSessionId: () => 'session-creator',
         getWorktreeSymlinkDirectories: () => [],
+        enterProjectWorktree: vi.fn().mockResolvedValue(undefined),
       } as unknown as Config;
       const result = await new EnterWorktreeTool(enterCfg)
         .build({ name: slug })

@@ -1498,6 +1498,53 @@ describe('llm.tsx main function', () => {
     },
   );
 
+  it.each([undefined, 'memory-override'])(
+    'binds the daemon ACP memory base from its launch environment (%s)',
+    async (override) => {
+      const runtimeBase = join(llmTestHome, 'daemon-runtime');
+      const memoryBase = override ? join(llmTestHome, override) : undefined;
+      vi.stubEnv('QWEN_CODE_SERVE', '1');
+      vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', 'trusted-test-parent');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      vi.stubEnv('QWEN_RUNTIME_DIR', runtimeBase);
+      vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', memoryBase);
+      const { parseArguments, loadCliConfig } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+      vi.mocked(loadSettings).mockImplementation(() => {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = join(llmTestHome, 'foreign');
+        return {
+          errors: [],
+          merged: { advanced: {}, security: { auth: {} }, ui: {} },
+          setValue: vi.fn(),
+          forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+          migrationWarnings: [],
+          getSystemHooks: () => undefined,
+          getUserHooks: () => undefined,
+          getProjectHooks: () => undefined,
+        } as never;
+      });
+      const reachedBinding = new Error('stop after daemon memory binding');
+      const bindProjectMemoryToWorkspace = vi.fn(() => {
+        throw reachedBinding;
+      });
+      vi.mocked(loadCliConfig).mockResolvedValue({
+        bindProjectMemoryToWorkspace,
+      } as unknown as Config);
+
+      try {
+        await expect(main()).rejects.toBe(reachedBinding);
+        expect(bindProjectMemoryToWorkspace).toHaveBeenCalledWith(
+          memoryBase ?? runtimeBase,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   // Regression for #8653 (placement): relaunchAppInChildProcess spawns with
   // {...process.env} captured at call time, so scrubbing BEFORE the handoff
   // would strip the loader the respawned child still needs to boot. The

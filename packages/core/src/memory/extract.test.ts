@@ -10,12 +10,16 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
-import { getAutoMemoryExtractCursorPath } from './paths.js';
+import {
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryIndexPath,
+} from './paths.js';
 import { runAutoMemoryExtract } from './extract.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   rebuildManagedAutoMemoryIndex,
+  rebuildProjectMemoryIndexLocked,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { refreshMemoryInstruction } from './refresh.js';
@@ -30,10 +34,17 @@ vi.mock('../agents/forkedAgent.js', async (importOriginal) => ({
   getCacheSafeParamsSessionId: vi.fn(),
 }));
 
-vi.mock('./indexer.js', () => ({
-  rebuildManagedAutoMemoryIndex: vi.fn().mockResolvedValue(''),
-  rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(''),
-}));
+vi.mock('./indexer.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./indexer.js')>();
+  return {
+    ...actual,
+    rebuildManagedAutoMemoryIndex: vi.fn(actual.rebuildManagedAutoMemoryIndex),
+    rebuildProjectMemoryIndexLocked: vi.fn(
+      actual.rebuildProjectMemoryIndexLocked,
+    ),
+    rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(''),
+  };
+});
 
 vi.mock('./refresh.js', () => ({
   refreshMemoryInstruction: vi.fn().mockResolvedValue(undefined),
@@ -130,6 +141,48 @@ describe('auto-memory extraction', () => {
 
     expect(cursor.sessionId).toBe('session-1');
     expect(cursor.processedOffset).toBe(2);
+  });
+
+  it('preserves the legacy session offset when another session extracts first', async () => {
+    const cursorPath = getAutoMemoryExtractCursorPath(projectRoot);
+    await fs.writeFile(
+      cursorPath,
+      JSON.stringify({
+        sessionId: 'session-1',
+        processedOffset: 1,
+        updatedAt: new Date(0).toISOString(),
+      }),
+    );
+    const history = [{ role: 'user', parts: [{ text: 'Different sessions' }] }];
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue(undefined);
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+    });
+    vi.mocked(mockConfig.getSessionId).mockReturnValue('session-2');
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-2',
+      config: mockConfig,
+      history,
+    });
+    vi.mocked(mockConfig.getSessionId).mockReturnValue('session-1');
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+    });
+
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(await fs.readFile(cursorPath, 'utf-8'))).toMatchObject({
+      sessions: {
+        'session-1': { processedOffset: 1 },
+        'session-2': { processedOffset: 1 },
+      },
+    });
   });
 
   it('forwards skipped context while keeping the cursor in raw-history offsets', async () => {
@@ -334,6 +387,20 @@ describe('auto-memory extraction', () => {
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
   });
 
+  it('skips a deferred extraction when its Config now owns another session', async () => {
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue(undefined);
+    vi.mocked(mockConfig.getSessionId).mockReturnValue('session-2');
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Older session.' }] }],
+    });
+
+    expect(result.skippedReason).toBe('session_mismatch');
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+  });
+
   it('throws when config is missing because heuristic fallback was removed', async () => {
     await expect(
       runAutoMemoryExtract({
@@ -357,6 +424,46 @@ describe('auto-memory extraction', () => {
       ) as { processedOffset?: number; sessionId?: string };
     }
 
+    async function blockIndexReplacement() {
+      const indexPath = getAutoMemoryIndexPath(projectRoot);
+      await fs.rm(indexPath);
+      await fs.mkdir(indexPath);
+      return indexPath;
+    }
+
+    it('keeps a rebuild failure recorded by another writer while advancing the cursor', async () => {
+      const extraction =
+        deferred<Awaited<ReturnType<typeof runAutoMemoryExtractionByAgent>>>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockReturnValueOnce(
+        extraction.promise,
+      );
+      const running = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: newHistory,
+      });
+      await waitForMockCall(vi.mocked(runAutoMemoryExtractionByAgent));
+      const indexPath = await blockIndexReplacement();
+      await expect(
+        rebuildManagedAutoMemoryIndex(projectRoot),
+      ).rejects.toThrow();
+      await fs.rmdir(indexPath);
+      await fs.writeFile(indexPath, '', 'utf-8');
+      extraction.resolve({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+      });
+      await running;
+
+      expect(await readCursor()).toMatchObject({
+        processedOffset: 1,
+        projectIndexRebuildPending: true,
+      });
+    });
+
     it('repairs a failed project rebuild before retrying without new writes', async () => {
       const cursorBefore = await readCursor();
       vi.mocked(runAutoMemoryExtractionByAgent)
@@ -372,9 +479,7 @@ describe('auto-memory extraction', () => {
           touchedUserScope: false,
           hasToolActivity: true,
         });
-      vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
-        new Error('EACCES: project memory index write failed'),
-      );
+      const indexPath = await blockIndexReplacement();
       const params = {
         projectRoot,
         sessionId: 'session-1',
@@ -382,19 +487,19 @@ describe('auto-memory extraction', () => {
         history: [...newHistory],
       };
 
-      await expect(runAutoMemoryExtract(params)).rejects.toThrow(
-        'EACCES: project memory index write failed',
-      );
+      await expect(runAutoMemoryExtract(params)).rejects.toThrow();
       expect(await readCursor()).toEqual({
         ...cursorBefore,
         projectIndexRebuildPending: true,
       });
 
+      await fs.rmdir(indexPath);
+      await fs.writeFile(indexPath, '', 'utf-8');
       await runAutoMemoryExtract(params);
 
-      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledTimes(2);
+      expect(rebuildProjectMemoryIndexLocked).toHaveBeenCalledTimes(1);
       expect(
-        vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[1]!,
+        vi.mocked(rebuildProjectMemoryIndexLocked).mock.invocationCallOrder[0]!,
       ).toBeLessThan(
         vi.mocked(runAutoMemoryExtractionByAgent).mock.invocationCallOrder[1]!,
       );
@@ -443,9 +548,7 @@ describe('auto-memory extraction', () => {
         hasToolActivity: false,
         failure: { error, reconcileAll: true },
       });
-      vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
-        new Error('project index unavailable'),
-      );
+      await blockIndexReplacement();
 
       await expect(
         runAutoMemoryExtract({
@@ -766,6 +869,8 @@ describe('auto-memory extraction', () => {
         .calls.length;
 
       // Session 2: cursor ignored, full history treated as unprocessed
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-2');
+      vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
       await runAutoMemoryExtract({
         projectRoot,
         sessionId: 'session-2',

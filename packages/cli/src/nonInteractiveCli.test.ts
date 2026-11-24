@@ -14459,6 +14459,8 @@ describe('runNonInteractive', () => {
       };
       (mockConfig as { getSessionService?: () => unknown }).getSessionService =
         vi.fn().mockReturnValue(sessionService);
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue(realTmpDir);
+      mockConfig.enterProjectWorktree = vi.fn().mockResolvedValue(undefined);
 
       setupMetricsMock();
       const events: ServerLlmStreamEvent[] = [
@@ -14480,6 +14482,10 @@ describe('runNonInteractive', () => {
           'prompt-id-resume',
         );
 
+        expect(mockConfig.enterProjectWorktree).toHaveBeenCalledWith(
+          worktreeDir,
+          worktreeDir,
+        );
         // The user message sent to the model should now begin with a
         // <system-reminder> block carrying the restore notice.
         const [parts] = mockLlmClient.sendMessageStream.mock.calls[0] as [

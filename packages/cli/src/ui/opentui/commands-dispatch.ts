@@ -57,6 +57,7 @@ import {
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
+  isPrivateBuiltinSlashCommand,
 } from '../utils/commandUtils.js';
 import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
 import {
@@ -949,6 +950,12 @@ export class OpenTuiSlashDispatcher {
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
+            confirmAction: (title, content) =>
+              this.host.presentActionConfirmation(title, {
+                signal: abortController.signal,
+                isCurrent: () => this.activeCommand === activeCommand,
+                reviewText: content,
+              }),
             beginCommit: () => {
               if (
                 this.activeCommand !== activeCommand ||
@@ -1288,15 +1295,12 @@ export class OpenTuiSlashDispatcher {
         resolvedCommandPath[0] ||
         trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
         trimmed;
-      // The built-in /advisor is skipped by identity (kind + name) so a
-      // user-defined command shadowing the name is still recorded like
-      // any other custom command (ink parity).
-      const isBuiltInAdvisor =
-        primaryCommand === 'advisor' &&
-        commandToExecute?.kind === CommandKind.BUILT_IN;
+      const privateBuiltin =
+        commandToExecute?.kind === CommandKind.BUILT_IN &&
+        isPrivateBuiltinSlashCommand(trimmed, primaryCommand);
       const shouldRecord =
         !delegatedToRecursiveInvocation &&
-        !isBuiltInAdvisor &&
+        !privateBuiltin &&
         !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
       try {
         if (shouldRecord) {

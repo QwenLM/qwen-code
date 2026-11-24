@@ -124,6 +124,7 @@ describe('EnterWorktreeTool.execute', () => {
     new EnterWorktreeTool({
       getTargetDir: () => targetDir,
       getSessionId: () => 'mock',
+      enterProjectWorktree: vi.fn().mockResolvedValue(undefined),
     } as unknown as Config)
       .build({ name })
       .execute(new AbortController().signal);

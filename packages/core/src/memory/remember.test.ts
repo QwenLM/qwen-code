@@ -32,7 +32,8 @@ vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
-vi.mock('./indexer.js', () => ({
+vi.mock('./indexer.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./indexer.js')>()),
   rebuildManagedAutoMemoryIndex: vi.fn(),
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
@@ -47,6 +48,7 @@ function createConfig(
   return {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
+    getModelContextWindowSize: vi.fn().mockReturnValue(200_000),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),

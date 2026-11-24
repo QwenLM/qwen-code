@@ -218,6 +218,7 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       // can still reference the absolute path from the tool result;
       // dropping the sidecar served no purpose beyond invalidating the
       // restore mechanism. (PR #4174 review #3259975245.)
+      await this.config.exitProjectWorktree(worktreePath);
       const output: ExitWorktreeOutput = {
         action: 'keep',
         worktreePath,
@@ -402,6 +403,7 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     // branch at all, and the branch that survives is the only handle to
     // the work once the directory is gone.
     await this.maybeClearWorktreeSession();
+    await this.config.exitProjectWorktree(worktreePath);
     const reportedBranch = result.deletedBranch ?? result.keptBranch ?? branch;
     let message: string;
     let returnDisplay: string;

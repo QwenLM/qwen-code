@@ -433,6 +433,30 @@ describe('WriteFileTool', () => {
       expect(permission).toBe('ask');
     });
 
+    it('rejects an approved project memory creation if the topic appeared after confirmation', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+      try {
+        const writer = new WriteFileTool({
+          ...mockConfigInternal,
+          getFileReadCacheDisabled: () => true,
+        } as unknown as Config);
+        const file = p('.qwen', 'memory', 'topic.md');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const invocation = writer.build({
+          file_path: file,
+          content: 'approved',
+        });
+        await invocation.getConfirmationDetails(abortSignal);
+
+        fs.writeFileSync(file, 'concurrent write');
+        const result = await invocation.execute(abortSignal);
+        expect(result.error?.message).toMatch(/changed since it was prepared/i);
+        expect(fs.readFileSync(file, 'utf-8')).toBe('concurrent write');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('auto-allows private memory writes but proposes team memory writes', async () => {
       const prev = process.env['QWEN_CODE_MEMORY_LOCAL'];
       process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';

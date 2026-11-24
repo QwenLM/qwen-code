@@ -329,6 +329,25 @@ describe('atomicWriteFile', () => {
   );
 
   itOtherUser(
+    'requires an atomic replace even with a foreign file owner',
+    async () => {
+      const filePath = existing('shared.txt', 'original');
+      const { uid, ino } = fsSync.statSync(filePath);
+      await expect(
+        asOtherUser(uid, () =>
+          atomicWriteFile(filePath, 'updated', {
+            noFollow: true,
+            requireAtomic: true,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'EACCES' });
+      expect(read(filePath)).toBe('original');
+      expect(fsSync.statSync(filePath).ino).toBe(ino);
+      expect(ls()).toEqual(['shared.txt']);
+    },
+  );
+
+  itOtherUser(
     'should skip in-place fallback for non-regular files and use atomic replace',
     async () => {
       // FIFO + ownership mismatch must NOT take the in-place fallback:
@@ -688,6 +707,17 @@ describe('EXDEV fallback (async + sync)', () => {
 
     expect(read(filePath)).toBe('sync-fallback-payload');
     expect(ls()).toEqual(['exdev-sync.txt']);
+  });
+
+  it('keeps the original file when strict-atomic rename fails with EXDEV', async () => {
+    const filePath = existing('strict.txt', 'original');
+    const options = { noFollow: true, requireAtomic: true };
+    await expect(writeExdev(filePath, options)).rejects.toMatchObject({
+      code: 'EXDEV',
+    });
+    expect(() => writeExdevSync(filePath, options)).toThrow(/EXDEV/);
+    expect(read(filePath)).toBe('original');
+    expect(ls()).toEqual(['strict.txt']);
   });
 
   it('atomicWriteFile: non-EXDEV rename failure propagates (no fallback)', async () => {

@@ -36,7 +36,7 @@ const LOCAL_READ_FALLBACK_ERROR_KINDS = new Set([
 const debugLogger = createDebugLogger('ACP_FILE_SYSTEM');
 
 interface AcpFileSystemServiceOptions {
-  localReadRoots?: readonly string[];
+  localReadRoots?: readonly string[] | (() => readonly string[]);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -214,11 +214,11 @@ export class AcpFileSystemService implements FileSystemService {
   async writeTextFile(
     params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
-    if (!this.capabilities.writeTextFile) {
+    if (!this.capabilities.writeTextFile || params.assertCanCommit) {
       return this.fallback.writeTextFile(params);
     }
 
-    const { toolWriteOrigin, _meta: requestMeta, ...wireParams } = params;
+    const { toolWriteOrigin, _meta: requestMeta, path } = params;
     const finalContent =
       requestMeta?.['bom'] && params.content.charCodeAt(0) !== 0xfeff
         ? '\uFEFF' + params.content
@@ -227,7 +227,7 @@ export class AcpFileSystemService implements FileSystemService {
 
     try {
       await this.connection.writeTextFile({
-        ...wireParams,
+        path,
         content: finalContent,
         ...(wireMeta !== undefined ? { _meta: wireMeta } : {}),
         sessionId: this.sessionId,
@@ -247,8 +247,13 @@ export class AcpFileSystemService implements FileSystemService {
   }
 
   private async getResolvedLocalReadRoots(): Promise<string[]> {
+    const configuredRoots = this.options.localReadRoots;
+    const localReadRoots =
+      typeof configuredRoots === 'function'
+        ? configuredRoots()
+        : configuredRoots;
     const roots = await Promise.all(
-      (this.options.localReadRoots ?? []).map(resolveRealPath),
+      (localReadRoots ?? []).map(resolveRealPath),
     );
     return roots.filter((root): root is string => Boolean(root));
   }

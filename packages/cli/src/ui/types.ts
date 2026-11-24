@@ -1052,6 +1052,7 @@ export interface ConfirmationRequest {
   signal?: AbortSignal;
   isCurrent?: () => boolean;
   prompt: ReactNode;
+  reviewText?: string;
   onConfirm: (confirm: boolean) => void;
 }
 

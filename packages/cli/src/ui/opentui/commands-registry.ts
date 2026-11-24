@@ -309,7 +309,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
   },
   { name: 'forget', results: ['message'], gatedBy: 'managed-memory' },
   { name: 'goal', results: ['goal_control', 'message'] },
-  { name: 'memory', results: ['dialog'], dialogs: ['memory'] },
+  { name: 'memory', results: ['dialog', 'message'], dialogs: ['memory'] },
   {
     name: 'model',
     results: ['dialog', 'message', 'submit_prompt'],

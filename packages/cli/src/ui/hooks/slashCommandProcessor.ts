@@ -81,6 +81,7 @@ import {
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
+  isPrivateBuiltinSlashCommand,
   SLASH_COMMANDS_SKIP_RECORDING,
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
@@ -407,10 +408,8 @@ export const useSlashCommandProcessor = (
         approvedCommands?: string[],
       ) => void;
     }>(null);
-  const [confirmationRequest, setConfirmationRequest] = useState<null | {
-    prompt: React.ReactNode;
-    onConfirm: (confirmed: boolean) => void;
-  }>(null);
+  const [confirmationRequest, setConfirmationRequest] =
+    useState<ConfirmationRequest | null>(null);
 
   const [sessionShellAllowlist, setSessionShellAllowlist] = useState(
     new Set<string>(),
@@ -1169,6 +1168,31 @@ export const useSlashCommandProcessor = (
             });
           }
           if (commandToExecute.action) {
+            const requestConfirmation = (
+              prompt: React.ReactNode,
+              reviewText?: string,
+            ) =>
+              new Promise<boolean>((resolve) => {
+                const signal = abortController.signal;
+                if (signal.aborted) {
+                  resolve(false);
+                  return;
+                }
+                const onAbort = () => request.onConfirm(false);
+                const request: ConfirmationRequest = {
+                  prompt,
+                  reviewText,
+                  onConfirm: (confirmed) => {
+                    signal.removeEventListener('abort', onAbort);
+                    setConfirmationRequest((current) =>
+                      current === request ? null : current,
+                    );
+                    resolve(confirmed);
+                  },
+                };
+                signal.addEventListener('abort', onAbort, { once: true });
+                setConfirmationRequest(request);
+              });
             const fullCommandContext: CommandContext = {
               ...commandContext,
               ui: {
@@ -1208,6 +1232,7 @@ export const useSlashCommandProcessor = (
               },
               overwriteConfirmed,
               abortSignal: abortController.signal,
+              confirmAction: requestConfirmation,
               beginCommit() {
                 if (
                   activeCommandRef.current !== activeCommand ||
@@ -1605,21 +1630,7 @@ export const useSlashCommandProcessor = (
                   );
                 }
                 case 'confirm_action': {
-                  const { confirmed } = await new Promise<{
-                    confirmed: boolean;
-                  }>((resolve) => {
-                    const request: ConfirmationRequest = {
-                      prompt: result.prompt,
-                      onConfirm: (resolvedConfirmed) => {
-                        setConfirmationRequest((current) =>
-                          current === request ? null : current,
-                        );
-                        resolve({ confirmed: resolvedConfirmed });
-                      },
-                    };
-                    setConfirmationRequest(request);
-                    void abortPromise.then(() => request.onConfirm(false));
-                  });
+                  const confirmed = await requestConfirmation(result.prompt);
 
                   if (abortController.signal.aborted) {
                     return { type: 'handled' };
@@ -1718,15 +1729,12 @@ export const useSlashCommandProcessor = (
             resolvedCommandPath[0] ||
             trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
             trimmed;
-          // The built-in /advisor is skipped by identity (kind + name) so a
-          // user-defined command shadowing the name is still recorded like
-          // any other custom command.
-          const isBuiltInAdvisor =
-            primaryCommand === 'advisor' &&
-            commandToExecute?.kind === CommandKind.BUILT_IN;
+          const privateBuiltin =
+            commandToExecute?.kind === CommandKind.BUILT_IN &&
+            isPrivateBuiltinSlashCommand(trimmed, primaryCommand);
           const shouldRecord =
             !delegatedToRecursiveInvocation &&
-            !isBuiltInAdvisor &&
+            !privateBuiltin &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
           try {
             if (shouldRecord) {

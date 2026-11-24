@@ -78,6 +78,7 @@ export function buildBareRememberPrompt(fact: string): string {
 
 async function buildCleanMemorySystemPrompt(
   projectRoot: string,
+  contextWindowSize: number,
   scope?: WorkspaceRememberTargetScope,
 ): Promise<string> {
   if (scope === 'user') {
@@ -143,6 +144,7 @@ async function buildCleanMemorySystemPrompt(
     userMemory,
     /* teamSection */ undefined,
     {
+      projectContextWindowSize: contextWindowSize,
       keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
         [...userDocs, ...projectDocs],
         { scopes: scope === 'project' ? ['project'] : ['user', 'project'] },
@@ -231,6 +233,7 @@ export async function runManagedRememberByAgent(params: {
 
   const memoryPrompt = await buildCleanMemorySystemPrompt(
     params.projectRoot,
+    params.config.getModelContextWindowSize(),
     params.scope,
   );
   // The remember agent's system prompt already embeds the full managed

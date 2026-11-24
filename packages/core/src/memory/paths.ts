@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
   QWEN_DIR,
+  isSubpath,
   realpathNearestExisting,
   resolvePath,
   sanitizeCwd,
@@ -19,7 +20,6 @@ import {
   clearMemoryImportIdentityCache,
 } from './import-paths.js';
 import type { AutoMemoryType } from './types.js';
-import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
 export const AUTO_MEMORY_DIRNAME = 'memory';
 export const AUTO_MEMORY_INDEX_FILENAME = 'MEMORY.md';
@@ -73,103 +73,80 @@ function findGitRoot(startPath: string): string | null {
  * or the global qwen dir);
  * overridable via QWEN_CODE_MEMORY_BASE_DIR for tests.
  */
-export function getMemoryBaseDir(): string {
-  if (process.env['QWEN_CODE_MEMORY_BASE_DIR']) {
-    return resolvePath(undefined, process.env['QWEN_CODE_MEMORY_BASE_DIR']);
-  }
-  return Storage.getRuntimeBaseDir();
+export function getMemoryBaseDir(
+  runtimeBaseDir = Storage.getRuntimeBaseDir(),
+  env = process.env,
+  cwd?: string,
+): string {
+  const override = env['QWEN_CODE_MEMORY_BASE_DIR'];
+  return override ? resolvePath(cwd, override) : runtimeBaseDir;
 }
-
-// Memoize by projectRoot, project scope, and the runtime-specific base dir.
-// The base dir is part of the key because in daemon mode different sessions can
-// share one projectRoot yet write to different output dirs.
-const _autoMemoryRootCache = new Map<string, string>();
 
 // Memoized on projectRoot alone: the team root resolves via findGitRoot, which
 // does sync fs I/O — and isTeamAutoMemPath runs on every file write.
 const _teamAutoMemoryRootCache = new Map<string, string>();
 
-let warnedUnknownMemoryProjectScope = false;
 let warnedImportedMemoryIdentityLost = false;
 
-/**
- * Resolve QWEN_CODE_MEMORY_PROJECT_SCOPE. Only "workspace" (after trimming and
- * lowercasing) opts into per-workspace partitioning; anything else keeps the
- * git-root scope. An unrecognized non-empty value warns once so a typo surfaces
- * instead of silently falling back to the shared scope this flag exists to
- * prevent.
- */
-const projectScopeContext = new AsyncLocalStorage<'workspace' | 'git-root'>();
-
-export function runWithMemoryProjectScope<T>(
-  scope: 'workspace' | 'git-root',
-  run: () => T,
-): T {
-  return projectScopeContext.run(scope, run);
+export interface ProjectMemoryOwner {
+  cwd: string;
+  memoryBaseDir: string;
 }
 
-function resolveWorkspaceProjectScope(): boolean {
-  const scoped = projectScopeContext.getStore();
-  if (scoped) return scoped === 'workspace';
-  const raw = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
-  if (raw === undefined) return false;
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === 'workspace') return true;
-  if (
-    normalized !== '' &&
-    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(normalized) &&
-    !warnedUnknownMemoryProjectScope
-  ) {
-    warnedUnknownMemoryProjectScope = true;
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[qwen-code] Ignoring unrecognized QWEN_CODE_MEMORY_PROJECT_SCOPE="${raw}"; ` +
-        'falling back to "git-root". Expected "git-root" or "workspace".',
-    );
-  }
-  return false;
+const projectMemoryOwner = new AsyncLocalStorage<() => ProjectMemoryOwner>();
+let standaloneProjectMemoryOwner:
+  | ((projectRoot?: string) => ProjectMemoryOwner | undefined)
+  | undefined;
+
+export function setStandaloneProjectMemoryOwner(
+  getOwner: typeof standaloneProjectMemoryOwner,
+): void {
+  standaloneProjectMemoryOwner = getOwner;
+}
+
+export function getBoundProjectMemoryOwner(
+  projectRoot?: string,
+): ProjectMemoryOwner | undefined {
+  return (
+    projectMemoryOwner.getStore()?.() ??
+    standaloneProjectMemoryOwner?.(projectRoot)
+  );
+}
+
+export function runWithProjectMemoryOwner<T>(
+  owner: () => ProjectMemoryOwner,
+  run: () => T,
+): T {
+  return projectMemoryOwner.run(owner, run);
+}
+
+export function getWorkspaceProjectMemoryRoot(
+  projectRoot: string,
+  memoryBaseDir: string,
+): string {
+  return path.join(
+    memoryBaseDir,
+    'projects',
+    sanitizeCwd(path.resolve(projectRoot)),
+    AUTO_MEMORY_DIRNAME,
+  );
 }
 
 export function getAutoMemoryRoot(projectRoot: string): string {
-  const useLocalMemory = process.env['QWEN_CODE_MEMORY_LOCAL'] === '1';
-  const useWorkspaceRoot = resolveWorkspaceProjectScope();
-  const memoryBaseDir = useLocalMemory ? '' : getMemoryBaseDir();
-  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${
-    useWorkspaceRoot ? 'workspace' : 'git-root'
-  }\0${projectRoot}`;
-  const cached = _autoMemoryRootCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  let result: string;
-  if (useLocalMemory) {
-    result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
-  } else {
-    // In git-root scope, anchor at the nearest git root WITHOUT resolving
-    // linked worktrees back to their canonical repository root: each worktree
-    // gets its own memory, consistent with the per-worktree isolation of
-    // chats/, workflows/, and team memory (getTeamAutoMemoryRoot). See #6449.
-    // In workspace scope, key by the exact resolved workspace dir instead so
-    // nested workspaces in one checkout do not share memory.
-    const projectKey = useWorkspaceRoot
-      ? path.resolve(projectRoot)
-      : (findGitRoot(projectRoot) ?? path.resolve(projectRoot));
-    result = path.join(
-      memoryBaseDir,
-      'projects',
-      sanitizeCwd(projectKey),
-      AUTO_MEMORY_DIRNAME,
-    );
+  if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
+    return path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   }
-  _autoMemoryRootCache.set(cacheKey, result);
-  return result;
+  const owner = getBoundProjectMemoryOwner(projectRoot);
+  return getWorkspaceProjectMemoryRoot(
+    owner?.cwd ?? projectRoot,
+    owner?.memoryBaseDir ?? getMemoryBaseDir(),
+  );
 }
 
 /** Clear the memoization caches (for tests that change environment or git layout). */
 export function clearAutoMemoryRootCache(): void {
-  _autoMemoryRootCache.clear();
   clearMemoryImportIdentityCache();
   _teamAutoMemoryRootCache.clear();
-  warnedUnknownMemoryProjectScope = false;
   warnedImportedMemoryIdentityLost = false;
 }
 
@@ -189,7 +166,8 @@ export function clearAutoMemoryRootCache(): void {
 export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
   return process.env['QWEN_CODE_MEMORY_LOCAL'] === '1'
     ? projectRoot
-    : getMemoryBaseDir();
+    : (getBoundProjectMemoryOwner(projectRoot)?.memoryBaseDir ??
+        getMemoryBaseDir());
 }
 
 export function getProjectAutoMemoryRoots(
@@ -234,17 +212,16 @@ export function getProjectAutoMemoryRoots(
 }
 
 export function getMemoryRootTrustedAnchor(root: string): string {
-  const baseDir = path.resolve(getMemoryBaseDir());
   const resolvedRoot = path.resolve(root);
-  const relativeToBase = path.relative(baseDir, resolvedRoot);
-  if (
-    relativeToBase === '' ||
-    (!relativeToBase.startsWith(`..${path.sep}`) &&
-      relativeToBase !== '..' &&
-      !path.isAbsolute(relativeToBase))
-  ) {
+  const owner = getBoundProjectMemoryOwner();
+  const baseDir = path.resolve(getMemoryBaseDir());
+  if (resolvedRoot === path.join(baseDir, USER_AUTO_MEMORY_DIRNAME)) {
     return baseDir;
   }
+  if (owner && isSubpath(owner.memoryBaseDir, resolvedRoot)) {
+    return owner.memoryBaseDir;
+  }
+  if (isSubpath(baseDir, resolvedRoot)) return baseDir;
   return path.dirname(path.dirname(resolvedRoot));
 }
 

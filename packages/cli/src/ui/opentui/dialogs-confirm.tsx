@@ -60,9 +60,11 @@ import {
   DialogSelect,
   FooterHint,
   dialogAreaWidth,
+  dialogContentWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
+import { useConfirmationPreview } from '../hooks/use-confirmation-preview.js';
 import { renderDiffBody } from './diff-render.js';
 import {
   headWindowPhysical,
@@ -1334,8 +1336,13 @@ export function OpenTuiShellConfirmation(props: OpenTuiShellConfirmationProps) {
 
 export interface OpenTuiActionConfirmationProps {
   prompt: ReactNode;
+  reviewText?: string;
+  availableTerminalHeight?: number;
   onResolve: (confirmed: boolean) => void;
 }
+
+// Frame, title, page indicator, choice rows, and footer.
+const ACTION_REVIEW_CHROME_ROWS = 11;
 
 /**
  * A yes/no confirmation (extension consent and friends). Enter confirms, Esc
@@ -1344,7 +1351,13 @@ export interface OpenTuiActionConfirmationProps {
 export function OpenTuiActionConfirmation(
   props: OpenTuiActionConfirmationProps,
 ) {
-  const { prompt, onResolve } = props;
+  const { prompt, reviewText, availableTerminalHeight, onResolve } = props;
+  const { width, height } = useTerminalDimensions();
+  const preview = useConfirmationPreview(
+    reviewText,
+    dialogContentWidth(width),
+    (availableTerminalHeight ?? height) - ACTION_REVIEW_CHROME_ROWS,
+  );
   const options = useMemo<Array<DialogListItem<boolean>>>(
     () => [
       { key: 'yes', value: true },
@@ -1359,13 +1372,23 @@ export function OpenTuiActionConfirmation(
   });
 
   useKeyboard((key) => {
-    if (toOriginalKey(key).name === 'escape') onResolve(false);
+    const { name } = toOriginalKey(key);
+    if (name === 'escape') onResolve(false);
+    if (reviewText !== undefined) preview.handleKey(name);
   });
 
   return (
     <DialogFrame borderColor={C.yellow}>
       <box flexDirection="column">
-        {prompt}
+        {reviewText !== undefined ? (
+          <>
+            {typeof prompt === 'string' ? <text>{prompt}</text> : prompt}
+            <text wrapMode="none">{preview.text}</text>
+            {preview.hint && <text fg={C.dim}>{preview.hint}</text>}
+          </>
+        ) : (
+          prompt
+        )}
         <box marginTop={1}>
           <DialogSelect
             items={options}

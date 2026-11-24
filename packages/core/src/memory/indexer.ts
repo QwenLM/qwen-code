@@ -11,8 +11,6 @@ import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
-  getAutoMemoryIndexPath,
-  getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
   getTeamAutoMemoryIndexPath,
@@ -36,12 +34,20 @@ import {
   describeDroppedIndexEntries,
   INDEX_SCAN_CAP_NOTICE_START,
   INDEX_TRUNCATION_NOTICE_START,
+  MAX_DROPPED_INDEX_DESCRIPTION_CHARS,
   MAX_NAMED_DROPPED_ENTRIES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
   MAX_INDEX_LINES,
   trimIndexToBudgetDetailed,
 } from './index-budget.js';
+import {
+  assertProjectMemoryCommit,
+  markProjectMemoryIndexPendingLocked,
+  readProjectMemoryCursor,
+  withProjectMemoryCommit,
+  writeProjectMemoryCursorLocked,
+} from './project-commit.js';
 
 const MAX_INDEX_FIELD_CHARS = 120;
 // The description is the only optional part of an entry, so it absorbs all the
@@ -237,6 +243,7 @@ function assembleIndex(
   scanNotice = '',
   scanOmitted = 0,
   priorityPrefixLength = 0,
+  includeNoticeInBudget = false,
 ): string {
   const { content, dropped } = trimIndexToBudgetDetailed(
     lines,
@@ -282,7 +289,22 @@ function assembleIndex(
     reasons.length === 0 && scanOmitted > 0
       ? INDEX_SCAN_CAP_NOTICE_START
       : INDEX_TRUNCATION_NOTICE_START;
-  return `${content}${noticeStart}${reason}${describeDroppedIndexEntries(dropped, lines.length)}${scanNotice}${budgetLever}${scanLever}`;
+  const suffix = `${scanNotice}${budgetLever}${scanLever}`;
+  const prefix = `${noticeStart}${reason}`;
+  const notice = (removed: readonly string[]) =>
+    `${prefix}${describeDroppedIndexEntries(removed, lines.length)}${suffix}`;
+  if (!includeNoticeInBudget) return content + notice(dropped);
+
+  const bounded = trimIndexToBudgetDetailed(
+    lines,
+    priorityPrefixLength,
+    MAX_INDEX_LINES - 2,
+    MAX_INDEX_CHARS -
+      prefix.length -
+      suffix.length -
+      MAX_DROPPED_INDEX_DESCRIPTION_CHARS,
+  );
+  return bounded.content + notice(bounded.dropped);
 }
 
 function describeScanOmissions(
@@ -305,6 +327,7 @@ export function buildManagedAutoMemoryIndex(
     'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
   >,
   omitted: readonly ScannedAutoMemoryDocument[] = [],
+  includeNoticeInBudget = false,
 ): string {
   const ordered = [...docs].sort(
     (a, b) =>
@@ -316,6 +339,7 @@ export function buildManagedAutoMemoryIndex(
     describeScanOmissions(ordered, omitted),
     omitted.length,
     firstImported < 0 ? 0 : firstImported,
+    includeNoticeInBudget,
   );
 }
 
@@ -387,36 +411,60 @@ export function buildTeamAutoMemoryIndex(
   );
 }
 
-async function readAutoMemoryMetadata(
-  projectRoot: string,
-): Promise<AutoMemoryMetadata | undefined> {
-  try {
-    const content = await fs.readFile(
-      getAutoMemoryMetadataPath(projectRoot),
-      'utf-8',
-    );
-    return JSON.parse(content) as AutoMemoryMetadata;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
 ): Promise<string> {
-  const [{ docs, omitted }, metadata] = await Promise.all([
-    scanAutoMemoryIndexDocumentsFromRoot(
-      getAutoMemoryRoot(projectRoot),
+  const root = getAutoMemoryRoot(projectRoot);
+  return withProjectMemoryCommit(root, () =>
+    rebuildProjectMemoryIndexLocked(root),
+  );
+}
+
+/** Call inside the project commit lock, after publishing any topic changes. */
+export async function rebuildProjectMemoryIndexLocked(
+  root: string,
+): Promise<string> {
+  assertProjectMemoryCommit();
+  const cursor = await readProjectMemoryCursor(root);
+  let content: string;
+  try {
+    await fs.mkdir(root, { recursive: true });
+    await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
+    const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
+      root,
       'project',
-    ),
-    readAutoMemoryMetadata(projectRoot),
-  ]);
-  const content = buildManagedAutoMemoryIndex(docs, metadata, omitted);
-  await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
-    encoding: 'utf-8',
-    noFollow: true,
-  });
+    );
+    content = buildManagedAutoMemoryIndex(docs, undefined, omitted, true);
+    await atomicWriteFile(
+      path.join(root, AUTO_MEMORY_INDEX_FILENAME),
+      content,
+      {
+        encoding: 'utf-8',
+        noFollow: true,
+        requireAtomic: true,
+        assertCanCommit: assertProjectMemoryCommit,
+      },
+    );
+  } catch (error) {
+    if (!cursor?.projectIndexRebuildPending)
+      await markProjectMemoryIndexPendingLocked(root);
+    throw error;
+  }
+  if (cursor?.projectIndexRebuildPending) {
+    const { projectIndexRebuildPending: _pending, ...repaired } = cursor;
+    await writeProjectMemoryCursorLocked(root, repaired);
+  }
   return content;
+}
+
+export async function recoverProjectMemoryIndex(root: string): Promise<void> {
+  if (!(await readProjectMemoryCursor(root))?.projectIndexRebuildPending)
+    return;
+  await withProjectMemoryCommit(root, async () => {
+    if ((await readProjectMemoryCursor(root))?.projectIndexRebuildPending) {
+      await rebuildProjectMemoryIndexLocked(root);
+    }
+  });
 }
 
 export async function rebuildAutoMemoryIndexAtRoot(

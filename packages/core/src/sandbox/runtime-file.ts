@@ -19,8 +19,9 @@ import { assertShellSandboxCwd } from './runtime-shell-policy.js';
 export function captureRuntimeFileVersion(
   config: Config,
   filePath: string,
+  requireVersion = false,
 ): SandboxFileVersion | null | undefined {
-  if (!config.getShellExecutionSandbox?.()) return undefined;
+  if (!requireVersion && !config.getShellExecutionSandbox?.()) return undefined;
   return getSandboxFileVersion(filePath);
 }
 
@@ -36,6 +37,9 @@ export async function writeRuntimeFile(
     return;
   }
   signal.throwIfAborted();
+  if (params.assertCanCommit) {
+    throw new Error('Project memory requires an atomic file writer.');
+  }
   if (expected === undefined) throw new Error('Missing sandbox file version.');
   assertShellSandboxCwd(policy, config.getTargetDir());
   const content = await encodeTextFileContentAsync(

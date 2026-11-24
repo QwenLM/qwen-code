@@ -12,6 +12,10 @@ import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/uti
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
+  getMemoryBaseDir,
+  setStandaloneProjectMemoryOwner,
+} from '@qwen-code/qwen-code-core/memory/paths.js';
+import {
   AuthType,
   type ChatRecord,
   computeInitialTurnFromHistory,
@@ -505,6 +509,14 @@ export async function main() {
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
+  // The daemon checked this launch environment for collisions before spawning.
+  // Child settings and provider reloads can independently reload workspace .env.
+  const daemonProjectMemoryBase =
+    isAcpMode &&
+    privateAcpParentCapability !== undefined &&
+    process.env[QWEN_CODE_SERVE_ENV] === '1'
+      ? getMemoryBaseDir()
+      : undefined;
   const conversationsRuntimeProvenance =
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
@@ -1004,6 +1016,17 @@ export async function main() {
   // cwd, and the startup-level chdir would not propagate. Reject the
   // combination with a clear error rather than silently dropping --worktree.
   let startupWorktreeContext: StartupWorktreeContext | null = null;
+  const startupWorktreeMemoryOwner =
+    argv.worktree === undefined
+      ? undefined
+      : {
+          cwd: process.cwd(),
+          memoryBaseDir: Storage.runWithRuntimeBaseDir(
+            settings.merged.advanced?.runtimeOutputDir,
+            process.cwd(),
+            () => getMemoryBaseDir(),
+          ),
+        };
   if (argv.worktree !== undefined && (argv.acp || argv.experimentalAcp)) {
     writeStderrLine(
       '--worktree cannot be combined with --acp / --experimental-acp. ' +
@@ -1125,6 +1148,23 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+    if (daemonProjectMemoryBase !== undefined) {
+      config.bindProjectMemoryToWorkspace(daemonProjectMemoryBase);
+    }
+    if (startupWorktreeContext && startupWorktreeMemoryOwner) {
+      config.bindProjectMemoryToWorktree(
+        process.cwd(),
+        startupWorktreeMemoryOwner,
+      );
+    }
+    if (!isAcpMode) {
+      // Input events may be dispatched outside the renderer's async context.
+      setStandaloneProjectMemoryOwner((projectRoot) =>
+        projectRoot === undefined || projectRoot === config.getProjectRoot()
+          ? config.getProjectMemoryOwner()
+          : undefined,
+      );
+    }
 
     // The interactive UI segments text through Intl.Segmenter; on an ICU-less
     // Node the first segmentation segfaults the process (#11747). Probe here,
@@ -1278,6 +1318,9 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
+    if (!isAcpMode) {
+      registerCleanup(() => setStandaloneProjectMemoryOwner(undefined));
+    }
 
     // Install the uncaughtException handler once the session ID is known.
     // Before this point VP mode is not active, so Node's default stderr

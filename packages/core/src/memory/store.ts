@@ -6,15 +6,28 @@
 
 import * as fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
+import * as path from 'node:path';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { openNoFollow } from '../utils/no-follow-open.js';
 import {
+  rebuildProjectMemoryIndexLocked,
+  recoverProjectMemoryIndex,
+} from './indexer.js';
+import {
+  assertProjectMemoryCommit,
+  readProjectMemoryCursor,
+  withProjectMemoryCommit,
+} from './project-commit.js';
+import {
+  AUTO_MEMORY_EXTRACT_CURSOR_FILENAME,
   AUTO_MEMORY_INDEX_FILENAME,
-  getAutoMemoryExtractCursorPath,
-  getAutoMemoryIndexPath,
-  getAutoMemoryMetadataPath,
+  AUTO_MEMORY_METADATA_FILENAME,
   getAutoMemoryRoot,
+  getMemoryRootTrustedAnchor,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from './paths.js';
+import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
   AUTO_MEMORY_SCHEMA_VERSION,
   type AutoMemoryExtractCursor,
@@ -71,43 +84,74 @@ export async function ensureAutoMemoryScaffold(
   now = new Date(),
 ): Promise<void> {
   const root = getAutoMemoryRoot(projectRoot);
-  await fs.mkdir(root, { recursive: true });
-
-  await writeFileIfMissing(
-    getAutoMemoryIndexPath(projectRoot),
-    createDefaultAutoMemoryIndex(),
-  );
-  await writeFileIfMissing(
-    getAutoMemoryMetadataPath(projectRoot),
-    JSON.stringify(createDefaultAutoMemoryMetadata(now), null, 2) + '\n',
-  );
-  await writeFileIfMissing(
-    getAutoMemoryExtractCursorPath(projectRoot),
-    JSON.stringify(createDefaultAutoMemoryExtractCursor(now), null, 2) + '\n',
-  );
+  const stateDir = path.dirname(root);
+  await withProjectMemoryCommit(root, async () => {
+    await fs.mkdir(root, { recursive: true });
+    for (const [filePath, state] of [
+      [
+        path.join(stateDir, AUTO_MEMORY_METADATA_FILENAME),
+        createDefaultAutoMemoryMetadata(now),
+      ],
+      [
+        path.join(stateDir, AUTO_MEMORY_EXTRACT_CURSOR_FILENAME),
+        createDefaultAutoMemoryExtractCursor(now),
+      ],
+    ] as const) {
+      try {
+        if (!(await fs.lstat(filePath)).isFile()) {
+          throw new Error(
+            `Project memory state requires a regular file: ${filePath}`,
+          );
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await atomicWriteFile(filePath, `${JSON.stringify(state, null, 2)}\n`, {
+          encoding: 'utf-8',
+          noFollow: true,
+          requireAtomic: true,
+          assertCanCommit: assertProjectMemoryCommit,
+        });
+      }
+    }
+    const indexExists = await fs
+      .lstat(path.join(root, AUTO_MEMORY_INDEX_FILENAME))
+      .then(
+        () => true,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code !== 'ENOENT') throw error;
+          return false;
+        },
+      );
+    if (!indexExists) await rebuildProjectMemoryIndexLocked(root);
+  });
 }
 
 export async function readAutoMemoryIndex(
   projectRoot: string,
 ): Promise<string | null> {
-  try {
-    return await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
+  return (await readAutoMemoryIndexWithStats(projectRoot))?.content ?? null;
 }
 
 async function readMemoryIndexWithStats(
   indexPath: string,
+  verifyRegularFile = false,
 ): Promise<AutoMemoryIndexRead | null> {
   try {
-    const stats = await fs.stat(indexPath);
-    const content = await fs.readFile(indexPath, 'utf-8');
-    return { content, stats };
+    const handle = await (verifyRegularFile
+      ? openNoFollow(indexPath, { nonBlocking: true })
+      : fs.open(indexPath, 'r'));
+    try {
+      const stats = await handle.stat();
+      if (verifyRegularFile && !stats.isFile()) {
+        throw new Error(
+          `Project memory index requires a regular file: ${indexPath}`,
+        );
+      }
+      const content = await handle.readFile('utf-8');
+      return { content, stats };
+    } finally {
+      await handle.close();
+    }
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === 'ENOENT') {
@@ -120,7 +164,20 @@ async function readMemoryIndexWithStats(
 export async function readAutoMemoryIndexWithStats(
   projectRoot: string,
 ): Promise<AutoMemoryIndexRead | null> {
-  return readMemoryIndexWithStats(getAutoMemoryIndexPath(projectRoot));
+  const root = getAutoMemoryRoot(projectRoot);
+  const anchor = getMemoryRootTrustedAnchor(root);
+  let result: AutoMemoryIndexRead | null;
+  do {
+    await recoverProjectMemoryIndex(root);
+    const trustedRoot = await resolveTrustedMemoryRoot(root, anchor);
+    result = trustedRoot
+      ? await readMemoryIndexWithStats(
+          path.join(trustedRoot, AUTO_MEMORY_INDEX_FILENAME),
+          true,
+        )
+      : null;
+  } while ((await readProjectMemoryCursor(root))?.projectIndexRebuildPending);
+  return result;
 }
 
 /**

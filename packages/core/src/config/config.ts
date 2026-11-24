@@ -307,6 +307,7 @@ import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
+import { isSubpath, realpathNearestExisting } from '../utils/paths.js';
 import { type ToolName } from '../tools/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
@@ -430,9 +431,12 @@ import {
 import {
   getAutoMemoryRoot,
   getAutoMemoryIndexPath,
+  getMemoryBaseDir,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
+  runWithProjectMemoryOwner,
+  type ProjectMemoryOwner,
 } from '../memory/paths.js';
 import {
   type AutoMemoryIndexRead,
@@ -468,6 +472,13 @@ const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
 export type MemoryRecallMode = 'legacy' | 'structured';
+
+interface ProjectMemoryWorktree {
+  root: string;
+  previousCwd: string;
+  owner: ProjectMemoryOwner;
+  previousWorktree?: ProjectMemoryWorktree;
+}
 
 export interface PreparedMemoryRecallTransition {
   from: MemoryRecallMode;
@@ -2617,6 +2628,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getCwd'
     | 'getWorkingDir'
     | 'getProjectRoot'
+    | 'getProjectMemoryOwner'
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
@@ -2857,11 +2869,13 @@ export function deriveWorktreeConfig(
     options.customIgnoreFiles,
   );
   const workspaceContext = new WorkspaceContext(worktreePath);
+  const memoryOwner = base.getProjectMemoryOwner();
   const derived = deriveConfig(base, {
     getTargetDir: () => worktreePath,
     getCwd: () => worktreePath,
     getWorkingDir: () => worktreePath,
     getProjectRoot: () => worktreePath,
+    getProjectMemoryOwner: () => memoryOwner,
     getFileService: () => fileService,
     getWorkspaceContext: () => workspaceContext,
   });
@@ -3061,6 +3075,9 @@ export class Config {
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
+  private readonly projectMemoryBaseDir: string;
+  private projectMemoryWorkspace?: ProjectMemoryOwner;
+  private projectMemoryWorktree?: ProjectMemoryWorktree;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -3570,6 +3587,11 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.projectMemoryBaseDir = getMemoryBaseDir(
+      this.sessionRuntimeBaseDir,
+      process.env,
+      this.targetDir,
+    );
     this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
@@ -5716,6 +5738,15 @@ export class Config {
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
   ): Promise<void> {
+    return this.runWithProjectMemoryOwner(() =>
+      this.refreshHierarchicalMemoryInContext(loadReason, signal),
+    );
+  }
+
+  private async refreshHierarchicalMemoryInContext(
+    loadReason: Exclude<InstructionLoadReason, 'include'>,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (this.executionEnvironment) return;
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
@@ -5918,6 +5949,7 @@ export class Config {
           managedAutoMemoryIndex,
           userSection,
           teamSection,
+          this.getModelContextWindowSize(),
         );
         this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
@@ -5953,11 +5985,16 @@ export class Config {
     });
   }
 
-  private buildMemoryContextWarning(memoryContent: string): string | undefined {
-    const contextWindowSize =
+  getModelContextWindowSize(): number {
+    return (
       this.getContentGeneratorConfig()?.contextWindowSize ??
       this.modelsConfig.getGenerationConfig().contextWindowSize ??
-      tokenLimit(this.getModel(), 'input');
+      tokenLimit(this.getModel(), 'input')
+    );
+  }
+
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize = this.getModelContextWindowSize();
     if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
       return undefined;
     }
@@ -8345,7 +8382,11 @@ export class Config {
   async relocateWorkingDirectory(
     newDir: string,
     expectedCanonicalDir?: string,
-    opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
+    opts?: {
+      skipProcessChdir?: boolean;
+      skipArtifactMigration?: boolean;
+      projectMemoryWorktree?: ProjectMemoryWorktree | null;
+    },
   ): Promise<{
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
@@ -8366,9 +8407,10 @@ export class Config {
     ) {
       throw new SessionWriterUnavailableError();
     }
-    const oldDir = opts?.skipProcessChdir
-      ? this.cwd
-      : fs.realpathSync(process.cwd());
+    const oldDir =
+      opts?.skipProcessChdir || opts?.projectMemoryWorktree !== undefined
+        ? this.cwd
+        : fs.realpathSync(process.cwd());
     const targetPath = path.resolve(newDir);
     const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
     if (!fs.statSync(targetPath).isDirectory()) {
@@ -8414,6 +8456,14 @@ export class Config {
     }
 
     this.backgroundTaskRegistry.disposeResidentAgents();
+    if (opts?.projectMemoryWorktree !== undefined) {
+      this.projectMemoryWorktree = opts.projectMemoryWorktree ?? undefined;
+    } else if (
+      this.projectMemoryWorktree &&
+      !isSubpath(this.projectMemoryWorktree.root, expected)
+    ) {
+      this.projectMemoryWorktree = undefined;
+    }
     this.targetDir = expected;
     this.cwd = expected;
     await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
@@ -8450,6 +8500,8 @@ export class Config {
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
     this.autoMemoryContext = '';
+
+    if (!this.initialized && opts?.projectMemoryWorktree) return {};
 
     let memoryRefreshError: unknown;
     try {
@@ -8497,6 +8549,71 @@ export class Config {
 
   getProjectRoot(): string {
     return this.targetDir;
+  }
+
+  bindProjectMemoryToWorkspace(
+    memoryBaseDir = this.projectMemoryBaseDir,
+  ): void {
+    this.projectMemoryWorkspace = {
+      cwd: this.storage.getProjectRoot(),
+      memoryBaseDir,
+    };
+  }
+
+  bindProjectMemoryToWorktree(root: string, owner: ProjectMemoryOwner): void {
+    this.projectMemoryWorktree = { root, owner, previousCwd: owner.cwd };
+  }
+
+  async enterProjectWorktree(
+    root: string,
+    canonicalRoot = fs.realpathSync(root),
+  ): Promise<void> {
+    if (canonicalRoot === this.targetDir) return;
+    await this.relocateWorkingDirectory(root, canonicalRoot, {
+      skipProcessChdir: this.getExperimentalZedIntegration(),
+      skipArtifactMigration: true,
+      projectMemoryWorktree: {
+        root: canonicalRoot,
+        previousCwd: this.targetDir,
+        owner: this.getProjectMemoryOwner(),
+        previousWorktree: this.projectMemoryWorktree,
+      },
+    });
+  }
+
+  async exitProjectWorktree(root: string): Promise<void> {
+    const worktree = this.projectMemoryWorktree;
+    if (
+      !worktree ||
+      path.relative(worktree.root, realpathNearestExisting(root)) !== ''
+    ) {
+      return;
+    }
+    await this.relocateWorkingDirectory(worktree.previousCwd, undefined, {
+      skipProcessChdir: this.getExperimentalZedIntegration(),
+      skipArtifactMigration: true,
+      projectMemoryWorktree: worktree.previousWorktree ?? null,
+    });
+  }
+
+  getProjectMemoryOwner(): ProjectMemoryOwner {
+    return (
+      this.projectMemoryWorkspace ??
+      this.projectMemoryWorktree?.owner ?? {
+        cwd: this.getProjectRoot(),
+        memoryBaseDir: this.projectMemoryBaseDir,
+      }
+    );
+  }
+
+  runWithProjectMemoryOwner<T>(run: () => T): T {
+    return runWithProjectMemoryOwner(() => this.getProjectMemoryOwner(), run);
+  }
+
+  getProjectAutoMemoryRoot(): string {
+    return this.runWithProjectMemoryOwner(() =>
+      getAutoMemoryRoot(this.getProjectRoot()),
+    );
   }
 
   getCwd(): string {
@@ -9858,6 +9975,14 @@ export class Config {
   async prepareMemoryRecallTransition(): Promise<
     PreparedMemoryRecallTransition | undefined
   > {
+    return this.runWithProjectMemoryOwner(() =>
+      this.prepareMemoryRecallTransitionInContext(),
+    );
+  }
+
+  private async prepareMemoryRecallTransitionInContext(): Promise<
+    PreparedMemoryRecallTransition | undefined
+  > {
     if (!this.getManagedAutoMemoryEnabled()) return undefined;
     if (!this.getStructuredMemoryRecallEnabled()) return undefined;
     if (this.memoryRecallMode === 'structured') return undefined;
@@ -9941,11 +10066,13 @@ export class Config {
   }
 
   private scanMemoryRecallCorpusStatus(): Promise<MemoryMetadataCorpusStatus> {
-    return scanMemoryMetadataCorpusStatus({
-      projectRoot: this.getProjectRoot(),
-      teamMemoryEnabled: this.getTeamMemoryEnabled(),
-      trustedProject: this.isTrustedFolder(),
-    });
+    return this.runWithProjectMemoryOwner(() =>
+      scanMemoryMetadataCorpusStatus({
+        projectRoot: this.getProjectRoot(),
+        teamMemoryEnabled: this.getTeamMemoryEnabled(),
+        trustedProject: this.isTrustedFolder(),
+      }),
+    );
   }
 
   getOutputLanguageFilePath(): string | undefined {

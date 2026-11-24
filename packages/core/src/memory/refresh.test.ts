@@ -31,7 +31,8 @@ import {
   type MemoryWriteCandidate,
 } from './refresh.js';
 
-vi.mock('./indexer.js', () => ({
+vi.mock('./indexer.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./indexer.js')>()),
   rebuildManagedAutoMemoryIndex: vi.fn(),
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
