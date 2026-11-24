@@ -45,19 +45,20 @@ async function inspectMarkdown(text: string) {
   const root = parseMarkdown(text);
   if (!root) return undefined;
   const words: string[] = [];
-  const code: Array<{
-    type: 'code' | 'inlineCode';
+  const fences: Array<{
     value?: string;
     lang?: string | null;
     meta?: string | null;
   }> = [];
-  walkMarkdown(root, ({ type, value, lang, meta }) => {
+  // Translation may reorder spans and links, but must keep each one.
+  const spans: string[] = [];
+  walkMarkdown(root, ({ type, value, lang, meta, url }) => {
     if (type === 'text' && value) words.push(value);
-    if (type === 'code' || type === 'inlineCode') {
-      code.push({ type, value, lang, meta });
-    }
+    else if (type === 'code') fences.push({ value, lang, meta });
+    else if (type === 'inlineCode') spans.push(`code:${value}`);
+    else if (url !== undefined) spans.push(`url:${url}`);
   });
-  return { prose: words.join(' '), code };
+  return { prose: words.join(' '), code: { fences, spans: spans.sort() } };
 }
 
 async function needsTranslation(

@@ -122,6 +122,16 @@ describe('translateDisplayText', () => {
     expect(complete).toHaveBeenCalledOnce();
   });
 
+  it('accepts a translation that reorders inline code and links', async () => {
+    const original =
+      'Set `x` in `config.json`, see [docs](https://a.example) and [api](https://b.example).';
+    const translated =
+      '在 `config.json` 中设置 `x`，参见 [接口](https://b.example) 和 [文档](https://a.example)。';
+    await expect(
+      translateDisplayText(original, 'zh-CN', answer(translated), signal),
+    ).resolves.toBe(translated);
+  });
+
   it('translates Traditional Chinese when the target is Simplified Chinese', async () => {
     const complete = answer('请先确认这个文件是否存在。');
     await expect(
@@ -164,6 +174,8 @@ describe('translateDisplayText', () => {
       '运行命令。\n\n~~~sh\nnpm run build\n~~~',
     ],
     ['Run `npm test`.', '运行 `npm run build`。'],
+    ['See [docs](https://a.example).', '参见[文档](https://evil.example)。'],
+    ['See the docs.', '参见文档。![](https://evil.example/p)'],
     ['Run this.\n\n    npm test', '运行这个。\n\n    npm run build'],
     ['Run this.\n\n> ~~~sh\n> npm test\n> ~~~', '运行这个。'],
     ['Run the command.', '运行命令。\n\n~~~sh\nnpm run build\n~~~'],
