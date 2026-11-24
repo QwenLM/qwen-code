@@ -1439,66 +1439,72 @@ export function createServeApp(
       }),
     };
   };
-  const bridge =
-    injectedWorkspaceRegistry?.primary.bridge ??
-    deps.bridge ??
-    createAcpSessionBridge({
-      isWorkflowModeWriteAllowed: (sessionId): boolean => {
-        const registry = primaryTrustRegistry;
-        if (!registry) return false;
-        const owner = registry.resolveLiveSessionOwner(sessionId);
-        const entry = registry.primaryEntry;
-        return (
-          owner.kind === 'found' &&
-          owner.runtime.trusted &&
-          owner.runtime.bridge === defaultBridgeForAdmission &&
-          entry.state === 'active' &&
-          entry.current?.runtime === owner.runtime &&
-          !entry.current.guard.closed
-        );
-      },
-      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
-      sessionAttachmentsRoot: attachmentsRoots.root,
-      sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
-      maxSessions: opts.maxSessions,
-      ...(totalSessionAdmission
-        ? { freshSessionAdmission: totalSessionAdmission.admit }
-        : {}),
-      ...(defaultSessionOwnerIndex
-        ? {
-            sessionLifecycle:
-              defaultSessionOwnerIndex.handleBridgeSessionLifecycle,
-          }
-        : {}),
-      maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
-      eventRingSize: opts.eventRingSize,
-      eventRingMaxBytes: opts.eventRingMaxBytes,
-      compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
-      maxJournalEvents: opts.maxJournalEvents,
-      maxJournalBytes: opts.maxJournalBytes,
-      initializeTimeoutMs: opts.initializeTimeoutMs,
-      sessionRestoreTimeoutMs,
-      permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
-      ...(opts.restoreAskUserQuestion === true
-        ? { restoreAskUserQuestion: true }
-        : {}),
-      ...defaultBridgeChannels(),
-      boundWorkspace,
-      sessionShellCommandEnabled,
-      // Wire the production status provider so direct embeds / tests
-      // that don't inject `deps.bridge` get daemon env + preflight cells.
-      statusProvider,
-      delegateReadTextFileToClient: false,
-      // Final ACP text writes remain delegated. Workspace writes use WFS;
-      // marked same-host tool writes may use the factory's host writer.
-      // Unexpected delegated reads still fail closed at the WFS boundary.
-      fileSystem: createBridgeFileSystemAdapter(fsFactory, {
-        allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
-      }),
-      // Reverse tool channel: answer the child's `client_mcp/message`
-      // ext-method by reaching the WS connection that hosts the named server.
-      clientMcpSender: clientMcpSenderRegistry.lookup,
-    });
+  let bridge: AcpSessionBridge;
+  try {
+    bridge =
+      injectedWorkspaceRegistry?.primary.bridge ??
+      deps.bridge ??
+      createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: (sessionId): boolean => {
+          const registry = primaryTrustRegistry;
+          if (!registry) return false;
+          const owner = registry.resolveLiveSessionOwner(sessionId);
+          const entry = registry.primaryEntry;
+          return (
+            owner.kind === 'found' &&
+            owner.runtime.trusted &&
+            owner.runtime.bridge === defaultBridgeForAdmission &&
+            entry.state === 'active' &&
+            entry.current?.runtime === owner.runtime &&
+            !entry.current.guard.closed
+          );
+        },
+        artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        sessionAttachmentsRoot: attachmentsRoots.root,
+        sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
+        maxSessions: opts.maxSessions,
+        ...(totalSessionAdmission
+          ? { freshSessionAdmission: totalSessionAdmission.admit }
+          : {}),
+        ...(defaultSessionOwnerIndex
+          ? {
+              sessionLifecycle:
+                defaultSessionOwnerIndex.handleBridgeSessionLifecycle,
+            }
+          : {}),
+        maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
+        eventRingSize: opts.eventRingSize,
+        eventRingMaxBytes: opts.eventRingMaxBytes,
+        compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
+        maxJournalEvents: opts.maxJournalEvents,
+        maxJournalBytes: opts.maxJournalBytes,
+        initializeTimeoutMs: opts.initializeTimeoutMs,
+        sessionRestoreTimeoutMs,
+        permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
+        ...defaultBridgeChannels(),
+        boundWorkspace,
+        sessionShellCommandEnabled,
+        // Wire the production status provider so direct embeds / tests
+        // that don't inject `deps.bridge` get daemon env + preflight cells.
+        statusProvider,
+        delegateReadTextFileToClient: false,
+        // Final ACP text writes remain delegated. Workspace writes use WFS;
+        // marked same-host tool writes may use the factory's host writer.
+        // Unexpected delegated reads still fail closed at the WFS boundary.
+        fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+        }),
+        // Reverse tool channel: answer the child's `client_mcp/message`
+        // ext-method by reaching the WS connection that hosts the named server.
+        clientMcpSender: clientMcpSenderRegistry.lookup,
+      });
+  } catch (error) {
+    loadAdmissionMonitor?.dispose();
+    throw error;
+  }
   if (!injectedWorkspaceRegistry && !deps.bridge) {
     defaultBridgeForAdmission = bridge;
   }

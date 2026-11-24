@@ -8123,7 +8123,7 @@ export function WebShellSidebar({
             >
               <div className={styles.railPrimary}>
                 {overloadPaused &&
-                  homeHidden &&
+                  (homeHidden || sectionView) &&
                   !homePreviewOpen &&
                   renderOverloadStrip(true)}
                 {activityEnabled && (collapsed || homeHidden) && (

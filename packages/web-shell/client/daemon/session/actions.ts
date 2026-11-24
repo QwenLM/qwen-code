@@ -4203,30 +4203,34 @@ export function createDaemonSessionActions({
           ('worktree' in options && options.worktree !== undefined)
             ? (result as DaemonBranchedSession)
             : undefined;
+        let switchCompleted: Promise<boolean> | undefined;
         if (switchStarted) {
           if (restored?.clientId) {
             persistStableClientId(restored.clientId, restored.sessionId);
           }
-          void startSessionSwitch(result.sessionId, 'load', {
+          switchCompleted = startSessionSwitch(result.sessionId, 'load', {
             failureAction: 'Branch session failed',
             failureOperation: 'branch_session',
-          }).catch((switchError: unknown) => {
-            if (restored?.clientId) {
-              void session.client
-                .detachSession(restored.sessionId, restored.clientId)
-                .catch(() => undefined);
-            }
-            if (isAbortError(switchError)) return;
-            dispatchActionError(
-              addNotice,
-              'Branch session failed',
-              switchError,
-              'branch_session',
-              isSystemOverloadedError(switchError)
-                ? { code: 'system_overloaded' }
-                : undefined,
-            );
-          });
+          })
+            .then(() => true)
+            .catch((switchError: unknown) => {
+              if (restored?.clientId) {
+                void session.client
+                  .detachSession(restored.sessionId, restored.clientId)
+                  .catch(() => undefined);
+              }
+              if (isAbortError(switchError)) return false;
+              dispatchActionError(
+                addNotice,
+                'Branch session failed',
+                switchError,
+                'branch_session',
+                isSystemOverloadedError(switchError)
+                  ? { code: 'system_overloaded' }
+                  : undefined,
+              );
+              return false;
+            });
         } else if (restored?.clientId) {
           void session.client
             .detachSession(restored.sessionId, restored.clientId)
@@ -4236,6 +4240,7 @@ export function createDaemonSessionActions({
           sessionId: result.sessionId,
           displayName: result.displayName,
           switchStarted,
+          ...(switchCompleted ? { switchCompleted } : {}),
           ...(result.sourceWarnings?.length
             ? { sourceWarnings: result.sourceWarnings }
             : {}),

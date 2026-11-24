@@ -16217,8 +16217,9 @@ describe('DaemonSessionProvider', () => {
       sessionId: 'session-b',
       displayName: 'Branch 1',
       switchStarted: true,
+      switchCompleted: expect.any(Promise),
     });
-
+    await expect((await branch).switchCompleted).resolves.toBe(true);
     expect(sdkMocks.branchSession).toHaveBeenCalledWith(
       'session-a',
       { name: 'Branch 1', atRecordId: 'checkpoint-1' },
@@ -16287,6 +16288,7 @@ describe('DaemonSessionProvider', () => {
           sessionId: string;
           displayName: string;
           switchStarted: boolean;
+          switchCompleted?: Promise<boolean>;
         }
       | undefined;
     await act(async () => {
@@ -16302,7 +16304,9 @@ describe('DaemonSessionProvider', () => {
       sessionId: 'session-b',
       displayName: 'First',
       switchStarted: true,
+      switchCompleted: expect.any(Promise),
     });
+    await expect(firstResult!.switchCompleted).resolves.toBe(true);
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
     expect(sdkMocks.MockDaemonSessionClient.load.mock.calls[0]?.[1]).toBe(
       'session-b',

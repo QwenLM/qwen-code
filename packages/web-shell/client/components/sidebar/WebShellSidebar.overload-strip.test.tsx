@@ -588,4 +588,37 @@ describe('WebShellSidebar overload strip', () => {
     expect(element!.closest('[data-web-shell-navigation-rail]')).not.toBeNull();
     expect(element!.closest('[hidden]')).toBeNull();
   });
+
+  it('keeps the rail warning in expanded channels, but not when healthy', async () => {
+    connection.capabilities = {
+      features: ['session_source_metadata'],
+    } as typeof connection.capabilities;
+    renderSidebar({
+      collapsed: false,
+      layout: 'rail',
+      activePage: 'channels',
+      overloadPaused: true,
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelector('[data-web-shell-sidebar-section="channels"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-navigation-rail]'),
+    ).not.toBeNull();
+    const element = strip();
+    expect(element).not.toBeNull();
+    expect(element!.closest('[data-web-shell-navigation-rail]')).not.toBeNull();
+    expect(element!.closest('[hidden]')).toBeNull();
+
+    renderSidebar({
+      collapsed: false,
+      layout: 'rail',
+      activePage: 'channels',
+      overloadPaused: false,
+    });
+    await flushSidebar();
+    expect(strip()).toBeNull();
+  });
 });

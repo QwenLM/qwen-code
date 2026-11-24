@@ -2073,7 +2073,7 @@ describe('createDaemonSessionActions', () => {
       clientId: string;
     }>();
     source.client.branchSession.mockReturnValueOnce(first.promise);
-    const { actions } = createActionsHarness({
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
       session: source,
     });
 
@@ -2093,7 +2093,15 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-b',
       displayName: 'First',
       switchStarted: true,
+      switchCompleted: expect.any(Promise),
     });
+    const firstResult = await firstBranch;
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected the forwarded branch load');
+    clearTimeout(pendingLoad.timeout);
+    pendingLoad.resolve();
+    pendingSessionLoadRef.current = undefined;
+    await expect(firstResult.switchCompleted).resolves.toBe(true);
   });
 
   it('does not open a branch that resolves after its source is cleared', async () => {
@@ -7239,6 +7247,9 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'checkpoint-child',
       switchStarted: true,
     });
+    const completion = (await branch).switchCompleted;
+    expect(completion).toBeInstanceOf(Promise);
+    await expect(completion).resolves.toBe(false);
     await vi.waitFor(() => {
       expect(addNotice).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
@@ -7336,12 +7347,15 @@ describe('createDaemonSessionActions', () => {
         sessionId: 'session-b',
         displayName: 'Historical branch',
         switchStarted: true,
+        switchCompleted: expect.any(Promise),
       });
+      const completion = (await branch).switchCompleted;
       if (pendingSessionLoadRef.current) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.resolve();
         pendingSessionLoadRef.current = undefined;
       }
+      await expect(completion).resolves.toBe(true);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();

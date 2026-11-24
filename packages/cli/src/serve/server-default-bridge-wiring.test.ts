@@ -757,6 +757,68 @@ describe('createServeApp load admission factory injection', () => {
       reason: 'cpu_load',
     });
   });
+
+  describe('createServeApp load admission failure cleanup', () => {
+    it('disposes the monitor when the default bridge rejects an invalid ring', async () => {
+      vi.doUnmock('./acp-session-bridge.js');
+      vi.resetModules();
+      const [{ createLoadAdmissionMonitor }, { createServeApp }] =
+        await Promise.all([
+          import('./load-admission.js'),
+          import('./server.js'),
+        ]);
+      const monitor = createLoadAdmissionMonitor();
+      const dispose = vi.spyOn(monitor, 'dispose');
+      const factory = vi.fn(() => monitor);
+      try {
+        expect(() =>
+          createServeApp(
+            {
+              workspace: WS_BOUND,
+              hostname: '127.0.0.1',
+              eventRingSize: 0,
+            } as Parameters<typeof createServeApp>[0],
+            () => 0,
+            { createLoadAdmissionMonitor: factory },
+          ),
+        ).toThrow(/Invalid eventRingSize: 0/);
+        expect(factory).toHaveBeenCalledTimes(1);
+        expect(dispose).toHaveBeenCalledTimes(1);
+      } finally {
+        monitor.dispose();
+      }
+    });
+
+    it('does not construct a monitor for an opted-out invalid bridge', async () => {
+      vi.doUnmock('./acp-session-bridge.js');
+      vi.resetModules();
+      const [{ createLoadAdmissionMonitor }, { createServeApp }] =
+        await Promise.all([
+          import('./load-admission.js'),
+          import('./server.js'),
+        ]);
+      const factory = vi.fn(() => createLoadAdmissionMonitor());
+      try {
+        expect(() =>
+          createServeApp(
+            {
+              workspace: WS_BOUND,
+              hostname: '127.0.0.1',
+              eventRingSize: 0,
+              loadAdmission: false,
+            } as Parameters<typeof createServeApp>[0],
+            () => 0,
+            { createLoadAdmissionMonitor: factory },
+          ),
+        ).toThrow(/Invalid eventRingSize: 0/);
+        expect(factory).not.toHaveBeenCalled();
+      } finally {
+        factory.mock.results.forEach((result) => {
+          if (result.type === 'return') result.value.dispose();
+        });
+      }
+    });
+  });
 });
 
 describe('createServeApp load admission with injected workspace registry', () => {

@@ -18503,6 +18503,44 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it.each([{ completion: false }, { completion: true }])(
+    'publishes branch success only after switch completion: $completion',
+    async ({ completion: result }) => {
+      const switchCompletion = deferred<boolean>();
+      mockSessionActions.branchSession.mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+        switchStarted: true,
+        switchCompleted: switchCompletion.promise,
+      });
+      renderApp();
+      await flush();
+
+      const request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      expect(request).toBeInstanceOf(Promise);
+      const expectedStatus = [
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('Historical branch') as string,
+        }),
+      ];
+      expect(mockStore.dispatch).not.toHaveBeenCalledWith(expectedStatus);
+
+      switchCompletion.resolve(result);
+      await act(async () => {
+        await request;
+      });
+      if (result) {
+        expect(mockStore.dispatch).toHaveBeenCalledExactlyOnceWith(
+          expectedStatus,
+        );
+      } else {
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith(expectedStatus);
+      }
+    },
+  );
+
   it.each([
     [
       'worktree is unsupported',

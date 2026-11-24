@@ -17388,8 +17388,9 @@ export function App({
               })
             : sessionActions.branchSession({ name: options.name });
       const request = branchRequest
-        .then((result) => {
+        .then(async (result) => {
           if (!result.switchStarted) return;
+          if ((await result.switchCompleted) === false) return;
           if (result.sourceWarnings?.length)
             pushToast('warning', result.sourceWarnings.join(' '));
           store.dispatch([
