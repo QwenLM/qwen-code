@@ -108,21 +108,21 @@ public final class ToolExecutionRecord {
             Instant dispatchLeaseUntil, long dispatchGeneration, long version,
             Instant settledAt, Instant abandonedAt, String lossEvidenceId,
             Long authorizedDispatchGeneration, Long authorizedBindingVersion) {
-        this.executionCallId = BrokerValues.requireId(executionCallId,
+        this.executionCallId = BrokerValues.requireChildRunId(executionCallId,
                 "executionCallId");
         this.idempotencyKey = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
-        this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
+        this.bindingId = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (runtimeGeneration <= 0) {
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");
         }
-        this.harnessSessionId = BrokerValues.requireId(harnessSessionId,
+        this.harnessSessionId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        this.runtimeSessionId = BrokerValues.requireId(runtimeSessionId,
+        this.runtimeSessionId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         this.turnId = BrokerValues.requireId(turnId, "turnId");
-        this.toolCallId = BrokerValues.requireId(toolCallId, "toolCallId");
+        this.toolCallId = BrokerValues.requireToolCallId(toolCallId, "toolCallId");
         this.requestDigest = BrokerValues.requireId(requestDigest,
                 "requestDigest");
         if (reference == null || state == null) {

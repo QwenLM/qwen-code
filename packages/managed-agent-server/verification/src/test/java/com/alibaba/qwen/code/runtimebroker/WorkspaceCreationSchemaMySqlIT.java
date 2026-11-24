@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.flywaydb.core.Flyway;
@@ -34,16 +35,16 @@ class WorkspaceCreationSchemaMySqlIT {
                     + " VALUES ('MANAGED_SESSION', 'tenant', 'session', 'workspace', 'session',"
                     + " 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 0, 'READY', 1, 1)",
                     "a".repeat(64), "b".repeat(64));
-            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
+            jdbc.update("INSERT INTO ma_resource (tenant_id,"
                     + " workspace_id, session_id, resource_id, kind, schema_version, byte_length,"
                     + " sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
-                    + " VALUES ('resource', 'tenant', 'workspace', 'session', 'descriptor',"
+                    + " VALUES ('tenant', 'workspace', 'session', 'descriptor',"
                     + " 'hosted-turn-cleanup', 1, 0, ?, 'MYSQL_INLINE', ?, 'published', 'REFERENCED', 1)",
                     org.apache.commons.codec.digest.DigestUtils.sha256Hex(new byte[0]), new byte[0]);
-            jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
-                    + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+            jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
+                    + " owner_revision, tenant_id, workspace_id, session_id,"
                     + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL',"
-                    + " 'owner', 1, 'resource', 'tenant', 'workspace', 'session', 1, 'descriptor', 1)");
+                    + " 'owner', 1, 'tenant', 'workspace', 'session', 1, 'descriptor', 1)");
             var head = jdbc.queryForMap("SELECT * FROM ma_session_head");
             var reference = jdbc.queryForMap("SELECT * FROM ma_resource_ref");
 
@@ -55,7 +56,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertThat(upgradedHead).containsEntry("cleanup_head_revision", null);
             assertThat(upgradedHead).usingRecursiveComparison().isEqualTo(head);
             var upgradedReference = jdbc.queryForMap("SELECT * FROM ma_resource_ref");
-            assertThat(upgradedReference).containsEntry("runtime_binding_key", null);
+            assertThat(upgradedReference).containsEntry("runtime_binding_id", null);
             assertThat(upgradedReference).usingRecursiveComparison().isEqualTo(reference);
         }
     }
@@ -213,11 +214,12 @@ class WorkspaceCreationSchemaMySqlIT {
             throws SQLException {
         try (var statement =
                 connection.prepareStatement(
-                        "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key,"
-                            + " tenant_id, scope_kind, scope_key, scope_id, idempotency_key,"
+                        "INSERT INTO ma_request_receipt (receipt_key, namespace,"
+                            + " tenant_id, scope_kind, scope_ref, scope_id, idempotency_key,"
                             + " idempotency_digest, request_digest, state, result_json, gmt_create,"
-                            + " gmt_modified) VALUES (?, ?, 'tenant-key', 'tenant', 'ACTOR', 'scope',"
-                            + " 'actor', ?, ?, 'digest', 'PENDING', '{\"name\":\"Existing Workspace"
+                            + " gmt_modified) VALUES (?, ?, 'tenant', 'ACTOR', '"
+                            + ManagedIdentityRefs.receiptScopeRef("tenant", "actor")
+                            + "', 'actor', ?, ?, 'digest', 'PENDING', '{\"name\":\"Existing Workspace"
                             + " \"}', 1, 1)")) {
             statement.setString(1, ManagedSchemaKeys.key(key));
             statement.setString(2, namespace);
@@ -228,9 +230,9 @@ class WorkspaceCreationSchemaMySqlIT {
     }
 
     private static void operation(JdbcTemplate jdbc, String key, String kind) {
-        jdbc.update("INSERT INTO ma_operation (operation_key,scope_key,operation_id,operation_kind,"
-                + "tenant_id,target_kind,target_key,request_digest,request_json,state,phase,"
-                + "gmt_create,gmt_modified) VALUES (?,'scope',?,?,'tenant','TURN','target',"
+        jdbc.update("INSERT INTO ma_operation (operation_ref,scope_kind,scope_id,operation_id,operation_kind,"
+                + "tenant_id,target_kind,target_id,request_digest,request_json,state,phase,"
+                + "gmt_create,gmt_modified) VALUES (?,'SESSION','scope',?,?,'tenant','TURN','target',"
                 + "'digest','{}','PENDING','ADMITTED',1,1)", ManagedSchemaKeys.key(key), key, kind);
     }
 }

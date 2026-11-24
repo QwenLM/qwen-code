@@ -757,7 +757,7 @@ class ManagedAgentDefinitionAdmissionTest {
     }
 
     private static String tenant() {
-        return "tenant-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 
     private static AuthenticatedTenantActor actor(String tenant,

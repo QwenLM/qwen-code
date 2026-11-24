@@ -164,9 +164,9 @@ final class RuntimeExecutionReconciler {
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
@@ -187,9 +187,9 @@ final class RuntimeExecutionReconciler {
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
