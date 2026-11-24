@@ -6,6 +6,7 @@
 
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
+import * as path from 'node:path';
 import {
   assertManagedSessionDurableRef,
   type ManagedSessionDurableRef,
@@ -344,6 +345,11 @@ export function readCsiFileHistoryObservation(
   }
   const names = new Set<string>();
   for (const snapshot of state.snapshots) {
+    ensure(
+      snapshot.cwd === undefined ||
+        (path.posix.isAbsolute(snapshot.cwd) &&
+          path.posix.normalize(snapshot.cwd) === snapshot.cwd),
+    );
     ensure(
       snapshot.promptId.normalize('NFC') === snapshot.promptId &&
         Buffer.byteLength(snapshot.promptId) <= 512 &&

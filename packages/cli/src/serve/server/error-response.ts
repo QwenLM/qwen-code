@@ -1113,6 +1113,20 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'cross_directory_checkpoint') {
+        // A rewind refusal carried up from the ACP child, not a server
+        // fault: the checkpoints this rewind would apply were captured in
+        // another working directory, so file restoration from the current
+        // root is unsafe. Retrying the identical request can never succeed,
+        // so this is a deterministic non-retryable 409 — conversation-only
+        // rewind remains available to the client.
+        res.status(409).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
       if (
         kind === 'working_directory_missing' ||
         kind === 'working_directory_compromised'

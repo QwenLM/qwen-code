@@ -45,6 +45,44 @@
       "action": "snapshot"
     }
   },
+  "snapshotCwdCases": [
+    { "cwd": "/", "valid": true },
+    { "cwd": "//", "valid": false },
+    { "cwd": "/workspace", "valid": true },
+    { "cwd": "/workspace/", "valid": true },
+    { "cwd": "/workspace//", "valid": false },
+    { "cwd": "/workspace//sub", "valid": false },
+    { "cwd": "/workspace/.", "valid": false },
+    { "cwd": "/workspace/sub/..", "valid": false },
+    { "cwd": "/workspace/[notes]", "valid": true },
+    { "cwd": "/workspace/with spaces", "valid": true },
+    { "cwd": "/workspace/项目", "valid": true },
+    { "cwd": "/runtime/workspaces/workspace-a", "valid": true },
+    { "cwd": "/workspace/a\\b\"cd", "valid": true },
+    { "cwd": "/workspace/a\\b\"c\nd", "valid": false },
+    { "cwd": "/workspace/a\u001bb", "valid": false },
+    { "cwd": "/workspace/a\rb", "valid": false },
+    { "cwd": "/workspace/a\u007fb", "valid": false },
+    { "cwd": "/workspace/a\tb", "valid": false },
+    { "cwd": "/workspace/...", "valid": true },
+    { "cwd": "/workspace/../other", "valid": false },
+    { "cwd": "/./workspace", "valid": false },
+    { "cwd": "C:\\workspace", "valid": false },
+    { "cwd": "C:\\", "valid": false },
+    { "cwd": "C:\\workspace\\", "valid": false },
+    { "cwd": "\\\\server\\share\\workspace", "valid": false },
+    { "cwd": "\\\\server\\share\\", "valid": false },
+    { "cwd": "\\workspace", "valid": false },
+    { "cwd": "C:/workspace", "valid": false },
+    { "cwd": "workspace", "valid": false },
+    { "cwd": "", "valid": false },
+    { "cwd": "/workspace/a\u0000b", "valid": false },
+    { "cwd": null, "valid": false },
+    { "cwd": 17, "valid": false },
+    { "cwd": false, "valid": false },
+    { "cwd": [], "valid": false },
+    { "cwd": {}, "valid": false }
+  ],
   "valid": [
     {
       "name": "empty",
@@ -79,6 +117,116 @@
                   "backupTime": "2026-10-09T00:00:00.000Z"
                 }
               }
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "snapshot-cwd",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              },
+              "cwd": "/workspace"
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "trailing-slash-cwd",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              },
+              "cwd": "/workspace/"
             },
             {
               "promptId": "second-prompt",
@@ -868,6 +1016,226 @@
           }
         ],
         "grant": true
+      }
+    },
+    {
+      "name": "relative-cwd",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              },
+              "cwd": "workspace"
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "unnormalized-cwd",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              },
+              "cwd": "/workspace/sub/.."
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "nul-in-cwd",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              },
+              "cwd": "/wor\u0000kspace"
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
+      }
+    },
+    {
+      "name": "null-cwd",
+      "observation": {
+        "state": {
+          "ownerSessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "snapshots": [
+            {
+              "promptId": "first-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              },
+              "cwd": null
+            },
+            {
+              "promptId": "second-prompt",
+              "timestamp": "2026-10-09T00:00:00.000Z",
+              "trackedFileBackups": {
+                "original.txt": {
+                  "backupFileName": "original.bin",
+                  "version": 1,
+                  "backupTime": "2026-10-09T00:00:00.000Z"
+                }
+              }
+            }
+          ],
+          "files": {
+            "original.txt": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "mode": 420
+            }
+          }
+        },
+        "backupDirectory": {
+          "volumeDevice": "1",
+          "volumeInode": "2",
+          "directoryDevice": "1",
+          "directoryInode": "3"
+        },
+        "retainedBackups": [
+          {
+            "name": "original.bin",
+            "device": "1",
+            "inode": "4",
+            "byteLength": 12,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mode": 420
+          }
+        ]
       }
     }
   ]

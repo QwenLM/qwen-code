@@ -40,6 +40,7 @@ function copySnapshots(
         ];
       }),
     ),
+    ...(snapshot.cwd ? { cwd: snapshot.cwd } : {}),
   }));
 }
 

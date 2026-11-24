@@ -15,7 +15,17 @@ import {
   stat,
   unlink,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import {
+  areSnapshotOriginsEqual,
+  getCapturePath,
+  getSnapshotPathGrammar,
+  isRefusedWin32CaptureCoordinate,
+  isRefusedWin32KeySpelling,
+  isWin32DriveRelativePath,
+  isWin32NamespacePath,
+  qualifyCapturePathRoot,
+} from '../utils/file-history-snapshots.js';
 import {
   diffLines,
   structuredPatch,
@@ -81,11 +91,43 @@ export interface FileHistorySnapshot {
   /** Original turn endpoint when the following turn has been deleted. */
   diffAfterBackups?: Record<string, FileHistoryBackup>;
   timestamp: Date;
+  /**
+   * Working directory the snapshot was captured under. Relative tracked
+   * paths expand against the service cwd, so a snapshot from another
+   * directory must not have its files applied here — `rewind` refuses it.
+   * Older payloads lack it; those keep restoring as before.
+   */
+  cwd?: string;
 }
 
 export interface FileHistoryState {
   snapshots: FileHistorySnapshot[];
   trackedFiles: Set<string>;
+}
+
+/**
+ * One raw recorded spelling with its live backup reference, grouped by
+ * capture identity (see {@link SnapshotIdentityIndex}). The raw key is
+ * retained so executable selection can run the raw-coordinate admission
+ * policy on the recorded spelling — identity lookup alone folds refused
+ * spellings into ordinary identities (R20).
+ */
+interface SnapshotIdentityEntry {
+  key: string;
+  backup: FileHistoryBackup;
+}
+
+/**
+ * Identity groups for one snapshot's two backup maps: capture identity →
+ * entries of that file in record order. Aliases of one file (absolute and
+ * relative spellings) share an identity; the arrays preserve
+ * `Object.entries` order for `getSnapshotBackup`'s first-alias selection
+ * and conflict detection, and hold live references so `failed`-flag
+ * healing stays visible.
+ */
+interface SnapshotIdentityIndex {
+  tracked: Map<string, SnapshotIdentityEntry[]>;
+  diff: Map<string, SnapshotIdentityEntry[]>;
 }
 
 type FileHistorySnapshotRecorder = (snapshot: FileHistorySnapshot) => void;
@@ -150,6 +192,7 @@ export interface SerializedFileHistorySnapshot {
   trackedFileBackups: Record<string, SerializedFileHistoryBackup>;
   diffAfterBackups?: Record<string, SerializedFileHistoryBackup>;
   timestamp: string;
+  cwd?: string;
 }
 
 export interface SerializedFileHistoryBackup {
@@ -183,6 +226,7 @@ export function serializeSnapshot(
     ...(s.diffAfterBackups
       ? { diffAfterBackups: serializeBackups(s.diffAfterBackups) }
       : {}),
+    ...(s.cwd ? { cwd: s.cwd } : {}),
   };
 }
 
@@ -217,6 +261,7 @@ export function deserializeSnapshots(
     ...(s.diffAfterBackups
       ? { diffAfterBackups: deserializeBackups(s.diffAfterBackups) }
       : {}),
+    ...(s.cwd ? { cwd: s.cwd } : {}),
   }));
 }
 /** Per-turn read-fanout cap. Each candidate file may read up to two backups,
@@ -676,6 +721,16 @@ function countLines(text: string): number {
 }
 
 /**
+ * The raw-coordinate admission predicates — namespace/drive-relative
+ * detection (`isWin32NamespacePath`, `isWin32DriveRelativePath`) and the
+ * policy entry points (`isRefusedWin32KeySpelling`,
+ * `isRefusedWin32CaptureCoordinate`, `isRefusedWin32CaptureRoot`) — live
+ * in ../utils/file-history-snapshots.ts so fold admission
+ * (`removeFileHistorySnapshots`) applies the identical policy without
+ * importing this service; see the wired-into map at their definition.
+ */
+
+/**
  * Tracks file edits made through the assistant's `edit` and `write_file`
  * tools so `/rewind` can roll the workspace back to the state at a chosen
  * turn boundary.
@@ -692,9 +747,41 @@ export class FileHistoryService {
     trackedFiles: new Set(),
   };
 
+  /**
+   * Lazily-built {@link SnapshotIdentityIndex} per snapshot object. Checkpoint
+   * creation and restore look up every execution path against every snapshot;
+   * regrouping each snapshot on every lookup made that O(snapshots × paths ×
+   * entries) — quadratic in tracked files on ordinary timelines. Snapshots are
+   * treated as immutable except for the in-place writes in `trackEdit` and
+   * `validateRestoredSnapshots`, which delete the affected entry so the next
+   * lookup rebuilds it; replacement paths (`restoreFromSnapshots`, deletion
+   * folding) construct new snapshot objects and simply miss the cache.
+   */
+  private readonly snapshotIdentityIndexes = new WeakMap<
+    FileHistorySnapshot,
+    SnapshotIdentityIndex
+  >();
+
   private readonly sessionId: string;
   private readonly enabled: boolean;
   private readonly cwd: string;
+  /**
+   * Whether the caller's ORIGINAL cwd spelling named a refused Win32
+   * capture coordinate: a namespace root (`\\?\`, `\\.`) or any
+   * drive-relative component (`C:\w\C:f\..`). `resolve()` erases
+   * incomplete prefixes (`\\.` → `C:\`, `\\?` → `C:\?`) and cancels
+   * dot-adjacent drive components, so this must be classified before the
+   * assignment below bakes the erased form into `this.cwd`; a complete
+   * prefix survives resolve and stays caught by the per-capture check.
+   * A service whose root was named through a refused spelling records
+   * nothing — neither per-capture (trackEdit) nor per-turn snapshots
+   * (makeSnapshot) — rather than capturing against the transformed
+   * ordinary path the caller never named — conservatively refusing
+   * every spelling of a coordinate the record-time policy refuses in
+   * its direct form (R20: the constructor is the only observer of the
+   * erased spelling; R21: makeSnapshot joins the boundary).
+   */
+  private readonly captureCwdOriginalRefused: boolean;
   private readonly onSnapshotUpdated?: FileHistorySnapshotRecorder;
 
   constructor(
@@ -706,7 +793,18 @@ export class FileHistoryService {
   ) {
     this.sessionId = sessionId;
     this.enabled = enabled;
-    this.cwd = cwd;
+    // Classify the ORIGINAL cwd spelling before resolve() below can erase
+    // an incomplete Win32 namespace prefix or cancel a drive-relative
+    // component; see the field doc.
+    this.captureCwdOriginalRefused =
+      sep === '\\' &&
+      (isWin32NamespacePath(cwd) || isWin32DriveRelativePath(cwd));
+    this.cwd =
+      sep === '\\'
+        ? resolve(cwd)
+        : isAbsolute(cwd)
+          ? cwd
+          : process.cwd() + (process.cwd().endsWith('/') ? '' : '/') + cwd;
     this.onSnapshotUpdated = onSnapshotUpdated;
   }
 
@@ -716,6 +814,224 @@ export class FileHistoryService {
 
   getSnapshots(): FileHistorySnapshot[] {
     return this.state.snapshots;
+  }
+
+  /**
+   * Working directories recorded on timeline snapshots that were captured
+   * under a root other than this service's. File rewind expands tracked
+   * paths and first-version backups from every snapshot against this cwd,
+   * so any foreign entry makes file restoration unsafe (see `rewind`).
+   * Legacy snapshots without a recorded cwd never count as foreign.
+   *
+   * Callers that are about to apply only part of the timeline (e.g. a
+   * survivor slice after truncation) may pass that explicit collection to
+   * preview exactly the snapshots they will restore; the default still
+   * checks the whole timeline, so existing callers are unchanged.
+   */
+  getForeignSnapshotCwds(
+    snapshots: readonly FileHistorySnapshot[] = this.state.snapshots,
+  ): string[] {
+    const foreign = new Set<string>();
+    for (const snapshot of snapshots) {
+      if (snapshot.cwd && !areSnapshotOriginsEqual(snapshot.cwd, this.cwd)) {
+        foreign.add(snapshot.cwd);
+      }
+    }
+    return [...foreign];
+  }
+
+  /**
+   * Capture paths in `discardedSnapshots` whose recovery baseline the
+   * `survivingSnapshots` slice cannot restore on its own.
+   *
+   * Truncating a timeline to a survivor slice discards the suffix
+   * (`restoreFromSnapshots`), and a foreign-root checkpoint in that suffix
+   * can hold the only record for a file this session still restores —
+   * typically a confirmed first-version null baseline proving the file did
+   * not exist yet, for a path under this root or an external absolute path
+   * outside both roots. Dropping it would let the restore report an empty
+   * success while leaving a later-created file in place, so rewind surfaces
+   * refuse such truncations based on this list before anything is cut.
+   *
+   * A capture is required (reported) unless the surviving slice can
+   * itself select a baseline for the same capture identity, judged by the
+   * restore's own selection rules (`applySnapshot` with the slice's last
+   * checkpoint as the rewind target, and the first-version fallback): a
+   * confirmed record in the target's tracked backups applies directly at
+   * any version, otherwise a confirmed version-1 record anywhere in the
+   * slice restores the identity. Mere record presence is not coverage — a
+   * later-version diff-only record or a failed capture serves neither
+   * selection path — so redundant captures do not block while unusable
+   * ones do not authorize a truncation the restore would then fail.
+   *
+   * Records under a discarded checkpoint's own root are its own files,
+   * dropped together with it — unless the identity also falls under this
+   * service's root: nested roots (or a filesystem root "/") contain each
+   * other, and anything under the current root remains a restore target
+   * here, so its baseline is required, not exempt. Reporting the truly
+   * disjoint own-root files would re-introduce the whole-timeline rewind
+   * block that the survivor-slice precheck removed.
+   *
+   * Identities fold Win32 drive-letter case (`c:\x` and `C:\x` name the
+   * same drive); later path components keep their case-sensitive spelling.
+   *
+   * Returns distinct absolute capture paths (grammar prefix stripped) in
+   * iteration order; the default previews the whole timeline as discarded,
+   * mirroring `getForeignSnapshotCwds`.
+   */
+  getUnrestorableDiscardedCaptures(
+    discardedSnapshots: readonly FileHistorySnapshot[] = this.state.snapshots,
+    survivingSnapshots: readonly FileHistorySnapshot[] = [],
+  ): string[] {
+    // Identities the surviving slice restores through the restore's own
+    // selection, memoized per query. Mirrors `getSnapshotBackup`: a
+    // confirmed record is any non-failed one, where a null backup file
+    // name confirms absence, and conflicting confirmed aliases make the
+    // selection throw instead of restore.
+    const firstConfirmed = (
+      aliases: readonly FileHistoryBackup[],
+    ): { conflict: boolean; backup?: FileHistoryBackup } => {
+      const confirmed = aliases.filter((alias) => !alias.failed);
+      if (confirmed.length === 0) return { conflict: false };
+      const first = confirmed[0]!;
+      const conflict = confirmed.some(
+        (alias) =>
+          alias.backupFileName !== first.backupFileName ||
+          alias.version !== first.version ||
+          alias.backupTime.getTime() !== first.backupTime.getTime(),
+      );
+      return conflict ? { conflict: true } : { conflict: false, backup: first };
+    };
+    // Identity groups hold raw spellings; this coverage mirror of the
+    // restore's own selection runs the raw-coordinate admission policy on
+    // them. A refused record neither covers an identity nor — dropped
+    // together with its checkpoint — endangers a restore, so it stays
+    // inert on both sides of the truncation precheck.
+    const admittedAliases = (
+      snapshot: FileHistorySnapshot,
+      group: 'tracked' | 'diff',
+      identity: string,
+    ): FileHistoryBackup[] =>
+      (this.getSnapshotIdentityIndex(snapshot)[group].get(identity) ?? [])
+        .filter(
+          (entry) =>
+            !isRefusedWin32CaptureCoordinate(
+              snapshot.cwd ?? this.cwd,
+              entry.key,
+            ),
+        )
+        .map((entry) => entry.backup);
+    const coveredIdentities = new Map<string, boolean>();
+    const isCovered = (identity: string): boolean => {
+      const known = coveredIdentities.get(identity);
+      if (known !== undefined) return known;
+      const target = survivingSnapshots[survivingSnapshots.length - 1] as
+        | FileHistorySnapshot
+        | undefined;
+      const targetAliases = target
+        ? admittedAliases(target, 'tracked', identity)
+        : undefined;
+      let covered = false;
+      if (targetAliases && targetAliases.length > 0) {
+        // The target resolves its own tracked record directly — confirmed
+        // at any version, or filesFailed when failed/conflicting — and
+        // never consults the first-version fallback for the identity.
+        const { conflict, backup } = firstConfirmed(targetAliases);
+        covered = !conflict && backup !== undefined;
+      } else {
+        // First-version fallback scan (oldest checkpoint first, tracked
+        // before diff), mirroring `getBackupFileNameFirstVersion`.
+        scan: for (const snapshot of survivingSnapshots) {
+          for (const group of ['tracked', 'diff'] as const) {
+            const aliases = admittedAliases(snapshot, group, identity);
+            if (!aliases || aliases.length === 0) continue;
+            const { conflict, backup } = firstConfirmed(aliases);
+            if (conflict) break scan; // selection throws
+            if (backup) {
+              if (backup.version === 1) {
+                covered = true;
+                break scan;
+              }
+              // Later-version confirmed record: the fallback skips it.
+              continue;
+            }
+            // No confirmed alias: selection falls back to the first raw
+            // record, and a failed version-1 baseline throws.
+            if (aliases[0]!.version === 1) break scan;
+          }
+        }
+      }
+      coveredIdentities.set(identity, covered);
+      return covered;
+    };
+    const directoryIdentity = (cwd: string): string => {
+      const grammar = getSnapshotPathGrammar(cwd);
+      // A directory root may end in `/.`; a file key must retain that
+      // requirement. Append a separator to compare root containment only.
+      return getCapturePath(
+        cwd,
+        cwd.endsWith(grammar.sep) ? cwd : cwd + grammar.sep,
+      );
+    };
+    const captures = new Set<string>();
+    for (const snapshot of discardedSnapshots) {
+      // Ordinary same-root truncation keeps dropping local records
+      // unreported; only foreign-labeled checkpoints are judged.
+      if (!snapshot.cwd || areSnapshotOriginsEqual(snapshot.cwd, this.cwd)) {
+        continue;
+      }
+      const grammar = getSnapshotPathGrammar(snapshot.cwd);
+      const ownRoot = directoryIdentity(snapshot.cwd);
+      // A root-only cwd (POSIX "/", win32 "C:\") already ends with the
+      // separator; appending another would break prefix matching.
+      const underOwnRoot = ownRoot.endsWith(grammar.sep)
+        ? ownRoot
+        : ownRoot + grammar.sep;
+      const currentGrammar = getSnapshotPathGrammar(this.cwd);
+      const currentRoot = directoryIdentity(this.cwd);
+      const underCurrentRoot = currentRoot.endsWith(currentGrammar.sep)
+        ? currentRoot
+        : currentRoot + currentGrammar.sep;
+      for (const backups of [
+        snapshot.trackedFileBackups,
+        snapshot.diffAfterBackups,
+      ]) {
+        for (const [key, backup] of Object.entries(backups ?? {})) {
+          // A failed capture holds no baseline whose loss could matter.
+          if (backup.failed) continue;
+          // A refused raw spelling is inert for execution: it can neither
+          // cover (see admittedAliases) nor, dropped with its checkpoint,
+          // endanger a restore — report nothing for it.
+          if (isRefusedWin32CaptureCoordinate(snapshot.cwd ?? this.cwd, key))
+            continue;
+          const identity = getCapturePath(snapshot.cwd, key);
+          // The discarded checkpoint's own files go with it by design —
+          // unless the path also falls under the current root: nested (or
+          // filesystem) roots overlap, and this service still restores
+          // anything under its own root, so that baseline is required.
+          if (
+            !(
+              grammar.sep === '/' &&
+              [key, snapshot.cwd, this.cwd].some((path) =>
+                /(^|\/)\.\.(\/|$)/.test(path),
+              )
+            ) &&
+            (identity === ownRoot || identity.startsWith(underOwnRoot)) &&
+            identity !== currentRoot &&
+            !identity.startsWith(underCurrentRoot)
+          ) {
+            continue;
+          }
+          // Redundant with a baseline the surviving slice can itself
+          // select: it restores this identity without the discarded
+          // record.
+          if (isCovered(identity)) continue;
+          // Strip the grammar prefix for a display-ready absolute path.
+          captures.add(identity.slice(identity.indexOf(':') + 1));
+        }
+      }
+    }
+    return [...captures];
   }
 
   private recordSnapshotUpdate(snapshot: FileHistorySnapshot): void {
@@ -730,35 +1046,75 @@ export class FileHistoryService {
   restoreFromSnapshots(snapshots: FileHistorySnapshot[]): void {
     if (this.retainedStorage && snapshots.length > MAX_SNAPSHOTS)
       throw new Error('Retained history exceeds its snapshot limit.');
-    const trackedFiles = new Set<string>();
-    const migrated: FileHistorySnapshot[] = [];
-    for (const snapshot of snapshots) {
-      const trackedFileBackups: Record<string, FileHistoryBackup> =
-        Object.create(null);
-      for (const [p, backup] of Object.entries(snapshot.trackedFileBackups)) {
-        const trackingPath = this.maybeShortenFilePath(p);
-        trackedFiles.add(trackingPath);
-        trackedFileBackups[trackingPath] = backup;
-      }
-      migrated.push({
+    // Keep every raw alias when normalization would hide distinct references
+    // or failed-version evidence. Selection is endpoint-local and read-only.
+    const migrated = snapshots.map((snapshot) => {
+      const base = snapshot.cwd ?? this.cwd;
+      // Shortening is limited to snapshots whose base is this service's own
+      // root: a foreign-labeled snapshot's absolute keys keep their captured
+      // spelling so serialization round-trips unchanged and the keys never
+      // depend on a directory they were not captured under (the reader cannot
+      // expand them here anyway — the cross-directory guard refuses foreign
+      // snapshots at file-application time).
+      const localOrigin = areSnapshotOriginsEqual(base, this.cwd);
+      const grammar = getSnapshotPathGrammar(base);
+      const hydrate = (backups: Record<string, FileHistoryBackup>) => {
+        const hydrated: Record<string, FileHistoryBackup> = Object.create(null);
+        if (
+          grammar.sep === '/' &&
+          [base, ...Object.keys(backups)].some((path) =>
+            /(^|\/)\.\.(\/|$)/.test(path),
+          )
+        ) {
+          return Object.assign(hydrated, backups);
+        }
+        const groups = new Map<string, Array<[string, FileHistoryBackup]>>();
+        for (const entry of Object.entries(backups)) {
+          const identity = getCapturePath(base, entry[0]);
+          const group = groups.get(identity) ?? [];
+          group.push(entry);
+          groups.set(identity, group);
+        }
+        // The singleton branch is the only one that can REPLACE a recorded
+        // key with a shorter one, so the admission policy's key-spelling
+        // half must run on the raw key before shortening: normalize cancels
+        // `C:f\..` (or ablates a namespace prefix) and would hand every
+        // downstream guard an ordinary-looking key for a coordinate record
+        // time refuses (`.\C:f\..\victim` → `victim`). A refused key keeps
+        // its raw spelling so the candidate and baseline-selection faces
+        // of the policy keep it unexecuted; every ordinary singleton still
+        // shortens.
+        const refusedKey = (key: string): boolean =>
+          grammar.sep === '\\' && isRefusedWin32KeySpelling(key);
+        return Object.assign(
+          hydrated,
+          Object.fromEntries(
+            [...groups.values()].flatMap((group) =>
+              group.length === 1
+                ? [
+                    [
+                      localOrigin && !refusedKey(group[0][0])
+                        ? this.maybeShortenFilePath(group[0][0], base)
+                        : group[0][0],
+                      group[0][1],
+                    ],
+                  ]
+                : group,
+            ),
+          ),
+        );
+      };
+      return {
         ...snapshot,
-        trackedFileBackups,
+        trackedFileBackups: hydrate(snapshot.trackedFileBackups),
         ...(snapshot.diffAfterBackups
-          ? {
-              diffAfterBackups: Object.fromEntries(
-                Object.entries(snapshot.diffAfterBackups).map(([p, backup]) => {
-                  const trackingPath = this.maybeShortenFilePath(p);
-                  trackedFiles.add(trackingPath);
-                  return [trackingPath, backup];
-                }),
-              ),
-            }
+          ? { diffAfterBackups: hydrate(snapshot.diffAfterBackups) }
           : {}),
-      });
-    }
+      };
+    });
     this.state = {
       snapshots: migrated,
-      trackedFiles,
+      trackedFiles: this.collectTrackedFiles(migrated),
     };
   }
 
@@ -832,6 +1188,10 @@ export class FileHistoryService {
       }
     }
     for (const snapshot of affectedSnapshots) {
+      // Failed flags feed the retained denial and alias-conflict checks in
+      // getSnapshotBackup; the flags are read through live references, but
+      // drop the index anyway so no lookup observes a stale grouping window.
+      this.snapshotIdentityIndexes.delete(snapshot);
       this.recordSnapshotUpdate(snapshot);
     }
 
@@ -843,7 +1203,6 @@ export class FileHistoryService {
   async trackEdit(filePath: string): Promise<void> {
     if (!this.enabled) return;
 
-    const trackingPath = this.maybeShortenFilePath(filePath);
     const mostRecent = this.state.snapshots.at(-1);
 
     if (!mostRecent) {
@@ -853,7 +1212,55 @@ export class FileHistoryService {
       return;
     }
 
-    const existing = mostRecent.trackedFileBackups[trackingPath];
+    const captureGrammar = getSnapshotPathGrammar(this.cwd);
+    if (captureGrammar.sep === '\\') {
+      // Capture-admission face of the raw-coordinate admission policy,
+      // applied to the caller's ORIGINAL input and capture root, before
+      // shortening or qualification transforms it: shortening `C:\w\C:f`
+      // would manufacture exactly the bare `C:f` key the direct spelling
+      // is refused for, normalizing `.\C:f` preserves it verbatim, and
+      // normalizing `\\.\foo\..` erases the namespace prefix into an
+      // ordinary drive root. The fully-qualified and explicit-relative
+      // spellings of the same coordinate are refused identically, and
+      // neither the capture input nor the capture cwd may use a refused
+      // spelling — the cwd is checked both in its original constructor
+      // spelling (incomplete prefixes and dot-canceled drive components
+      // are erased by resolve, so only the constructor could observe
+      // them) and as resolved here.
+      if (
+        this.captureCwdOriginalRefused ||
+        isRefusedWin32CaptureCoordinate(this.cwd, filePath)
+      ) {
+        debugLogger.warn(
+          `FileHistory: Skipping trackEdit for ${filePath}: unsupported namespace or drive-relative capture coordinate`,
+        );
+        return;
+      }
+    }
+
+    const trackingPath = this.maybeShortenFilePath(filePath);
+
+    // Rooted Win32 keys need a capture drive or UNC share. The shared
+    // qualifier already supplied one if this cwd proves it; a still-rooted
+    // key cannot be persisted safely. Refuse it now, not after hydration.
+    if (
+      captureGrammar.sep === '\\' &&
+      captureGrammar.parse(trackingPath).root === '\\'
+    ) {
+      debugLogger.warn(
+        `FileHistory: Skipping trackEdit for ${trackingPath}: no capture directory drive provenance to resolve it safely`,
+      );
+      return;
+    }
+
+    let existing: FileHistoryBackup | undefined;
+    try {
+      existing = this.getSnapshotBackup(mostRecent, trackingPath);
+    } catch (error) {
+      if (this.retainedStorage) throw error;
+      debugLogger.error(`FileHistory: Cannot select a baseline: ${error}`);
+      return;
+    }
     // Skip only when we already have a confirmed (non-failed) backup. If
     // the existing entry is marked `failed` (because makeSnapshot's
     // per-file backup attempt threw earlier), let trackEdit retry: this
@@ -871,14 +1278,33 @@ export class FileHistoryService {
         );
       return;
     }
+    if (mostRecent.cwd && !areSnapshotOriginsEqual(mostRecent.cwd, this.cwd)) {
+      // Folding a backup captured under this cwd into a snapshot labeled
+      // with another directory would give that snapshot mixed provenance:
+      // reloading it in the labeled directory would then pass the
+      // cross-directory guard and restore this capture into an unrelated
+      // file. Skip the write; the next makeSnapshot opens a snapshot
+      // labeled with the current cwd.
+      debugLogger.warn(
+        `FileHistory: Skipping trackEdit for ${trackingPath}: snapshot ${mostRecent.promptId} was captured in ${mostRecent.cwd}`,
+      );
+      return;
+    }
 
     const maxVersion = this.getMaxVersion(trackingPath);
 
     let backup: FileHistoryBackup;
     try {
       backup = this.retainedStorage
-        ? await this.retainedStorage.createBackup(filePath, maxVersion + 1)
-        : await createBackup(filePath, maxVersion + 1, this.sessionId);
+        ? await this.retainedStorage.createBackup(
+            this.maybeExpandFilePath(trackingPath),
+            maxVersion + 1,
+          )
+        : await createBackup(
+            this.maybeExpandFilePath(trackingPath),
+            maxVersion + 1,
+            this.sessionId,
+          );
     } catch (error) {
       if (this.retainedStorage) throw error;
       debugLogger.error(`FileHistory: trackEdit failed: ${error}`);
@@ -894,9 +1320,27 @@ export class FileHistoryService {
     // Allow overwriting a `failed` entry so the heal path actually
     // records the fresh backup (otherwise we'd leave the failed marker
     // in place even though we successfully captured the file).
-    const current = mostRecent.trackedFileBackups[trackingPath];
+    const current = this.getSnapshotBackup(mostRecent, trackingPath);
     if (!current || current.failed) {
+      const identity = getCapturePath(this.cwd, trackingPath);
+      const base = mostRecent.cwd ?? this.cwd;
+      for (const key of Object.keys(mostRecent.trackedFileBackups)) {
+        if (
+          getCapturePath(base, key) === identity &&
+          // Raw-evidence preservation (R21): the newly admitted capture
+          // rewrites only ordinary aliases. A refused spelling keeps its
+          // backup pointer, version and timestamp verbatim — the key
+          // survives for serialization and version reservation, and
+          // overwriting its record would silently destroy the historical
+          // evidence the record-time refusal promised to preserve.
+          !isRefusedWin32CaptureCoordinate(base, key)
+        )
+          mostRecent.trackedFileBackups[key] = backup;
+      }
       mostRecent.trackedFileBackups[trackingPath] = backup;
+      // The snapshot's backup map changed in place: drop its identity index
+      // so the next lookup regroups the new record.
+      this.snapshotIdentityIndexes.delete(mostRecent);
       this.state.trackedFiles.add(trackingPath);
       this.recordSnapshotUpdate(mostRecent);
       debugLogger.debug(
@@ -911,19 +1355,34 @@ export class FileHistoryService {
    */
   async makeSnapshot(promptId: string): Promise<void> {
     if (!this.enabled) return;
+    // Constructor-admission boundary (R21): a service whose ORIGINAL cwd
+    // spelled a refused Win32 coordinate records nothing (see
+    // `captureCwdOriginalRefused`). trackEdit already refuses per
+    // capture; minting an ordinary snapshot labeled with the resolved
+    // form would let restored ordinary checkpoints re-capture and
+    // execute under a root the caller never named. Conservative choice:
+    // emit no snapshot at all, exactly like trackEdit emits no record.
+    if (this.captureCwdOriginalRefused) {
+      debugLogger.warn(
+        'FileHistory: Skipping makeSnapshot: the original cwd named a refused Win32 capture coordinate',
+      );
+      return;
+    }
     if (this.retainedStorage && this.state.snapshots.length >= MAX_SNAPSHOTS)
       throw new Error('Retained history has reached its snapshot limit.');
 
     const trackedFileBackups: Record<string, FileHistoryBackup> =
       Object.create(null);
     const mostRecent = this.state.snapshots.at(-1);
+    const executionPaths = this.getExecutionPaths();
 
     if (mostRecent) {
       await this.joinOperations(
-        Array.from(this.state.trackedFiles, async (trackingPath) => {
+        Array.from(executionPaths, async (trackingPath) => {
+          let latestBackup: FileHistoryBackup | undefined;
           try {
             const filePath = this.maybeExpandFilePath(trackingPath);
-            const latestBackup = mostRecent.trackedFileBackups[trackingPath];
+            latestBackup = this.getSnapshotBackup(mostRecent, trackingPath);
             const nextVersion = this.getMaxVersion(trackingPath) + 1;
             if (this.retainedStorage) {
               if (latestBackup?.failed)
@@ -1004,9 +1463,8 @@ export class FileHistoryService {
             // make a rewind to this snapshot restore the file to its
             // pre-failure content as if it were the captured state of
             // this turn.
-            const previous = mostRecent?.trackedFileBackups[trackingPath];
             trackedFileBackups[trackingPath] = {
-              backupFileName: previous?.backupFileName ?? null,
+              backupFileName: latestBackup?.backupFileName ?? null,
               version: this.getMaxVersion(trackingPath) + 1,
               backupTime: new Date(),
               failed: true,
@@ -1016,9 +1474,10 @@ export class FileHistoryService {
       );
     }
 
-    for (const trackingPath of this.state.trackedFiles) {
+    for (const trackingPath of executionPaths) {
       if (trackingPath in trackedFileBackups) continue;
-      const inherited = mostRecent?.trackedFileBackups[trackingPath];
+      const inherited =
+        mostRecent && this.getSnapshotBackup(mostRecent, trackingPath);
       if (inherited) trackedFileBackups[trackingPath] = inherited;
     }
 
@@ -1026,6 +1485,7 @@ export class FileHistoryService {
       promptId,
       trackedFileBackups,
       timestamp: new Date(),
+      cwd: this.cwd,
     };
 
     this.state.snapshots.push(newSnapshot);
@@ -1048,6 +1508,18 @@ export class FileHistoryService {
     if (this.retainedStorage)
       throw new Error('Retained history cannot rewind.');
     if (!this.enabled) return { filesChanged: [], filesFailed: [] };
+
+    // File application consumes tracked paths and first-version backups from
+    // every snapshot in the timeline, so a single foreign-cwd checkpoint
+    // makes the whole applied set unsafe — not just the selected one.
+    // Refuse before any file is touched or history truncated; conversation
+    // rewind does not go through here, so refusing only blocks file restore.
+    const foreignCwds = this.getForeignSnapshotCwds();
+    if (foreignCwds.length > 0) {
+      throw new Error(
+        `The session timeline contains checkpoints captured in a different working directory (${foreignCwds.join(', ')}) and cannot restore files from ${this.cwd}`,
+      );
+    }
 
     // Refuse a shared key before truncation can prune the wrong backups.
     let matches = 0;
@@ -1073,11 +1545,8 @@ export class FileHistoryService {
       if (targetIdx >= 0) {
         const removed = this.state.snapshots.slice(targetIdx + 1);
         this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
-        this.state.trackedFiles = new Set(
-          this.state.snapshots.flatMap((s) => [
-            ...Object.keys(s.trackedFileBackups),
-            ...Object.keys(s.diffAfterBackups ?? {}),
-          ]),
+        this.state.trackedFiles = this.collectTrackedFiles(
+          this.state.snapshots,
         );
         await this.cleanupOrphanedBackups(removed);
       }
@@ -1090,14 +1559,23 @@ export class FileHistoryService {
   async getDiffStats(promptId: string): Promise<DiffStats | undefined> {
     if (!this.enabled) return undefined;
 
+    // A timeline holding foreign-cwd checkpoints cannot restore files from
+    // this cwd (`rewind` refuses the whole application set), so a preview
+    // expanded against this root would describe writes that cannot happen.
+    // Report no stats; rewind surfaces keep offering conversation-only.
+    if (this.getForeignSnapshotCwds().length > 0) return undefined;
+
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) return undefined;
 
     const results = await this.joinOperations(
-      Array.from(this.state.trackedFiles, async (trackingPath) => {
+      Array.from(this.getExecutionPaths(), async (trackingPath) => {
         try {
           const filePath = this.maybeExpandFilePath(trackingPath);
-          const targetBackup = targetSnapshot.trackedFileBackups[trackingPath];
+          const targetBackup = this.getSnapshotBackup(
+            targetSnapshot,
+            trackingPath,
+          );
 
           // The backup attempt failed at the target snapshot; we cannot
           // produce a meaningful diff against a content we never captured,
@@ -1175,6 +1653,13 @@ export class FileHistoryService {
   async getTurnDiff(promptId: string): Promise<TurnDiff | undefined> {
     if (!this.enabled) return undefined;
 
+    // Same whole-timeline guard as `getDiffStats`: rewind cannot restore a
+    // timeline holding foreign-cwd checkpoints from this cwd, and for the
+    // most recent turn the "after" endpoint is the live worktree of THIS
+    // root, which would attribute unrelated local content to a captured
+    // turn. Report no diff instead of showing hunks that cannot be applied.
+    if (this.getForeignSnapshotCwds().length > 0) return undefined;
+
     // `findSnapshotIndex` mirrors `findSnapshot`'s last-occurrence-wins
     // tie-break so `/rewind` and `/diff` agree on which snapshot a reused
     // promptId resolves to. In normal sessions promptIds are unique per
@@ -1197,15 +1682,19 @@ export class FileHistoryService {
     // `trackEdit` mutates `mostRecent` in place, so by the time we read
     // target.trackedFileBackups it already contains every file touched
     // during target's turn, including newly created or deleted ones.
+    // Each raw key passes with its capture root so the unified admission
+    // policy judges the recorded coordinate, not the key alone (R20).
     // Sort so the cap below is deterministic. `Object.keys` order is
     // spec-defined as insertion order for string keys, but sorting makes
     // the kept-vs-dropped split reproducible across runs that may insert
     // in different orders (e.g. a session resumed from disk vs. one that
     // grew live), which matters for both reviewer reproducibility and
     // for the truncation log line below.
-    const candidatePaths = Object.keys(target.trackedFileBackups).sort((a, b) =>
-      a.localeCompare(b),
-    );
+    const candidatePaths = this.getExecutionPaths(
+      Object.keys(target.trackedFileBackups).map(
+        (key) => [target.cwd ?? this.cwd, key] as const,
+      ),
+    ).sort((a, b) => a.localeCompare(b));
 
     // Cap concurrent file reads. Each candidate reads up to two backups,
     // so a 250-file turn would issue ~500 simultaneous opens — enough to
@@ -1284,7 +1773,7 @@ export class FileHistoryService {
     // `absoluteFilePath` is used only for live-worktree I/O below.
     const absoluteFilePath = this.maybeExpandFilePath(trackingPath);
 
-    const beforeBackup = before.trackedFileBackups[trackingPath];
+    const beforeBackup = this.getSnapshotBackup(before, trackingPath);
     if (beforeBackup?.failed) {
       if (this.retainedStorage)
         throw new Error('Retained backup is unavailable.');
@@ -1294,7 +1783,7 @@ export class FileHistoryService {
     let afterBackup: FileHistoryBackup | undefined;
     let afterFromWorktree = false;
     if (after) {
-      afterBackup = after.trackedFileBackups[trackingPath];
+      afterBackup = this.getSnapshotBackup(after, trackingPath);
       if (afterBackup?.failed) {
         if (this.retainedStorage)
           throw new Error('Retained backup is unavailable.');
@@ -1492,6 +1981,55 @@ export class FileHistoryService {
     return -1;
   }
 
+  private getUncertainRestorePaths(
+    paths: readonly string[],
+    targetSnapshot: FileHistorySnapshot,
+  ): Set<string> {
+    const refused = new Set<string>();
+    const grammar = getSnapshotPathGrammar(this.cwd);
+    if (grammar.sep !== '/') return refused;
+    const groups = new Map<string, string[]>();
+    for (const path of paths) {
+      const expression = this.maybeExpandFilePath(path);
+      // Lexical cancellation is only an uncertainty bucket, never an I/O
+      // coordinate or proof that the expressions address the same file.
+      const doubleRoot =
+        expression.startsWith('//') && !expression.startsWith('///');
+      const key = (doubleRoot ? '/' : '') + grammar.normalize(expression);
+      const group = groups.get(key);
+      if (group) group.push(path);
+      else groups.set(key, [path]);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      let first: FileHistoryBackup | undefined;
+      let conflict = false;
+      for (const path of group) {
+        try {
+          const backup =
+            this.getSnapshotBackup(targetSnapshot, path) ??
+            this.getFirstVersionBackup(path);
+          if (!backup || backup.failed) {
+            conflict = true;
+            continue;
+          }
+          if (
+            first &&
+            (backup.backupFileName !== first.backupFileName ||
+              backup.version !== first.version ||
+              backup.backupTime.getTime() !== first.backupTime.getTime())
+          )
+            conflict = true;
+          first ??= backup;
+        } catch {
+          conflict = true;
+        }
+      }
+      if (conflict) for (const path of group) refused.add(path);
+    }
+    return refused;
+  }
+
   private async applySnapshot(
     targetSnapshot: FileHistorySnapshot,
   ): Promise<RewindResult> {
@@ -1499,10 +2037,19 @@ export class FileHistoryService {
       throw new Error('Retained history cannot restore.');
     const filesChanged: string[] = [];
     const filesFailed: string[] = [];
-    for (const trackingPath of this.state.trackedFiles) {
+    const paths = this.getExecutionPaths();
+    const uncertain = this.getUncertainRestorePaths(paths, targetSnapshot);
+    for (const trackingPath of paths) {
+      if (uncertain.has(trackingPath)) {
+        filesFailed.push(this.maybeExpandFilePath(trackingPath));
+        continue;
+      }
       try {
         const filePath = this.maybeExpandFilePath(trackingPath);
-        const targetBackup = targetSnapshot.trackedFileBackups[trackingPath];
+        const targetBackup = this.getSnapshotBackup(
+          targetSnapshot,
+          trackingPath,
+        );
 
         // makeSnapshot couldn't capture this file at the target turn.
         // Surface it as failed instead of restoring the carried-over
@@ -1562,16 +2109,47 @@ export class FileHistoryService {
     return { filesChanged, filesFailed };
   }
 
+  private *getBackupsForPath(
+    trackingPath: string,
+  ): Generator<FileHistoryBackup> {
+    const identity = getCapturePath(this.cwd, trackingPath);
+    for (const snapshot of this.state.snapshots) {
+      // Keys retain their capture coordinates, including after relocation.
+      // Unlabeled legacy snapshots still use the hydrating service's cwd.
+      // Deliberately admission-blind (R20): version reservation must see
+      // EVERY raw record of the identity — refused spellings included —
+      // or two records of one identity could share a version number.
+      for (const entry of [
+        ...(this.getSnapshotIdentityIndex(snapshot).tracked.get(identity) ??
+          []),
+        ...(this.getSnapshotIdentityIndex(snapshot).diff.get(identity) ?? []),
+      ]) {
+        yield entry.backup;
+      }
+    }
+  }
+
   private getBackupFileNameFirstVersion(
     trackingPath: string,
   ): BackupFileName | undefined {
+    return this.getFirstVersionBackup(trackingPath)?.backupFileName;
+  }
+
+  private getFirstVersionBackup(
+    trackingPath: string,
+  ): FileHistoryBackup | undefined {
     for (const snapshot of this.state.snapshots) {
-      for (const backup of [
-        snapshot.trackedFileBackups[trackingPath],
-        snapshot.diffAfterBackups?.[trackingPath],
+      for (const backups of [
+        snapshot.trackedFileBackups,
+        snapshot.diffAfterBackups,
       ]) {
-        if (backup !== undefined && backup.version === 1)
-          return backup.backupFileName;
+        if (!backups) continue;
+        const backup = this.getSnapshotBackup(snapshot, trackingPath, backups);
+        if (backup?.version === 1) {
+          if (backup.failed)
+            throw new Error('File-history baseline is unavailable.');
+          return backup;
+        }
       }
     }
     return undefined;
@@ -1579,14 +2157,8 @@ export class FileHistoryService {
 
   private getMaxVersion(trackingPath: string): number {
     let maxVersion = 0;
-    for (const snapshot of this.state.snapshots) {
-      for (const existing of [
-        snapshot.trackedFileBackups[trackingPath],
-        snapshot.diffAfterBackups?.[trackingPath],
-      ]) {
-        if (existing && existing.version > maxVersion)
-          maxVersion = existing.version;
-      }
+    for (const existing of this.getBackupsForPath(trackingPath)) {
+      if (existing.version > maxVersion) maxVersion = existing.version;
     }
     return maxVersion;
   }
@@ -1650,16 +2222,220 @@ export class FileHistoryService {
     });
   }
 
-  private maybeShortenFilePath(filePath: string): string {
-    if (!isAbsolute(filePath)) return filePath;
-    if (filePath.startsWith(this.cwd + sep) || filePath === this.cwd) {
-      return relative(this.cwd, filePath);
+  private getSnapshotBackup(
+    snapshot: FileHistorySnapshot,
+    trackingPath: string,
+    backups = snapshot.trackedFileBackups,
+  ): FileHistoryBackup | undefined {
+    const identity = getCapturePath(this.cwd, trackingPath);
+    const index = this.getSnapshotIdentityIndex(snapshot);
+    // Executable-baseline-selection face of the raw-coordinate admission
+    // policy. The maps are keyed by identity once per snapshot instead of
+    // rescanning (and renormalizing) every raw key on each lookup. Record
+    // order inside a group is the cache-build order, which is
+    // `Object.entries` order, so first-alias selection and conflict
+    // detection are unchanged. Identity lookup alone folds a refused
+    // spelling into the ordinary identity (`.\\C:f\\..\\victim` and
+    // `victim` share it), so filtering execution candidates does not
+    // exclude a refused record's restoration evidence — an ordinary
+    // candidate from ANY checkpoint must not select its metadata here:
+    // a selected null baseline dispatches unlink, and satisfying
+    // trackEdit's existing-baseline lookup silently skips capture. The
+    // raw records stay in the snapshot maps and the index for
+    // serialization, version reservation and backup retention.
+    const base = snapshot.cwd ?? this.cwd;
+    const aliases =
+      backups === snapshot.trackedFileBackups
+        ? (index.tracked.get(identity) ?? [])
+            .filter(
+              (entry) => !isRefusedWin32CaptureCoordinate(base, entry.key),
+            )
+            .map((entry) => entry.backup)
+        : backups === snapshot.diffAfterBackups
+          ? (index.diff.get(identity) ?? [])
+              .filter(
+                (entry) => !isRefusedWin32CaptureCoordinate(base, entry.key),
+              )
+              .map((entry) => entry.backup)
+          : Object.entries(backups)
+              .filter(
+                ([key]) =>
+                  getCapturePath(base, key) === identity &&
+                  !isRefusedWin32CaptureCoordinate(base, key),
+              )
+              .map(([, backup]) => backup);
+    if (this.retainedStorage && aliases.some((backup) => backup.failed))
+      throw new Error('Retained backup is unavailable.');
+    const confirmed = aliases.filter((backup) => !backup.failed);
+    const first = confirmed[0];
+    if (
+      first &&
+      confirmed.some(
+        (backup) =>
+          backup.backupFileName !== first.backupFileName ||
+          backup.version !== first.version ||
+          backup.backupTime.getTime() !== first.backupTime.getTime(),
+      )
+    ) {
+      // Old alias writers had independent counters. Neither version nor time
+      // proves capture order: preserve all references and use existing failure
+      // reporting until maintainers specify a historical recovery policy.
+      throw new Error('File-history aliases have conflicting baselines.');
     }
-    return filePath;
+    return first ?? aliases[0];
+  }
+
+  /**
+   * Cached identity grouping for one snapshot (see
+   * {@link snapshotIdentityIndexes}). The raw key spellings stay untouched in
+   * the snapshot itself for serialization; only lookup paths go through here.
+   */
+  private getSnapshotIdentityIndex(
+    snapshot: FileHistorySnapshot,
+  ): SnapshotIdentityIndex {
+    let index = this.snapshotIdentityIndexes.get(snapshot);
+    if (index) return index;
+    const base = snapshot.cwd ?? this.cwd;
+    const build = (
+      backups: Record<string, FileHistoryBackup> | undefined,
+    ): Map<string, SnapshotIdentityEntry[]> => {
+      const groups = new Map<string, SnapshotIdentityEntry[]>();
+      if (!backups) return groups;
+      for (const [key, backup] of Object.entries(backups)) {
+        const identity = getCapturePath(base, key);
+        const group = groups.get(identity);
+        if (group) group.push({ key, backup });
+        else groups.set(identity, [{ key, backup }]);
+      }
+      return groups;
+    };
+    index = {
+      tracked: build(snapshot.trackedFileBackups),
+      diff: build(snapshot.diffAfterBackups),
+    };
+    this.snapshotIdentityIndexes.set(snapshot, index);
+    return index;
+  }
+
+  private getExecutionPaths(
+    entries: Iterable<readonly [base: string, key: string]> = Array.from(
+      this.state.trackedFiles,
+      (key) => [this.cwd, key] as const,
+    ),
+  ): string[] {
+    const unique = new Map<string, string>();
+    for (const [base, key] of entries) {
+      // Execution-candidate face of the raw-coordinate admission policy:
+      // the candidate key AND its capture root are classified on their
+      // raw spellings, before any shortening. Default candidates arrive
+      // pre-filtered from collectTrackedFiles, but direct snapshot-key
+      // callers (getTurnDiff) pass each raw key with its snapshot's
+      // capture root — a key that is ordinary itself yet recorded under a
+      // refused root must stay unexecuted, so preview and restore admit
+      // identically.
+      if (isRefusedWin32CaptureCoordinate(base, key)) {
+        continue;
+      }
+      const trackingPath = this.maybeShortenFilePath(key);
+      unique.set(getCapturePath(this.cwd, trackingPath), trackingPath);
+    }
+    return [...unique.values()];
+  }
+
+  private collectTrackedFiles(snapshots: FileHistorySnapshot[]): Set<string> {
+    const entries: Array<readonly [base: string, key: string]> = [];
+    const grammar = getSnapshotPathGrammar(this.cwd);
+    for (const snapshot of snapshots) {
+      if (snapshot.cwd && !areSnapshotOriginsEqual(snapshot.cwd, this.cwd)) {
+        continue;
+      }
+      const base = snapshot.cwd ?? this.cwd;
+      if (getSnapshotPathGrammar(base) !== grammar) continue;
+      // Unknown Win32 drives must not become the reader's current drive.
+      if (
+        grammar.parse(base).root === '\\' &&
+        grammar.parse(this.cwd).root !== '\\'
+      )
+        continue;
+      for (const key of [
+        ...Object.keys(snapshot.trackedFileBackups),
+        ...Object.keys(snapshot.diffAfterBackups ?? {}),
+      ]) {
+        // Execution-candidate face of the raw-coordinate admission
+        // policy: the recorded key spelling is classified together with
+        // its capture root (label check is separator-agnostic — a
+        // historical `\\?/UNC/…` spelling normalizes into the same
+        // namespace), before any shortening. Record-time refusal covers
+        // EVERY spelling of a refused coordinate (`C:f`, `.\C:f`,
+        // `C:\w\C:f`, namespace forms in either separator) and every
+        // capture root this service refuses, so reaching here means
+        // crafted/legacy data — whichever way it would shorten, it must
+        // stay unexecuted, never one spelling executed while its twin is
+        // silently dropped.
+        if (isRefusedWin32CaptureCoordinate(base, key)) {
+          continue;
+        }
+        const path = this.maybeShortenFilePath(key, base);
+        // A Win32 key rooted without a drive either resolved against the
+        // capture label's drive above, or has no provenance at all: never
+        // let it resolve against the reader's current drive silently —
+        // such keys are refused at record time (trackEdit), so reaching
+        // here means crafted/legacy data that must stay unexecuted.
+        if (grammar.sep === '\\' && grammar.parse(path).root === '\\') {
+          continue;
+        }
+        entries.push([this.cwd, path]);
+      }
+    }
+    return new Set(this.getExecutionPaths(entries));
+  }
+
+  private maybeShortenFilePath(filePath: string, baseCwd = this.cwd): string {
+    const grammar = getSnapshotPathGrammar(baseCwd);
+    // Recording, hydration and identity lookup share the capture-side root
+    // rule, including UNC shares. Never infer a root from the reader.
+    const path = qualifyCapturePathRoot(baseCwd, filePath);
+    if (!grammar.isAbsolute(path)) return path;
+    const normalizedCwd =
+      grammar.sep === '/' ? baseCwd : grammar.normalize(baseCwd);
+    const root = grammar.parse(normalizedCwd).root;
+    // A separator-only POSIX cwd ('//', '///') spells its root class, and
+    // posix.parse reports '/' for all such spellings: dropping the trailing
+    // separator would rebase shortening onto another root class ('//' →
+    // '/'), while expansion still uses the original spelling — an absolute
+    // '/w/f' would come back as '//w/f'. Keep such a cwd verbatim; ordinary
+    // directories still drop one trailing separator.
+    const cwd =
+      grammar.sep === '/' && /^\/{2,}$/.test(normalizedCwd)
+        ? normalizedCwd
+        : normalizedCwd.length > root.length &&
+            normalizedCwd.endsWith(grammar.sep)
+          ? normalizedCwd.slice(0, -1)
+          : normalizedCwd;
+    const prefix = cwd.endsWith(grammar.sep) ? cwd : cwd + grammar.sep;
+    if (grammar.sep === '/') {
+      const doubleRoot = (value: string) =>
+        value.startsWith('//') && !value.startsWith('///');
+      // Reversibility is judged in the original cwd's root class, so an
+      // absolute input never crosses into another leading-slash class.
+      if (doubleRoot(path) !== doubleRoot(cwd)) return path;
+      const shortened = path.startsWith(prefix)
+        ? path.slice(prefix.length)
+        : path;
+      return shortened && !shortened.startsWith('/') ? shortened : path;
+    }
+    if (path.startsWith(prefix) || path === cwd) {
+      return grammar.relative(cwd, path);
+    }
+    return path;
   }
 
   private maybeExpandFilePath(filePath: string): string {
-    if (isAbsolute(filePath)) return filePath;
-    return join(this.cwd, filePath);
+    const grammar = getSnapshotPathGrammar(this.cwd);
+    const qualified = qualifyCapturePathRoot(this.cwd, filePath);
+    if (grammar.isAbsolute(qualified)) return qualified;
+    return grammar.sep === '/'
+      ? this.cwd + (this.cwd.endsWith('/') ? '' : '/') + qualified
+      : grammar.join(this.cwd, qualified);
   }
 }

@@ -5,7 +5,12 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as path from 'node:path';
+import {
+  parseHostedFileHistoryRecord,
+  parseHostedFileHistoryState,
+} from './hosted-file-history-protocol.js';
 import { createHash } from 'node:crypto';
 import {
   readCsiNativeRequest,
@@ -23,6 +28,10 @@ import {
   readCsiPreparationEvidence,
 } from './managed-csi-file-history-protocol.js';
 
+vi.mock('node:path', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:path')>()),
+}));
+
 const fixture = JSON.parse(
   readFileSync(
     new URL(
@@ -36,6 +45,7 @@ const fixture = JSON.parse(
     identity: { sessionId: string };
     installedContext: Record<string, unknown>;
   };
+  snapshotCwdCases: Array<{ cwd: unknown; valid: boolean }>;
   valid: Array<{ name: string; observation: unknown }>;
   invalid: Array<{ name: string; observation: unknown }>;
 };
@@ -49,64 +59,168 @@ const native = JSON.parse(
   ),
 );
 
-describe('shared private CSI history wire contract', () => {
-  const owner = fixture.request.identity.sessionId;
-  it.each(fixture.valid)(
-    'preserves $name descriptor and backup evidence',
-    (candidate) => {
-      expect(
+describe.each(['posix', 'win32'] as const)(
+  'shared private CSI history wire contract with injected native %s grammar',
+  (grammar) => {
+    const nativePaths = path[grammar];
+    beforeEach(() => {
+      vi.spyOn(path, 'isAbsolute').mockImplementation(nativePaths.isAbsolute);
+      vi.spyOn(path, 'normalize').mockImplementation(nativePaths.normalize);
+    });
+    afterEach(() => vi.restoreAllMocks());
+    const owner = fixture.request.identity.sessionId;
+    it.each(fixture.valid)(
+      'preserves $name descriptor and backup evidence',
+      (candidate) => {
+        expect(
+          readCsiFileHistoryObservation(candidate.observation, owner),
+        ).toEqual(candidate.observation);
+      },
+    );
+    it.each(fixture.invalid)('refuses $name', (candidate) => {
+      expect(() =>
         readCsiFileHistoryObservation(candidate.observation, owner),
-      ).toEqual(candidate.observation);
-    },
-  );
-  it.each(fixture.invalid)('refuses $name', (candidate) => {
-    expect(() =>
-      readCsiFileHistoryObservation(candidate.observation, owner),
-    ).toThrow();
-  });
-  it('requires the exact original installation and the three closed operations', () => {
-    const boot = parseManagedCsiFileBoot(native.boot);
-    const installed = fixture.request.installedContext;
-    for (const action of ['bind', 'snapshot'] as const) {
-      const operation = {
-        kind: 'csi-file-history',
-        version: 1,
-        action,
-      } as const;
-      const envelope = csiFileHistoryEnvelope(boot, installed, operation);
-      expect(readCsiFileHistoryEnvelope(envelope, boot, installed)).toEqual(
-        operation,
+      ).toThrow();
+    });
+    it.each(fixture.snapshotCwdCases)(
+      'matches the shared cwd normalization contract for $cwd',
+      ({ cwd, valid }) => {
+        const observation = readCsiFileHistoryObservation(
+          fixture.valid.find((entry) => entry.name === 'snapshot-cwd')!
+            .observation,
+          owner,
+        );
+        Object.assign(observation.state.snapshots[0], { cwd });
+        if (valid) {
+          expect(readCsiFileHistoryObservation(observation, owner)).toEqual(
+            observation,
+          );
+        } else {
+          expect(() =>
+            readCsiFileHistoryObservation(observation, owner),
+          ).toThrow();
+        }
+      },
+    );
+    it.each(
+      fixture.snapshotCwdCases.filter(
+        ({ cwd }) =>
+          typeof cwd === 'string' &&
+          [...cwd].some(
+            (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+          ),
+      ),
+    )(
+      'rejects control-bearing cwd through the existing error kind',
+      ({ cwd }) => {
+        const observation = readCsiFileHistoryObservation(
+          fixture.valid.find((entry) => entry.name === 'snapshot-cwd')!
+            .observation,
+          owner,
+        );
+        Object.assign(observation.state.snapshots[0], { cwd });
+        expect(() => readCsiFileHistoryObservation(observation, owner)).toThrow(
+          expect.objectContaining({
+            name: 'ManagedToolProtocolError',
+            code: 'managed_tool_invalid_request',
+            message: 'Managed Tool invocation data is invalid.',
+          }),
+        );
+      },
+    );
+    it.each([
+      'C:\\workspace',
+      'C:\\',
+      'C:\\workspace\\',
+      '\\\\server\\share\\workspace',
+      '\\\\server\\share\\',
+      '\\workspace',
+    ])(
+      'allows generic Hosted origin %s but refuses it at the CSI boundary',
+      (cwd) => {
+        const observation = readCsiFileHistoryObservation(
+          fixture.valid.find((entry) => entry.name === 'snapshot-cwd')!
+            .observation,
+          owner,
+        );
+        observation.state.snapshots[0].cwd = cwd;
+        expect(parseHostedFileHistoryState(observation.state, owner)).toEqual(
+          observation.state,
+        );
+        const record = {
+          schemaVersion: 1,
+          state: observation.state,
+          pendingTurn: null,
+          pendingUndo: null,
+          undoReceipts: [],
+        };
+        expect(parseHostedFileHistoryRecord(record, owner)).toEqual(record);
+        expect(() => readCsiFileHistoryObservation(observation, owner)).toThrow(
+          'Invalid private CSI file history.',
+        );
+      },
+    );
+    it.each([4096, 4097])('bounds the POSIX cwd length at %s', (length) => {
+      const observation = readCsiFileHistoryObservation(
+        fixture.valid.find((entry) => entry.name === 'snapshot-cwd')!
+          .observation,
+        owner,
       );
+      observation.state.snapshots[0].cwd = `/${'x'.repeat(length - 1)}`;
+      if (length === 4096) {
+        expect(readCsiFileHistoryObservation(observation, owner)).toEqual(
+          observation,
+        );
+      } else {
+        expect(() =>
+          readCsiFileHistoryObservation(observation, owner),
+        ).toThrow();
+      }
+    });
+    it('requires the exact original installation and the three closed operations', () => {
+      const boot = parseManagedCsiFileBoot(native.boot);
+      const installed = fixture.request.installedContext;
+      for (const action of ['bind', 'snapshot'] as const) {
+        const operation = {
+          kind: 'csi-file-history',
+          version: 1,
+          action,
+        } as const;
+        const envelope = csiFileHistoryEnvelope(boot, installed, operation);
+        expect(readCsiFileHistoryEnvelope(envelope, boot, installed)).toEqual(
+          operation,
+        );
+        expect(() =>
+          readCsiFileHistoryEnvelope(
+            {
+              ...envelope,
+              installedContext: { ...installed, operationId: 'other' },
+            },
+            boot,
+            installed,
+          ),
+        ).toThrow();
+        expect(() =>
+          readCsiFileHistoryOperation({ ...operation, paths: ['caller.txt'] }),
+        ).toThrow();
+      }
       expect(() =>
-        readCsiFileHistoryEnvelope(
-          {
-            ...envelope,
-            installedContext: { ...installed, operationId: 'other' },
-          },
-          boot,
-          installed,
-        ),
+        readCsiFileHistoryOperation({
+          kind: 'csi-file-history',
+          version: 1,
+          action: 'prepare',
+        }),
       ).toThrow();
       expect(() =>
-        readCsiFileHistoryOperation({ ...operation, paths: ['caller.txt'] }),
+        readCsiFileHistoryOperation({
+          kind: 'csi-file-history',
+          version: 1,
+          action: 'rewind',
+        }),
       ).toThrow();
-    }
-    expect(() =>
-      readCsiFileHistoryOperation({
-        kind: 'csi-file-history',
-        version: 1,
-        action: 'prepare',
-      }),
-    ).toThrow();
-    expect(() =>
-      readCsiFileHistoryOperation({
-        kind: 'csi-file-history',
-        version: 1,
-        action: 'rewind',
-      }),
-    ).toThrow();
-  });
-});
+    });
+  },
+);
 
 describe('preparation paths from original resource bytes', () => {
   it('preserves the full Read/Write/Edit membership and refusal ordinal gaps', () => {
