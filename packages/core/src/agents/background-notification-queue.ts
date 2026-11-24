@@ -223,6 +223,30 @@ export class DroppedNotificationTally {
   }
 
   /**
+   * Withdraws one previously recorded loss: the report it counted is about
+   * to be delivered after all (a rolled-back close re-delivers it warm), so
+   * the next summary must not announce it. Only ever retract an item that is
+   * queued for delivery — a genuinely lost report must stay counted. No-op
+   * when the item's group was never recorded or was already taken.
+   */
+  retract(item: AdmissibleNotification): void {
+    const key = groupKey(item);
+    const group = this.groups.get(key);
+    if (!group) return;
+    if (item.taskId) {
+      // Groups count without storing members, so the recorded id list is the
+      // only per-item evidence: an id that never landed there (never recorded,
+      // or elided past the naming cap) is not the loss being withdrawn.
+      const idIndex = group.ids.indexOf(item.taskId);
+      if (idIndex < 0) return;
+      group.ids.splice(idIndex, 1);
+    }
+    group.count--;
+    this.total--;
+    if (group.count <= 0) this.groups.delete(key);
+  }
+
+  /**
    * Returns the summary for everything recorded since the last call and
    * resets. `undefined` when there is nothing to report.
    */

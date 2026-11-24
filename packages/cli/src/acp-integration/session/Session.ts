@@ -5614,6 +5614,16 @@ export class Session implements SessionContext {
       // model was never told about.
       for (const landed of this.#peerItemsLandedByFlush) {
         landed.persisted = false;
+        // The no-recorder arm also tallied the report as lost; the re-drain
+        // below delivers it warm, so both the client frame and the leader
+        // prompt would claim a loss that is not happening (R11-1). Retract
+        // the tally and clear the mark — but only for a report that made it
+        // back into the queue; one refused at the admission cap is genuinely
+        // lost and stays counted.
+        if (landed.lossTallied && this.notificationQueue.includes(landed)) {
+          landed.lossTallied = false;
+          this.droppedNotifications.retract(toAdmissibleNotification(landed));
+        }
       }
       this.#peerItemsLandedByFlush.clear();
       void this.#drainGoalQueue();

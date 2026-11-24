@@ -2380,6 +2380,60 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('delivers a sealed-window report without a dropped claim when the close rolls back and there is no recorder', async () => {
+      // R11-1: on a hidden workspace the sealed-window landing has no cold
+      // copy to write, so it tallies the report as lost and queues it for
+      // the rollback re-drain. The release used to clear only `persisted`,
+      // leaving the tally in place — the re-drain then announced "dropped,
+      // never redelivered" to the client and the leader in the same turn
+      // that handed them the report.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const releaseClose = session.beginClose();
+      await session.flushPendingPeerNotifications();
+      manager.leaderCallback?.(
+        'report inside the window',
+        'report inside the window',
+        ['security'],
+      );
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+
+      releaseClose();
+
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => expect(sendMessageStream).toHaveBeenCalled());
+      const prompted = sendMessageStream.mock.calls
+        .map((call) =>
+          ((call[1] as { message?: Array<{ text?: string }> }).message ?? [])
+            .map((part) => part.text ?? '')
+            .join('\n'),
+        )
+        .join('\n');
+      // The report is delivered warm and the same prompt never claims it was
+      // dropped.
+      expect(prompted).toContain('report inside the window');
+      expect(prompted).not.toContain('Dropped');
+      const clientFrames = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([arg]) => JSON.stringify(arg));
+      expect(
+        clientFrames.some((frame) => frame.includes('"status":"dropped"')),
+      ).toBe(false);
+      session.dispose();
+    });
+
     it('still records a non-peer completion that arrives inside the sealed window', async () => {
       // The seal is about peer reports. `#landUndrainedPeerNotifications` skips
       // every other kind, so routing an agent/shell/monitor/workflow/cron

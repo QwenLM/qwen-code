@@ -178,6 +178,28 @@ describe('DroppedNotificationTally', () => {
     expect(tally.take()).toBeUndefined();
   });
 
+  it('retracts a redelivered loss while keeping genuine drops counted', () => {
+    const tally = tallyOf(shell('bg_1'), shell('bg_2'));
+
+    tally.retract(shell('bg_1'));
+
+    expect(tally.count).toBe(1);
+    expect(tally.take()?.displayText).toBe(
+      'Dropped 1 background notification (queue full): 1 shell result (bg_2).',
+    );
+  });
+
+  it('retracts the last member of a group and never a never-recorded item', () => {
+    const tally = tallyOf(shell('bg_1'));
+
+    tally.retract(shell('bg_9'));
+    expect(tally.count).toBe(1);
+    tally.retract(shell('bg_1'));
+
+    expect(tally.count).toBe(0);
+    expect(tally.take()).toBeUndefined();
+  });
+
   it('summarises drops by kind for the user and the model', () => {
     const tally = tallyOf(
       ...['mon_ab12', 'mon_cd34', 'mon_ab12', 'mon_cd34', 'mon_ab12'].map(
