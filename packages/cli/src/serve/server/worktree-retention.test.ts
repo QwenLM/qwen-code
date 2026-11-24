@@ -29,6 +29,7 @@ import {
   verifyRestoredWorktreeSnapshot,
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { writeRuntimeStatus } from '@qwen-code/qwen-code-core/utils/runtimeStatus.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 function git(cwd: string, home: string, ...args: string[]): string {
   return execFileSync('git', args, {
@@ -260,6 +261,33 @@ async function writeOwnerRuntimeStatus(
       qwenVersion: null,
       ...(pid === undefined ? {} : { pid }),
     },
+  );
+}
+
+function writeUnverifiableOwnerRecord(
+  target: RetentionTestRuntime,
+  sessionId: string,
+  worktreePath: string,
+): void {
+  const storage = new Storage(
+    worktreePath,
+    target.runtime.sessionRuntimeBaseDir,
+  );
+  const statusPath = storage.getRuntimeStatusPath(sessionId);
+  fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+  fs.writeFileSync(
+    statusPath,
+    JSON.stringify({
+      schema_version: 1,
+      pid: process.pid,
+      proc_start: null,
+      pid_ns: null,
+      session_id: sessionId,
+      work_dir: worktreePath,
+      hostname: 'unverifiable-owner.invalid',
+      started_at: Date.now() / 1000,
+      qwen_version: null,
+    }),
   );
 }
 
@@ -678,6 +706,30 @@ describe('worktree retention with real repositories', () => {
 
     expect((await sweep(target)).removed).toEqual([stale.id]);
     await expectRetainedSnapshot(target, stale);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves a checkout whose owner record cannot be verified here', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const foreign = await makeRetainedSession(target, {
+      slug: 'foreign-owner',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    writeUnverifiableOwnerRecord(target, foreign.id, foreign.worktreePath);
+
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(fs.existsSync(foreign.worktreePath)).toBe(true);
+    const read = await readWorktreeSessionStrict(foreign.sidecarPath);
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.worktreeRemoved).toBeUndefined();
+    }
     expect(fs.existsSync(newest.worktreePath)).toBe(true);
   });
 

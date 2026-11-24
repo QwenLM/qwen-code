@@ -23,6 +23,7 @@ import {
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionOrganizationService } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { readCronTasks } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 import { collectBoundSessionIds } from '../scheduled-task-keepalive.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
@@ -126,21 +127,33 @@ async function retentionRoot(
 /**
  * A live owner outside this daemon (for example a TUI that resumed the same
  * session) never appears on this runtime's bridge, but its runtime record
- * names the checkout it is working in. Only an explicit `active` answer
- * blocks the sweep: `unknown` is what sessions without any record return,
- * which is the normal state for daemon-created chats.
+ * names the checkout it is working in. `unknown` without any record is what
+ * daemon-created chats return, and blocking those would disable retention;
+ * `unknown` with a record means the owner exists but cannot be verified from
+ * this process (another PID namespace or host sharing the runtime base), and
+ * that must be preserved.
  */
 async function ownerProcessActive(
   sessionId: string,
   sidecar: { originalCwd: string; worktreePath: string },
 ): Promise<boolean> {
   try {
-    return (
-      (await getSessionRuntimeLiveness(sessionId, [
-        sidecar.originalCwd,
-        sidecar.worktreePath,
-      ])) === 'active'
-    );
+    const liveness = await getSessionRuntimeLiveness(sessionId, [
+      sidecar.originalCwd,
+      sidecar.worktreePath,
+    ]);
+    if (liveness === 'active') return true;
+    if (liveness === 'inactive') return false;
+    for (const root of [sidecar.originalCwd, sidecar.worktreePath]) {
+      const recordPath = new Storage(root).getRuntimeStatusPath(sessionId);
+      try {
+        await fs.lstat(recordPath);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
+      }
+    }
+    return false;
   } catch {
     return true;
   }
