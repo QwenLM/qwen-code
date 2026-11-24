@@ -1444,5 +1444,22 @@ describe('compactionInputSlimming', () => {
       ]);
       expect(result.stats.thoughtsStripped).toBe(1);
     });
+
+    it('keeps a thought-flagged part that also carries a functionCall so tool pairing survives', () => {
+      const functionCall = { id: 'c2', name: 'read_file', args: { p: 'b' } };
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [{ text: 'plan', thought: true, functionCall }],
+        },
+      ];
+
+      const result = slimCompactionInput(history, undefined, {
+        stripUnsignedThoughts: true,
+      });
+
+      expect(result.slimmedHistory).toBe(history);
+      expect(result.stats.thoughtsStripped).toBe(0);
+    });
   });
 });

@@ -349,6 +349,10 @@ export function slimCompactionInput(
       if (
         options?.stripUnsignedThoughts &&
         part.thought === true &&
+        // Only a pure thought part is dropped: one that also carries a tool
+        // call or result must stay so tool_call/tool_response pairing survives.
+        !part.functionCall &&
+        !part.functionResponse &&
         !(
           typeof part.thoughtSignature === 'string' &&
           part.thoughtSignature.length > 0
