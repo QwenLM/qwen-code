@@ -477,7 +477,11 @@ interface ChatEditorRenderProps
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
     | 'workspaceSelectionDisabled'
+    | 'workspaces'
+    | 'onSelectWorkspace'
     | 'selectedWorkspaceCwd'
+    | 'gitModeIntent'
+    | 'onGitModeIntentChange'
     | 'contextUsageAlwaysVisible'
     | 'contextUsageControls'
     | 'onOpenContextUsage'
@@ -5896,7 +5900,7 @@ describe('ChatEditor slash command popovers', () => {
     { source: 'plugin-command', extensionName: undefined },
     { source: 'skill', extensionName: 'suite' },
   ])(
-    'separates Extension Skill details for $source',
+    'shows only the Skill name in the slash menu and highlights the Extension in the hover detail for $source',
     ({ source, extensionName }) => {
       const name = 'suite:rust:chat';
       composerCoreState.slashMenu = {
@@ -5916,6 +5920,9 @@ describe('ChatEditor slash command popovers', () => {
       const option = document.querySelector(
         '[data-web-shell-slash-menu] [role="option"]',
       );
+      const commandLabel = option?.querySelector(`.${styles.slashCommand}`);
+      expect(commandLabel?.textContent).toBe('/rust:chat');
+      expect(option?.textContent).not.toContain('suite:');
       act(() =>
         option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
       );
@@ -5923,11 +5930,117 @@ describe('ChatEditor slash command popovers', () => {
       expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
         'rust:chat',
       );
-      expect(detail?.firstElementChild?.children[1]?.textContent).toBe(
-        'Extension: suite',
+      const extensionRow = detail?.querySelector(
+        `.${styles.slashDetailExtension}`,
       );
+      expect(extensionRow).not.toBeNull();
+      expect(extensionRow?.classList.contains(styles.slashDetailText)).toBe(
+        false,
+      );
+      expect(
+        extensionRow?.querySelector(`.${styles.slashDetailExtensionLabel}`)
+          ?.textContent,
+      ).toBe('Extension');
+      expect(
+        extensionRow?.querySelector(`.${styles.slashDetailExtensionName}`)
+          ?.textContent,
+      ).toBe('suite');
+      expect(
+        detail?.querySelector(`.${styles.slashDetailText}`)?.textContent,
+      ).toBe('Chat');
     },
   );
+
+  it('shows the hover detail for an Extension Skill without a description', () => {
+    const name = 'suite:rust:chat';
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 1,
+      query: '',
+      selectedIndex: 0,
+      items: [{ id: name, label: `/${name}`, apply: `/${name} ` }],
+    };
+    renderChatEditor({
+      commands: [{ name, description: '', source: 'skill' }],
+      skills: [{ name, description: '', extensionName: 'suite' }],
+    });
+    const option = document.querySelector(
+      '[data-web-shell-slash-menu] [role="option"]',
+    );
+    expect(option?.querySelector(`.${styles.slashCommand}`)?.textContent).toBe(
+      '/rust:chat',
+    );
+    act(() =>
+      option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+    const detail = document.querySelector('[data-web-shell-slash-detail]');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailCommand}`)?.textContent,
+    ).toBe('rust:chat');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailExtensionName}`)?.textContent,
+    ).toBe('suite');
+    expect(detail?.querySelector(`.${styles.slashDetailText}`)).toBeNull();
+  });
+
+  it('strips the Extension prefix in /skills subcommand rows while leaving other subcommands intact', () => {
+    const name = 'suite:rust:chat';
+    composerCoreState.slashMenu = {
+      kind: 'subcommand',
+      from: 0,
+      to: 8,
+      query: '',
+      selectedIndex: 0,
+      items: [
+        {
+          id: `/skills ${name}`,
+          label: name,
+          apply: `/skills ${name} `,
+          detail: 'Chat',
+          type: 'skill',
+        },
+        {
+          id: name,
+          label: name,
+          apply: `/other ${name} `,
+          detail: 'Plain subcommand',
+        },
+      ],
+    };
+    renderChatEditor({
+      commands: [{ name, description: 'Chat', source: 'skill' }],
+      skills: [{ name, description: 'Chat', extensionName: 'suite' }],
+    });
+    const options = document.querySelectorAll(
+      '[data-web-shell-slash-menu] [role="option"]',
+    );
+    expect(
+      options[0]?.querySelector(`.${styles.slashCommand}`)?.textContent,
+    ).toBe('rust:chat');
+    expect(
+      options[1]?.querySelector(`.${styles.slashCommand}`)?.textContent,
+    ).toBe(name);
+
+    act(() =>
+      options[0]?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+    const detail = document.querySelector('[data-web-shell-slash-detail]');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailCommand}`)?.textContent,
+    ).toBe('rust:chat');
+    expect(
+      detail?.querySelector(`.${styles.slashDetailExtensionName}`)?.textContent,
+    ).toBe('suite');
+
+    act(() =>
+      options[1]?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+    expect(
+      detail?.querySelector(`.${styles.slashDetailCommand}`)?.textContent,
+    ).toBe(name);
+    expect(detail?.querySelector(`.${styles.slashDetailExtension}`)).toBeNull();
+  });
 
   it.each([true, false])(
     'preserves colon names without an Extension (Skill: %s)',
@@ -5956,6 +6069,9 @@ describe('ChatEditor slash command popovers', () => {
       const option = document.querySelector(
         '[data-web-shell-slash-menu] [role="option"]',
       );
+      expect(
+        option?.querySelector(`.${styles.slashCommand}`)?.textContent,
+      ).toBe(`/${name}`);
       act(() =>
         option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
       );
@@ -5963,7 +6079,10 @@ describe('ChatEditor slash command popovers', () => {
       expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
         isSkill ? name : `/${name}`,
       );
-      expect(detail?.textContent).not.toContain('Extension:');
+      expect(
+        detail?.querySelector(`.${styles.slashDetailExtension}`),
+      ).toBeNull();
+      expect(detail?.textContent).not.toContain('Extension');
     },
   );
 
@@ -6291,12 +6410,15 @@ describe('ChatEditor mobile composer actions', () => {
       container.querySelector('[data-web-shell-mobile-editing-actions]'),
     ).not.toBeNull();
     const shellButton = () =>
-      [...container.querySelectorAll('button')].find(
-        (button) => button.textContent === 'Shell mode',
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Shell mode"]',
       );
-    expect(shellButton()).toBeUndefined();
+    expect(shellButton()).toBeNull();
     rerenderChatEditor(container, { visibleToolbarActions: [] });
-    expect(shellButton()).toBeDefined();
+    expect(shellButton()).not.toBeNull();
+    expect(
+      shellButton()!.closest('[data-web-shell-mobile-editing-actions]'),
+    ).toBe(null);
   });
 
   it('returns focus to the composer after entering Shell from the drawer', async () => {
@@ -6316,15 +6438,22 @@ describe('ChatEditor mobile composer actions', () => {
     mobileComposer('draft');
     renderChatEditor({ visibleToolbarActions: [] });
 
-    const actions = document.querySelector(
-      '[data-web-shell-mobile-editing-actions]',
+    expect(
+      document
+        .querySelector('[data-web-shell-mobile-editing-actions]')!
+        .querySelectorAll('button'),
+    ).toHaveLength(6);
+    const historyButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Input history"]',
     )!;
-    const historyButton = actions.querySelector<HTMLButtonElement>(
-      '[aria-label="Input history"]',
+    const shellButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Shell mode"]',
     )!;
-    const shellButton = Array.from(actions.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Shell mode',
-    )!;
+    for (const button of [historyButton, shellButton]) {
+      expect(
+        button.closest('[data-web-shell-mobile-editing-actions]'),
+      ).toBeNull();
+    }
 
     const expectMousedownPrevented = (button: HTMLButtonElement) => {
       const pointerDown = new Event('pointerdown', {
@@ -6920,6 +7049,275 @@ describe('ChatEditor mobile composer actions', () => {
     expect(
       container.querySelector('[data-mobile-voice-active="true"]'),
     ).toBeNull();
+  });
+
+  it('switches mobile context placement across wide (iPad), medium (split), and narrow (phone 3A) widths', () => {
+    const backend = mobileComposer('draft');
+    const { observers, restore } = captureResizeObservers();
+    let containerWidth = 768;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { width: containerWidth } as DOMRect;
+        }
+        return { width: 0 } as DOMRect;
+      });
+    const workspaces = [
+      {
+        id: 'w1',
+        label: 'primary',
+        cwd: '/tmp/primary',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'w2',
+        label: 'secondary',
+        cwd: '/tmp/secondary',
+        primary: false,
+        trusted: true,
+      },
+    ];
+    try {
+      const container = renderChatEditor({
+        workspaces,
+        selectedWorkspaceCwd: '/tmp/secondary',
+        onSelectWorkspace: vi.fn(),
+        gitBranch: 'feature/mobile-bar',
+        contextChipPlacement: 'below',
+      });
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      const actions = () =>
+        container.querySelector<HTMLElement>(
+          '[data-web-shell-mobile-editing-actions]',
+        )!;
+
+      // Wide (iPad): inline workspace + full git branch alongside the 6 keys.
+      expect(actions().getAttribute('data-mobile-layout')).toBe('wide');
+      expect(
+        actions().querySelector('[class*="mobileContextRow"]'),
+      ).not.toBeNull();
+      expect(
+        actions().querySelector('[aria-label="Workspace"]')?.textContent,
+      ).toContain('secondary');
+      expect(
+        actions().querySelector('[data-web-shell-git-branch]')?.className,
+      ).not.toContain('gitBranchChipCompact');
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+
+      // Medium (iPad narrow split): inline workspace + compact git branch.
+      containerWidth = 480;
+      act(() => fireResize(observers, surface));
+      expect(actions().getAttribute('data-mobile-layout')).toBe('medium');
+      expect(
+        actions().querySelector('[class*="mobileContextRow"]'),
+      ).not.toBeNull();
+      expect(
+        actions().querySelector('[aria-label="Workspace"]')?.textContent,
+      ).toContain('secondary');
+      expect(
+        actions().querySelector('[data-web-shell-git-branch]')?.className,
+      ).toContain('gitBranchChipCompact');
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+
+      // Narrow (phone 3A): top row has only the 6 editing keys; workspace + git
+      // move below the composer while blurred and hide while focused.
+      containerWidth = 390;
+      act(() => fireResize(observers, surface));
+      expect(actions().getAttribute('data-mobile-layout')).toBe('narrow');
+      expect(actions().querySelector('[class*="mobileContextRow"]')).toBeNull();
+      const belowRow = container.querySelector(
+        '[data-web-shell-composer-context-row]',
+      )!;
+      expect(belowRow).not.toBeNull();
+      expect(
+        belowRow.querySelector('[aria-label="Workspace"]')?.textContent,
+      ).toContain('secondary');
+      expect(
+        belowRow.querySelector('[data-web-shell-git-branch]')?.textContent,
+      ).toContain('feature/mobile-bar');
+
+      act(() => backend.textareaRef.current!.focus());
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+
+      act(() => backend.textareaRef.current!.blur());
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).not.toBeNull();
+
+      // Narrow + existing session (`header`): workspace is owned by the header
+      // and is not duplicated under the composer.
+      rerenderChatEditor(container, {
+        workspaces,
+        selectedWorkspaceCwd: '/tmp/secondary',
+        onSelectWorkspace: vi.fn(),
+        gitBranch: 'feature/mobile-bar',
+        contextChipPlacement: 'header',
+      });
+      const headerBelowRow = container.querySelector(
+        '[data-web-shell-composer-context-row]',
+      )!;
+      expect(headerBelowRow).not.toBeNull();
+      expect(
+        headerBelowRow.querySelector('[aria-label="Workspace"]'),
+      ).toBeNull();
+      expect(
+        headerBelowRow.querySelector('[data-web-shell-git-branch]'),
+      ).not.toBeNull();
+      for (const width of [480, 560]) {
+        containerWidth = width;
+        act(() => fireResize(observers, surface));
+        expect(actions().querySelector('[aria-label="Workspace"]')).toBeNull();
+        expect(
+          actions().querySelector('[data-web-shell-git-branch]'),
+        ).not.toBeNull();
+      }
+
+      // Without git either, existing sessions render zero rows below.
+      rerenderChatEditor(container, {
+        workspaces,
+        selectedWorkspaceCwd: '/tmp/secondary',
+        onSelectWorkspace: vi.fn(),
+        contextChipPlacement: 'header',
+      });
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+      for (const [width, tier] of [
+        [419, 'narrow'],
+        [420, 'medium'],
+        [559, 'medium'],
+        [560, 'wide'],
+      ] as const) {
+        containerWidth = width;
+        act(() => fireResize(observers, surface));
+        expect(actions().getAttribute('data-mobile-layout')).toBe(tier);
+        if (tier !== 'narrow') {
+          expect(
+            actions().querySelector('[class*="mobileContextRow"]'),
+          ).toBeNull();
+        }
+        expect(container.querySelector('[aria-label="Workspace"]')).toBeNull();
+      }
+    } finally {
+      rectSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('preserves the read-only workspace indicator through responsive context placement', () => {
+    const backend = mobileComposer('draft');
+    const { observers, restore } = captureResizeObservers();
+    let containerWidth = 768;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { width: containerWidth } as DOMRect;
+        }
+        return { width: 0 } as DOMRect;
+      });
+    const props = {
+      workspaceName: 'api',
+      workspaceTitle: 'api',
+      workspaceFeaturesEnabled: true,
+      visibleToolbarActions: ['workspace'] as const,
+      contextChipPlacement: 'below' as const,
+    };
+    try {
+      const container = renderChatEditor(props);
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      const actions = () =>
+        container.querySelector('[data-web-shell-mobile-editing-actions]')!;
+      for (const width of [768, 480]) {
+        containerWidth = width;
+        act(() => fireResize(observers, surface));
+        const selector = actions().querySelector('[data-web-shell-workspace]')!;
+        expect(selector).not.toBeNull();
+        expect(selector.getAttribute('data-web-shell-workspace-title')).toBe(
+          'api',
+        );
+      }
+      containerWidth = 390;
+      act(() => fireResize(observers, surface));
+      const below = () =>
+        container.querySelector('[data-web-shell-composer-context-row]')!;
+      expect(actions().querySelector('[class*="mobileContextRow"]')).toBeNull();
+      expect(
+        below().querySelector('[data-web-shell-workspace]'),
+      ).not.toBeNull();
+      act(() => backend.textareaRef.current!.focus());
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+      act(() => backend.textareaRef.current!.blur());
+      expect(below()).not.toBeNull();
+
+      rerenderChatEditor(container, {
+        ...props,
+        contextChipPlacement: 'header',
+      });
+      containerWidth = 390;
+      act(() => fireResize(observers, surface));
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+    } finally {
+      rectSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('clears stale Git menu ownership when Git capability disappears and recovers', () => {
+    mobileComposer('draft');
+    const onGitModeIntentChange = vi.fn();
+    const withGit = {
+      gitBranch: 'feature/mobile-bar',
+      gitModeIntent: { mode: 'current' as const },
+      onGitModeIntentChange,
+      visibleToolbarActions: ['gitBranch'] as const,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(withGit);
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="git-mode-chip"]',
+    )!;
+    expect(chip).not.toBeNull();
+
+    act(() => chip.click());
+    expect(
+      document.querySelector('[data-slot="popover-content"]'),
+    ).not.toBeNull();
+
+    // Simulate a failed Git poll removing gitBranch and gitModeIntent.
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['gitBranch'] as const,
+      contextChipPlacement: 'below' as const,
+    });
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+
+    // Restoring the same Git props must keep the popover closed until tapped again.
+    rerenderChatEditor(container, withGit);
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+
+    const restoredChip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="git-mode-chip"]',
+    )!;
+    act(() => restoredChip.click());
+    expect(
+      document.querySelector('[data-slot="popover-content"]'),
+    ).not.toBeNull();
   });
 
   function visibleFollowup() {

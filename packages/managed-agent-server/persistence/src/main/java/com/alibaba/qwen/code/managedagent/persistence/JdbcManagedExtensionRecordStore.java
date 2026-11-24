@@ -251,8 +251,7 @@ public class JdbcManagedExtensionRecordStore
         Map<String, WebShellModelContext> contexts = new HashMap<>();
         jdbc.query("SELECT r.session_id, r.settled_at, u.kind, u.byte_length, u.sha256, u.inline_bytes"
                         + " FROM ma_session_record r JOIN ma_resource u ON"
-                        + " " + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id")
-                        + " = r.record_resource_id AND"
+                        + " u.resource_id = r.record_resource_id AND"
                         + " u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND"
                         + " u.workspace_id = r.workspace_id JOIN ma_session s ON s.tenant_id ="
                         + " r.tenant_id AND s.session_id = r.session_id AND s.workspace_id ="

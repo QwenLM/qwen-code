@@ -67,6 +67,7 @@ import {
 import {
   hostedActionParkRegistration,
   hostedApprovalResumeShapeRefusal,
+  hostedCommandStepResumeShapeRefusal,
   registerHostedActionPark,
   type HostedActionParkRefusal,
   type HostedActionParkRegistration,
@@ -2123,6 +2124,20 @@ export async function settleCrashedWakeTurnAftermath(params: {
 // pending notification counts as an unsettled Turn on every load while
 // the pump that would deliver it can never run. H6: an automation input
 // rides the same pump and the same rules; H5: so does a channel input.
+/** The wake sources whose interrupted approval wait the pump resumes, so
+ * the only ones whose wait may park (#18149 S4, S4b). Session-message
+ * Turns keep their own settlement. */
+function isResumableWakeSource(source: unknown): boolean {
+  return (
+    source === 'monitor' ||
+    source === AUTOMATION_INPUT_SOURCE ||
+    source === LOOP_INPUT_SOURCE ||
+    source === CHANNEL_INPUT_SOURCE ||
+    source === PR_EVENT_INPUT_SOURCE ||
+    isChildNotificationSource(source)
+  );
+}
+
 function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   if (event.kind !== 'input.accepted') return false;
   if (isWakeInputSource(event.payload['source'] as string)) return true;
@@ -2902,8 +2917,10 @@ function retainHostedCleanupHolds(
   }
 }
 
-// A resumed approval restarts from this text, so an Action park refuses a
-// Turn without it exactly as the recovery arms do.
+// A resumed Turn restarts from this text, so an Action park refuses a Turn
+// without it exactly as the recovery arms do. A hosted-harness input that
+// carries only attachments restarts from empty text, as its live Turn ran:
+// executeHostedTurn reads the attachments back from the input itself.
 async function hostedOriginalPromptText(
   managed: ManagedSession,
   promptId: string,
@@ -2911,11 +2928,13 @@ async function hostedOriginalPromptText(
   const user = (await managed.sink.project()).find(
     (item) => item.type === 'user' && item.daemonPromptId === promptId,
   );
-  return (
-    user?.message?.parts
-      ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
-      .join('\n') || undefined
-  );
+  const text = user?.message?.parts
+    ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
+    .join('\n');
+  if (text) return text;
+  return (await readHostedInput(managed, promptId, '')).attachments.length
+    ? ''
+    : undefined;
 }
 
 async function retryHostedCleanup(
@@ -5148,6 +5167,8 @@ export function registerHostedHarnessSessionRoutes(
     readonly wakeAt: number;
     readonly approvalRevision?: number;
     readonly cleanupExempt: boolean;
+    /** A wake-started Turn: the wake scan, not a Turn row, resumes it. */
+    readonly wakeOwned: boolean;
   }
 
   // Undefined means no Turn is waiting; a refusal names why a waiting Turn
@@ -5161,9 +5182,6 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active?.promptId !== registration.promptId)
       return 'turn_mismatch';
     if (session.recoveredTurn !== undefined) return 'recovered_turn';
-    if (session.definition?.['lineage'] !== undefined) return 'lineage';
-    const shape = hostedApprovalResumeShapeRefusal(session, brokerOptions);
-    if (shape) return shape;
     if (
       session.stores?.supportsActionParking?.() !== true ||
       session.stores?.supportsWakeDispatch?.() !== true
@@ -5179,9 +5197,24 @@ export function registerHostedHarnessSessionRoutes(
         event.payload['turnId'] === registration.promptId,
     );
     if (!accepted) return 'input_missing';
-    if (isWakeOwnedInput(accepted)) return 'wake_owned';
+    // A wake-started Turn parks only where the pump resumes its wait, and
+    // only on a control plane that accepts its wake-claiming certificate.
+    const wakeOwned = isWakeOwnedInput(accepted);
+    if (
+      wakeOwned &&
+      (!isResumableWakeSource(accepted.payload['source']) ||
+        session.stores?.supportsWakeActionParking?.() !== true)
+    )
+      return 'wake_owned';
+    // The pump owns wake inputs, so the unsettled set never holds a wake
+    // Turn's own: it must hold nothing else. A second wake input still
+    // refuses at the gate, which reads every pending input.
     const unsettled = unsettledInputs(session);
-    if (unsettled.size !== 1 || !unsettled.has(registration.promptId))
+    if (
+      wakeOwned
+        ? unsettled.size !== 0
+        : unsettled.size !== 1 || !unsettled.has(registration.promptId)
+    )
       return 'other_unsettled_input';
     if (
       session.managed.authority.action(registration.options.requestId)
@@ -5193,11 +5226,23 @@ export function registerHostedHarnessSessionRoutes(
       registration.promptId,
     );
     if (!continuation) return 'no_continuation';
-    if (continuation.plan.commandStep !== undefined) return 'command_step';
+    const commandStep = continuation.plan.commandStep;
+    const shape = commandStep
+      ? hostedCommandStepResumeShapeRefusal(session, brokerOptions)
+      : hostedApprovalResumeShapeRefusal(session, brokerOptions);
+    if (shape) return shape;
+    // A drained MCP owner comes back under a new connection, so its tool
+    // names would no longer match the saved batch.
+    if (session.mcp && !session.mcp.parkable()) return 'mcp_not_parkable';
+    // The pump resumes only a native wait.
+    if (commandStep && wakeOwned) return 'wake_owned';
     if (
-      !(await hostedOriginalPromptText(session.managed, registration.promptId))
+      (await hostedOriginalPromptText(
+        session.managed,
+        registration.promptId,
+      )) === undefined
     )
-      return 'prompt_text_missing';
+      return 'original_prompt_missing';
     let approvalRevision: number | undefined;
     if (registration.livePoll) {
       const settings = registration.settings;
@@ -5230,6 +5275,7 @@ export function registerHostedHarnessSessionRoutes(
         session.managed,
         registration.promptId,
       )),
+      wakeOwned,
     };
   };
 
@@ -5372,7 +5418,8 @@ export function registerHostedHarnessSessionRoutes(
         if (park) {
           const certificateLost = await refreshBackgroundCertificate();
           const blocked =
-            backgroundCertified ||
+            (backgroundCertified &&
+              session.stores?.supportsBackgroundActionParking?.() !== true) ||
             certificateLost ||
             hostedActionParkRegistration(session.managed) !==
               park.registration ||
@@ -5510,15 +5557,19 @@ export function registerHostedHarnessSessionRoutes(
             // closes, recomputed on every retry.
             let wake: ManagedSessionWakeStamp | undefined;
             if (actionPark) {
+              // A wake-started Turn has no Turn row to redispatch: its park
+              // claims the wake at its own due time, and the scan resumes it.
               wake = {
-                pending: false,
-                dueAt: 0,
+                pending: actionPark.wakeOwned,
+                dueAt: actionPark.wakeOwned ? actionPark.wakeAt : 0,
+                ...(backgroundCertified ? { backgroundHeld: true } : {}),
                 parkedTurn: {
                   promptId: actionPark.promptId,
                   wakeAt: actionPark.wakeAt,
                   ...(actionPark.approvalRevision === undefined
                     ? {}
                     : { approvalRevision: actionPark.approvalRevision }),
+                  ...(actionPark.wakeOwned ? { owner: 'wake' as const } : {}),
                 },
               };
             } else if (session.stores?.supportsWakeDispatch?.()) {
@@ -6752,7 +6803,7 @@ export function registerHostedHarnessSessionRoutes(
               resident.managed,
               parked,
             );
-            if (!text)
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -8243,6 +8294,70 @@ export function registerHostedHarnessSessionRoutes(
               // terminal settlement from their own funnel; monitor turns
               // keep the recovery-blocked freeze their fleet owns.
               settleInterrupted: settleInterruptedChannelWake,
+              // A wake turn's native approval wait resumes on the terms the
+              // takeover arm applies to a parked prompt's, ahead of a channel
+              // turn's own settlement, which keeps every other wait.
+              // Session-message turns keep their own settlement.
+              resumeInterrupted: async (turn) => {
+                if (
+                  !isResumableWakeSource(turn.source) ||
+                  hostedApprovalResumeShapeRefusal(session, brokerOptions)
+                )
+                  return undefined;
+                const verdict =
+                  await session.managed.authority.harnessRunAuthorization();
+                if (
+                  verdict.status !== 'runnable' ||
+                  verdict.checkpoint.identity.turnId !== turn.turnId ||
+                  verdict.checkpoint.continuation.phase !== 'await_action'
+                )
+                  return undefined;
+                let continuation:
+                  | RestoredHostedApprovalContinuation
+                  | undefined;
+                try {
+                  continuation = await findHostedApprovalContinuation(
+                    session.managed,
+                    turn.turnId,
+                  );
+                } catch (cause) {
+                  // A Store fault says nothing about the saved continuation,
+                  // so the pump retries it. Any other rejection is fixed in
+                  // the journal and would fail every pass: the Turn takes the
+                  // crash path instead, as it did before it could resume.
+                  if (
+                    cause instanceof ManagedSessionStoreTransportError ||
+                    (cause instanceof ManagedSessionStoreHttpError &&
+                      (cause.status === 429 || cause.status >= 500))
+                  )
+                    throw cause;
+                  writeStderrLineSafe(
+                    `qwen serve: Interrupted wake turn ${turn.turnId} cannot resume its approval wait: ${String(cause)}`,
+                  );
+                  return undefined;
+                }
+                if (!continuation || continuation.plan.commandStep)
+                  return undefined;
+                const text = await hostedOriginalPromptText(
+                  session.managed,
+                  turn.turnId,
+                );
+                if (text === undefined) return undefined;
+                return (abort) =>
+                  executeHostedTurn(
+                    session,
+                    sessionId,
+                    cwd,
+                    turn.turnId,
+                    text,
+                    abort,
+                    brokerOptions,
+                    undefined,
+                    undefined,
+                    undefined,
+                    continuation,
+                  );
+              },
               writeStderr: writeStderrLineSafe,
             });
             // H6c: the automation turn settled; its run settles from the
@@ -8427,8 +8542,9 @@ export function registerHostedHarnessSessionRoutes(
         await managed.close();
         return error(res, 409, 'hosted_tool_profile_conflict');
       }
-      const pendingCommandApproval =
-        session.extensions?.enabled && unsettled
+      const pendingContinuation =
+        (session.extensions?.enabled || session.hooks || session.mcp) &&
+        unsettled
           ? await findHostedApprovalContinuation(managed, unsettled)
           : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
@@ -8446,18 +8562,27 @@ export function registerHostedHarnessSessionRoutes(
         takeoverFlags &&
         !lifecycle &&
         !!session.extensions?.enabled &&
-        pendingCommandApproval?.plan.commandStep !== undefined;
-      // A parked command-step round must never be answered by a cold load:
-      // answering writes a durable tool_result for the plan's own skill call,
-      // which permanently destroys the continuation. Both answer guards below
-      // key on this one predicate. pendingCommandApproval is computed
-      // unconditionally above; resumeApproval is only assigned inside the
-      // takeover arm, so on a bare load it is undefined and cannot be the key
-      // (R9-1).
+        pendingContinuation?.plan.commandStep !== undefined;
+      // A Hooks or MCP Session's saved native batch is recovered the same
+      // way: only by an explicit takeover load, and only on a shape recovery
+      // admits.
+      const hooksNativePark =
+        (session.hooks !== undefined || session.mcp !== undefined) &&
+        pendingContinuation !== undefined &&
+        pendingContinuation.plan.commandStep === undefined &&
+        hostedApprovalResumeShapeRefusal(session, brokerOptions) === undefined;
+      const hooksNativeTakeover =
+        takeoverFlags && !lifecycle && hooksNativePark;
+      // A parked command-step or Hooks native round must never be answered by
+      // a cold load: answering writes a durable tool_result for one of the
+      // plan's own calls, which permanently destroys the continuation. Both
+      // answer guards below key on this one predicate. pendingContinuation is
+      // computed unconditionally above; resumeApproval is only assigned inside
+      // the takeover arm, so on a bare load it is undefined and cannot be the
+      // key (R9-1).
       let resumeApproval: RestoredHostedApprovalContinuation | undefined;
-      const commandStepPark =
-        pendingCommandApproval?.plan.commandStep !== undefined ||
-        resumeApproval?.plan.commandStep !== undefined;
+      const continuationPark =
+        pendingContinuation?.plan.commandStep !== undefined || hooksNativePark;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -8469,7 +8594,7 @@ export function registerHostedHarnessSessionRoutes(
         session.hooks &&
         !lifecycle &&
         unsettled !== undefined &&
-        !commandStepPark
+        !continuationPark
       ) {
         try {
           await answerResumedTurnCalls({
@@ -8536,7 +8661,9 @@ export function registerHostedHarnessSessionRoutes(
         !fileHistory?.pendingUndo &&
         fileHistory?.pendingTurn &&
         !pumpOwnedParked
-          ? (takeover || extensionsCommandStepTakeover) &&
+          ? (takeover ||
+              extensionsCommandStepTakeover ||
+              hooksNativeTakeover) &&
             unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
               ? null
@@ -8671,15 +8798,8 @@ export function registerHostedHarnessSessionRoutes(
         if (!committedModelOutput)
           resumeModel = await findHostedModelRequest(managed, unsettled);
         if (resumeModel) {
-          const user = (await managed.sink.project()).find(
-            (item) => item.type === 'user' && item.daemonPromptId === unsettled,
-          );
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original model Prompt is missing.',
             );
@@ -8690,19 +8810,21 @@ export function registerHostedHarnessSessionRoutes(
       // the settle exemption above): an explicit, non-lifecycle takeover of an
       // extensions Session's parked command-step plan, even when a Hook catalog
       // makes `takeover` itself false. It is scoped to a command-step plan — a
-      // native approval on a hooks/MCP Session is refused by
-      // resumeSavedNativeBatch, so admitting it here would 503 the load instead
-      // of attaching (R7-2); native approvals stay on the no-hooks arm. Sharing
-      // the boolean with the settle exemption keeps a file-history-owing batch
-      // recoverable instead of 409'ing before this arm is consulted (R8-1).
+      // native approval on an MCP Session is refused by resumeSavedNativeBatch,
+      // so admitting it here would 503 the load instead of attaching (R7-2);
+      // a Hooks Session's native plan takes the Hooks arm on the shape terms
+      // its park eligibility read. Sharing the booleans with the settle
+      // exemption keeps a file-history-owing batch recoverable instead of
+      // 409'ing before this arm is consulted (R8-1).
       if (
         unsettled &&
         ((takeover &&
           hostedApprovalResumeShapeRefusal(session, brokerOptions) ===
             undefined) ||
-          (session.toolProfile &&
-            brokerOptions &&
-            extensionsCommandStepTakeover))
+          (extensionsCommandStepTakeover &&
+            hostedCommandStepResumeShapeRefusal(session, brokerOptions) ===
+              undefined) ||
+          hooksNativeTakeover)
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -8712,11 +8834,11 @@ export function registerHostedHarnessSessionRoutes(
           )
         ) {
           resumeApproval =
-            pendingCommandApproval ??
+            pendingContinuation ??
             (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const text = await hostedOriginalPromptText(managed, unsettled);
-            if (!text)
+            if (text === undefined)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
@@ -8764,13 +8886,8 @@ export function registerHostedHarnessSessionRoutes(
           const projected = (await managed.sink.project()).filter(
             (record) => record.daemonPromptId === unsettled,
           );
-          const user = projected.find((record) => record.type === 'user');
-          const text = user?.message?.parts
-            ?.flatMap((part) =>
-              typeof part.text === 'string' ? [part.text] : [],
-            )
-            .join('\n');
-          if (!text)
+          const text = await hostedOriginalPromptText(managed, unsettled);
+          if (text === undefined)
             throw new HostedToolRecoveryRequiredError(
               'Original Prompt is missing.',
             );
@@ -9028,7 +9145,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId && !commandStepPark)
+        if (promptId && !continuationPark)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
@@ -9107,7 +9224,9 @@ export function registerHostedHarnessSessionRoutes(
         (hasUnsettledInput(session, unsettledThrough) &&
           !resume &&
           !settlePromptId &&
-          !session.hooks &&
+          // A Hooks Session otherwise recovers through this load, but only a
+          // takeover may resume a parked command step or native batch (R9-1).
+          (!session.hooks || continuationPark) &&
           !recovery &&
           !inapplicableAnswer)
       ) {
