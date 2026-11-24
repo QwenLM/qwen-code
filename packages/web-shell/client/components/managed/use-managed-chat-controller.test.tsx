@@ -789,6 +789,65 @@ describe('useManagedChatController', () => {
     ).toBe(true);
   });
 
+  it('refuses a different-turn cancel while the first admission is still in flight', async () => {
+    const h = mount();
+    const cancelReceipt = deferred<{
+      sessionId: string;
+      turnId: string;
+      operationId: string;
+    }>();
+    vi.mocked(h.provider.cancel).mockReturnValueOnce(cancelReceipt.promise);
+    vi.mocked(h.provider.queryCancelOperation).mockResolvedValue({
+      sessionId: 'session-1',
+      operationId: 'cancel-live-turn-1',
+      type: 'cancel',
+      status: 'completed',
+      admissionStage: 'java_durable',
+      deliveryState: 'confirmed',
+      replayed: false,
+    });
+    await h.render();
+    await flushReact();
+
+    const first = h.controller!.cancel();
+    await flushReact();
+    // Branch precondition: the live slot exists with exactly one dispatch
+    // and its receipt still pending.
+    expect(h.provider.cancel).toHaveBeenCalledTimes(1);
+
+    vi.mocked(h.provider.getSession).mockResolvedValue({
+      ...summary('session-1'),
+      activeTurnId: 'turn-2',
+    });
+    await act(async () => h.emit(event(2, 'session-1', 'context_changed')));
+    await flushReact();
+
+    const second = h.controller!.cancel();
+    await flushReact();
+    const secondSettled = await Promise.race([
+      second.then(() => 'settled'),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 0)),
+    ]);
+    expect(secondSettled).toBe('settled');
+    const secondResult = await second;
+    expect(secondResult.admission).toBe('unknown');
+    expect(secondResult.target.turnId).toBe('turn-2');
+    expect(h.provider.cancel).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      cancelReceipt.resolve({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        operationId: 'cancel-live-turn-1',
+      });
+      await Promise.resolve();
+    });
+    const firstResult = await first;
+    await flushReact();
+    expect(firstResult.admission).toBe('accepted');
+    expect(firstResult.target.turnId).toBe('turn-1');
+  });
+
   it('rejects foreign session summaries, mismatched cancel turn receipts, and foreign action admissions', async () => {
     // 1. Summary sessionId mismatch -> no controller bound
     const mismatched = mount({ sessionId: 'session-expected' });
