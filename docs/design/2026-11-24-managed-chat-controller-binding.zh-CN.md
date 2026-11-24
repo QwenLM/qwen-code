@@ -188,7 +188,9 @@ owner 改变或 unmount 时中止该 owner 的请求信号；effect 重建时重
 永久中止或拆断结算监听。迟到的 transport 或事件结果不会进入新 owner 的
 listeners。待初始 summary 与初始 transcript 加载完成后，hook 锁定事件高水位
 线，确保初始历史快照与后续 `loadOlder()` 拉回的旧历史页都不会重放为新的
-turn 结算。停止观察并不等于取消服务端已经接受的 operation。
+turn 结算。停止观察并不等于取消服务端已经接受的 operation。准入后的 summary
+刷新是建议性的：调用点吞掉它的失败或中止，因为恢复与持续错误展示由 session
+轮询循环负责。
 
 `detail.stoppedReason`／`stoppedLeg` 与真实 loading 状态决定转录状态；一次
 older-page 临时失败不得偷偷成为整个 session 的终态错误。queue 与 goal 字段继续

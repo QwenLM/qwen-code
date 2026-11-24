@@ -304,6 +304,62 @@ describe('useManagedChatController', () => {
     },
   );
 
+  it('keeps admission accepted and leaks no unhandled rejection when the post-admission summary refresh fails', async () => {
+    const h = mount();
+    await h.render();
+    await flushReact();
+    const reads = vi.mocked(h.provider.getSession).mock.calls.length;
+    vi.mocked(h.provider.getSession).mockRejectedValueOnce(
+      Object.assign(new Error('refresh blip'), { status: 503 }),
+    );
+    // web-shell ignores unhandled errors off Linux, so pin the absence here.
+    const unhandled: unknown[] = [];
+    const capture = (error: unknown) => unhandled.push(error);
+    process.on('unhandledRejection', capture);
+    try {
+      const result = await h.controller!.submit({ text: 'refresh blip' });
+      await flushReact();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(result.admission).toBe('accepted');
+      expect(h.controller!.operations[0]?.state).toBe('running');
+      expect(
+        vi.mocked(h.provider.getSession).mock.calls.length,
+      ).toBeGreaterThan(reads);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', capture);
+    }
+  });
+
+  it('swallows the post-admission refresh rejection when the owner switches mid-refresh', async () => {
+    const h = mount();
+    await h.render();
+    await flushReact();
+    const refresh = deferred<ManagedAgentSessionSummary>();
+    vi.mocked(h.provider.getSession).mockReturnValueOnce(refresh.promise);
+    const unhandled: unknown[] = [];
+    const capture = (error: unknown) => unhandled.push(error);
+    process.on('unhandledRejection', capture);
+    try {
+      const submission = h.controller!.submit({ text: 'switch mid-refresh' });
+      await flushReact();
+      await h.render({ sessionId: 'other' });
+      refresh.resolve(summary('session-1'));
+      const result = await submission;
+      await flushReact();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(result.admission).toBe('accepted');
+      expect(h.controller!.sessionId).toBe('other');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', capture);
+    }
+  });
+
   it('preserves structured question fields and keeps late operation failure distinct from fulfilment', async () => {
     const action = pendingQuestion();
     const h = mount({ pending: [action] });

@@ -221,7 +221,9 @@ transport or event results never enter a new owner's listeners. Once the initial
 summary and transcript finish loading, the hook latches an event high-water mark
 so initial history snapshots and later `loadOlder()` pages never replay as fresh
 turn settlements. Stopping observations does not purport to cancel a backend
-operation already accepted by the server.
+operation already accepted by the server. The post-admission summary refresh
+is advisory: its failure or abort is swallowed at the call site, because the
+session poll loop owns recovery and the standing error display.
 
 `detail.stoppedReason`/`stoppedLeg` and the real loading states govern transcript
 status; transient older-page errors do not silently become terminal session

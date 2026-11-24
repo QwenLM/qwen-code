@@ -465,7 +465,11 @@ export function useManagedChatController({
           ) {
             return { admission: 'unknown' };
           }
-          void facts(owner).detail.refreshSummary();
+          // Advisory refresh: the session poll loop owns recovery, and a
+          // failed or aborted read must not escape as an unhandled rejection.
+          void facts(owner)
+            .detail.refreshSummary()
+            .catch(() => undefined);
           return {
             admission: 'accepted',
             turnId: admission.turnId,
