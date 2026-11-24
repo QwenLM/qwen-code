@@ -33,12 +33,14 @@ import {
   chmodSync,
   chownSync,
   closeSync,
-  createReadStream,
+  constants as fsConstants,
   createWriteStream,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  read,
   readSync,
   renameSync,
   rmSync,
@@ -48,6 +50,7 @@ import {
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import { isTokenFileRevoked } from './verify-pr-model-proxy.mjs';
 import { validateSocketPathLength } from './verify-pr-vm-collector.mjs';
 
@@ -416,18 +419,6 @@ export function startInputServer({
   if (typeof bundlePath !== 'string' || bundlePath.trim() === '') {
     throw new Error('bundlePath must be a non-empty path');
   }
-  const bundleStat = lstatSync(bundlePath);
-  if (
-    bundleStat.isSymbolicLink() ||
-    !bundleStat.isFile() ||
-    bundleStat.nlink !== 1 ||
-    bundleStat.size !== manifest.bundleBytes
-  ) {
-    throw new Error(
-      'bundlePath must be a single-link regular file matching manifest.bundleBytes',
-    );
-  }
-  const bundleIdentity = { dev: bundleStat.dev, ino: bundleStat.ino };
   const lenCheck = validateSocketPathLength(socketPath);
   if (!lenCheck.ok) {
     throw new Error(`input-server: ${lenCheck.reason}`);
@@ -439,6 +430,61 @@ export function startInputServer({
     );
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
+  }
+
+  // Open the validated bundle once with O_NOFOLLOW | O_NONBLOCK and hold the
+  // read-only fd for the lifetime of the server. Keeping the inode pinned in
+  // the kernel prevents the filesystem from reusing its inode number after an
+  // unlink+recreate replacement (fstatSync(bundleFd).nlink drops to 0).
+  const preStat = lstatSync(bundlePath);
+  if (
+    preStat.isSymbolicLink() ||
+    !preStat.isFile() ||
+    preStat.nlink !== 1 ||
+    preStat.size !== manifest.bundleBytes
+  ) {
+    throw new Error(
+      'bundlePath must be a single-link regular file matching manifest.bundleBytes',
+    );
+  }
+  const openFlags =
+    fsConstants.O_RDONLY |
+    (fsConstants.O_NOFOLLOW ?? 0) |
+    (fsConstants.O_NONBLOCK ?? 0);
+  let bundleFd = openSync(bundlePath, openFlags);
+  let activeReads = 0;
+  let closeFdPending = false;
+  const closeBundleFd = () => {
+    if (bundleFd === null) return;
+    if (activeReads > 0) {
+      closeFdPending = true;
+      return;
+    }
+    const fd = bundleFd;
+    bundleFd = null;
+    closeFdPending = false;
+    try {
+      closeSync(fd);
+    } catch {
+      // Already closed.
+    }
+  };
+  let bundleIdentity;
+  try {
+    const fStat = fstatSync(bundleFd);
+    if (
+      !fStat.isFile() ||
+      fStat.nlink !== 1 ||
+      fStat.size !== manifest.bundleBytes
+    ) {
+      throw new Error(
+        'bundlePath must be a single-link regular file matching manifest.bundleBytes',
+      );
+    }
+    bundleIdentity = { dev: fStat.dev, ino: fStat.ino };
+  } catch (error) {
+    closeBundleFd();
+    throw error;
   }
 
   const encodedManifest =
@@ -454,18 +500,76 @@ export function startInputServer({
     rejectedInvalid: 0,
     rejectedBusy: 0,
   };
-  const activeSockets = new Set();
+  const openSockets = new Set();
+  const inFlightSockets = new Set();
   let socketIdentity = null;
   let closed = false;
 
+  // Flush the rejection message cleanly before closing so the kernel does not
+  // turn unread client bytes into an immediate RST/EPIPE. Release the
+  // concurrency slot immediately so a half-closed socket cannot falsely reject
+  // the next sequential request under maxConcurrent=1.
+  const endAndClose = (socket, message) => {
+    inFlightSockets.delete(socket);
+    socket.resume();
+    socket.end(message);
+    const guard = setTimeout(() => {
+      if (!socket.destroyed) socket.destroy();
+    }, 150);
+    guard.unref?.();
+    socket.once('close', () => clearTimeout(guard));
+  };
+
+  const createPinnedBundleStream = (fd, totalBytes) => {
+    let offset = 0;
+    const chunkBytes = 64 * 1024;
+    return new Readable({
+      read() {
+        if (offset >= totalBytes) {
+          this.push(null);
+          return;
+        }
+        if (closeFdPending || bundleFd === null) {
+          this.destroy(new Error('input server closed while streaming bundle'));
+          return;
+        }
+        const toRead = Math.min(chunkBytes, totalBytes - offset);
+        const buf = Buffer.allocUnsafe(toRead);
+        activeReads += 1;
+        read(fd, buf, 0, toRead, offset, (err, bytesRead) => {
+          activeReads -= 1;
+          if (closeFdPending && activeReads === 0) {
+            closeBundleFd();
+          }
+          if (err) {
+            this.destroy(err);
+            return;
+          }
+          if (bytesRead <= 0) {
+            this.destroy(new Error('bundle shrank while streaming'));
+            return;
+          }
+          offset += bytesRead;
+          this.push(bytesRead === toRead ? buf : buf.subarray(0, bytesRead));
+        });
+      },
+    });
+  };
+
   const server = net.createServer((socket) => {
-    if (closed || activeSockets.size >= maxConcurrent) {
-      stats.rejectedBusy += 1;
-      socket.end('ERR busy\n');
+    openSockets.add(socket);
+    socket.once('error', () => {
+      inFlightSockets.delete(socket);
+      openSockets.delete(socket);
       socket.destroy();
+    });
+    if (closed || inFlightSockets.size >= maxConcurrent) {
+      stats.rejectedBusy += 1;
+      socket.once('close', () => openSockets.delete(socket));
+      endAndClose(socket, 'ERR busy\n');
       return;
     }
-    activeSockets.add(socket);
+    inFlightSockets.add(socket);
     let handled = false;
     let buf = Buffer.alloc(0);
 
@@ -473,27 +577,23 @@ export function startInputServer({
       if (!handled) {
         handled = true;
         stats.rejectedInvalid += 1;
-        socket.end('ERR timeout\n');
-        socket.destroy();
+        endAndClose(socket, 'ERR timeout\n');
       }
     }, commandTimeoutMs);
     timer.unref?.();
 
     const finish = () => {
       clearTimeout(timer);
-      activeSockets.delete(socket);
+      inFlightSockets.delete(socket);
+      openSockets.delete(socket);
     };
     socket.once('close', finish);
-    socket.once('error', () => {
-      finish();
-      socket.destroy();
-    });
 
     const reject = (code, statKey) => {
       handled = true;
       clearTimeout(timer);
       stats[statKey] += 1;
-      socket.end(`ERR ${code}\n`);
+      endAndClose(socket, `ERR ${code}\n`);
     };
 
     socket.on('data', (chunk) => {
@@ -503,13 +603,11 @@ export function startInputServer({
       if (nl === -1) {
         if (buf.length > maxCommandBytes) {
           reject('command-too-long', 'rejectedInvalid');
-          socket.destroy();
         }
         return;
       }
       if (nl > maxCommandBytes) {
         reject('command-too-long', 'rejectedInvalid');
-        socket.destroy();
         return;
       }
       handled = true;
@@ -518,48 +616,64 @@ export function startInputServer({
 
       if (tokenFile !== null && isTokenFileRevoked(tokenFile)) {
         stats.rejectedRevoked += 1;
-        socket.end('ERR token-revoked\n');
+        endAndClose(socket, 'ERR token-revoked\n');
         return;
       }
       const totalServed = stats.servedManifest + stats.servedBundle;
       if (totalServed >= maxReads) {
         stats.rejectedBudget += 1;
-        socket.end('ERR read-budget-exceeded\n');
+        endAndClose(socket, 'ERR read-budget-exceeded\n');
         return;
       }
 
       if (line === 'GET manifest') {
         stats.servedManifest += 1;
         socket.write(`OK ${encodedManifest.length}\n`);
-        socket.end(encodedManifest);
+        socket.end(encodedManifest, () => {
+          inFlightSockets.delete(socket);
+        });
         return;
       }
 
       if (line === 'GET bundle') {
-        let cur;
+        if (bundleFd === null) {
+          stats.rejectedInvalid += 1;
+          endAndClose(socket, 'ERR bundle-unavailable\n');
+          return;
+        }
+        let fdStat;
+        let pathStat;
         try {
-          cur = lstatSync(bundlePath);
+          fdStat = fstatSync(bundleFd);
+          pathStat = lstatSync(bundlePath);
         } catch {
           stats.rejectedInvalid += 1;
-          socket.end('ERR bundle-unavailable\n');
+          endAndClose(socket, 'ERR bundle-invalid\n');
           return;
         }
         if (
-          cur.isSymbolicLink() ||
-          !cur.isFile() ||
-          cur.nlink !== 1 ||
-          cur.dev !== bundleIdentity.dev ||
-          cur.ino !== bundleIdentity.ino ||
-          cur.size !== manifest.bundleBytes
+          !fdStat.isFile() ||
+          fdStat.nlink !== 1 ||
+          fdStat.size !== manifest.bundleBytes ||
+          pathStat.isSymbolicLink() ||
+          !pathStat.isFile() ||
+          pathStat.nlink !== 1 ||
+          pathStat.dev !== bundleIdentity.dev ||
+          pathStat.ino !== bundleIdentity.ino ||
+          pathStat.size !== manifest.bundleBytes
         ) {
           stats.rejectedInvalid += 1;
-          socket.end('ERR bundle-invalid\n');
+          endAndClose(socket, 'ERR bundle-invalid\n');
           return;
         }
         stats.servedBundle += 1;
-        socket.write(`OK ${cur.size}\n`);
-        const rs = createReadStream(bundlePath);
+        socket.write(`OK ${fdStat.size}\n`);
+        const rs = createPinnedBundleStream(bundleFd, fdStat.size);
+        rs.on('end', () => {
+          inFlightSockets.delete(socket);
+        });
         rs.on('error', () => {
+          inFlightSockets.delete(socket);
           socket.destroy();
         });
         socket.on('close', () => {
@@ -570,12 +684,15 @@ export function startInputServer({
       }
 
       stats.rejectedInvalid += 1;
-      socket.end('ERR unknown-command\n');
+      endAndClose(socket, 'ERR unknown-command\n');
     });
   });
 
   const ready = new Promise((resolveReady, rejectReady) => {
-    server.once('error', rejectReady);
+    server.once('error', (err) => {
+      closeBundleFd();
+      rejectReady(err);
+    });
     server.listen(socketPath, () => {
       try {
         const st = lstatSync(socketPath);
@@ -586,6 +703,7 @@ export function startInputServer({
         }
         resolveReady({ socketPath });
       } catch (error) {
+        closeBundleFd();
         const cleanup = socketIdentity
           ? removeOwnedInputSocket(socketPath, socketIdentity)
           : { identityChanged: false };
@@ -604,10 +722,11 @@ export function startInputServer({
       return { ok: true, identityChanged: false, error: null };
     }
     closed = true;
-    for (const s of activeSockets) {
+    for (const s of openSockets) {
       s.destroy();
     }
-    activeSockets.clear();
+    openSockets.clear();
+    inFlightSockets.clear();
     const cleanup = socketIdentity
       ? removeOwnedInputSocket(socketPath, socketIdentity)
       : { ok: true, identityChanged: false, error: null };
@@ -621,6 +740,7 @@ export function startInputServer({
         });
       }
     }
+    closeBundleFd();
     return cleanup;
   }
 
@@ -655,6 +775,7 @@ function fetchOneFramedItem(
     const fail = (err) => {
       if (settled) return;
       settled = true;
+      client.setTimeout(0);
       if (ws) ws.destroy();
       client.destroy();
       rejectFetch(err);
@@ -662,6 +783,7 @@ function fetchOneFramedItem(
     const succeed = () => {
       if (settled) return;
       settled = true;
+      client.setTimeout(0);
       const digest = hash.digest('hex');
       if (ws) {
         ws.end(() => resolveFetch({ bytes: received, sha256: digest }));

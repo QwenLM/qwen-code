@@ -30,6 +30,8 @@ ACK = b"host-vsock-ack"
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 CHUNK_SIZE = 64 * 1024
+# Host collector defaults: maxChunkBytes=2048, maxFrameBytes=4096.
+UPLOAD_CHUNK_SIZE = 2048
 
 
 def connect_endpoint(args, timeout=15.0):
@@ -277,20 +279,35 @@ def cmd_upload_artifacts(args):
         if ack != ACK:
             raise RuntimeError(f"unexpected collector ack: {ack!r}")
         send_frame(sock, "H", b"report-v1")
-        for rel_name, full_path, file_size in files:
-            send_frame(
-                sock,
-                "B",
-                struct.pack(">Q", file_size) + rel_name.encode("utf-8"),
-            )
-            digest = hashlib.sha256()
-            with open(full_path, "rb") as fp:
-                while True:
-                    chunk = fp.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    send_frame(sock, "C", chunk)
+        for rel_name, full_path, _ in files:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(full_path, flags)
+            try:
+                f_st = os.fstat(fd)
+                if not stat.S_ISREG(f_st.st_mode):
+                    raise RuntimeError(f"refusing non-regular file: {rel_name}")
+                file_size = f_st.st_size
+                send_frame(
+                    sock,
+                    "B",
+                    struct.pack(">Q", file_size) + rel_name.encode("utf-8"),
+                )
+                digest = hashlib.sha256()
+                remaining = file_size
+                with os.fdopen(fd, "rb") as fp:
+                    fd = -1
+                    while remaining > 0:
+                        chunk = fp.read(min(UPLOAD_CHUNK_SIZE, remaining))
+                        if not chunk:
+                            raise RuntimeError(
+                                f"file shrank while uploading: {rel_name}"
+                            )
+                        digest.update(chunk)
+                        send_frame(sock, "C", chunk)
+                        remaining -= len(chunk)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
             send_frame(sock, "E", digest.hexdigest().encode("ascii"))
         send_frame(sock, "R", b"")
         reply = sock.recv(256)

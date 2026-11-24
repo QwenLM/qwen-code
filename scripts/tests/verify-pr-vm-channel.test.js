@@ -9,6 +9,7 @@ import { once } from 'node:events';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -601,5 +602,131 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
     ]);
     expect(badListen.status).toBe(1);
     expect(badListen.stderr).toMatch(/non-loopback/);
+  });
+
+  it('pins real-size guest uploads (F1), clean ERR busy delivery (F2), inode-reuse-proof bundle pinning (F3), and startup hard-link refusal (M4)', async () => {
+    const { root, repoDir, baseRefOid, headRefOid } = makeFixtureRepo();
+
+    // F1: default collector (maxChunkBytes=2048, maxFrameBytes=4096) receives
+    // 2048B, 2049B, 4092B, 12 KiB report.md, and 120 KiB PNG via Python guest
+    const largeReport = `${`merge-ready · 1 passed · 0 failed · 1 total · ${headRefOid}\n\n`.padEnd(12 * 1024, 'x')}\n`;
+    const largePng = Buffer.concat([
+      PNG_BYTES,
+      Buffer.alloc(120 * 1024 - PNG_BYTES.length, 0x5a),
+    ]);
+    const log2048 = 'a'.repeat(2048);
+    const log2049 = 'b'.repeat(2049);
+    const log4092 = 'c'.repeat(4092);
+
+    const artDir = join(root, 'real-size-art');
+    mkdirSync(join(artDir, 'evidence'), { recursive: true });
+    mkdirSync(join(artDir, 'logs'), { recursive: true });
+    writeFileSync(join(artDir, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(artDir, 'assertions.json'),
+      '{"pass":1,"fail":0,"total":1}\n',
+    );
+    writeFileSync(join(artDir, 'report.md'), largeReport);
+    writeFileSync(join(artDir, 'evidence', '01-ab.png'), largePng);
+    writeFileSync(join(artDir, 'logs', 'b2048.log'), log2048);
+    writeFileSync(join(artDir, 'logs', 'b2049.log'), log2049);
+    writeFileSync(join(artDir, 'logs', 'b4092.log'), log4092);
+
+    const vaultDir = join(root, 'real-size-vault');
+    const colSock = join(root, 'col-f1.sock');
+    const collector = startCollectorServer({ socketPath: colSock, vaultDir });
+    cleanups.push(() => collector.close());
+    await collector.ready;
+
+    const upRes = await runAsync('python3', [
+      GUEST_VSOCK_PY,
+      'upload-artifacts',
+      '--unix',
+      colSock,
+      '--dir',
+      artDir,
+    ]);
+    expect(upRes.status, upRes.stderr).toBe(0);
+    const summary = await collector.done;
+    expect(summary.outputStatus).toBe('complete');
+    expect(readFileSync(join(vaultDir, 'report.md'), 'utf8')).toBe(largeReport);
+    expect(readFileSync(join(vaultDir, 'evidence', '01-ab.png'))).toEqual(
+      largePng,
+    );
+    expect(readFileSync(join(vaultDir, 'logs', 'b2048.log'), 'utf8')).toBe(
+      log2048,
+    );
+    expect(readFileSync(join(vaultDir, 'logs', 'b2049.log'), 'utf8')).toBe(
+      log2049,
+    );
+    expect(readFileSync(join(vaultDir, 'logs', 'b4092.log'), 'utf8')).toBe(
+      log4092,
+    );
+
+    // M4: constructor refuses a hard-linked bundlePath before creating socket
+    const bundleInfo = createRoundInputBundle({
+      repoDir,
+      baseRefOid,
+      headRefOid,
+      outPath: join(root, 'm4.bundle'),
+    });
+    const built = buildInputManifest({
+      runId: 'm4f2',
+      baseRefOid,
+      headRefOid,
+      bundleSha256: bundleInfo.bundleSha256,
+      bundleBytes: bundleInfo.bundleBytes,
+    });
+    const hardAlias = join(root, 'm4-alias.bundle');
+    linkSync(bundleInfo.bundlePath, hardAlias);
+    const neverBoundSock = join(root, 'never-bound.sock');
+    expect(() =>
+      startInputServer({
+        socketPath: neverBoundSock,
+        manifest: built.manifest,
+        bundlePath: bundleInfo.bundlePath,
+      }),
+    ).toThrow(/single-link regular file/);
+    expect(existsSync(neverBoundSock)).toBe(false);
+    unlinkSync(hardAlias);
+
+    // F2: 12 consecutive over-cap Node clients receive ERR busy\n (zero EPIPE)
+    const busySock = join(root, 'busy.sock');
+    const busyServer = startInputServer({
+      socketPath: busySock,
+      manifest: built.manifest,
+      manifestBytes: built.manifestBytes,
+      bundlePath: bundleInfo.bundlePath,
+      maxConcurrent: 1,
+      commandTimeoutMs: 5_000,
+    });
+    cleanups.push(() => busyServer.close());
+    await busyServer.ready;
+
+    const holder = net.createConnection(busySock);
+    cleanups.push(() => holder.destroy());
+    await once(holder, 'connect');
+    // Give the server loop one tick to register holder in activeSockets.
+    await new Promise((r) => setTimeout(r, 20));
+    for (let i = 0; i < 12; i++) {
+      const reply = await rawCommand(busySock, 'GET manifest\n');
+      expect(reply).toBe('ERR busy\n');
+    }
+    expect(busyServer.getStats().rejectedBusy).toBe(12);
+    holder.destroy();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // F3: 20 tight unlink + same-size recreate trials must fail 20/20 because
+    // the server holds the original inode pinned via an open read-only fd.
+    const origLen = bundleInfo.bundleBytes;
+    for (let i = 0; i < 20; i++) {
+      unlinkSync(bundleInfo.bundlePath);
+      writeFileSync(
+        bundleInfo.bundlePath,
+        Buffer.alloc(origLen, 0x41 + (i % 26)),
+      );
+      const reply = await rawCommand(busySock, 'GET bundle\n');
+      expect(reply).toBe('ERR bundle-invalid\n');
+    }
   });
 });
