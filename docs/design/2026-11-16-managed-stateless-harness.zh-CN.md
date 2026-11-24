@@ -210,7 +210,7 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 - Harness 限制单个实例的并发冷打开数，候选常量为 8。超出限制的打开请求以新错误码 `409 hosted_session_open_busy` 拒绝。
 - 这个限制作用于所有冷打开，包括首次 create（即使没有 journal 要恢复，它也会安装 MCP 与 Hook owner），以及 Harness 重启后的批量重新加载，同时也会把这类批量加载拉平。被名额拒绝的 create 不发布任何资源，也不留下 unresolved-opening 债务。
 - 控制面已在 `HarnessConflictCodes` 中把 `hosted_session_open_busy` 归为暂时性错误；在 `HarnessCoordinator` 中把它归为推迟 Turn 但不消耗其准入预算的错误码，与现有的池 ownership 等待码同类（#17681）。没有它，一阵集中的拒绝就会耗尽排队 Turn 的准入预算，导致它们失败。
-- 免于扣减预算的等待仍需要上限，而这个上限对不同调用方含义不同。#17681 把该上限重命名为 `WAIT_CHURN_BUDGET_FACTOR`，并同时作用于 generation 等待与池等待：超过之后 **Turn** 以其所处阶段的 unavailable 错误码失败。**lifecycle** 操作则改为以拒绝自身的错误码发布 `recovery_blocked` 并继续被重驱，因为放弃会把它欠下的资源搁死。**relay 是剩余缺口**：#17681 只豁免了 command-execute 与 child-stop 两个分支，普通 session message 投递、child result 投递与 automation fire 仍把这些等待计入自己的尝试预算。由于 transport wake 与 SQL wake 恢复都只覆盖 public Session，被挂起的子 Session 完全依赖这些 relay，一次冷打开突发就可能把它的消息结算成 cancelled 或 unknown。补齐这个缺口是第一阶段前置条件，不是后续项。
+- 免于扣减预算的等待仍需要上限，而这个上限对不同调用方含义不同。#17681 把该上限重命名为 `WAIT_CHURN_BUDGET_FACTOR`，并同时作用于 generation 等待与池等待：超过之后 **Turn** 以其所处阶段的 unavailable 错误码失败。**lifecycle** 操作则改为以拒绝自身的错误码发布 `recovery_blocked` 并继续被重驱，因为放弃会把它欠下的资源搁死。**relay 是剩余缺口**。#17681 豁免了 command-execute 与 child-stop 两个分支，#18149 的阶段 3 豁免了普通 session message 投递的每个步骤，其 closing 等待由 Harness 升级为 `hosted_session_teardown_blocked` 来设上限；child result 投递与 automation fire 仍把这些等待计入自己的尝试预算。由于 transport wake 与 SQL wake 恢复都只覆盖 public Session，被挂起的子 Session 完全依赖这些 relay，一次冷打开突发就可能把它的消息结算成 cancelled 或 unknown。补齐这个缺口是第一阶段前置条件，不是后续项。
 - 控制面现有的限制保持不变：transport wake 的加载线程池，以及 `WakeRecovery` 每轮 8 个候选。
 - Session Store 由所有池成员共享，单实例限制管不住 store 负载，也不会减少恢复总工作量。启用挂起之前，测量空闲 SQL、随历史大小变化的冷打开 SQL/延迟/CPU、MCP 重连成本、回收的内存，以及读取或迟到 wake 通知引起的重载频率。在多个池成员下比较常驻与挂起负载，记录负载模型和接受的延迟/store 预算；候选默认值不满足预算时，调整常量或降低加载成本。早先的每分钟 51–56 条 SQL 和 200-Turn 加载测量，是需要复现的基线，不是当前保证。
 
@@ -220,7 +220,7 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 
 1. **已落地（#17521、#17680）。** 上述准入/恢复契约：仅准入操作的 404 恢复、会检查请求参数的 Harness mock、恢复快照与水位处理（含无 epoch 重提分支）。缓存引用失效和 Session 完全不在内存中，是两种不同情况。真实双控制面接管测试仍是欠项。
 2. **已落地（#17521、#17681）。** 所有 attachment/marker 更新纳入按 key 的归属规则，以及 SDK 心跳失效通知。
-3. **部分落地（#17681）。** 重试时重新选择池 placement；coordinator 与 lifecycle 处理中保留 closing、open-busy 和 ownership 等待，按"冷打开准入控制"一节设置等待上限，且不在 `hosted_session_teardown_blocked` 上等待。**仍欠：** 对该节指出的普通 relay 路径给予同样的豁免与上限。
+3. **部分落地（#17681）。** 重试时重新选择池 placement；coordinator 与 lifecycle 处理中保留 closing、open-busy 和 ownership 等待，按"冷打开准入控制"一节设置等待上限，且不在 `hosted_session_teardown_blocked` 上等待。普通 session message 投递自 #18149 阶段 3 起已获得豁免。**仍欠：** 对该节指出的 child result 投递与 automation fire 给予同样的豁免与上限。
 4. **部分落地（#17690）。** wake 缓存失效处理已改为在两张缓存中各只移除当次观察到的引用。**仍欠：** 证明延时输入资格与持久提示，以及在真实 MySQL 上验证[恢复视图补篇](2026-11-18-managed-suspension-recovery-view.zh-CN.md)的恢复/状态行为。
 5. **已落地（#17690）。** `create()`、`channelAttachment()`、`automationAttachment()` 对非"已在那里"的每个 409 保留其自身错误码，不再重新 load。
 6. 只有上述行为及测试落地后，才更新 coordinator 对永久常驻的假设。仅有 mock 重试测试通过，不能证明这些条件成立。
@@ -235,7 +235,7 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 
 ### 可观测性
 
-- Harness：干净挂起次数、可回退放弃次数、闸门保持关闭的失败/结果未知 teardown 及其持续时间和原因、判定未通过次数、冷打开耗时（拆分为 store 恢复和 MCP 重新安装）、`hosted_session_open_busy` 拒绝次数。失败 teardown 不计为干净挂起。
+- Harness：干净挂起次数、可回退放弃次数、闸门保持关闭的失败/结果未知 teardown 及其持续时间和原因、判定未通过次数、冷打开耗时（拆分为 store 恢复和 MCP 重新安装）、`hosted_session_open_busy` 拒绝次数。失败 teardown 不计为干净挂起。这些计数从进程启动起累计，在实例的 `/internal/hosted-harness/v1/metrics` 接口中以 `suspension` 字段返回。
 - 控制面：准入重新 attach、心跳失效、保留下来的恢复快照、池重新选择、清掉过期 attachment 的 wake 激活次数，以及达到上限的等待次数。
 
 ### 故障模式

@@ -2761,11 +2761,6 @@ export const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.restoreUnknown': '恢复本地副本',
-  'queue.discardUnknown': '丢弃本地副本',
-  'queue.continueEditing': '继续编辑',
-  'queue.continueEditingConfirm':
-    '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.commandGoalBlocked':
     'Goal 正在占用会话或状态仍在加载，暂时无法执行 Slash 命令。',
@@ -2780,7 +2775,8 @@ export const ZH: Messages = {
   'queue.insertTip': '插入当前回合',
   'queue.insertCommandDisabled': '命令不能插入当前回合',
   'queue.sendNow': '立即发送',
-  'queue.sendNowTip': '立即发送排队的消息。模型正在回复或调用工具时会打断它',
+  'queue.sendNowTip':
+    '立即发送排队的消息。可能打断当前回复或工具调用。可转后台的 shell 命令会继续运行。',
   'queue.sendNowFailed': '立即发送排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
@@ -4193,8 +4189,9 @@ export const ZH: Messages = {
   'userMessage.showMore': '显示更多',
   'userMessage.showLess': '收起',
   'userMessage.automatic.title': '自动触发',
-  'userMessage.sendFailed': '发送失败',
-  'userMessage.retrySend': '重新发送消息',
+  'userMessage.retrySend': '重发',
+  'userMessage.retryUncertain': '可能未送达，点击重发',
+  'userMessage.deliveryUncertain': '消息可能未送达，点击左侧感叹号重发',
   'userMessage.edit': '编辑消息',
   'message.moreActions': '更多操作',
   ...MESSAGE_DELETION_MESSAGES_ZH,

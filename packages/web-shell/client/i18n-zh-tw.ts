@@ -2670,11 +2670,6 @@ export const ZH_TW: Record<string, MessageValue> = {
   'queue.submittingDisabled': '排隊訊息正在提交中...',
   'queue.summaryEditDisabled': '恢復的佇列摘要無法還原原始附件。',
   'queue.admissionUnknown': '訊息是否送達尚不確定，請先檢查會話再重試。',
-  'queue.restoreUnknown': '恢復本地副本',
-  'queue.discardUnknown': '丟棄本地副本',
-  'queue.continueEditing': '繼續編輯',
-  'queue.continueEditingConfirm':
-    '這條訊息可能已經在執行。只有在接受重複傳送風險時才繼續編輯。',
   'queue.commandBlocked': '當前回合執行時，Slash 命令不能進入排隊。',
   'queue.commandGoalBlocked':
     'Goal 正在佔用會話或狀態仍在載入，暫時無法執行 Slash 命令。',
@@ -2689,7 +2684,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'queue.insertTip': '插入當前回合',
   'queue.insertCommandDisabled': '命令不能插入當前回合',
   'queue.sendNow': '立即傳送',
-  'queue.sendNowTip': '立即傳送排隊的訊息。模型正在回覆或呼叫工具時會打斷它',
+  'queue.sendNowTip':
+    '立即傳送排隊的訊息。可能中斷目前的回覆或工具呼叫。可轉到背景的 shell 命令會繼續執行。',
   'queue.sendNowFailed': '立即傳送排隊訊息失敗',
   'queue.footer': '按 ↑ 編輯最後一條排隊訊息 · Esc 清空佇列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 張圖片）`,
@@ -4205,8 +4201,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'userMessage.showMore': '顯示更多',
   'userMessage.showLess': '收起',
   'userMessage.automatic.title': '自動觸發',
-  'userMessage.sendFailed': '傳送失敗',
-  'userMessage.retrySend': '重新傳送訊息',
+  'userMessage.retrySend': '重發',
+  'userMessage.retryUncertain': '可能未送達，點擊重發',
+  'userMessage.deliveryUncertain': '訊息可能未送達，點擊左側驚嘆號重發',
   'userMessage.edit': '編輯訊息',
   'message.moreActions': '更多操作',
   'messageDelete.commandFailed': '命令執行失敗。',
@@ -6090,7 +6087,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '讓會話執行在共享的 agent loop 上。未設定時，每個入口使用自己的預設值：headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理執行在共享 loop 上，Hosted Harness 仍使用自己的 loop（在該入口上屬實驗性）。設為 `true` 時它們都執行在共享 loop 上（Hosted Harness 的模型輪執行在它上面，同時保留其 journal 化工具派發），設為 `false` 時它們都用各自的 loop，headless、ACP 會話、兩個 TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 環境變數按入口覆蓋此設定：`1` 開啟所有入口，`0` 關閉所有入口，逗號分隔的列表（如 `headless,acp=0`）強制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作為整值識別，不在列表內生效；列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.eventBusAgentLoop': '事件匯流排 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '讓共享 agent loop 執行在事件匯流排架構上（實驗性）。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
+    '讓共享 agent loop 執行在事件匯流排架構上。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。未設定時，headless 會話執行在核心上，其他執行共享 loop 的入口使用過程式路徑。設為 `true` 時使用核心，設為 `false` 時使用過程式路徑，headless 也可切回。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.modelAvailabilityTracking': '模型可用性台賬',
   'settings.description.experimental.modelAvailabilityTracking':
     '在會話內跨請求記住模型健康狀態（實驗性）。當某個 fallback 模型在容量錯誤（429/503/529）上耗盡重試後，模型 fallback 鏈在本輪剩餘請求中跳過它，並在下一輪重新探測一次；顯式重試也會重新探測被跳過的模型。primary 模型仍每個請求都會被嘗試。永久配額耗盡仍快速失敗，不視為瞬時容量跳過。關閉時 fallback 鏈行為與之前完全一致。',

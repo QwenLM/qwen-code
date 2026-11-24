@@ -356,6 +356,81 @@ describe('WorkspaceSelector', () => {
     expect(document.activeElement).not.toBe(trigger);
   });
 
+  it('re-enables the trigger tooltip after a controlled close from the host', async () => {
+    const onOpenChange = vi.fn();
+    let currentOpen = false;
+    const renderControlled = (open: boolean) => {
+      currentOpen = open;
+      act(() => {
+        root?.render(
+          <I18nProvider language="en">
+            <WorkspaceSelector
+              workspaces={[
+                {
+                  id: 'primary',
+                  cwd: '/primary',
+                  label: 'primary',
+                  primary: true,
+                  trusted: true,
+                },
+                {
+                  id: 'other',
+                  cwd: '/other',
+                  label: 'other',
+                  primary: false,
+                  trusted: true,
+                },
+              ]}
+              scratchSupported={false}
+              existingFolderSupported={false}
+              open={currentOpen}
+              onOpenChange={(next) => {
+                onOpenChange(next);
+                renderControlled(next);
+              }}
+              onSelectWorkspace={vi.fn()}
+              onCreateScratch={vi.fn()}
+              onOpenExistingFolder={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+    };
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    renderControlled(false);
+
+    const trigger = container.querySelector('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+
+    // While the menu stays open, hovering the trigger keeps the tooltip suppressed.
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+      trigger.dispatchEvent(new Event('pointermove', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+
+    // Host switches to another menu by setting open=false without onOpenChange.
+    renderControlled(false);
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('pointerout', { bubbles: true }));
+      trigger.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+      trigger.dispatchEvent(new Event('pointermove', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="tooltip"]')).not.toBeNull();
+  });
+
   it.each([
     { contentSide: undefined, expectedSide: 'top' },
     { contentSide: 'bottom' as const, expectedSide: 'bottom' },
