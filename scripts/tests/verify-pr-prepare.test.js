@@ -688,6 +688,143 @@ describe('git hardening', () => {
     );
   });
 
+  it('blocks promisor lazy-fetch RCE, core.worktree nested decoy repos, refs/replace forgery, and symlinked-subdir config.worktree filters', () => {
+    // 1. Promisor lazy-fetch must never execute remote.origin.uploadpack on host.
+    const { dir: promRepo, base: promBase, head: promHead } = makeRepo();
+    const promMarker = join(promRepo, 'promisor-rce-fired');
+    const objPath = join(
+      promRepo,
+      '.git',
+      'objects',
+      promBase.slice(0, 2),
+      promBase.slice(2),
+    );
+    rmSync(objPath, { force: true });
+    execFileSync(
+      'git',
+      [
+        '-C',
+        promRepo,
+        'config',
+        '--local',
+        'core.repositoryformatversion',
+        '1',
+      ],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-C',
+        promRepo,
+        'config',
+        '--local',
+        'extensions.partialclone',
+        'origin',
+      ],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', promRepo, 'config', '--local', 'remote.origin.url', promRepo],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', promRepo, 'config', '--local', 'remote.origin.promisor', 'true'],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-C',
+        promRepo,
+        'config',
+        '--local',
+        'remote.origin.uploadpack',
+        `touch ${promMarker}; false`,
+      ],
+      { stdio: 'pipe' },
+    );
+    const promRes = runPrepare(
+      promRepo,
+      ['42', '--repo', REPO],
+      installFakeGh(snapshotFor({ base: promBase, head: promHead })),
+    );
+    expect(promRes.status).toBe(3);
+    expect(existsSync(promMarker)).toBe(false);
+
+    // 2. core.worktree pointing to a nested clean decoy git repository inside
+    // .git/decoy is refused before rev-parse --show-toplevel can redirect root.
+    const { dir: decoyParent, base: dBase, head: dHead } = makeRepo();
+    const nestedDecoy = join(decoyParent, '.git', 'decoy');
+    execFileSync('git', ['clone', '--no-hardlinks', decoyParent, nestedDecoy], {
+      stdio: 'pipe',
+    });
+    writeFileSync(join(decoyParent, 'dirty.js'), 'evil\n');
+    execFileSync(
+      'git',
+      ['-C', decoyParent, 'config', '--local', 'core.worktree', nestedDecoy],
+      { stdio: 'pipe' },
+    );
+    const decoyRes = runPrepare(
+      decoyParent,
+      ['42', '--repo', REPO],
+      installFakeGh(snapshotFor({ base: dBase, head: dHead })),
+    );
+    expect(decoyRes.status).toBe(3);
+    expect(decoyRes.stderr).toContain('core.worktree');
+
+    // 3. refs/replace/ entries are refused so they cannot forge clean trees or diffs.
+    const { dir: repRepo, base: rBase, head: rHead } = makeRepo();
+    execFileSync('git', ['-C', repRepo, 'replace', rBase, rHead], {
+      stdio: 'pipe',
+    });
+    const repRes = runPrepare(
+      repRepo,
+      ['42', '--repo', REPO],
+      installFakeGh(snapshotFor({ base: rBase, head: rHead })),
+    );
+    expect(repRes.status).toBe(3);
+    expect(repRes.stderr).toContain('refs/replace/');
+
+    // 4. Symlink pointing to a deep subdir still resolves config.worktree filters.
+    const outer = makeTmpDir();
+    const deepRoot = join(outer, 'a', 'b', 'c');
+    mkdirSync(deepRoot, { recursive: true });
+    const { dir: wtRepo } = makeRepo();
+    const deepSub = join(wtRepo, 'sub', 'deep');
+    mkdirSync(deepSub, { recursive: true });
+    execFileSync(
+      'git',
+      ['-C', wtRepo, 'config', '--local', 'core.repositoryformatversion', '1'],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', wtRepo, 'config', '--local', 'extensions.worktreeConfig', 'true'],
+      { stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-C',
+        wtRepo,
+        'config',
+        '--worktree',
+        'filter.symwt.clean',
+        'touch /tmp/nope',
+      ],
+      { stdio: 'pipe' },
+    );
+    const deepLink = join(deepRoot, 'sym-deep');
+    symlinkSync(deepSub, deepLink);
+    expect(localFilterOverrides(deepLink)).toEqual([
+      '-c',
+      'filter.symwt.clean=',
+    ]);
+  });
+
   // A filter VALUE may contain newlines; parsing the rendered `key value`
   // output would accept the second line as a key and forge a `-c` that
   // outranks the hardening (git applies the last -c for a key).

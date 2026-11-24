@@ -781,8 +781,24 @@ export function parseArgs(argv) {
   return options;
 }
 
+const GIT_SAFE_ENV_OVERRIDES = {
+  // Never trigger partial-clone promisor lazy-fetch (which can execute
+  // remote.*.uploadpack on the host) or honor PR-writable refs/replace/*.
+  GIT_NO_LAZY_FETCH: '1',
+  GIT_NO_REPLACE_OBJECTS: '1',
+};
+
 function run(command, args, options = {}) {
-  return spawnSync(command, args, { encoding: 'utf8', ...options });
+  const env =
+    command === 'git'
+      ? { ...(options.env ?? process.env), ...GIT_SAFE_ENV_OVERRIDES }
+      : options.env;
+  return spawnSync(command, args, {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+    ...options,
+    ...(env ? { env } : {}),
+  });
 }
 
 /**
@@ -935,21 +951,34 @@ function activeGitConfigScopes(root) {
     '--bool',
     'extensions.worktreeConfig',
   ]);
+  if (worktreeConfig.status !== 0 && worktreeConfig.status !== 1) {
+    throw new Error('could not inspect extensions.worktreeConfig');
+  }
   if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
-    const wtPath = run('git', [
+    const absWt = run('git', [
       ...prefix,
       'rev-parse',
+      '--path-format=absolute',
       '--git-path',
       'config.worktree',
     ]);
-    const rawWt = singleLineOutput(wtPath);
-    if (rawWt) {
-      const resolvedWt = isAbsolute(rawWt)
-        ? rawWt
-        : resolve(root ?? process.cwd(), rawWt);
-      if (existsSync(resolvedWt)) {
-        scopes.push('--worktree');
+    let resolvedWt = singleLineOutput(absWt);
+    if (!resolvedWt || !isAbsolute(resolvedWt)) {
+      const relWt = run('git', [
+        ...prefix,
+        'rev-parse',
+        '--git-path',
+        'config.worktree',
+      ]);
+      const rawWt = singleLineOutput(relWt);
+      if (!rawWt) {
+        throw new Error('could not resolve git config.worktree path');
       }
+      const baseDir = realPath(root ?? process.cwd());
+      resolvedWt = isAbsolute(rawWt) ? rawWt : resolve(baseDir, rawWt);
+    }
+    if (existsSync(resolvedWt)) {
+      scopes.push('--worktree');
     }
   }
   return scopes;
@@ -972,7 +1001,11 @@ export function localFilterOverrides(root) {
     const result = spawnSync(
       'git',
       [...prefix, 'config', scope, '--includes', '--null', '--list'],
-      { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 },
+      {
+        encoding: 'buffer',
+        maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, ...GIT_SAFE_ENV_OVERRIDES },
+      },
     );
     if (result.status === 1) continue;
     if (result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
@@ -1014,20 +1047,21 @@ export function localFilterOverrides(root) {
   return overrides;
 }
 
-function hasCustomWorktreeConfig(root) {
+function hasCustomWorktreeConfig(root = null) {
+  const prefix = root ? ['-C', root] : [];
   const scopes = activeGitConfigScopes(root);
   for (const scope of scopes) {
     const res = run('git', [
       ...GIT_HARDENING,
-      '-C',
-      root,
+      ...prefix,
       'config',
       scope,
       '--includes',
+      '--null',
       '--get-all',
       'core.worktree',
     ]);
-    if (res.status === 0 && res.stdout.trim() !== '') return true;
+    if (res.status === 0 && res.stdout.length > 0) return true;
     if (res.status !== 0 && res.status !== 1) {
       throw new Error('could not inspect core.worktree in git config');
     }
@@ -1137,6 +1171,16 @@ function exactCheckoutError(root, context) {
   if (treeHead.status !== 0) return 'could not read HEAD in this clone';
   if (treeHead.stdout.trim() !== context.head) {
     return `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`;
+  }
+  const replaceRefs = runGit(
+    ['-C', root, 'for-each-ref', '--count=1', 'refs/replace/'],
+    root,
+  );
+  if (replaceRefs.status !== 0) {
+    return 'could not inspect refs/replace/ in this clone';
+  }
+  if (replaceRefs.stdout.trim() !== '') {
+    return 'refs/replace/ entries are present in this clone and can forge commits or diffs — re-clone or clear refs/replace/, then re-run prepare';
   }
   // The ignore channel is steerable from the same PR-controlled .git:
   // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
@@ -1628,21 +1672,46 @@ function main(argv) {
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
 
+  // Check inside-worktree + core.worktree BEFORE resolving --show-toplevel so
+  // a hostile core.worktree pointing to a clean nested decoy repository cannot
+  // redirect `root` away from the actual PR clone before inspection.
+  const probeGitDir = run('git', [...GIT_HARDENING, 'rev-parse', '--git-dir']);
+  if (probeGitDir.status !== 0) {
+    return fail(3, 'not inside a git worktree — run this from the clone');
+  }
+  try {
+    if (hasCustomWorktreeConfig(null)) {
+      return fail(
+        3,
+        'git config sets core.worktree, which redirects the working tree root — re-clone or clear core.worktree, then re-run prepare',
+      );
+    }
+  } catch (error) {
+    return fail(3, error.message);
+  }
   let toplevel;
   try {
     toplevel = runGit(['rev-parse', '--show-toplevel']);
   } catch (error) {
-    // A hostile filter name is a refusal with its own remedy, not a missing
-    // worktree; it must surface before any guarded status could run it.
-    if (error instanceof UnsafeFilterNameError) {
-      return fail(3, error.message);
+    return fail(3, error.message);
+  }
+  const root = singleLineOutput(toplevel);
+  if (!root) {
+    return fail(3, 'not inside a git worktree — run this from the clone');
+  }
+  try {
+    if (!isSameOrWithin(realPath(root), realPath(process.cwd()))) {
+      return fail(
+        3,
+        `git working tree root ${root} does not contain the current directory — re-clone or clear core.worktree, then re-run prepare`,
+      );
     }
-    return fail(3, 'not inside a git worktree — run this from the clone');
+  } catch (error) {
+    return fail(
+      3,
+      `could not validate git working tree root ${root}: ${error.message}`,
+    );
   }
-  if (toplevel.status !== 0) {
-    return fail(3, 'not inside a git worktree — run this from the clone');
-  }
-  const root = toplevel.stdout.trim();
   let rootFilterOverrides;
   try {
     if (hasCustomWorktreeConfig(root)) {
