@@ -366,6 +366,8 @@ publication.
   ordering and recovery.
 - `docs/design/verify-pr-local-round.md` and
   `docs/design/verify-pr-local-round.zh-CN.md`: local-round compatibility.
+- `docs/design/verify-pr-residual-hardening.md` and
+  `docs/design/verify-pr-residual-hardening.zh-CN.md`: Java recipe step reference.
 - `docs/design/2026-11-14-verify-pr-java-container-recipe.md` and
   `docs/design/2026-11-14-verify-pr-java-container-recipe.zh-CN.md`: Java
   container proposal.

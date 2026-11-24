@@ -89,7 +89,7 @@ VM 的 `mode` 为 `vm`。只有完整 HTML comment 在列零独占一行时，�
 
 prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效时，把 `executionApproval` 对象加入 `--context-out` 原本就写出的同一份宿主 context 字节。对象包含 `mode`、`source`、`by`、`basis`、`reason`、可选 `attestation`、`head`、`round` 和认证所得权限。`source` 为 `local-trust` 或 `comment`；`basis` 对本地信任为 `own-pr` 或 `same-repository`，对评论为 `maintainer-comment`。本地决定没有 `approval` 永久链接；评论决定增加 `approval`、观测到的评论 id 和正文 sha256，以及它的 `registrationNonce`。声明的 `mode` 沿用现有词汇：`vm` 或 `waived`。
 
-产物中的 `boundary.json` 携带同一对象。发布使用与宿主 `executionApproval` 的深度严格对账，不是忽略额外字段的子集检查：声名字段键必须完全一致，评论批准还必须包括同一个 `registrationNonce`。prepare 打印的 context sha256 同时覆盖批准字节。
+产物中的 `boundary.json` 携带同一对象。发布使用与宿主 `executionApproval` 的深度严格对账，不是忽略额外字段的子集检查：声明字段键必须完全一致，评论批准还必须包括同一个 `registrationNonce`。prepare 打印的 context sha256 同时覆盖批准字节。
 
 `verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源，产物 `context.json` 也不能自行铸造坐标。每个经外部 context 对账的 `vm` 或 `waived` 声明，都要求该 context 带有合法 `owner/repo` slug 与正整数 `pr` 或 `number`；仓库或 PR 号缺失、畸形都硬性拒绝，产物 basename 及其 `context.json` 均不得补足缺口。规范的 prepare 输出总会提供这两项。在这些可信坐标下，`pr<N>-verify-*` 目录中的 N 不同即为拒绝，对评论和 local-trust 批准都一样；即使共享分支上的 head 相同、产物 context 缺失或它自行标识为另一个 PR，也不能改变宿主身份。这一比较要求产物 ROOT 本身是真实目录，不能是软链或其它非目录；以获批 PR 命名的 alias 不得隐藏另一个目标，操作者必须传入解析后的产物目录路径。对于带有上述宿主 `executionApproval` 的轮次，发布还要求产物位于 `pr<N>-verify-*` 目录，并且有可读的产物 `context.json`，其中的仓库与 PR 坐标必须同宿主快照一致。缺失、畸形或冲突的见证都被拒绝；它绝不替代宿主快照。没有此字段的 legacy context 记录不受这项新增见证要求。写入任何 context 或批准文件之前，带时间戳的产物目录必须是真实目录（不是软链或其它文件），且其完整规范路径恰好是真实 `tmp/` 目录下预期的直接子目录。普通同秒重试仍可以复用已有的真实目录；重定向或非目录以 exit 3 拒绝，不写入其目标。事务记录保存其规范产物父目录，并在捕获、写入和恢复每个记录时再次比对。若末次 review 响应暂停期间产物目录被换成软链，prepare 在提交整个写组之前拒绝。产物 `context.json` 同样必须不存在或是单链接普通文件，防止 symlink/hardlink 覆盖原物。`--context-out` containment 使用规范化 PR clone root 和父目录存在后的完整规范化父路径；不存在的新 leaf 不直接传给 `realpath`，真实父目录重定向回 clone 的 alias 在写批准字节前以 exit 3 拒绝。评论路径还在 state-lock 临界区内比较规范化输出与 live watch state JSON 及其 `.lock`，覆盖父目录 alias 和已存在目标的 same-file identity；命中任一 identity 都在写 authority 前 exit 3，而合法的其他外部 context 仍成功。外部与树内 context、产物坐标与批准、review 快照属于同一写入组。prepare 在首次改变前保存其旧字节；稍后的失败恢复这些字节并移除本组新创建的文件。若某项恢复失败，prepare 以 exit 3 明确点名，不宣称已恢复。
 
@@ -130,6 +130,11 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 - `scripts/tests/qwen-triage-workflow.test.js`：register-ahead、shell replay 与发布器兼容 pin；workflow 本身不变。
 - `.qwen/skills/verify-pr/SKILL.md`：本地、容器配方与 watch 调用顺序、批准说明、产物/检查器示例。
 - `docs/design/verify-pr-execution-preflight.md` 与 `docs/design/verify-pr-execution-preflight.zh-CN.md`：本设计。
+- `docs/design/verify-pr-watch.md` 与 `docs/design/verify-pr-watch.zh-CN.md`：watch 与注册生命周期。
+- `docs/design/verify-pr-register-ahead-of-prepare.md` 与 `docs/design/verify-pr-register-ahead-of-prepare.zh-CN.md`：注册顺序与恢复。
+- `docs/design/verify-pr-local-round.md` 与 `docs/design/verify-pr-local-round.zh-CN.md`：本地轮兼容性。
+- `docs/design/verify-pr-residual-hardening.md` 与 `docs/design/verify-pr-residual-hardening.zh-CN.md`：Java 配方步骤引用。
+- `docs/design/2026-11-14-verify-pr-java-container-recipe.md` 与 `docs/design/2026-11-14-verify-pr-java-container-recipe.zh-CN.md`：Java 容器提案。
 - `.qwen/e2e-tests/verify-pr-execution-preflight.md`：基线与本地 E2E 证据（git-ignored 工作产物）。
 
 ## 设计决定与风险

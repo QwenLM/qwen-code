@@ -4685,5 +4685,131 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(aliasedRecRefused.stderr).toMatch(
       /--execution-record must not point inside the PR-writable worktree/,
     );
+
+    // 8j. When <clone>/tmp itself is a symlink to an external directory not
+    // named "tmp", both the clone root and the external container stay enclosed.
+    const symlinkedClone = join(base, 'clone-symlink-tmp');
+    const externalArtifacts = join(base, 'outside-artifacts');
+    mkdirSync(symlinkedClone, { recursive: true });
+    mkdirSync(join(externalArtifacts, 'verify-context'), { recursive: true });
+    symlinkSync(externalArtifacts, join(symlinkedClone, 'tmp'));
+    const symRoundDir = join(
+      symlinkedClone,
+      'tmp',
+      'pr17185-verify-20261124-031500',
+    );
+    mkdirSync(join(symRoundDir, 'evidence'), { recursive: true });
+    writeFileSync(join(symRoundDir, 'report.md'), validFiles().report);
+    writeFileSync(join(symRoundDir, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(symRoundDir, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(symRoundDir, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(symRoundDir, 'evidence', '01-ab-cells.png'), 'png');
+    const cloneRootCtx = join(symlinkedClone, 'forged-ctx.json');
+    writeFileSync(cloneRootCtx, ctxText);
+    const cloneRootRec = join(symlinkedClone, 'forged-rec.json');
+    writeFileSync(cloneRootRec, boundRecText);
+    const siblingCtx = join(
+      symlinkedClone,
+      'tmp',
+      'verify-context',
+      'pr17185.json',
+    );
+    writeFileSync(siblingCtx, ctxText);
+    for (const [label, args] of [
+      [
+        'clone-root context',
+        [
+          '--context',
+          cloneRootCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          symRoundDir,
+        ],
+      ],
+      [
+        'clone-root execution-record',
+        [
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          cloneRootRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          symRoundDir,
+        ],
+      ],
+      [
+        'symlinked-tmp sibling context',
+        [
+          '--context',
+          siblingCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          symRoundDir,
+        ],
+      ],
+    ]) {
+      const res = run(args);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // 8k. Container mode unconditionally rejects contradictory executionClass,
+    // and checkArtifacts rejects mismatched prTrust between trustClassification
+    // and execution-record.json.
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'container',
+          detail: 'img',
+          executionClass: 'hardware-isolated',
+        }),
+        validFiles().boundaryGate,
+      ).errors.join('\n'),
+    ).toMatch(/mode container cannot declare executionClass/);
+    const mismatchedTrustRec = makeExecRecord({
+      prTrust: 'local-owner',
+      contextDigest: ctxSha,
+    });
+    const mismatchedTrustRecText = JSON.stringify(mismatchedTrustRec);
+    const mismatchedTrustResult = checkArtifacts({
+      files: validFiles({
+        boundary: JSON.stringify(
+          makeMicrovmBoundary(mismatchedTrustRec, mismatchedTrustRecText),
+        ),
+        boundaryGate: null,
+      }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      executionRecordText: mismatchedTrustRecText,
+      executionRecordSha256: sha256(mismatchedTrustRecText),
+      expectedContextSha256: ctxSha,
+      trustClassification: {
+        prTrust: 'external',
+        executionClass: 'hardware-isolated',
+        escalationReasons: [],
+        headRefOid: HEAD,
+      },
+    });
+    expect(mismatchedTrustResult.errors.join('\n')).toMatch(
+      /execution-record\.json prTrust .* does not match host trustClassification\.prTrust/,
+    );
   });
 });

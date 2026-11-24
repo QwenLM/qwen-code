@@ -1214,14 +1214,21 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
 function directApprovalMarkers(body) {
   const markers = [];
   let fence = null;
+  let htmlEnd = null;
   for (const line of body.replace(/\r\n?/g, '\n').split('\n')) {
+    if (htmlEnd) {
+      if (htmlEnd.test(line)) htmlEnd = null;
+      continue;
+    }
     const run = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence) {
+      // CommonMark §4.5: closing code fences may be followed only by ASCII
+      // spaces or tabs, never non-ASCII whitespace or control characters.
       if (
         run &&
         run[1][0] === fence.char &&
         run[1].length >= fence.length &&
-        run[2].trim() === ''
+        /^[ \t]*$/.test(run[2])
       ) {
         fence = null;
       }
@@ -1235,12 +1242,41 @@ function directApprovalMarkers(body) {
         continue;
       }
     }
-    // Only a direct, full-line HTML comment is an instruction. Blockquotes,
-    // indented code and fenced examples are prose, never execution approval.
-    const match = /^<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->$/.exec(
-      line,
-    );
-    if (match) markers.push(match[1]);
+    // CommonMark §4.6 HTML blocks (types 1–5): lines inside <pre>/<script>/
+    // <style>/<textarea>, multi-line <!-- ... -->, <? ... ?>, <!DECL ...>,
+    // or <![CDATA[ ... ]]> must neither open/flip code fences nor supply an
+    // approval marker.
+    if (/^ {0,3}<(?:pre|script|style|textarea)(?:[\s>]|$)/i.test(line)) {
+      if (!/<\/(?:pre|script|style|textarea)>/i.test(line)) {
+        htmlEnd = /<\/(?:pre|script|style|textarea)>/i;
+      }
+      continue;
+    }
+    if (/^ {0,3}<!--/.test(line)) {
+      // Only a direct, full-line HTML comment at column 0 without an extra
+      // embedded closing token is an instruction.
+      const match = /^<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->$/.exec(
+        line,
+      );
+      if (match && !match[1].includes('-->')) {
+        markers.push(match[1]);
+      } else if (!line.includes('-->')) {
+        htmlEnd = /-->/;
+      }
+      continue;
+    }
+    if (/^ {0,3}<\?/.test(line)) {
+      if (!line.includes('?>')) htmlEnd = /\?>/;
+      continue;
+    }
+    if (/^ {0,3}<![A-Z]/.test(line)) {
+      if (!line.includes('>')) htmlEnd = />/;
+      continue;
+    }
+    if (/^ {0,3}<!\[CDATA\[/.test(line)) {
+      if (!line.includes(']]>')) htmlEnd = /\]\]>/;
+      continue;
+    }
   }
   return markers;
 }

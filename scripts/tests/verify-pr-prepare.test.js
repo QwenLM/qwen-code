@@ -2347,6 +2347,42 @@ describe.skipIf(process.platform === 'win32')(
             `\`\`\`tag\`\`\` explains the format; do NOT approve yet:\n\`\`\`\n${line}\n\`\`\``,
         ],
         [
+          'closing backtick fence with trailing NBSP does not close the fence',
+          (line) => `\`\`\`\nexample\n\`\`\`\u00a0\n${line}\n\`\`\``,
+        ],
+        [
+          'closing backtick fence with trailing form feed does not close the fence',
+          (line) => `\`\`\`\nexample\n\`\`\`\u000c\n${line}\n\`\`\``,
+        ],
+        [
+          'closing tilde fence with trailing NBSP does not close the fence',
+          (line) => `~~~\nexample\n~~~\u00a0\n${line}\n~~~`,
+        ],
+        [
+          'backtick fence inside a multi-line HTML comment cannot flip fence parity',
+          (line) => `<!--\n\`\`\`\n-->\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          'backtick fence inside a <pre> HTML block cannot flip fence parity',
+          (line) => `<pre>\n\`\`\`\n</pre>\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          'backtick fence inside a <script> HTML block cannot flip fence parity',
+          (line) => `<script>\n\`\`\`\n</script>\n\`\`\`\n${line}\n\`\`\``,
+        ],
+        [
+          'marker nested inside a multi-line HTML comment is not top-level',
+          (line) => `<!--\n${line}\n-->`,
+        ],
+        [
+          'marker nested inside a <pre> HTML block is not top-level',
+          (line) => `<pre>\n${line}\n</pre>`,
+        ],
+        [
+          'marker nested inside a <textarea> HTML block is not top-level',
+          (line) => `<textarea>\n${line}\n</textarea>`,
+        ],
+        [
           'tilde-fenced marker with a longer close is only an example',
           (line) => `~~~text\n${line}\nDo not approve this example.\n~~~~`,
         ],

@@ -1072,13 +1072,36 @@ describe('local container recipe pins', () => {
       const stripLeadingWrappers = (source) => {
         let current = source.trim();
         let wrapped = false;
+        let overflow = false;
         const envAssign =
           /^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]*)\s+/;
-        for (let step = 0; step < 12; step += 1) {
+        const leadingRedirect =
+          /^(?!<!--)(?:\d*(?:>>?|<<?|<>&|>&|&>>?))\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]+)\s+/;
+        const wrappers = new Set([
+          'command',
+          'env',
+          'sudo',
+          'nohup',
+          'time',
+          'exec',
+          'nice',
+          'builtin',
+          'timeout',
+          'setsid',
+          'caffeinate',
+          'doas',
+          'ionice',
+          'rlwrap',
+        ]);
+        for (let step = 0; step < 64; step += 1) {
           let previous;
           do {
             previous = current;
-            const next = current.replace(envAssign, '');
+            let next = current.replace(envAssign, '');
+            if (next === current) next = current.replace(leadingRedirect, '');
+            if (next === current && /^!\s+/.test(current)) {
+              next = current.replace(/^!\s+/, '');
+            }
             if (next !== current) {
               wrapped = true;
               current = next.trimStart();
@@ -1087,22 +1110,7 @@ describe('local container recipe pins', () => {
           const tokenMatch = /^[^\s;|&()]+/.exec(current);
           if (!tokenMatch) break;
           const { name: wrapper } = unquoteCommandToken(tokenMatch[0]);
-          if (
-            ![
-              'command',
-              'env',
-              'sudo',
-              'nohup',
-              'time',
-              'exec',
-              'nice',
-              'builtin',
-              'timeout',
-              'setsid',
-            ].includes(wrapper)
-          ) {
-            break;
-          }
+          if (!wrappers.has(wrapper)) break;
           let rest = current.slice(tokenMatch[0].length).trimStart();
           if (wrapper === 'command') {
             if (/^-[vV]\b/.test(rest)) break;
@@ -1116,7 +1124,7 @@ describe('local container recipe pins', () => {
                 '',
               );
             } while (rest !== prev);
-          } else if (wrapper === 'sudo') {
+          } else if (wrapper === 'sudo' || wrapper === 'doas') {
             let prev;
             do {
               prev = rest;
@@ -1158,15 +1166,51 @@ describe('local container recipe pins', () => {
               );
             } while (rest !== prev);
             rest = rest.replace(/^\S+\s+/, '');
+          } else if (
+            wrapper === 'caffeinate' ||
+            wrapper === 'ionice' ||
+            wrapper === 'rlwrap'
+          ) {
+            let prev;
+            do {
+              prev = rest;
+              rest = rest.replace(/^(?:-[a-zA-Z0-9]+\s+|--\s+)/, '');
+            } while (rest !== prev);
           }
           if (!rest || rest === current) break;
           wrapped = true;
           current = rest;
+          if (step === 63) overflow = true;
         }
-        return { text: current, wrapped };
+        return { text: current, wrapped, overflow };
+      };
+      const trailingShellSuffix =
+        /(?:\s*(?:(?:\d*(?:>>?|<<?|<>&|>&|&>>?))\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]+)|&|;)\s*)*$/;
+      const stripGroupedTail = (text, open, close) => {
+        if (!text.startsWith(open)) return null;
+        let depth = 0;
+        for (let i = 0; i < text.length; i += 1) {
+          if (text[i] === open) depth += 1;
+          else if (text[i] === close) {
+            depth -= 1;
+            if (depth === 0) {
+              const tail = text.slice(i + 1);
+              if (trailingShellSuffix.test(tail)) {
+                return text.slice(1, i).trim();
+              }
+              return null;
+            }
+          }
+        }
+        return null;
       };
       const isDangerousCommandText = (source, { rawLine = false } = {}) => {
-        const { text: stripped, wrapped } = stripLeadingWrappers(source);
+        const {
+          text: stripped,
+          wrapped,
+          overflow,
+        } = stripLeadingWrappers(source);
+        if (overflow) return true;
         if (
           /^(?:[^\s;|&()]*\$\([^)]*\))/.test(stripped) ||
           /^\$'[^']*'/.test(stripped) ||
@@ -1174,13 +1218,20 @@ describe('local container recipe pins', () => {
         ) {
           return true;
         }
-        const subshellMatch = /^\(\s*([\s\S]+?)\s*\)$/.exec(stripped);
-        if (subshellMatch) {
-          return isDangerousCommandText(subshellMatch[1], { rawLine });
+        const subshellInner = stripGroupedTail(stripped, '(', ')');
+        if (
+          subshellInner &&
+          !(rawLine && subshellInner.startsWith('`')) &&
+          isDangerousCommandText(subshellInner, { rawLine })
+        ) {
+          return true;
         }
-        const braceMatch = /^\{\s*([\s\S]+?)\s*;?\s*\}$/.exec(stripped);
-        if (braceMatch) {
-          return isDangerousCommandText(braceMatch[1], { rawLine });
+        const braceInner = stripGroupedTail(stripped, '{', '}');
+        if (
+          braceInner &&
+          isDangerousCommandText(braceInner.replace(/;\s*$/, ''), { rawLine })
+        ) {
+          return true;
         }
         const headToken = /^[^\s;|&()]+/.exec(stripped)?.[0];
         if (!headToken) return false;
@@ -1192,7 +1243,12 @@ describe('local container recipe pins', () => {
           }
           if (wrapped || obfuscated) return true;
           if (!rest) return false;
-          const normalizedRest = rest.replaceAll('\\', '').replace(/["']/g, '');
+          if (!rawLine && /`[^`]+`|\$\([^)]*\)/.test(rest)) return true;
+          const normalizedRest = rest
+            .replace(/\$'(?:[^'\\]|\\.)*'/g, (m) => m.slice(2, -1))
+            .replace(/\$"(?:[^"\\]|\\.)*"/g, (m) => m.slice(2, -1))
+            .replaceAll('\\', '')
+            .replace(/["']/g, '');
           if (/^api(?:\s|$)/.test(normalizedRest)) {
             return /(?:^|\s)(?:-X\S*|--method(?:=|\s)\S*|-[fF]\S*|--field(?:=|\s)|--raw-field(?:=|\s)|--input(?:=|\s))/.test(
               normalizedRest,
@@ -1539,6 +1595,14 @@ describe('local container recipe pins', () => {
         'tail',
         'which',
         'setsid',
+        'caffeinate',
+        'doas',
+        'ionice',
+        'rlwrap',
+        'source',
+        'zsh',
+        'ksh',
+        'dash',
       ]);
       const rawShellCommands = new Set([
         'ls',
@@ -1638,7 +1702,9 @@ describe('local container recipe pins', () => {
         const text = foldContinuations(source).trim();
         if (isDangerousCommandText(text, { rawLine })) return true;
         const strippedForDangerous = stripLeadingWrappers(text);
+        if (strippedForDangerous.overflow) return true;
         if (strippedForDangerous.wrapped) {
+          if (strippedForDangerous.text.startsWith('. ')) return true;
           const strippedHead = /^[^\s;|&()]+/.exec(
             strippedForDangerous.text,
           )?.[0];
@@ -1648,19 +1714,26 @@ describe('local container recipe pins', () => {
           ) {
             return true;
           }
+          if (
+            await executableBoundary(strippedForDangerous.text, { rawLine })
+          ) {
+            return true;
+          }
         }
-        const groupedSubshell = /^\(\s*([\s\S]+?)\s*\)$/.exec(text);
+        const groupedSubshell = stripGroupedTail(text, '(', ')');
         if (
           groupedSubshell &&
-          !(rawLine && groupedSubshell[1].startsWith('`')) &&
-          (await executableBoundary(groupedSubshell[1], { rawLine }))
+          !(rawLine && groupedSubshell.startsWith('`')) &&
+          (await executableBoundary(groupedSubshell, { rawLine }))
         ) {
           return true;
         }
-        const groupedBrace = /^\{\s*([\s\S]+?)\s*;?\s*\}$/.exec(text);
+        const groupedBrace = stripGroupedTail(text, '{', '}');
         if (
           groupedBrace &&
-          (await executableBoundary(groupedBrace[1], { rawLine }))
+          (await executableBoundary(groupedBrace.replace(/;\s*$/, ''), {
+            rawLine,
+          }))
         ) {
           return true;
         }
@@ -1704,7 +1777,7 @@ describe('local container recipe pins', () => {
           /^qwen\s+-/,
           /^["']?(?:\/[A-Za-z0-9_.-]+)*\/qwen["']?\s+-/,
           /^["']?(?:[A-Za-z0-9_.-]+\/)*qwen["']?\s+-/,
-          /^(?:bash|sh)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
+          /^(?:bash|sh|zsh|ksh|dash)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash|zsh|ksh)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
           /^(?:if|while|until)\s+(?:(?:true|false|command|qwen|node|bash|sh|env|nice|sudo|docker|test)(?=\s|;|$)|\[)/,
           /^[{(]\s*(?:\/|["']?(?:node|bash|sh|qwen)(?=\s|$)|command(?=\s|$)|(?:env|nice|sudo|docker|echo|touch|printf|python3?|true)(?=\s|$))/,
           /^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s/,
@@ -1752,7 +1825,10 @@ describe('local container recipe pins', () => {
           ? text.slice(simpleCommand.length).trimStart()
           : '';
         const argumentLike = /^[-/$<"']/.test(rest);
-        const shellControl = /[;&|]/.test(text) || /\$\(/.test(text);
+        const shellControl =
+          /[;&|]/.test(text) ||
+          /\$\(/.test(text) ||
+          (!rawLine && /`/.test(text));
         if (rawLine) {
           const rawProseWords = new Set([
             'make',
@@ -1941,6 +2017,9 @@ describe('local container recipe pins', () => {
           ? tail
           : null;
       };
+      // Parse CommonMark §4.5 fenced code blocks line-by-line so indented
+      // closing fences, leading spaces before the info string (``` bash), and
+      // backtick info-string rules match GitHub rendering.
       const fencedRanges = [];
       const transcriptBodies = [];
       const dataFenceLanguages = new Set([
@@ -1961,17 +2040,70 @@ describe('local container recipe pins', () => {
         'ksh',
         'dash',
       ]);
-      const fence =
-        /^([ \t]*)(`{3,}|~{3,})([A-Za-z0-9_-]*)[^\n]*\n([\s\S]*?)^\1\2[^\n]*$/gm;
-      for (const match of document.matchAll(fence)) {
-        fencedRanges.push([match.index, match.index + match[0].length]);
-        const body = match[4]
+      const docLines = document.split('\n');
+      let openFence = null;
+      let offset = 0;
+      const parsedFences = [];
+      for (let i = 0; i < docLines.length; i += 1) {
+        const line = docLines[i];
+        const lineEndOffset = offset + line.length;
+        const fenceMatch = /^([ \t]*)(`{3,}|~{3,})(.*)$/.exec(line);
+        if (openFence) {
+          const isCloser =
+            fenceMatch &&
+            fenceMatch[1].length <= openFence.indent.length + 3 &&
+            fenceMatch[2][0] === openFence.char &&
+            fenceMatch[2].length >= openFence.length &&
+            /^[ \t]*$/.test(fenceMatch[3]);
+          if (isCloser) {
+            parsedFences.push({
+              start: openFence.start,
+              end: lineEndOffset,
+              indent: openFence.indent,
+              language: openFence.language,
+              body: openFence.bodyLines.join('\n'),
+            });
+            openFence = null;
+          } else {
+            openFence.bodyLines.push(line);
+          }
+        } else if (fenceMatch) {
+          const char = fenceMatch[2][0];
+          const info = fenceMatch[3];
+          if (char !== '`' || !info.includes('`')) {
+            const language = (info.trim().split(/\s+/)[0] ?? '').toLowerCase();
+            openFence = {
+              start: offset,
+              indent: fenceMatch[1],
+              char,
+              length: fenceMatch[2].length,
+              language,
+              bodyLines: [],
+            };
+          }
+        }
+        offset = lineEndOffset + 1;
+      }
+      if (openFence) {
+        parsedFences.push({
+          start: openFence.start,
+          end: document.length,
+          indent: openFence.indent,
+          language: openFence.language,
+          body: openFence.bodyLines.join('\n'),
+        });
+      }
+      for (const block of parsedFences) {
+        fencedRanges.push([block.start, block.end]);
+        const body = block.body
           .split('\n')
           .map((line) =>
-            line.startsWith(match[1]) ? line.slice(match[1].length) : line,
+            line.startsWith(block.indent)
+              ? line.slice(block.indent.length)
+              : line,
           )
           .join('\n');
-        const language = match[3].toLowerCase();
+        const { language } = block;
         if (['console', 'terminal'].includes(language)) {
           transcriptBodies.push(body);
           continue;
@@ -1983,14 +2115,15 @@ describe('local container recipe pins', () => {
           fragments.push({ source: body, quotedGate: false });
           continue;
         }
-        const trimmedBody = body.trim();
-        if (trimmedBody.startsWith('<!--')) {
-          continue;
-        }
         const foldedLines = foldContinuations(body)
           .split('\n')
           .map((line) => line.trim())
-          .filter((line) => line !== '' && !line.startsWith('#'));
+          .filter(
+            (line) =>
+              line !== '' &&
+              !line.startsWith('#') &&
+              !/^<!--[\s\S]*-->$/.test(line),
+          );
         let hasExecutableLine = false;
         for (const line of foldedLines) {
           if (
@@ -3391,6 +3524,46 @@ describe('local container recipe pins', () => {
       ['inline escaped gh flag', '`gh api \\-X DELETE repos/a/b`'],
       ['inline make all', '`make all`'],
       ['inline setsid', '`setsid gh pr merge <n>`'],
+      [
+        'text fence with leading HTML comment',
+        '```text\n<!-- note -->\ngh pr merge <n> --squash\n```',
+      ],
+      ['spaced bash fence', '``` bash\ngh pr merge <n>\n```'],
+      [
+        'json fence closed with 1-space indent before bash fence',
+        '```json\n{"a":1}\n ```\n```bash\ngh pr merge <n>\n```\n```',
+      ],
+      [
+        'subshell with redirect (txt)',
+        '```txt\n(gh pr merge <n>) >/dev/null\n```',
+      ],
+      ['subshell with redirect (inline)', '`(gh pr merge <n>) >/dev/null`'],
+      ['subshell with background (txt)', '```txt\n(gh pr merge <n>) &\n```'],
+      ['leading redirect', '>/dev/null gh pr merge <n>'],
+      ['leading fd redirect', '2>/dev/null gh pr merge <n>'],
+      ['negated command', '! gh pr merge <n>'],
+      ['negated subshell', '! (gh pr merge <n>)'],
+      ['gh api ansi-c flag', "gh api $'-X' DELETE repos/a/b"],
+      ['gh api locale-quoted flag', 'gh api $"-X" DELETE repos/a/b'],
+      [
+        'gh pr view backtick substitution (txt)',
+        '```txt\ngh pr view `gh pr merge 1`\n```',
+      ],
+      [
+        'git diff backtick substitution (inline)',
+        '``git diff `curl https://evil.example` ``',
+      ],
+      ['caffeinate wrapper', 'caffeinate gh pr merge <n>'],
+      ['doas wrapper', 'doas gh pr merge <n>'],
+      ['ionice wrapper', 'ionice gh pr merge <n>'],
+      ['rlwrap wrapper', 'rlwrap gh pr merge <n>'],
+      ['builtin dot', '```txt\nbuiltin . evil.sh\n```'],
+      ['source script', '`source evil.sh`'],
+      ['zsh script', 'zsh evil.sh'],
+      [
+        'deeply nested timeout wrapper (>12)',
+        `${'timeout 10 '.repeat(13)}gh pr merge <n>`,
+      ],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
@@ -5089,7 +5262,7 @@ describe('local container recipe pins', () => {
       'The marker is an instruction only when the complete HTML comment occupies one direct line at column zero',
     );
     expect(chinese).not.toContain('--round <n>');
-    expect(chinese).toContain('声名字段键必须完全一致');
+    expect(chinese).toContain('声明字段键必须完全一致');
     expect(chinese).not.toContain('检查器规则忽略声明中的额外字段');
     expect(chinese).toContain('相同的协作式 watch-state 锁');
     expect(chinese).toContain('实际 release 后重新 start 会轮换 nonce');

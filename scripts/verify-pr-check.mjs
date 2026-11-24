@@ -970,6 +970,16 @@ export function checkBoundary(
   if (parsed.mode === 'container') {
     const gateErrors = gateRecordErrors(gateText, { publishLane });
     if (gateErrors.length > 0) return { errors: gateErrors };
+    if (
+      parsed.executionClass !== undefined &&
+      parsed.executionClass !== 'trusted-shared-kernel'
+    ) {
+      return {
+        errors: [
+          `boundary.json mode container cannot declare executionClass=${JSON.stringify(parsed.executionClass)} (must be "trusted-shared-kernel")`,
+        ],
+      };
+    }
     if (executionRecord) {
       if (executionRecord.executionClass !== 'trusted-shared-kernel') {
         return {
@@ -1630,6 +1640,18 @@ export function checkArtifacts({
     });
     errors.push(...execCheck.errors);
     executionRecord = execCheck.record;
+    if (
+      executionRecord &&
+      trustClassification &&
+      typeof trustClassification === 'object' &&
+      typeof trustClassification.prTrust === 'string' &&
+      trustClassification.prTrust &&
+      executionRecord.prTrust !== trustClassification.prTrust
+    ) {
+      errors.push(
+        `execution-record.json prTrust (${JSON.stringify(executionRecord.prTrust)}) does not match host trustClassification.prTrust (${JSON.stringify(trustClassification.prTrust)})`,
+      );
+    }
   }
 
   if (
@@ -2012,20 +2034,33 @@ function main(argv) {
       ? { owner: repoMatch[1], repo: repoMatch[2], number }
       : null;
   };
-  const deriveTrustRoot = () => {
-    if (contextRoot) return realpathSync(contextRoot);
-    const lexicalContainer = dirname(resolve(dir));
-    const realDir = realpathSync(dir);
-    const realContainer = dirname(realDir);
-    const realDirPrNumber =
-      dirPrNumber ?? /^pr(\d+)-verify-/.exec(basename(realDir))?.[1];
-    if (realDirPrNumber && basename(lexicalContainer) === 'tmp') {
-      const lexicalParent = realpathSync(dirname(lexicalContainer));
-      if (isFilesystemRoot(lexicalParent)) return lexicalParent;
+  const deriveTrustRoots = () => {
+    try {
+      if (contextRoot) return { roots: [realpathSync.native(contextRoot)] };
+      const roots = new Set();
+      const realDir = realpathSync.native(dir);
+      roots.add(realDir);
+      const realContainer = dirname(realDir);
+      const lexicalContainer = dirname(resolve(dir));
+      const realDirPrNumber =
+        dirPrNumber ?? /^pr(\d+)-verify-/.exec(basename(realDir))?.[1];
+      if (realDirPrNumber && basename(realContainer) === 'tmp') {
+        roots.add(dirname(realContainer));
+      }
+      if (realDirPrNumber && basename(lexicalContainer) === 'tmp') {
+        roots.add(realpathSync.native(dirname(lexicalContainer)));
+        // When <clone>/tmp is a symlink to an external container directory,
+        // PR-writable sibling files (e.g. verify-context/pr<n>.json) live
+        // inside realContainer too, so both the clone root and realContainer
+        // must be enclosed in the refusal set.
+        roots.add(realContainer);
+      }
+      return { roots: [...roots] };
+    } catch (error) {
+      return {
+        error: `could not resolve artifact directory ${dir}: ${error.message}`,
+      };
     }
-    return realDirPrNumber && basename(realContainer) === 'tmp'
-      ? dirname(realContainer)
-      : realDir;
   };
   let coordinates = null;
   let trustedSnapshot = null;
@@ -2065,8 +2100,16 @@ function main(argv) {
     // --context-root was validated above (contains the artifact dir). The
     // fallback root is the clone root for a pr<n>-verify-<ts> dir under tmp/
     // (the tmp container's parent), or the dir itself for a plain fixture.
-    const trustRoot = deriveTrustRoot();
-    const insideByPath = withinRoot(trustRoot, realContext);
+    const derivedRoots = deriveTrustRoots();
+    if (derivedRoots.error) {
+      process.stderr.write(`verify-pr check: ${derivedRoots.error}\n`);
+      return 1;
+    }
+    const matchedRoot =
+      derivedRoots.roots.find((root) => isFilesystemRoot(root)) ??
+      derivedRoots.roots.find((root) => withinRoot(root, realContext)) ??
+      null;
+    const insideByPath = matchedRoot !== null;
     // A hard link gives a PR-writable file a second name outside the trust
     // root; realpath cannot see the source name, but a freshly written host
     // copy has exactly one link, so a link count above one means the context
@@ -2094,14 +2137,14 @@ function main(argv) {
       let reason;
       if (contextIsAlias) {
         reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
-      } else if (isFilesystemRoot(trustRoot)) {
+      } else if (isFilesystemRoot(matchedRoot)) {
         // Only the derived root reaches here: an explicit filesystem-root
         // --context-root is already a usage error at the containment gate
         // (R2-2). The artifact dir sits directly under root-level tmp/ and no
         // PR clone can contain it, so the remedy is to move it, not to pass
         // --context-root (which would only trade this refusal for a containment
         // error, R1-4).
-        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${trustRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
+        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${matchedRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
       } else {
         reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
       }
@@ -2213,8 +2256,16 @@ function main(argv) {
     } catch {
       realExecRecord = resolve(executionRecordPath);
     }
-    const execTrustRoot = deriveTrustRoot();
-    const execInsideByPath = withinRoot(execTrustRoot, realExecRecord);
+    const execDerivedRoots = deriveTrustRoots();
+    if (execDerivedRoots.error) {
+      process.stderr.write(`verify-pr check: ${execDerivedRoots.error}\n`);
+      return 1;
+    }
+    const execMatchedRoot =
+      execDerivedRoots.roots.find((root) => isFilesystemRoot(root)) ??
+      execDerivedRoots.roots.find((root) => withinRoot(root, realExecRecord)) ??
+      null;
+    const execInsideByPath = execMatchedRoot !== null;
     let execIsAlias = false;
     let execLinks = 0;
     if (!execInsideByPath) {
@@ -2232,8 +2283,8 @@ function main(argv) {
       let reason;
       if (execIsAlias) {
         reason = `--execution-record ${executionRecordPath} is a hard link (${execLinks} names); copy it into launcher-owned storage instead of linking it`;
-      } else if (isFilesystemRoot(execTrustRoot)) {
-        reason = `--execution-record ${executionRecordPath} cannot be trusted under root-level trust root '${execTrustRoot}'`;
+      } else if (isFilesystemRoot(execMatchedRoot)) {
+        reason = `--execution-record ${executionRecordPath} cannot be trusted under root-level trust root '${execMatchedRoot}'`;
       } else {
         reason = `--execution-record must not point inside the PR-writable worktree (${executionRecordPath}): pass a host-held launcher record outside the artifact tree`;
       }
