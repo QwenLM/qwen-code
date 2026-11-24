@@ -13316,7 +13316,10 @@ export class Session implements SessionContext {
     const restoreOneShot = async (): Promise<void> => {
       if (job.recurring !== false || !job.id) return;
       try {
-        const restored = await scheduler.restoreConsumedOneShot(job.id);
+        const restored = await scheduler.restoreConsumedOneShot(
+          job.id,
+          job.boundSessionId ?? null,
+        );
         if (!restored) {
           debugLogger.warn(
             `Scheduled task ${taskId} could not find its consumed one-shot to restore`,

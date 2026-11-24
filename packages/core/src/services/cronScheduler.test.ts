@@ -1077,8 +1077,16 @@ describe('CronScheduler', () => {
       scheduler.start((job) => {
         r.fired.push(job);
         r.restoration = dispatch
-          ? dispatch.then(() => scheduler.restoreConsumedOneShot(job.id))
-          : scheduler.restoreConsumedOneShot(job.id);
+          ? dispatch.then(() =>
+              scheduler.restoreConsumedOneShot(
+                job.id,
+                job.boundSessionId ?? null,
+              ),
+            )
+          : scheduler.restoreConsumedOneShot(
+              job.id,
+              job.boundSessionId ?? null,
+            );
       });
       return r;
     }
@@ -1267,6 +1275,41 @@ describe('CronScheduler', () => {
         { at: minute, kind: 'scheduled', sessionId: 'owned-child' },
       ]);
       expect(tasks[0]?.runs).toEqual([{ at: minute, kind: 'scheduled' }]);
+    });
+
+    it('scopes natural one-shot consumption and failed restoration to its owner', async () => {
+      const sibling = perRunOneShot('shared-once', {
+        sessionId: 'session-other',
+        prompt: 'untouched sibling',
+      });
+      const original = perRunOneShot('shared-once', {
+        sessionId: 'session-1',
+        prompt: 'selected owner task',
+      });
+      await load([sibling, original]);
+      const dispatch = deferred();
+      const r = startRestoring(dispatch.promise);
+      const fireAt = tickPastFirstFire(original);
+      await internals().pendingPersist;
+      expect(await readCronTasks(tmpDir)).toEqual([sibling]);
+      expect(r.fired[0]?.boundSessionId).toBe('session-1');
+
+      // A later sibling-only deletion must not veto the original owner's restore.
+      await updateCronTasks(
+        tmpDir,
+        (tasks) => tasks.filter((task) => task.sessionId !== sibling.sessionId),
+        {
+          deletionIds: [
+            JSON.stringify([sibling.sessionId, original.id]),
+            'session:session-other',
+          ],
+        },
+      );
+      dispatch.resolve();
+      expect(await r.restoration).toBe(true);
+      expect(await readCronTasks(tmpDir)).toEqual([
+        pausedAfterFailure(original, fireAt),
+      ]);
     });
 
     it('does not accrue run history for a one-shot (deleted on fire)', async () => {
@@ -1501,7 +1544,12 @@ describe('CronScheduler', () => {
         deletionIds: ['session:session-1'],
       });
 
-      expect(await scheduler.restoreConsumedOneShot(original.id)).toBe(false);
+      expect(
+        await scheduler.restoreConsumedOneShot(
+          original.id,
+          original.sessionId ?? null,
+        ),
+      ).toBe(false);
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
 
@@ -1550,7 +1598,10 @@ describe('CronScheduler', () => {
       updateGate.fail = fsError('ENOSPC', 'disk full');
       try {
         await expect(
-          scheduler.restoreConsumedOneShot(original.id),
+          scheduler.restoreConsumedOneShot(
+            original.id,
+            original.sessionId ?? null,
+          ),
         ).rejects.toThrow('ENOSPC');
       } finally {
         updateGate.fail = null;

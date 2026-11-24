@@ -10620,6 +10620,7 @@ describe('Session', () => {
         (
           callback: (job: {
             id: string;
+            boundSessionId: string;
             name: string;
             prompt: string;
             cronExpr: string;
@@ -10631,6 +10632,7 @@ describe('Session', () => {
         ) => {
           callback({
             id: 'task-1',
+            boundSessionId: 'session-owner',
             name: 'Review PRs',
             prompt: 'review the next PR',
             cronExpr: '0 * * * *',
@@ -10671,9 +10673,12 @@ describe('Session', () => {
       );
     });
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        sessionId: 'child-session',
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { sessionId: 'child-session' },
+        'session-owner',
+      );
     });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
@@ -10791,10 +10796,12 @@ describe('Session', () => {
     });
     // The fire is not lost: it runs here, and the run record says so.
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        sessionId: 'test-session-id',
-        dispatchFailed: true,
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { sessionId: 'test-session-id', dispatchFailed: true },
+        null,
+      );
     });
     await vi.waitFor(() => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
@@ -10847,9 +10854,12 @@ describe('Session', () => {
     session.startCronScheduler();
 
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        dispatchFailed: true,
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { dispatchFailed: true },
+        null,
+      );
     });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
@@ -10864,6 +10874,7 @@ describe('Session', () => {
         (
           callback: (job: {
             id: string;
+            boundSessionId: string;
             prompt: string;
             cronExpr: string;
             recurring: false;
@@ -10874,6 +10885,7 @@ describe('Session', () => {
         ) => {
           callback({
             id: 'task-1',
+            boundSessionId: 'session-owner',
             prompt: 'review the next PR',
             cronExpr: '0 * * * *',
             recurring: false,
@@ -10897,11 +10909,17 @@ describe('Session', () => {
     session.startCronScheduler();
 
     await vi.waitFor(() => {
-      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith(
+        'task-1',
+        'session-owner',
+      );
     });
-    expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-      dispatchFailed: true,
-    });
+    expect(annotateRunSession).toHaveBeenCalledWith(
+      'task-1',
+      123,
+      { dispatchFailed: true },
+      'session-owner',
+    );
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
@@ -10945,10 +10963,13 @@ describe('Session', () => {
     session.startCronScheduler();
 
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        dispatchFailed: true,
-      });
-      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { dispatchFailed: true },
+        null,
+      );
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1', null);
     });
     expect(mockClient.extMethod).not.toHaveBeenCalled();
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
@@ -11052,9 +11073,12 @@ describe('Session', () => {
     releaseSpawn();
 
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        sessionId: 'child-session',
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { sessionId: 'child-session' },
+        null,
+      );
     });
   });
 

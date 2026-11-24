@@ -1108,7 +1108,11 @@ export class CronScheduler {
       if (!task.recurring && task.sessionMode === 'per_run') {
         this.restorablePerRunOneShots.set(task.id, {
           task,
-          index: read.findIndex((candidate) => candidate.id === task.id),
+          index: read.findIndex(
+            (candidate) =>
+              candidate.id === task.id &&
+              (candidate.sessionId ?? null) === (task.sessionId ?? null),
+          ),
         });
       } else {
         this.restorablePerRunOneShots.delete(task.id);
@@ -1674,7 +1678,13 @@ export class CronScheduler {
     outcome: CronRunSessionOutcome,
     expectedTaskSessionId: string | null,
   ): Promise<void> {
-    if (outcome.sessionId && this.consumedPerRunOneShots.delete(taskId)) {
+    const snapshot = this.restorablePerRunOneShots.get(taskId);
+    if (
+      outcome.sessionId &&
+      this.consumedPerRunOneShots.has(taskId) &&
+      (!snapshot || (snapshot.task.sessionId ?? null) === expectedTaskSessionId)
+    ) {
+      this.consumedPerRunOneShots.delete(taskId);
       this.restorablePerRunOneShots.delete(taskId);
       this.consumedPerRunRemovalGenerations.delete(taskId);
     }
@@ -1693,13 +1703,17 @@ export class CronScheduler {
   }
 
   /** Pauses and records a durable per-run one-shot that never dispatched. */
-  async restoreConsumedOneShot(taskId: string): Promise<boolean> {
+  async restoreConsumedOneShot(
+    taskId: string,
+    expectedTaskSessionId: string | null,
+  ): Promise<boolean> {
     const projectRoot = this.projectRoot;
     const snapshot = this.restorablePerRunOneShots.get(taskId);
     const firedAt = snapshot?.task.lastFiredAt;
     if (
       !projectRoot ||
       !snapshot ||
+      (snapshot.task.sessionId ?? null) !== expectedTaskSessionId ||
       firedAt == null ||
       !this.consumedPerRunOneShots.has(taskId)
     ) {
@@ -1734,7 +1748,11 @@ export class CronScheduler {
             )
           )
             return tasks;
-          const existing = tasks.findIndex((task) => task.id === taskId);
+          const existing = tasks.findIndex(
+            (task) =>
+              task.id === taskId &&
+              (task.sessionId ?? null) === expectedTaskSessionId,
+          );
           const current = tasks[existing] ?? snapshot.task;
           const failed: DurableCronTask = {
             ...current,
@@ -1957,6 +1975,7 @@ export class CronScheduler {
 
     const firedAt = new Map<string, number>(); // durable recurring fires
     const removedIds: string[] = []; // durable one-shot fires / expiries
+    const removedOneShotSessionIds = new Map<string, string | null>();
     // Gated recurring fires book their run when the gate settles, not here;
     // the tick persist only moves their stamp and the status summary, kept
     // with the command it describes.
@@ -1987,6 +2006,9 @@ export class CronScheduler {
 
       if (result === 'fired-final' || !job.recurring) {
         removedIds.push(job.id);
+        if (!job.recurring && job.sessionMode === 'per_run') {
+          removedOneShotSessionIds.set(job.id, job.boundSessionId ?? null);
+        }
       } else {
         firedAt.set(job.id, job.lastFiredAt!);
         if (job.gate) {
@@ -2013,13 +2035,14 @@ export class CronScheduler {
       this.markFirePersistPending(guarded);
       const recordRemovalGenerations = () => {
         for (const id of removedByFire) {
-          const generation = removalGenerations.get(id);
+          const owner = removedOneShotSessionIds.get(id);
+          const deletionId = owner ? JSON.stringify([owner, id]) : id;
+          const generation = removalGenerations.get(deletionId);
           if (generation !== undefined && this.consumedPerRunOneShots.has(id)) {
-            const observed = new Map([[id, generation]]);
-            const sessionId =
-              this.restorablePerRunOneShots.get(id)?.task.sessionId;
-            if (sessionId) {
-              const key = cronTaskSessionDeletionId(sessionId);
+            const observed = new Map([[deletionId, generation]]);
+            if (owner) {
+              observed.set(id, removalGenerations.get(id)!);
+              const key = cronTaskSessionDeletionId(owner);
               const sessionGeneration = removalGenerations.get(key);
               if (sessionGeneration === undefined) continue;
               observed.set(key, sessionGeneration);
@@ -2035,6 +2058,12 @@ export class CronScheduler {
             tasks
               .filter((t) => {
                 if (!removed.has(t.id)) return true;
+                if (
+                  removedOneShotSessionIds.has(t.id) &&
+                  (t.sessionId ?? null) !== removedOneShotSessionIds.get(t.id)
+                ) {
+                  return true;
+                }
                 removedByFire.add(t.id);
                 const snapshot = this.restorablePerRunOneShots.get(t.id);
                 if (snapshot) {
@@ -2087,11 +2116,14 @@ export class CronScheduler {
           {
             observeDeletionIds: (tasks) => [
               ...removedIds,
-              ...tasks.flatMap((task) =>
-                removed.has(task.id) && task.sessionId
-                  ? [cronTaskSessionDeletionId(task.sessionId)]
-                  : [],
-              ),
+              ...tasks.flatMap((task) => {
+                const owner = removedOneShotSessionIds.get(task.id);
+                if (!owner || (task.sessionId ?? null) !== owner) return [];
+                return [
+                  JSON.stringify([owner, task.id]),
+                  cronTaskSessionDeletionId(owner),
+                ];
+              }),
             ],
             onDeletionGenerations: (generations) => {
               removalGenerations = generations;
