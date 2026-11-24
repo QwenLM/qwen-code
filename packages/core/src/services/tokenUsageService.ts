@@ -417,10 +417,10 @@ export function isCompleteLedgerExecutionEvidence(
 }
 
 function discardLedgerExecutionEvidence(table: TokenUsageDailyByModel): void {
+  // Ambiguous-session metadata is a veto, not proof of a matching response.
   incompleteLedgerEvidence.add(table);
   ledgerExecutionRows.delete(table);
   ledgerExecutionCounts.delete(table);
-  unidentifiedLedgerSessionIds.delete(table);
 }
 
 /** Session evidence behind the aggregate counters, never serialized to JSON. */
@@ -466,6 +466,7 @@ function mergeLedgerExecutionRows(
   destination: TokenUsageDailyByModel,
   source: TokenUsageDailyByModel,
 ): void {
+  mergeLedgerIds(destination, source, unidentifiedLedgerSessionIds);
   if (
     incompleteLedgerEvidence.has(destination) ||
     incompleteLedgerEvidence.has(source)
@@ -486,7 +487,6 @@ function mergeLedgerExecutionRows(
     destinationRows = new Map();
     ledgerExecutionRows.set(destination, destinationRows);
   }
-  mergeLedgerIds(destination, source, unidentifiedLedgerSessionIds);
   for (const [day, models] of sourceRows ?? []) {
     const destinationModels = destinationRows.get(day) ?? new Map();
     destinationRows.set(day, destinationModels);
@@ -548,12 +548,6 @@ function rememberLedgerExecution(
   table: TokenUsageDailyByModel,
   record: TokenUsageRecord,
 ): void {
-  if (incompleteLedgerEvidence.has(table)) return;
-  const count = ledgerExecutionCounts.get(table) ?? 0;
-  if (count >= MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS) {
-    discardLedgerExecutionEvidence(table);
-    return;
-  }
   if (!record.executionId) {
     let metadata = unidentifiedLedgerSessionIds.get(table);
     if (!metadata) {
@@ -565,6 +559,15 @@ function rememberLedgerExecution(
     const sessionIds = models.get(record.model) ?? new Set<string>();
     if (record.sessionId) sessionIds.add(record.sessionId);
     models.set(record.model, sessionIds);
+    if (incompleteLedgerEvidence.has(table)) return;
+  }
+  if (incompleteLedgerEvidence.has(table)) return;
+  const count = ledgerExecutionCounts.get(table) ?? 0;
+  if (count >= MAX_LEDGER_EXECUTION_EVIDENCE_RECORDS) {
+    discardLedgerExecutionEvidence(table);
+    return;
+  }
+  if (!record.executionId) {
     ledgerExecutionCounts.set(table, count + 1);
     return;
   }

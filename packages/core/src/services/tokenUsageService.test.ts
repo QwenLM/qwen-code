@@ -1340,11 +1340,21 @@ describe('tokenUsageService', () => {
 
     rows.push({ ...unidentified, id: 'unidentified-budget-overflow' });
     await writeRows();
+    const overBudget = await loadTokenUsageDailyByModel('2026-05-01');
+    expect(isCompleteLedgerExecutionEvidence(overBudget)).toBe(false);
     expect(
-      isCompleteLedgerExecutionEvidence(
-        await loadTokenUsageDailyByModel('2026-05-01'),
+      getTokenUsageUnidentifiedSessionIds(overBudget, localDate, 'model-a'),
+    ).toEqual(new Set(['unidentified-budget-session']));
+    const mergedOverBudget: TokenUsageDailyByModel = new Map();
+    mergeTokenUsageExecutionIds(mergedOverBudget, overBudget);
+    expect(isCompleteLedgerExecutionEvidence(mergedOverBudget)).toBe(false);
+    expect(
+      getTokenUsageUnidentifiedSessionIds(
+        mergedOverBudget,
+        localDate,
+        'model-a',
       ),
-    ).toBe(false);
+    ).toEqual(new Set(['unidentified-budget-session']));
   });
 
   it('retains complete evidence exactly at the single-root and merged cap', async () => {

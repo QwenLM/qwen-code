@@ -342,7 +342,10 @@ complete execution-evidence tables cannot be covered by an older ledger. If
 only part of a live record is already persisted, subtract only uniquely
 fingerprinted same-model response rows whose consumption is compatible with
 the live counters; preserve the unpersisted residue instead of leaving the
-whole record to be counted again beside the ledger. Global
+whole record to be counted again beside the ledger. Recombined active copies
+match the caller by session/project and the complete ID set, never array
+order, but any conflicting fingerprints for an expected response prohibit
+partial deduction. Global
 same-session project ambiguity does not invalidate another root's complete,
 individually compatible owner-local exact proof; each such proof is evaluated
 against that root's own transcript/project scope, never a merged token count.
@@ -377,8 +380,10 @@ session/model/day counters continue accumulating from every valid in-scope row.
 
 Rows without an execution ID retain only private day/model/session presence
 as ambiguous evidence and count toward that same budget, not an extra one.
-Merging preserves this metadata. Such a row cannot be treated as an absent
-ledger or be used by the legacy fallback to erase a response with known IDs.
+Merging preserves this metadata. Releasing raw rows or fingerprint evidence at
+the budget limit does not erase this ambiguity veto, which is not itself exact
+proof. Such a row cannot be treated as an absent ledger or be used by the
+legacy fallback to erase a response with known IDs.
 
 A completed-month aggregate also has a separately bounded snapshot of its
 latest day's complete identity evidence. It is reused only by a partial-month

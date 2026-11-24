@@ -2118,6 +2118,52 @@ describe('loadUsageDashboard', () => {
     expect(
       recombinedTable.get(dayKey(Date.parse(timestamp)))?.get('qwen-max'),
     ).toMatchObject({ requests: 2, totalTokens: 150, apiDurationMs: 100 });
+    const reordered = {
+      ...recombined,
+      requestExecutionIds: [...recombined.requestExecutionIds!].reverse(),
+    };
+    expect(
+      buildUsageDayTable([reordered], ledgerDaily, undefined, undefined, active)
+        .get(dayKey(Date.parse(timestamp)))
+        ?.get('qwen-max'),
+    ).toMatchObject({ requests: 2, totalTokens: 150, apiDurationMs: 100 });
+
+    await Storage.runWithResolvedRuntimeBaseDir(root, () => {
+      const ledgerPath = getTokenUsageFilePath('2026-05');
+      const row = JSON.parse(
+        fs.readFileSync(ledgerPath, 'utf8').trim().split('\n')[0]!,
+      ) as TokenUsageRecord;
+      fs.appendFileSync(
+        ledgerPath,
+        `${JSON.stringify({
+          ...row,
+          id: 'conflicting-persisted-response',
+          inputTokens: 200,
+          totalTokens: 200,
+        })}\n`,
+      );
+    });
+    const conflicting = await Storage.runWithResolvedRuntimeBaseDir(root, () =>
+      loadTokenUsageDailyByModel('2026-05-25'),
+    );
+    const day = dayKey(Date.parse(timestamp));
+    for (const scopes of [
+      undefined,
+      [{ records: [active], ledgerDaily: conflicting }],
+    ]) {
+      expect(
+        buildUsageDayTable(
+          [active],
+          conflicting,
+          undefined,
+          undefined,
+          active,
+          scopes,
+        )
+          .get(day)
+          ?.get('qwen-max'),
+      ).toMatchObject({ requests: 4, totalTokens: 450 });
+    }
   });
 
   it('does not let an unidentified ledger row cover a known response', async () => {
@@ -2148,6 +2194,50 @@ describe('loadUsageDashboard', () => {
         sources.ledgerDaily,
         sources.runtimeScopes,
       ).summary,
+    ).toMatchObject({ totalTokens: 300, requests: 2 });
+  });
+
+  it('retains the unidentified veto past the evidence budget', async () => {
+    const root = path.join(tmpHome, 'unidentified-veto-over-budget');
+    const sessionId = 'known-response-over-budget';
+    const project = '/runtime/unidentified-veto-over-budget';
+    const timestamp = '2026-05-25T12:00:00.000Z';
+    plantRuntimeRequest(root, {
+      sessionId,
+      project,
+      timestamp,
+      executionId: 'known-response-over-budget',
+      tokens: 100,
+    });
+    const fillers = Array.from({ length: 10_000 }, (_, index) => ({
+      timestamp: '2026-05-24T12:00:00.000Z',
+      sessionId: 'unrelated-filler',
+      model: 'filler-model',
+      executionId: `unrelated-fill-${index}`,
+    }));
+    writeTestLedgerRows(root, [
+      ...fillers,
+      {
+        sessionId,
+        timestamp,
+        executionId: undefined,
+        inputTokens: 200,
+        totalTokens: 200,
+      },
+    ]);
+
+    const sources = await loadScopedSourcesAt([root], timestamp);
+    expect(
+      buildUsageDayTable(
+        sources.records,
+        sources.ledgerDaily,
+        undefined,
+        undefined,
+        undefined,
+        sources.runtimeScopes,
+      )
+        .get(dayKey(Date.parse(timestamp)))
+        ?.get('qwen-max'),
     ).toMatchObject({ totalTokens: 300, requests: 2 });
   });
 

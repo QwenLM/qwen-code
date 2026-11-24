@@ -201,7 +201,7 @@ function isActiveSessionRecord(
     record.sessionId === activeSessionRecord.sessionId &&
     record.project === activeSessionRecord.project &&
     record.requestExecutionIds?.length === ids.length &&
-    ids.every((id, index) => record.requestExecutionIds?.[index] === id)
+    ids.every((id) => record.requestExecutionIds?.includes(id))
   );
 }
 
@@ -233,9 +233,11 @@ function partialLiveModelUsage(
     for (const table of tables) {
       for (const day of table.keys()) {
         const bucket = getLedgerBucketEvidence(table, day, model);
+        const fingerprints = bucket.fingerprints.get(record.sessionId)?.get(id);
         const row = bucket.rows.get(record.sessionId)?.get(id);
         if (!row) continue;
-        responses.set(scopedLedgerFingerprint(row)!, row);
+        if (fingerprints?.size !== 1) return undefined;
+        responses.set(fingerprints.values().next().value!, row);
       }
     }
     if (responses.size !== 1) continue;
