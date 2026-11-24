@@ -35,6 +35,9 @@ import {
 
 import { isHostedMemoryTool } from './hosted-memory-session.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
+import { isHostedConfigScopedOwner } from './hosted-hook-session.js';
+import { isHostedDurableMcpOwner } from './hosted-mcp-session.js';
+import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
 import { isHostedWorkspacePublicShellProfile } from './hosted-workspace-profiles.js';
 import { CONFINED_SHELL_PROFILE } from './managed-private-root.js';
@@ -51,6 +54,11 @@ export class HostedPublicChildRecoveryProfileChanged extends Error {
   constructor() {
     super('Public child recovery profile changed.');
   }
+}
+
+// An MCP tool's model name, built by HostedMcpSession from its catalog.
+function isHostedMcpModelToolName(name: unknown): boolean {
+  return typeof name === 'string' && /^mcp_[0-9a-f]{32}$/u.test(name);
 }
 
 const NATIVE_TOOLS = new Set([
@@ -81,7 +89,17 @@ export interface HostedNativePlannedCall {
   readonly refusal: string | null;
   readonly actionId: string | null;
   readonly publicationId?: string | null;
+  /** Set on every call of a Hooks Session's plan, and only there. */
+  readonly hookResults?: readonly HostedSavedHookResult[];
 }
+
+/** A tool Hook occurrence the call completed before the wait. */
+export interface HostedSavedHookResult {
+  readonly event: (typeof HOOK_RESULT_EVENTS)[number];
+  readonly resultDigest: string;
+}
+
+const HOOK_RESULT_EVENTS = ['PreToolUse', 'PermissionRequest'] as const;
 
 export interface HostedApprovalContinuation {
   readonly v: 1;
@@ -130,6 +148,27 @@ export interface RestoredHostedApprovalContinuation {
   }>;
 }
 
+// Each event at most once, in the order the producer reads them.
+function validHookResults(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  let next = 0;
+  for (const entry of value as unknown[]) {
+    const result = entry as Partial<HostedSavedHookResult> | null;
+    const index = HOOK_RESULT_EVENTS.indexOf(
+      result?.event as HostedSavedHookResult['event'],
+    );
+    if (
+      index < next ||
+      Object.keys(result!).sort().join(',') !== 'event,resultDigest' ||
+      typeof result!.resultDigest !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test(result!.resultDigest)
+    )
+      return false;
+    next = index + 1;
+  }
+  return true;
+}
+
 export async function readHostedApprovalContinuation(
   session: ManagedSession,
   ref: ManagedSessionDurableRef,
@@ -167,10 +206,14 @@ export async function readHostedApprovalContinuation(
     plan.sourceActivation.epoch < 1
   )
     throw new Error(conflict);
+  const hooksPlan = plan.calls.some((item) =>
+    Object.hasOwn(item ?? {}, 'hookResults'),
+  );
   if (plan.runtime === null) {
     if (
       plan.commandStep ||
       plan.publicChildModel ||
+      hooksPlan ||
       plan.calls.some((item) => !isHostedMemoryTool(item.call?.name))
     )
       throw new Error(conflict);
@@ -187,8 +230,14 @@ export async function readHostedApprovalContinuation(
           plan.commandStep !== undefined ||
           plan.calls.length !== 1 ||
           plan.calls[0]?.call?.name !== 'ask_user_question')) ||
+      // A Hooks or MCP Session's batch runs on the durable MCP owner or a
+      // config-scoped one; any other batch on its Turn's Runtime session.
       (!plan.commandStep &&
-        runtimeSessionId !== hostedRuntimeSessionId(promptId)) ||
+        !(
+          isHostedDurableMcpOwner(runtimeSessionId) ||
+          isHostedConfigScopedOwner(runtimeSessionId) ||
+          (!hooksPlan && runtimeSessionId === hostedRuntimeSessionId(promptId))
+        )) ||
       !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
       !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.workspaceGeneration) ||
       BigInt(plan.runtime.generation) > 2n ** 63n - 1n ||
@@ -204,6 +253,7 @@ export async function readHostedApprovalContinuation(
       plan.commandStep.configRevision < 1 ||
       !['read_file', 'shell'].includes(plan.commandStep.toolName) ||
       plan.stage !== 'approval' ||
+      hooksPlan ||
       plan.calls.some((item) => item.call.name !== 'skill')
     )
       throw new Error('Invalid command step continuation.');
@@ -214,6 +264,7 @@ export async function readHostedApprovalContinuation(
       'command approval input',
     );
   }
+  if (hooksPlan) assertManagedSessionStableId(runtimeSessionId, 'Hook owner');
   for (const id of [
     plan.batchId,
     ...(plan.runtime ? [plan.runtime.bindingId] : []),
@@ -293,7 +344,10 @@ export async function readHostedApprovalContinuation(
   for (const [ordinal, item] of plan.calls.entries()) {
     if (
       Object.keys(item).length !==
-        11 + (Object.hasOwn(item, 'publicationId') ? 1 : 0) ||
+        11 +
+          (Object.hasOwn(item, 'publicationId') ? 1 : 0) +
+          (hooksPlan ? 1 : 0) ||
+      (hooksPlan && !validHookResults(item.hookResults)) ||
       (Object.hasOwn(item, 'publicationId') &&
         (!publicShell ||
           item.call?.name !== 'run_shell_command' ||
@@ -307,6 +361,7 @@ export async function readHostedApprovalContinuation(
       !(
         NATIVE_TOOLS.has(item.call.name) ||
         isHostedMemoryTool(item.call.name) ||
+        isHostedMcpModelToolName(item.call.name) ||
         (plan.commandStep && item.call.name === 'skill') ||
         publicPlanExit ||
         (confinedShell && item.call.name === 'run_shell_command') ||
@@ -367,11 +422,15 @@ export async function readHostedApprovalContinuation(
       toolName?: string;
       input?: Record<string, unknown>;
     };
+    const mcpCall = isHostedMcpModelToolName(item.call.name);
     if (
-      payload.toolName !== item.call.name ||
+      payload.toolName !== (mcpCall ? MANAGED_MCP_TOOL : item.call.name) ||
       !payload.input ||
       typeof payload.input !== 'object' ||
       Array.isArray(payload.input) ||
+      (mcpCall &&
+        (payload.input['kind'] !== 'mcp-invoke' ||
+          payload.input['operationId'] !== item.runtimeCallId)) ||
       item.argsDigest !== `sha256:${managedToolDigest(payload.input)}`
     )
       throw new Error('Saved native request is invalid.');
