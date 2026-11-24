@@ -380,10 +380,14 @@ order this section exists to prevent.
   setup errors and unexpected unlink errors raise failures instead of silently
   removing coverage. Each `seed_helper` step's sole trap must sit inside the
   unbroken missing-helper guard (`if ... fi`) after `mktemp` and before `curl`,
-  pinned to a single single-operand `${seed_helper}` removal with the warning
-  subshell and saved status restoration — rejecting extra operands, extra
-  traps, or explicit helper-targeted `rm`/`unlink` commands elsewhere in the
-  step (including workspace/`$PWD` targets). These cleanup and missing-helper
+  pinned to a single-operand `${seed_helper}` removal with the warning
+  subshell and saved status restoration — rejecting extra operands and extra
+  traps. That trap is the step's only `rm`/`unlink`, so a removal cannot hide
+  behind an aliased target, and the only `find -delete` allowed outside it is
+  the write-back's host-cache coordinate purge, pinned to that whole command
+  verbatim so neither an aliased target nor a broader purge of the shared
+  cache can pass. Other destructive verbs are outside this pin.
+  These cleanup and missing-helper
   probes set both `cwd` and `GITHUB_WORKSPACE` to a private fixture workspace
   so a `$PWD`-based deletion cannot touch the source checkout; the log-pipe
   cleanup probe initializes a fixture workspace helper from the checkout

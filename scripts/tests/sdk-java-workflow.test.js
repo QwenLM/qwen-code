@@ -35,6 +35,9 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
 const writeBackFind =
   "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 
+const writeBackPurge =
+  "find -P \"${HOME}/.m2/repository\" -xdev -depth \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*' \\) -delete 9>&- || write_back=$?";
+
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
   const start = workflow.indexOf(`  ${name}:`);
@@ -111,6 +114,14 @@ function readBashCodeLines(run) {
   const lines = [];
   let current = '';
   let continuing = false;
+  // A continuation can land on a comment; bash runs only the prefix, so
+  // keeping the comment text would reject words that never execute.
+  const flush = () => {
+    const text = current.trim();
+    if (text && !text.startsWith('#')) lines.push(text);
+    current = '';
+    continuing = false;
+  };
   for (const rawLine of run.split('\n')) {
     const line = rawLine.replace(/\r$/, '');
     const trimmedStart = line.trimStart();
@@ -120,9 +131,7 @@ function readBashCodeLines(run) {
     } else {
       const hadSpace = /\s$/.test(current) || /^\s/.test(line);
       if (hadSpace && trimmedStart.startsWith('#')) {
-        lines.push(`${current.trimEnd()} ${trimmedStart}`.trim());
-        current = '';
-        continuing = false;
+        flush();
         continue;
       }
       current = hadSpace
@@ -133,12 +142,10 @@ function readBashCodeLines(run) {
       current = current.slice(0, -1);
       continuing = true;
     } else {
-      lines.push(current.trim());
-      current = '';
-      continuing = false;
+      flush();
     }
   }
-  if (continuing && current.trim()) lines.push(current.trim());
+  if (continuing) flush();
   return lines;
 }
 
@@ -2128,13 +2135,18 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(trapAt).toBeGreaterThan(mktempAt);
       expect(curlAt).toBeGreaterThan(trapAt);
       const nonTrapLines = codeLines.filter((line) => line !== trap);
+      // The trap owns the step's only removal: matching "command + helper" on
+      // one line lets an aliased target delete the checkout helper unseen.
+      expect(nonTrapLines.some((line) => /\b(?:rm|unlink)\b/.test(line))).toBe(
+        false,
+      );
+      // Allow only the write-back's host-cache coordinate purge, verbatim: a
+      // prefix match would also admit a broad purge of the shared cache.
       expect(
-        nonTrapLines.some(
-          (line) =>
-            /\b(?:rm|unlink)\b/.test(line) &&
-            /(?:seed_helper|maven-cache-seed\.sh)/.test(line),
-        ),
-      ).toBe(false);
+        nonTrapLines
+          .filter((line) => /-delete\b/.test(line))
+          .every((line) => line === writeBackPurge),
+      ).toBe(true);
       return trap;
     });
     expect(new Set(traps).size).toBe(1);
