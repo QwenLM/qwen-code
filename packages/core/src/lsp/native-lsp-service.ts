@@ -2824,51 +2824,102 @@ export class NativeLspService {
         // bucket, on a query with no extension to attribute it to.
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
         if (pullUnsupported(error)) {
-          // A push-only server cannot enumerate the workspace. Replay what it
-          // has actually pushed for documents this session opened; a report
-          // from outside the workspace must never leak through a string
-          // prefix match on the raw URI.
-          let replayed = 0;
-          const pushed = handle.pushedDiagnostics;
-          if (pushed) {
-            for (const [pushedUri, entry] of pushed) {
-              if (results.length >= limit) {
-                break;
+          // A push-only server cannot enumerate the workspace. Give reports
+          // for already tracked documents the same bounded wait the document
+          // query uses: a cold cache must not beat a notification that is
+          // still in flight. Wait for all missing reports together so one
+          // slow document does not multiply the timeout.
+          const missingReports = [...this.trackedUrisFor(name)].filter(
+            (trackedUri) => {
+              if (handle.pushedDiagnostics?.has(trackedUri)) {
+                return false;
               }
-              let filePath: string;
               try {
-                filePath = fileURLToPath(pushedUri);
-              } catch {
-                continue;
-              }
-              if (!this.workspaceContext.isPathWithinWorkspace(filePath)) {
-                continue;
-              }
-              const normalized: LspDiagnostic[] = [];
-              for (const item of entry.diagnostics) {
-                const diagnostic = this.normalizer.normalizeDiagnostic(
-                  item,
-                  name,
+                return this.workspaceContext.isPathWithinWorkspace(
+                  fileURLToPath(trackedUri),
                 );
-                if (diagnostic) {
-                  normalized.push(diagnostic);
+              } catch {
+                return false;
+              }
+            },
+          );
+          if (missingReports.length > 0) {
+            await Promise.all(
+              missingReports.map((trackedUri) =>
+                this.waitForPushedDiagnostics(name, handle, trackedUri),
+              ),
+            );
+          }
+          if (
+            handle.connection !== connection ||
+            handle.status !== 'READY' ||
+            this.serverManager.getHandles().get(name) !== handle
+          ) {
+            failures.push({
+              name,
+              error: new Error(
+                'server connection is no longer active while waiting for pushed diagnostics',
+              ),
+            });
+          } else {
+            // Replay what the server pushed for documents this session
+            // opened; a report from outside the workspace must never leak
+            // through a string prefix match on the raw URI.
+            let replayed = 0;
+            let unusable = 0;
+            const pushed = handle.pushedDiagnostics;
+            if (pushed) {
+              for (const [pushedUri, entry] of pushed) {
+                if (results.length >= limit) {
+                  break;
+                }
+                let filePath: string;
+                try {
+                  filePath = fileURLToPath(pushedUri);
+                } catch {
+                  continue;
+                }
+                if (!this.workspaceContext.isPathWithinWorkspace(filePath)) {
+                  continue;
+                }
+                const normalized: LspDiagnostic[] = [];
+                for (const item of entry.diagnostics) {
+                  const diagnostic = this.normalizer.normalizeDiagnostic(
+                    item,
+                    name,
+                  );
+                  if (diagnostic) {
+                    normalized.push(diagnostic);
+                  }
+                }
+                if (normalized.length > 0) {
+                  results.push({
+                    uri: pushedUri,
+                    diagnostics: normalized,
+                    serverName: name,
+                  });
+                  replayed++;
+                } else if (entry.diagnostics.length > 0) {
+                  // The server reported problems but none survived
+                  // normalization (e.g. no range); an empty result must not
+                  // absorb that loss.
+                  unusable++;
                 }
               }
-              if (normalized.length > 0) {
-                results.push({
-                  uri: pushedUri,
-                  diagnostics: normalized,
-                  serverName: name,
+            }
+            if (replayed === 0) {
+              if (unusable > 0) {
+                failures.push({
+                  name,
+                  error: new Error('server returned only unusable diagnostics'),
                 });
-                replayed++;
+              } else {
+                unsupported.push({
+                  name,
+                  error: new Error(PULL_UNSUPPORTED_REASON),
+                });
               }
             }
-          }
-          if (replayed === 0) {
-            unsupported.push({
-              name,
-              error: new Error(PULL_UNSUPPORTED_REASON),
-            });
           }
         } else {
           failures.push({ name, error });

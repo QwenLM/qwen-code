@@ -94,9 +94,11 @@ restart and reconnect discard the affected entries, and a report whose version
 does not match the delivered document is ignored. `workspaceDiagnostics`
 replays cached reports from `-32601` servers after parsing each URI with
 `fileURLToPath()` and checking the normalized path against the workspace; it
-never uses a raw URI prefix match and never claims a complete workspace. The
-result covers documents the server has already pushed, not files it never
-opened or analyzed.
+never uses a raw URI prefix match and never claims a complete workspace. Before
+replaying, it waits a bounded time for tracked documents that have no cached
+report yet. A non-empty pushed report whose entries all fail normalization is a
+failure, not a clean workspace. The result covers documents the server has
+already pushed, not files it never opened or analyzed.
 
 ## Boundaries
 

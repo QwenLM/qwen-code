@@ -4163,5 +4163,55 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result[0]?.uri).toBe(insideUri);
       expect(result[0]?.diagnostics[0]?.message).toBe('Inside error');
     });
+
+    it('waits for a late pushed report before replaying workspace diagnostics', async () => {
+      const [, trackedUri] = addFile('late.ts', 'const x = 1;\n');
+      const target = createConnection();
+      target.request.mockImplementation(async (method: string) => {
+        if (method !== 'workspace/diagnostic') {
+          return method === 'textDocument/hover' ? [] : { items: [] };
+        }
+        setTimeout(() => {
+          pushDiagnostics(target, trackedUri, [
+            { range, severity: 1, message: 'Late workspace error' },
+          ]);
+        }, 500);
+        throw new LspJsonRpcError(
+          'Unhandled method workspace/diagnostic',
+          -32601,
+        );
+      });
+      withServers([['tsls', serverOn('tsls', ['typescript'], target)]]);
+
+      await run(service.hover({ uri: trackedUri, range }));
+      const result = await run(service.workspaceDiagnostics());
+
+      expect(result).toHaveLength(1);
+      expect(result[0]?.uri).toBe(trackedUri);
+      expect(result[0]?.diagnostics[0]?.message).toBe('Late workspace error');
+    });
+
+    it('rejects workspace diagnostics when every pushed report is unusable', async () => {
+      const [, trackedUri] = addFile('unusable.ts', 'const x = 1;\n');
+      const target = createConnection();
+      target.request.mockImplementation(async (method: string) => {
+        if (method !== 'workspace/diagnostic') {
+          return method === 'textDocument/hover' ? [] : { items: [] };
+        }
+        pushDiagnostics(target, trackedUri, [
+          { severity: 1, message: 'Missing range' },
+        ]);
+        throw new LspJsonRpcError(
+          'Unhandled method workspace/diagnostic',
+          -32601,
+        );
+      });
+      withServers([['tsls', serverOn('tsls', ['typescript'], target)]]);
+
+      await run(service.hover({ uri: trackedUri, range }));
+      await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
+        'server returned only unusable diagnostics',
+      );
+    });
   });
 });
