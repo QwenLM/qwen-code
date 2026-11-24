@@ -15,7 +15,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
-import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.List;
 
@@ -40,7 +39,10 @@ public class ManagedSessionModelConfigs {
         return settings.getModelCatalog().stream().map(option -> {
             String id = option.getModelId();
             String label = option.getLabel() == null ? id : option.getLabel();
-            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
+            // model_id is a VARCHAR(128) column counted in characters; the
+            // catalog bound matches it (Java length counts UTF-16 units, the
+            // stricter of the two engines' length semantics).
+            if (StringUtils.isBlank(id) || id.length() > 128
                     || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
                     || StringUtils.isBlank(label) || label.length() > 512
                     || label.chars().anyMatch(Character::isISOControl)) {
