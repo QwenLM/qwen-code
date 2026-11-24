@@ -3134,9 +3134,7 @@ describe('review execution sandbox opt-in (#9556)', () => {
     expect(preflight.env.HEAD_REPO).toBe(
       '${{ github.event.pull_request.head.repo.full_name }}',
     );
-    expect(preflight.env.RUNNER_ENVIRONMENT).toBe(
-      '${{ runner.environment }}',
-    );
+    expect(preflight.env.RUNNER_ENVIRONMENT).toBe('${{ runner.environment }}');
     // Payload-less triggers resolve the head repo through the read-only job
     // token, never CI_BOT_PAT: this step must not need the write credential.
     expect(preflight.env.GH_TOKEN).toBe('${{ github.token }}');

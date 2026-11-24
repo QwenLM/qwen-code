@@ -81,14 +81,7 @@ describe('serve-ab publisher neutralizes planted triage markers', () => {
       const block = publish.run.slice(blockStart, blockEnd + '\nfi'.length);
       const res = spawnSync(
         'bash',
-        [
-          '-euo',
-          'pipefail',
-          '-c',
-          `BODY_FILE="$1"\n${block}`,
-          'bash',
-          body,
-        ],
+        ['-euo', 'pipefail', '-c', `BODY_FILE="$1"\n${block}`, 'bash', body],
         { encoding: 'utf8' },
       );
       expect(res.status).toBe(0);
