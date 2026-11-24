@@ -21,7 +21,7 @@ The `/pkgdiet` skill provides an interactive, opt-in guardrail powered by the Pk
 
 - `user-invocable: true`, `disable-model-invocation: true`: The skill is never invoked autonomously by the model. Only an explicit user invocation of `/pkgdiet` can activate the guardrail.
 - `allowedTools: undefined`: No tools are pre-approved. Every action, including server registration and package installation, requires explicit user confirmation.
-- **Skill Provenance and Untrusted Overrides:** The guardrail verifies skill provenance during bootstrap: if a project- or user-scope skill named `pkgdiet` exists (such as `.qwen/skills/pkgdiet/SKILL.md` or `~/.qwen/skills/pkgdiet/SKILL.md`), it is treated as untrusted and execution halts immediately. This prevents repository-committed skills from overriding the bundled skill body or bypassing consent and verification steps.
+- **Skill Shadowing:** Skill names resolve with project and user scope taking precedence over bundled, so a project- or user-scope skill named `pkgdiet` (such as `.qwen/skills/pkgdiet/SKILL.md` or `~/.qwen/skills/pkgdiet/SKILL.md`) replaces the bundled body entirely and none of the bundled instructions run. The bundled skill therefore cannot detect or halt on shadowing; this is recorded as an accepted residual risk (§4).
 - **Session-Scoped Enforcement:** The guardrail instructions apply strictly to the interactive session in which `/pkgdiet` was invoked; they do not gate background subagents, hooks, workflow scripts, or external terminal commands. Only npm ecosystem managers (`npm`, `pnpm`, `yarn`, `bun`) are covered.
 
 ### 2.2 Registration and Storage Scope
@@ -65,3 +65,4 @@ Users can remove the persistent server registration at any time by executing:
 2. **Environment Variable Exposure:** Local MCP servers spawned over stdio inherit exported credentials from the host session environment.
 3. **Repository-Declared Policies:** Project-level configuration files (`.pkgdietrc.json`, `pkgdiet.config.json`) override default evaluation thresholds when present in the inspected repository.
 4. **Configuration Scope Limitation:** The pkgdiet allowlist is enforced only on the user-scope settings file. In managed or multi-user environments, configurations originating from SystemDefaults, System scope, the `--mcp-config` CLI flag, extension-contributed sources, or session-injected ACP/IDE runtime are outside the skill's inspection and validation reach.
+5. **Skill Shadowing:** A project- or user-scope skill named `pkgdiet` replaces the bundled skill body, so the bootstrap, consent, and verdict checks never run. Mitigation requires loader-level enforcement for reserved bundled names, which is outside this skill.

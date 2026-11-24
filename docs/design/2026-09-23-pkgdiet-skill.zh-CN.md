@@ -21,7 +21,7 @@
 
 - `user-invocable: true`，`disable-model-invocation: true`：模型绝不自主触发该技能，仅当用户显式输入 `/pkgdiet` 时方可激活。
 - `allowedTools: undefined`：无预先授权工具。所有操作（包括注册服务与包安装）均须通过显式用户确认。
-- **技能来源与不受信覆盖隔离**：引导阶段排查技能来源：若存在项目级或用户级同名技能（如 `.qwen/skills/pkgdiet/SKILL.md` 或 `~/.qwen/skills/pkgdiet/SKILL.md`），一律视为不受信并立刻终止执行，防止仓库提交的同名技能顶掉内建技能正文或绕过校验与授权流程。
+- **技能同名遮蔽**：技能按名称解析时项目级和用户级优先于内建级，因此项目级或用户级同名 `pkgdiet` 技能（如 `.qwen/skills/pkgdiet/SKILL.md` 或 `~/.qwen/skills/pkgdiet/SKILL.md`）会整体替换内建技能正文，内建指令均不会执行。内建技能因此无法检测或终止遮蔽情形；该风险记录为可接受的残留风险（见 §4）。
 - **会话级与生态边界**：技能防护指引仅在显式调用 `/pkgdiet` 的交互会话内有效，不限制后台子智能体、钩子、工作流脚本或外部终端命令。仅防护 npm 生态管理器（`npm`、`pnpm`、`yarn`、`bun`）。
 
 ### 2.2 注册与存储范围
@@ -65,3 +65,4 @@
 2. **环境变量可读性**：本地 stdio 启动的 MCP 服务会继承当前会话导出的环境变量与 API 凭据。
 3. **仓库声明策略**：项目级配置文件（`.pkgdietrc.json`、`pkgdiet.config.json`）在存在时会覆盖默认评估阈值。
 4. **配置作用域限制**：pkgdiet 白名单仅在用户作用域配置文件中强制执行。在托管或多用户环境中，源自 SystemDefaults、系统作用域（System scope）、`--mcp-config` CLI 标志、扩展提供（extension-contributed）或会话注入的 ACP/IDE 运行时的配置均超出本技能的检查与验证范围。
+5. **技能同名遮蔽**：项目级或用户级同名 `pkgdiet` 技能会替换内建技能正文，引导、授权与判定校验均不会执行。缓解需要在加载器层面对内建保留名称做强制，超出本技能范围。

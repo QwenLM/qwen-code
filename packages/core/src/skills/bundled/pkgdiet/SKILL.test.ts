@@ -79,21 +79,14 @@ describe('bundled pkgdiet skill', () => {
 
     // Bootstrap checks, policy filters, allowlist, and whole entry inspection
     expect(normalizedBody).toContain(
-      'Inspect skill provenance, session policy filters, configured MCP servers, and tool availability',
+      'Inspect session policy filters, configured MCP servers, and tool availability',
     );
     expect(normalizedBody).toContain('mcp.allowed');
     expect(normalizedBody).toContain('mcp.excluded');
 
-    // Skill provenance fail-closed check (R11-1)
-    expect(normalizedBody).toContain(
-      'if a project- or user-scope skill named `pkgdiet` exists, treat it as untrusted: report the declaring file and stop',
-    );
-    expect(normalizedBody).toContain(
-      'if a project- or user-scope skill named `pkgdiet` exists',
-    );
-    expect(normalizedBody).toContain(
-      'treat it as untrusted: report the declaring file and stop',
-    );
+    // The bundled body cannot police its own shadowing, so it must not claim to (R11-1)
+    expect(normalizedBody).not.toContain('skill provenance');
+    expect(normalizedBody).not.toContain('named `pkgdiet` exists');
 
     // Hoisted provenance fail-closed check (R7-1)
     expect(normalizedBody).toContain(
@@ -219,10 +212,7 @@ describe('bundled pkgdiet skill', () => {
 
     // Critical ordering checks: registry probe in evaluator cwd must precede fastPath skip to Instructions!
     const inspectCheck = normalizedBody.indexOf(
-      'Inspect skill provenance, session policy filters, configured MCP servers, and tool availability',
-    );
-    const skillProvenanceCheck = normalizedBody.indexOf(
-      'if a project- or user-scope skill named `pkgdiet` exists',
+      'Inspect session policy filters, configured MCP servers, and tool availability',
     );
     const provenanceHalt = normalizedBody.indexOf(
       'If `check_dependency` is reachable but no `pkgdiet` entry is found',
@@ -236,8 +226,7 @@ describe('bundled pkgdiet skill', () => {
     );
 
     expect(inspectCheck).toBeGreaterThanOrEqual(0);
-    expect(skillProvenanceCheck).toBeGreaterThan(inspectCheck);
-    expect(provenanceHalt).toBeGreaterThan(skillProvenanceCheck);
+    expect(provenanceHalt).toBeGreaterThan(inspectCheck);
     expect(registryCheck).toBeGreaterThan(provenanceHalt);
     expect(fastPath).toBeGreaterThan(registryCheck);
     expect(sandboxCheck).toBeGreaterThan(fastPath);
@@ -347,6 +336,9 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'For a `package.json` script, read the script body and gate any registry-fetching command inside it; otherwise treat the command as a registry fetch and run the check',
     );
+    // npm ci is a fetch-capable command, never exempt as a lockfile restore (R12-1)
+    expect(normalizedBody).not.toContain('bare lockfile restore');
+    expect(normalizedBody).not.toContain('lockfile restore');
 
     // Concrete name resolution & scaffolder mapping (R7-4, R10-2)
     expect(normalizedBody).toContain('cannot be resolved');
