@@ -6072,7 +6072,7 @@ export function registerHostedHarnessSessionRoutes(
       if (body?.['hookCatalog'] !== undefined) {
         if (!brokerOptions || (create && !toolProfile))
           throw new Error('Hooks require a Hosted Workspace profile.');
-        hookCatalog = parseHostedHookPin(body['hookCatalog'], !create);
+        hookCatalog = parseHostedHookPin(body['hookCatalog'], true);
       }
     } catch {
       error(res, 400, 'invalid_hosted_hook_catalog');
@@ -6085,14 +6085,14 @@ export function registerHostedHarnessSessionRoutes(
           body?.['lifecycleAuthority'] === undefined ||
           body?.['mcpServers'] !== undefined)
       )
-        mcpServers = parseHostedMcpServers(body?.['mcpServers'], !create);
+        mcpServers = parseHostedMcpServers(body?.['mcpServers'], true);
       else if (body?.['mcpServers'] !== undefined) {
         if (
           !isHostedWorkspacePublicShellProfile(toolProfile) ||
           !contract.lifecycleV2Profiles?.includes(toolProfile)
         )
           throw new Error('MCP requires a supported Workspace profile.');
-        mcpServers = parseHostedMcpServers(body['mcpServers'], !create);
+        mcpServers = parseHostedMcpServers(body['mcpServers'], true);
       }
       if (
         create &&

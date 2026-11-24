@@ -40,6 +40,19 @@ public final class AgentDefinitionCompiler {
     public static Compiled compile(String definitionJson, boolean workspaceBound,
             String deploymentApprovalMode, List<String> toolProfiles,
             List<String> models) {
+        return compile(definitionJson, workspaceBound, deploymentApprovalMode,
+                toolProfiles, models, false);
+    }
+
+    /**
+     * {@code stored} validates a definition this deployment already persisted.
+     * Its pins were written under the bound in force at that time, so they are
+     * read at the stored bound; a definition that cannot be read wedges its
+     * Session out of every path, and attach is the delete precondition.
+     */
+    public static Compiled compile(String definitionJson, boolean workspaceBound,
+            String deploymentApprovalMode, List<String> toolProfiles,
+            List<String> models, boolean stored) {
         Map<String, Object> definition;
         try {
             definition = JSON.readValue(definitionJson, CONTENT);
@@ -111,8 +124,8 @@ public final class AgentDefinitionCompiler {
             }
         }
         AgentDefinitionExtensions.skills(definition.get("skills"), toolProfile != null);
-        AgentDefinitionExtensions.mcpServers(definition.get("mcp_servers"), toolProfile);
-        AgentDefinitionExtensions.hookCatalog(definition.get("hook_catalog"), toolProfile != null);
+        AgentDefinitionExtensions.mcpServers(definition.get("mcp_servers"), toolProfile, stored);
+        AgentDefinitionExtensions.hookCatalog(definition.get("hook_catalog"), toolProfile != null, stored);
         if (definition.get("environment_template_id") != null) {
             throw unsupported("environment_template_id");
         }

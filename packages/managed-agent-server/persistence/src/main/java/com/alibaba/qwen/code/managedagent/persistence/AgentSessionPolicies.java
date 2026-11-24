@@ -188,17 +188,17 @@ final class AgentSessionPolicies {
         }
         JdbcManagedAgentDefinitionStore.DefinitionRevision revision =
                 resolveDefinitionRevision(tenantId, agentId, requested);
+        // A stored definition is read under the wider bound it may have been
+        // written with; the compiler otherwise validates at the admission
+        // bound and would refuse a pin an older build persisted.
         AgentDefinitionCompiler.Compiled compiled =
                 AgentDefinitionCompiler.compile(revision.definitionJson(),
                         workspaceBound, approvalMode, definitionToolProfiles,
-                        definitionModels);
+                        definitionModels, true);
         Map<String, Object> content = storeRows.readMap(revision.definitionJson());
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
                 compiled.toolProfile(), content.containsKey("hook_catalog"),
-                // The stored read: a definition this deployment pinned is
-                // read back under the wider bound it was admitted with, so
-                // an older pin cannot wedge its Session out of the estimate.
                 !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile(), true).isEmpty(),
                 AgentDefinitionExtensions.skills(content.get("skills"), true));
     }

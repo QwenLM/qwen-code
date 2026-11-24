@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
@@ -26,6 +25,10 @@ import java.util.function.Supplier;
 @Service
 public class ManagedMcpManagementService {
     private static final Set<String> ACTIONS = Set.of("add", "edit", "remove", "enable", "disable", "reload", "restart");
+    // One bound for both sides of the revision counter: submit() admits up to
+    // this value and the read path accepts the same value back, so a command
+    // this service commits can always be read again.
+    private static final long MAX_REVISION = 9_007_199_254_740_991L;
     private final ManagedAgentService sessions;
     private final SessionPolicyStore store;
     private final HarnessConnector harness;
@@ -62,7 +65,7 @@ public class ManagedMcpManagementService {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         if (!ACTIONS.contains(command.action()) || !command.serverId().matches("[A-Za-z0-9._:-]{1,128}")
                 || command.expectedRevision() == null || command.expectedRevision() < 0
-                || command.expectedRevision() > ManagedSessionStoreModels.MAX_SAFE_COUNTER
+                || command.expectedRevision() > MAX_REVISION
                 || Set.of("add", "edit").contains(command.action()) != (command.server() != null)
                 || command.server() != null && !command.serverId().equals(command.server().serverId())) {
             throw new ManagedAgentException(400, "invalid_request", "Invalid MCP management command.");
@@ -175,6 +178,6 @@ public class ManagedMcpManagementService {
     private static boolean counter(JsonNode value, long minimum) {
         return value.isIntegralNumber() && value.canConvertToLong()
                 && value.longValue() >= minimum
-                && value.longValue() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER;
+                && value.longValue() <= MAX_REVISION;
     }
 }
