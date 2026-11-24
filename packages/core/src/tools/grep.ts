@@ -192,7 +192,7 @@ class GrepToolInvocation extends BaseToolInvocation<
               this.config.getTargetDir(),
               ToolNames.GREP,
               this.params as unknown as Record<string, unknown>,
-              this.config.getApprovalMode?.() === 'yolo',
+              this.config.getApprovalMode?.(),
             );
             evaluatedPaths.set(match.absoluteFilePath, denied);
           }

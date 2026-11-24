@@ -52,7 +52,11 @@ describe.skipIf(process.platform === 'win32')(
     let children: WorkerProcess[];
     let hold: string | undefined;
     let initializations: Array<{
-      permissions?: { allow?: readonly string[]; ask?: readonly string[]; deny?: readonly string[] };
+      permissions?: {
+        allow?: readonly string[];
+        ask?: readonly string[];
+        deny?: readonly string[];
+      };
       approvalMode?: string;
     }>;
     let messages: Array<{ id: string; request: ExecutionWorkerRequest }>;

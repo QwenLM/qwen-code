@@ -74,8 +74,9 @@ export function createExecutionWorkerEnvironment(
 export async function runExecutionWorker(
   environmentOrFactory:
     | ExecutionEnvironment
-    | ((options: Pick<ExecutionWorkerOptions, 'permissions' | 'approvalMode'>) =>
-        ExecutionEnvironment),
+    | ((
+        options: Pick<ExecutionWorkerOptions, 'permissions' | 'approvalMode'>,
+      ) => ExecutionEnvironment),
   input: Readable,
   output: Writable,
 ): Promise<void> {
@@ -113,8 +114,10 @@ export async function runExecutionWorker(
           signal,
         );
       case 'execute':
-        return activeEnvironment.execute(request.invocationId, signal, (update) =>
-          reply({ id, update }),
+        return activeEnvironment.execute(
+          request.invocationId,
+          signal,
+          (update) => reply({ id, update }),
         );
       case 'modificationContent':
         return activeEnvironment.modificationContent(

@@ -28,6 +28,7 @@ import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.
 import { FileReadCache } from '../services/fileReadCache.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import type { ToolResult } from './tools.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
@@ -303,6 +304,31 @@ describe('RipGrepTool', () => {
       expect(result.llmContent).not.toContain('fileA.txt');
       expect(result.llmContent).toContain('sub/fileC.txt');
       expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'sub', 'fileC.txt'),
+      ]);
+    });
+
+    it('keeps path-scoped Read ask results visible in auto-edit mode', async () => {
+      const askedFile = path.join(tempRootDir, 'fileA.txt');
+      Object.assign(mockConfig, {
+        getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+        getPermissionManager: () => ({
+          hasRelevantRules: () => true,
+          evaluate: async (context: { filePath?: string }) =>
+            context.filePath === askedFile ? 'ask' : 'default',
+        }),
+      });
+
+      const result = await searchWith(
+        hit('fileA.txt', 1, 'hello world') +
+          hit('sub/fileC.txt', 1, 'another world'),
+        { pattern: 'world' },
+      );
+
+      expect(result.llmContent).toContain('fileA.txt');
+      expect(result.llmContent).toContain('sub/fileC.txt');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
         path.join(tempRootDir, 'sub', 'fileC.txt'),
       ]);
     });

@@ -22,6 +22,7 @@ import type {
 } from '../tools/tools.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { buildPermissionRules } from '../permissions/rule-parser.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Context building
@@ -132,7 +133,7 @@ export async function isPathDeniedByReadRule(
   targetDir: string,
   toolName = 'read_file',
   invocationParams?: Record<string, unknown>,
-  askAutoApproved = false,
+  approvalMode?: ApprovalMode,
 ): Promise<boolean> {
   if (!pm) return false;
 
@@ -149,7 +150,12 @@ export async function isPathDeniedByReadRule(
   const decision = await pm.evaluate(context);
   if (decision === 'deny') return true;
   if (decision !== 'ask') return false;
-  if (askAutoApproved) return false;
+  if (
+    approvalMode === ApprovalMode.YOLO ||
+    approvalMode === ApprovalMode.AUTO_EDIT
+  ) {
+    return false;
+  }
 
   // A bare tool-level ask rule already gated the search invocation. Only hide
   // a result for an ask decision that comes from a path-scoped rule. When the
@@ -190,7 +196,9 @@ function isPathWithinCanonical(root: string, candidate: string): boolean {
   const relative = path.relative(canonicalRoot, canonicalCandidate);
   return (
     relative === '' ||
-    (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+    (!relative.startsWith(`..${path.sep}`) &&
+      relative !== '..' &&
+      !path.isAbsolute(relative))
   );
 }
 

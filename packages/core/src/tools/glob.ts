@@ -309,7 +309,7 @@ class GlobToolInvocation extends BaseToolInvocation<
             this.config.getTargetDir(),
             ToolNames.GLOB,
             this.params as unknown as Record<string, unknown>,
-            this.config.getApprovalMode?.() === 'yolo',
+            this.config.getApprovalMode?.(),
           ))
         ) {
           filteredEntries.push(entry);
