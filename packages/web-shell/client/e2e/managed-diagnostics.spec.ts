@@ -11,6 +11,11 @@ import {
   activityStatistics,
 } from '../components/managed/managed-activity.test-fixtures';
 import type { components } from '../components/managed/generated/managed-agent-api';
+import { installBootRetry } from './utils/bootRetry';
+
+test.beforeEach(async ({ page }) => {
+  await installBootRetry(page);
+});
 
 for (const width of [1280, 390]) {
   test(`Managed diagnostics read persisted snapshots at ${width}px @smoke`, async ({

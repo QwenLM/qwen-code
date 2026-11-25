@@ -1796,7 +1796,7 @@ test('ordinary branch picker preserves an unconfirmed New Branch draft across mo
   await installScenario(page, scenario, testInfo);
   await page.goto('/');
   const branchChip = page.locator('[data-web-shell-git-branch]');
-  await expect(branchChip).toBeVisible({ timeout: 10_000 });
+  await expect(branchChip).toBeVisible();
   await branchChip.tap();
   const newBranchAction = page.getByRole('button', { name: 'New Branch…' });
   await expect(newBranchAction).toBeVisible({ timeout: 10_000 });
@@ -1850,7 +1850,7 @@ for (const width of [240, 310, 320, 345, 390, 480]) {
       exact: true,
     });
 
-    await expect(workspace).toBeVisible({ timeout: 10_000 });
+    await expect(workspace).toBeVisible();
     const idleEditingHeight = (await editingKeys.boundingBox())!.height;
 
     const workspaceBeforeTap = (await workspace.boundingBox())!;
