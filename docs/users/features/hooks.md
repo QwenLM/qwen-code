@@ -535,7 +535,7 @@ Hook output supports three categories of fields:
 2. **Top-level Decision**: `decision`, `reason` (used by some events)
 3. **Event-specific Control**: `hookSpecificOutput` (must include `hookEventName`)
 
-On the tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`), `continue: false` ends the turn. The calls of the current batch finish, their results are kept in the conversation, the model gets no further request in this turn, and `stopReason` (or `reason`) is shown to the user. In a subagent, the subagent stops and its parent is told why. When the same output also blocks (`decision: "block"` or `"deny"`, a PreToolUse `permissionDecision: "deny"`, or exit code 2), the block wins and the turn goes on, as on `Stop`. In daemon sessions (Web Shell, IDEs), scheduled (cron) turns, background-notification turns, restored turns and the continuation a blocking `Stop` hook asks for do not end the turn yet: there a PreToolUse or PostToolUse `continue: false` fails only that call, as in earlier versions.
+On the tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`), `continue: false` ends the turn. The calls of the current batch finish, their results are kept in the conversation, the model gets no further request in this turn, and `stopReason` (or `reason`) is shown to the user. In a subagent, the subagent stops and its parent is told why. When the same output also blocks (`decision: "block"` or `"deny"`, a PreToolUse `permissionDecision: "deny"`, or exit code 2), the block wins and the turn goes on, as on `Stop`.
 
 ```json
 {

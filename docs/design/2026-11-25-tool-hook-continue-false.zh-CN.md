@@ -38,7 +38,7 @@
 - Code Mode：`exec` 脚本里嵌套调用发出的停止，同样结束 turn。
 - 不在范围内（这些地方 turn 照常继续）：
   - 旧的（非共享）循环。它们是可以手动切回的旧路径，#17045 会移除。它们用的是同一个调度器，所以 PreToolUse 拒绝该调用，PostToolUse 保留结果，PostToolBatch 保留所有结果。
-  - 在共享批处理之外运行工具的 ACP turn：恢复的 turn、Stop hook 的续写、cron turn 和后台通知 turn。它们自己的工具路径保持旧的效果（PreToolUse 拒绝该调用，PostToolUse 的停止把结果替换成错误）。后续改动会把它们移到共享批处理上，或者在那里也结束 turn。
+  - 在共享批处理之外运行的 ACP 工具调用：daemon 重启后恢复的 `ask_user_question` 调用，以及关闭统一循环时的所有 ACP turn。这条工具路径保持旧的效果（PreToolUse 拒绝该调用，PostToolUse 的停止把结果替换成错误）。cron、后台通知和 Stop hook 续写的 turn 默认走共享批处理，已经覆盖。
   - Hosted Harness，它有自己的 hook 处理。
   - speculation，它不是用户 turn；以及给 PostToolUse 的 `decision` 新增含义。
 
@@ -91,7 +91,7 @@ hook 输出照旧合并，然后：
 - **block 优先。** 这是 #18229 的规则，今天所有会阻断的 prompt hook 和 function hook 都能保持原样工作。
 - **PostToolUse 保留结果。** 工具已经运行，它的效果是真实的。用一个错误盖住输出，会误导下一轮。输出脱敏是另一个功能（B4 `updatedToolOutput`）。
 - **PreToolUse 不取消同一批的其他调用。** 它们已经排好了，它们的结果无论如何都要写入。这批结束后 turn 就结束。
-- **旧循环保持不变。** 它们是可以手动切回的旧路径，#17045 会移除。连它们一起改，改动量会翻倍，而这些路径默认没人走。有自己工具路径的那几种 ACP turn 出于同样的原因留作后续：每一种都有自己的循环。
+- **旧循环保持不变。** 它们是可以手动切回的旧路径，#17045 会移除。连它们一起改，改动量会翻倍，而这些路径默认没人走。恢复的 `ask_user_question` 调用出于同样的原因留作后续。
 
 ## 兼容性
 

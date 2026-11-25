@@ -20732,8 +20732,8 @@ export class Session implements SessionContext {
               );
             }
 
-            // If hook indicates to stop, return an error response. These
-            // turns run outside the shared batch and keep that behavior for a
+            // If hook indicates to stop, return an error response. Calls run
+            // outside the shared batch keep that behavior for a
             // `continue: false` too.
             if (postHookResult.shouldStop || postHookResult.endsTurn) {
               this.#stopMovedShell(this.movableShells.get(callId));

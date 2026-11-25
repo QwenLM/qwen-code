@@ -34,7 +34,7 @@ So a hook cannot stop the agent at a tool boundary. A hook that notices a loop (
 - Code Mode: a stop from a call nested in an `exec` script ends the turn too.
 - Out of scope, and the turn goes on there:
   - The legacy (non-shared) loops, opt-out paths that #17045 removes. They use the same scheduler, so PreToolUse refuses the call, PostToolUse keeps the result and PostToolBatch keeps every result.
-  - ACP turns that run their tools outside the shared batch: a restored turn, a Stop-hook continuation, a cron turn and a background-notification turn. Their own tool path keeps the old effect (PreToolUse refuses the call, a PostToolUse stop replaces the result with an error). A follow-up moves them to the shared batch or ends the turn there too.
+  - ACP tool calls that run outside the shared batch: a restored `ask_user_question` call after a daemon restart, and, with the unified loop turned off, every ACP turn. That tool path keeps the old effect (PreToolUse refuses the call, a PostToolUse stop replaces the result with an error). Cron, background-notification and Stop-hook continuation turns use the shared batch by default and are covered.
   - The Hosted Harness, which has its own hook handling.
   - Speculation, which is not a user turn, and a new `decision` meaning on PostToolUse.
 
@@ -77,7 +77,7 @@ The tool span keeps `post_hook_stopped` for the blocking PostToolUse path only. 
 - **Block wins.** This is the rule of #18229, and it keeps every prompt and function hook that blocks today working unchanged.
 - **PostToolUse keeps the result.** The tool already ran, and its effect is real. Hiding the output behind an error would mislead the next turn. Redaction is a separate feature (B4 `updatedToolOutput`).
 - **PreToolUse does not cancel the sibling calls.** They were already scheduled, and their results must be written anyway. The turn ends once the batch settles.
-- **The legacy loops stay as they are.** They are opt-out paths that #17045 removes. Changing them doubles the change for paths nobody runs by default. The ACP turns with their own tool path are a follow-up for the same reason: each has its own loop.
+- **The legacy loops stay as they are.** They are opt-out paths that #17045 removes. Changing them doubles the change for paths nobody runs by default. The restored `ask_user_question` call is a follow-up for the same reason.
 
 ## Compatibility
 
