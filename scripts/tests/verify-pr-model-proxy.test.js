@@ -1069,14 +1069,487 @@ describe('local container recipe pins', () => {
           cleaned !== token || token.includes('/') || token.includes('\\');
         return { name, obfuscated };
       };
+      const redirPlaceholderOp = /<[^<>\s;|&()`]+>/y;
+      const nextRedirAfterPhOp = /&[ \t]*[\dA-Za-z_$/'"-]|\|/y;
+      const safeAfterPhOp =
+        /[ \t]*(?:$|;|#|&&|\|\||\|&|\||&[ \t]*(?:$|;|#|&|(?:\d*|\{[A-Za-z_][A-Za-z0-9_]*\})?(?:>\||>&|>>?|<<<|<<-|<>&|<&|<>|<<?|&>>?))|(?:\d*|\{[A-Za-z_][A-Za-z0-9_]*\})?(?:>\||>&|>>?|<<<|<<-|<>&|<&|<>|<<?|&>>?))/y;
+      const redirSymbolOp = /(?:>\||>&|>>?|<<<|<<-|<>&|<&|<>|<<?|&>>?)/y;
+      const UNSAFE_REDIR_TARGET = -2;
+      const followsKnownCommand = (str, startIndex) => {
+        let i = startIndex;
+        if (i >= str.length || (str[i] !== ' ' && str[i] !== '\t')) {
+          return false;
+        }
+        while (i < str.length && (str[i] === ' ' || str[i] === '\t')) i += 1;
+        const tokStart = i;
+        while (i < str.length && !/[\s;|&()]/.test(str[i])) i += 1;
+        const tok = str.slice(tokStart, i);
+        if (!tok) {
+          return i < str.length && str[i] === '(';
+        }
+        if (/[*?[\]${(]/.test(tok) || (i < str.length && str[i] === '(')) {
+          return true;
+        }
+        const { name: cmdName } = unquoteCommandToken(tok);
+        if (dangerousCommands.has(cmdName)) {
+          return true;
+        }
+        return /^(?:gh|make|sh|bash|zsh|dash|ksh|git|curl|wget|node|python|python3|rm|cp|env|sudo|eval|exec|command|nice|nohup|source|chmod|tar|awk|sed|find|cargo|npm|npx|yarn|pnpm|bun|docker|ssh|perl|ruby|pip|pip3|unzip|touch|cat|echo|mkdir|kill|cd|grep|printf|export|alias|function|!)$/.test(
+          cmdName,
+        );
+      };
+      const matchRedirOpAt = (str, startIndex, allowCommentLike = true) => {
+        if (!allowCommentLike && str.startsWith('<!--', startIndex)) {
+          return -1;
+        }
+        let i = startIndex;
+        if (str[i] === '{') {
+          let j = i + 1;
+          if (j < str.length && /[A-Za-z_]/.test(str[j])) {
+            j += 1;
+            while (j < str.length && /[A-Za-z0-9_]/.test(str[j])) j += 1;
+            if (str[j] === '[') {
+              let bDepth = 1;
+              j += 1;
+              while (j < str.length && bDepth > 0) {
+                if (str[j] === '\\' && j + 1 < str.length) {
+                  j += 2;
+                  continue;
+                }
+                if (
+                  str[j] === '`' ||
+                  (str[j] === '$' &&
+                    (str[j + 1] === '(' ||
+                      str[j + 1] === '{' ||
+                      str[j + 1] === "'" ||
+                      str[j + 1] === '"'))
+                ) {
+                  return UNSAFE_REDIR_TARGET;
+                }
+                if (str[j] === "'") {
+                  const end = str.indexOf("'", j + 1);
+                  if (end === -1) return -1;
+                  j = end + 1;
+                  continue;
+                }
+                if (str[j] === '"') {
+                  const nextIdx = consumeDoubleQuoted(str, j);
+                  if (nextIdx === UNSAFE_REDIR_TARGET) {
+                    return UNSAFE_REDIR_TARGET;
+                  }
+                  if (nextIdx < 0) return -1;
+                  j = nextIdx;
+                  continue;
+                }
+                if (str[j] === '[') bDepth += 1;
+                else if (str[j] === ']') bDepth -= 1;
+                j += 1;
+              }
+              if (bDepth !== 0) return -1;
+            }
+            if (str[j] === '}') i = j + 1;
+          }
+        } else {
+          while (i < str.length && str[i] >= '0' && str[i] <= '9') i += 1;
+        }
+        redirSymbolOp.lastIndex = i;
+        const m = redirSymbolOp.exec(str);
+        return m ? i + m[0].length : -1;
+      };
+      const hasParamBraceExpansion = (str) => {
+        const lastClose = str.lastIndexOf('}');
+        if (lastClose < 2) return false;
+        let idx = str.indexOf('${');
+        while (idx !== -1 && idx < lastClose) {
+          if (str[idx + 2] !== '{') return true;
+          idx = str.indexOf('${', idx + 2);
+        }
+        return false;
+      };
+      const consumeDoubleQuoted = (str, quoteIndex) => {
+        let i = quoteIndex + 1;
+        while (i < str.length && str[i] !== '"') {
+          if (str[i] === '\\' && i + 1 < str.length) {
+            i += 2;
+            continue;
+          }
+          if (str[i] === '`' || (str[i] === '$' && str[i + 1] === '(')) {
+            return UNSAFE_REDIR_TARGET;
+          }
+          if (str[i] === '$' && str[i + 1] === '{') {
+            let depth = 1;
+            i += 2;
+            while (i < str.length && depth > 0) {
+              if (str[i] === '\\' && i + 1 < str.length) {
+                i += 2;
+                continue;
+              }
+              if (
+                str[i] === '"' ||
+                str[i] === '`' ||
+                (str[i] === '$' && str[i + 1] === '(')
+              ) {
+                return UNSAFE_REDIR_TARGET;
+              }
+              if (str[i] === '$' && str[i + 1] === '{') {
+                depth += 1;
+                i += 2;
+                continue;
+              }
+              if (str[i] === '}') depth -= 1;
+              i += 1;
+            }
+            if (depth !== 0) return -1;
+            continue;
+          }
+          i += 1;
+        }
+        return i < str.length ? i + 1 : -1;
+      };
+      const consumeParamExpansion = (str, dollarIndex) => {
+        let depth = 1;
+        let i = dollarIndex + 2;
+        while (i < str.length && depth > 0) {
+          if (str[i] === '\\' && i + 1 < str.length) {
+            i += 2;
+            continue;
+          }
+          if (str[i] === '`' || (str[i] === '$' && str[i + 1] === '(')) {
+            return UNSAFE_REDIR_TARGET;
+          }
+          if (str[i] === '$' && str[i + 1] === "'") {
+            i += 2;
+            while (i < str.length && str[i] !== "'") {
+              i += str[i] === '\\' && i + 1 < str.length ? 2 : 1;
+            }
+            if (i >= str.length) return -1;
+            i += 1;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === '"') {
+            const nextIdx = consumeDoubleQuoted(str, i + 1);
+            if (nextIdx < 0) return nextIdx;
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === "'") {
+            const end = str.indexOf("'", i + 1);
+            if (end === -1) return -1;
+            i = end + 1;
+            continue;
+          }
+          if (str[i] === '"') {
+            const nextIdx = consumeDoubleQuoted(str, i);
+            if (nextIdx < 0) return nextIdx;
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === '{') {
+            depth += 1;
+            i += 2;
+            continue;
+          }
+          if (str[i] === '}') depth -= 1;
+          i += 1;
+        }
+        return depth === 0 ? i : -1;
+      };
+      const consumeRedirectTarget = (
+        str,
+        startIndex,
+        { isLeading = false, scanState = null } = {},
+      ) => {
+        let i = startIndex;
+        if (
+          i + 1 < str.length &&
+          (str[i] === '<' || str[i] === '>') &&
+          str[i + 1] === '('
+        ) {
+          return UNSAFE_REDIR_TARGET;
+        }
+        while (i < str.length) {
+          if (str[i] === '`' || (str[i] === '$' && str[i + 1] === '(')) {
+            return UNSAFE_REDIR_TARGET;
+          }
+          if (str[i] === '$' && str[i + 1] === '{') {
+            if (scanState?.noParam) {
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            const nextIdx = consumeParamExpansion(str, i);
+            if (nextIdx === UNSAFE_REDIR_TARGET) return UNSAFE_REDIR_TARGET;
+            if (nextIdx < 0) {
+              if (scanState) scanState.noParam = true;
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === '<') {
+            if (str[i + 1] === '(') return UNSAFE_REDIR_TARGET;
+            redirPlaceholderOp.lastIndex = i;
+            const ph = redirPlaceholderOp.exec(str);
+            if (ph) {
+              const afterPh = i + ph[0].length;
+              nextRedirAfterPhOp.lastIndex = afterPh;
+              const startsNextRedir = nextRedirAfterPhOp.test(str);
+              safeAfterPhOp.lastIndex = afterPh;
+              const looksLikePlaceholder =
+                i === startIndex ||
+                str[i - 1] === '/' ||
+                afterPh >= str.length ||
+                str[afterPh] === '.' ||
+                str[afterPh] === '-' ||
+                safeAfterPhOp.test(str) ||
+                (isLeading && followsKnownCommand(str, afterPh));
+              if (!startsNextRedir && looksLikePlaceholder) {
+                i = afterPh;
+                continue;
+              }
+            }
+            if (
+              i === startIndex ||
+              i + 1 >= str.length ||
+              /[\s;|&()]/.test(str[i + 1])
+            ) {
+              i += 1;
+              continue;
+            }
+            break;
+          }
+          if (str[i] === '>') {
+            if (str[i + 1] === '(') return UNSAFE_REDIR_TARGET;
+            safeAfterPhOp.lastIndex = i + 1;
+            if (
+              i + 1 >= str.length ||
+              safeAfterPhOp.test(str) ||
+              (isLeading && /^[ \t]+(?:gh|make)\b/.test(str.slice(i + 1)))
+            ) {
+              i += 1;
+              continue;
+            }
+            break;
+          }
+          if (/[\s;|&()]/.test(str[i])) break;
+          if (str[i] === '\\' && i + 1 < str.length) {
+            i += 2;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === "'") {
+            if (scanState?.noSingle) {
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            let j = i + 2;
+            while (j < str.length && str[j] !== "'") {
+              j += str[j] === '\\' && j + 1 < str.length ? 2 : 1;
+            }
+            if (j >= str.length) {
+              if (scanState) scanState.noSingle = true;
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            i = j + 1;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === '"') {
+            if (scanState?.noDouble) {
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            const nextIdx = consumeDoubleQuoted(str, i + 1);
+            if (nextIdx === UNSAFE_REDIR_TARGET) return UNSAFE_REDIR_TARGET;
+            if (nextIdx < 0) {
+              if (scanState) scanState.noDouble = true;
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === '"') {
+            if (scanState?.noDouble) {
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            const nextIdx = consumeDoubleQuoted(str, i);
+            if (nextIdx === UNSAFE_REDIR_TARGET) return UNSAFE_REDIR_TARGET;
+            if (nextIdx < 0) {
+              if (scanState) scanState.noDouble = true;
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === "'") {
+            if (scanState?.noSingle) {
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            const end = str.indexOf("'", i + 1);
+            if (end === -1) {
+              if (scanState) scanState.noSingle = true;
+              while (i < str.length && !/[\s;|&()<>]/.test(str[i])) i += 1;
+              break;
+            }
+            i = end + 1;
+            continue;
+          }
+          i += 1;
+        }
+        return i;
+      };
+      const consumeLeadingRedirect = (
+        str,
+        allowCommentLike = false,
+        scanState = null,
+      ) => {
+        const opEnd = matchRedirOpAt(str, 0, allowCommentLike);
+        if (opEnd === UNSAFE_REDIR_TARGET) return { unsafe: true, next: '' };
+        if (opEnd === -1) return null;
+        let i = opEnd;
+        while (i < str.length && /[ \t]/.test(str[i])) i += 1;
+        const start = i;
+        i = consumeRedirectTarget(str, start, { isLeading: true, scanState });
+        if (i === UNSAFE_REDIR_TARGET) return { unsafe: true, next: '' };
+        if (i <= start || i >= str.length) return null;
+        const sawSpace = /\s/.test(str[i]);
+        let j = i;
+        while (j < str.length && /[ \t]/.test(str[j])) j += 1;
+        const sep = /^(?:&&|\|\||\|&|[;|&])[ \t]*/.exec(str.slice(j));
+        if (sep) {
+          return {
+            unsafe: false,
+            next: str.slice(j + sep[0].length).trimStart(),
+          };
+        }
+        if (sawSpace) return { unsafe: false, next: str.slice(j).trimStart() };
+        if (matchRedirOpAt(str, i, true) !== -1) {
+          return { unsafe: false, next: str.slice(i) };
+        }
+        return null;
+      };
+      const consumeEnvAssign = (str) => {
+        const m = /^[A-Za-z_][A-Za-z0-9_]*\+?=/.exec(str);
+        if (!m) return null;
+        let i = m[0].length;
+        while (i < str.length && !/[\s;|&()<>]/.test(str[i])) {
+          if (str[i] === '`' || (str[i] === '$' && str[i + 1] === '(')) {
+            return { unsafe: true, next: '' };
+          }
+          if (str[i] === '$' && str[i + 1] === '{') {
+            const nextIdx = consumeParamExpansion(str, i);
+            if (nextIdx === UNSAFE_REDIR_TARGET) {
+              return { unsafe: true, next: '' };
+            }
+            if (nextIdx < 0) return null;
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === '\\' && i + 1 < str.length) {
+            i += 2;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === "'") {
+            i += 2;
+            while (i < str.length && str[i] !== "'") {
+              i += str[i] === '\\' && i + 1 < str.length ? 2 : 1;
+            }
+            if (i >= str.length) return null;
+            i += 1;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === '"') {
+            const nextIdx = consumeDoubleQuoted(str, i + 1);
+            if (nextIdx === UNSAFE_REDIR_TARGET) {
+              return { unsafe: true, next: '' };
+            }
+            if (nextIdx < 0) return null;
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === '"') {
+            const nextIdx = consumeDoubleQuoted(str, i);
+            if (nextIdx === UNSAFE_REDIR_TARGET) {
+              return { unsafe: true, next: '' };
+            }
+            if (nextIdx < 0) return null;
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === "'") {
+            const end = str.indexOf("'", i + 1);
+            if (end === -1) return null;
+            i = end + 1;
+            continue;
+          }
+          i += 1;
+        }
+        if (i >= str.length) return null;
+        if (/\s/.test(str[i])) {
+          return { unsafe: false, next: str.slice(i).trimStart() };
+        }
+        if (str[i] === '<' || str[i] === '>') {
+          if (str[i + 1] === '(') return { unsafe: true, next: '' };
+          return { unsafe: false, next: str.slice(i) };
+        }
+        if (str[i] === '&' && str[i + 1] === '>') {
+          return { unsafe: false, next: str.slice(i) };
+        }
+        return null;
+      };
+      const consumeEnvArgToken = (str, startIndex) => {
+        let i = startIndex;
+        while (i < str.length && !/[\s;|&()<>]/.test(str[i])) {
+          if (str[i] === '`' || (str[i] === '$' && str[i + 1] === '(')) {
+            return UNSAFE_REDIR_TARGET;
+          }
+          if (str[i] === '\\' && i + 1 < str.length) {
+            i += 2;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === "'") {
+            i += 2;
+            while (i < str.length && str[i] !== "'") {
+              i += str[i] === '\\' && i + 1 < str.length ? 2 : 1;
+            }
+            if (i >= str.length) return -1;
+            i += 1;
+            continue;
+          }
+          if (str[i] === '$' && str[i + 1] === '"') {
+            const nextIdx = consumeDoubleQuoted(str, i + 1);
+            if (nextIdx < 0) return nextIdx;
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === '"') {
+            const nextIdx = consumeDoubleQuoted(str, i);
+            if (nextIdx < 0) return nextIdx;
+            i = nextIdx;
+            continue;
+          }
+          if (str[i] === "'") {
+            const end = str.indexOf("'", i + 1);
+            if (end === -1) return -1;
+            i = end + 1;
+            continue;
+          }
+          i += 1;
+        }
+        return i > startIndex ? i : -1;
+      };
       const stripLeadingWrappers = (source) => {
         let current = source.trim();
         let wrapped = false;
         let overflow = false;
-        const envAssign =
-          /^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]*)\s+/;
-        const leadingRedirect =
-          /^(?!<!--)(?:\d*(?:>>?|<<?|<>&|>&|&>>?))\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]+)\s+/;
+        const redirScanState = {
+          noParam: false,
+          noSingle: false,
+          noDouble: false,
+        };
         const wrappers = new Set([
           'command',
           'env',
@@ -1097,8 +1570,26 @@ describe('local container recipe pins', () => {
           let previous;
           do {
             previous = current;
-            let next = current.replace(envAssign, '');
-            if (next === current) next = current.replace(leadingRedirect, '');
+            let next = current;
+            const afterAssign = consumeEnvAssign(current);
+            if (afterAssign !== null) {
+              if (afterAssign.unsafe) {
+                return { text: '', wrapped: true, overflow: true };
+              }
+              next = afterAssign.next;
+            } else {
+              const afterRedir = consumeLeadingRedirect(
+                current,
+                wrapped,
+                redirScanState,
+              );
+              if (afterRedir !== null) {
+                if (afterRedir.unsafe) {
+                  return { text: '', wrapped: true, overflow: true };
+                }
+                next = afterRedir.next;
+              }
+            }
             if (next === current && /^!\s+/.test(current)) {
               next = current.replace(/^!\s+/, '');
             }
@@ -1119,10 +1610,77 @@ describe('local container recipe pins', () => {
             let prev;
             do {
               prev = rest;
-              rest = rest.replace(
-                /^(?:-[i0S]\s+|-u\s+\S+\s+|-u\S+\s+|--unset=\S+\s+|-C\s+\S+\s+|-C\S+\s+|--chdir=\S+\s+|--\s+|[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]*)\s+)/,
-                '',
-              );
+              const afterEnvAssign = consumeEnvAssign(rest);
+              if (afterEnvAssign !== null) {
+                if (afterEnvAssign.unsafe) {
+                  return { text: '', wrapped: true, overflow: true };
+                }
+                rest = afterEnvAssign.next;
+              } else {
+                const afterEnvRedir = consumeLeadingRedirect(
+                  rest,
+                  true,
+                  redirScanState,
+                );
+                if (afterEnvRedir !== null) {
+                  if (afterEnvRedir.unsafe) {
+                    return { text: '', wrapped: true, overflow: true };
+                  }
+                  rest = afterEnvRedir.next;
+                } else if (/^-[uC](?:\s+|(?=[<>]|&>))/.test(rest)) {
+                  let afterFlag = rest.slice(2).trimStart();
+                  let rPrev;
+                  do {
+                    rPrev = afterFlag;
+                    const rNext = consumeLeadingRedirect(
+                      afterFlag,
+                      true,
+                      redirScanState,
+                    );
+                    if (rNext !== null) {
+                      if (rNext.unsafe) {
+                        return { text: '', wrapped: true, overflow: true };
+                      }
+                      afterFlag = rNext.next;
+                    }
+                  } while (afterFlag !== rPrev);
+                  const argEnd = consumeEnvArgToken(afterFlag, 0);
+                  if (argEnd === UNSAFE_REDIR_TARGET) {
+                    return { text: '', wrapped: true, overflow: true };
+                  }
+                  if (
+                    argEnd > 0 &&
+                    (argEnd >= afterFlag.length ||
+                      /\s|[<>]/.test(afterFlag[argEnd]) ||
+                      (afterFlag[argEnd] === '&' &&
+                        afterFlag[argEnd + 1] === '>'))
+                  ) {
+                    rest = afterFlag.slice(argEnd).trimStart();
+                  }
+                } else if (/^(?:-[uC]|--(?:unset|chdir)=)/.test(rest)) {
+                  const prefixMatch = /^(?:-[uC]|--(?:unset|chdir)=)/.exec(
+                    rest,
+                  );
+                  const argStart = prefixMatch[0].length;
+                  const argEnd = consumeEnvArgToken(rest, argStart);
+                  if (argEnd === UNSAFE_REDIR_TARGET) {
+                    return { text: '', wrapped: true, overflow: true };
+                  }
+                  if (
+                    argEnd > argStart &&
+                    (argEnd >= rest.length ||
+                      /\s|[<>]/.test(rest[argEnd]) ||
+                      (rest[argEnd] === '&' && rest[argEnd + 1] === '>'))
+                  ) {
+                    rest = rest.slice(argEnd).trimStart();
+                  }
+                } else {
+                  rest = rest.replace(
+                    /^(?:-[i0S](?:\s+|(?=[<>]|&>))|--(?:\s+|(?=[<>]|&>)))/,
+                    '',
+                  );
+                }
+              }
             } while (rest !== prev);
           } else if (wrapper === 'sudo' || wrapper === 'doas') {
             let prev;
@@ -1184,8 +1742,35 @@ describe('local container recipe pins', () => {
         }
         return { text: current, wrapped, overflow };
       };
-      const trailingShellSuffix =
-        /^(?:\s*(?:(?:\d*(?:>>?|<<?|<>&|>&|&>>?))\s*(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;|&()]+)|&|;)\s*)*$/;
+      const isTrailingShellSuffix = (tail) => {
+        let i = 0;
+        const scanState = { noParam: false, noSingle: false, noDouble: false };
+        while (i < tail.length) {
+          while (i < tail.length && /\s/.test(tail[i])) i += 1;
+          if (i >= tail.length) return 1;
+          const ch = tail[i];
+          if (ch === '#') return 1;
+          if (ch === ';') {
+            i += 1;
+            continue;
+          }
+          if (ch === '&' && (tail[i + 1] !== '>' || tail[i + 2] === '&')) {
+            i += 1;
+            continue;
+          }
+          const opEnd = matchRedirOpAt(tail, i, true);
+          if (opEnd === UNSAFE_REDIR_TARGET) return 2;
+          if (opEnd === -1) return 0;
+          i = opEnd;
+          while (i < tail.length && /\s/.test(tail[i])) i += 1;
+          if (i >= tail.length) return 0;
+          const start = i;
+          i = consumeRedirectTarget(tail, start, { scanState });
+          if (i === UNSAFE_REDIR_TARGET) return 2;
+          if (i <= start) return 0;
+        }
+        return 1;
+      };
       const stripGroupedTail = (text, open, close) => {
         if (!text.startsWith(open)) return null;
         let depth = 0;
@@ -1195,8 +1780,10 @@ describe('local container recipe pins', () => {
             depth -= 1;
             if (depth === 0) {
               const tail = text.slice(i + 1);
-              if (trailingShellSuffix.test(tail)) {
-                return text.slice(1, i).trim();
+              const suffixState = isTrailingShellSuffix(tail);
+              if (suffixState === 2) return { inner: '', unsafe: true };
+              if (suffixState === 1) {
+                return { inner: text.slice(1, i).trim(), unsafe: false };
               }
               return null;
             }
@@ -1204,7 +1791,567 @@ describe('local container recipe pins', () => {
         }
         return null;
       };
-      const isDangerousCommandText = (source, { rawLine = false } = {}) => {
+      const hasUnquotedGlob = (token) => {
+        let i = 0;
+        let bracketStart = -1;
+        while (i < token.length) {
+          const ch = token[i];
+          if (ch === '\\' && i + 1 < token.length) {
+            i += 2;
+            continue;
+          }
+          if (ch === '$' && token[i + 1] === "'") {
+            i += 2;
+            while (i < token.length && token[i] !== "'") {
+              i += token[i] === '\\' && i + 1 < token.length ? 2 : 1;
+            }
+            if (i < token.length) i += 1;
+            continue;
+          }
+          if (ch === "'") {
+            const end = token.indexOf("'", i + 1);
+            if (end === -1) break;
+            i = end + 1;
+            continue;
+          }
+          if (ch === '"') {
+            i += 1;
+            while (i < token.length && token[i] !== '"') {
+              i += token[i] === '\\' && i + 1 < token.length ? 2 : 1;
+            }
+            if (i < token.length) i += 1;
+            continue;
+          }
+          if (
+            (ch === '?' ||
+              ch === '*' ||
+              ch === '+' ||
+              ch === '@' ||
+              ch === '!') &&
+            token[i + 1] === '('
+          ) {
+            return true;
+          }
+          if (ch === '*' || ch === '?') return true;
+          if (ch === '[') {
+            if (bracketStart === -1) bracketStart = i;
+          } else if (ch === ']' && bracketStart !== -1) {
+            const literalFirst =
+              i === bracketStart + 1 ||
+              (i === bracketStart + 2 &&
+                (token[bracketStart + 1] === '!' ||
+                  token[bracketStart + 1] === '^'));
+            if (!literalFirst) return true;
+          }
+          i += 1;
+        }
+        return false;
+      };
+      const hasBraceExpansionInArgs = (text) => {
+        let i = 0;
+        const stack = [];
+        while (i < text.length) {
+          const ch = text[i];
+          if (ch === '\\' && i + 1 < text.length) {
+            i += 2;
+            continue;
+          }
+          if (ch === '$' && text[i + 1] === "'") {
+            i += 2;
+            while (i < text.length && text[i] !== "'") {
+              i += text[i] === '\\' && i + 1 < text.length ? 2 : 1;
+            }
+            if (i < text.length) i += 1;
+            continue;
+          }
+          if (ch === "'") {
+            const end = text.indexOf("'", i + 1);
+            if (end === -1) break;
+            i = end + 1;
+            continue;
+          }
+          if (ch === '"') {
+            i += 1;
+            while (i < text.length && text[i] !== '"') {
+              i += text[i] === '\\' && i + 1 < text.length ? 2 : 1;
+            }
+            if (i < text.length) i += 1;
+            continue;
+          }
+          if (ch === '$' && text[i + 1] === '{') {
+            let depth = 1;
+            i += 2;
+            while (i < text.length && depth > 0) {
+              if (text[i] === '\\' && i + 1 < text.length) {
+                i += 2;
+                continue;
+              }
+              if (text[i] === '$' && text[i + 1] === '{') {
+                depth += 1;
+                i += 2;
+                continue;
+              }
+              if (text[i] === '}') depth -= 1;
+              i += 1;
+            }
+            continue;
+          }
+          if (ch === '{') {
+            stack.push(false);
+          } else if (ch === '}' && stack.length > 0) {
+            if (stack.pop()) return true;
+          } else if (stack.length > 0) {
+            if (ch === ',') {
+              stack[stack.length - 1] = true;
+            } else if (ch === '.' && text[i + 1] === '.') {
+              stack[stack.length - 1] = true;
+              i += 2;
+              continue;
+            } else if (/\s/.test(ch)) {
+              stack.length = 0;
+            }
+          }
+          i += 1;
+        }
+        return false;
+      };
+      const hasUnquotedFlagGlob = (text) => {
+        let i = 0;
+        let tokenStart = true;
+        let flagCandidate = false;
+        let tokenHasGlob = false;
+        let normTok = '';
+        let bracketStart = -1;
+        const isUrlGlobToken = () => tokenHasGlob && normTok.includes('//');
+        while (i < text.length) {
+          const ch = text[i];
+          if (/\s/.test(ch)) {
+            if (isUrlGlobToken()) return true;
+            tokenStart = true;
+            flagCandidate = false;
+            tokenHasGlob = false;
+            normTok = '';
+            bracketStart = -1;
+            i += 1;
+            continue;
+          }
+          if (tokenStart) {
+            flagCandidate =
+              ch === '-' ||
+              ch === '*' ||
+              ch === '?' ||
+              ch === '[' ||
+              ch === "'" ||
+              ch === '"' ||
+              ch === '\\' ||
+              ((ch === '@' || ch === '+' || ch === '!') && text[i + 1] === '(');
+            tokenStart = false;
+          }
+          if (ch === '\\' && i + 1 < text.length) {
+            normTok += text[i + 1];
+            i += 2;
+            continue;
+          }
+          if (ch === '$' && text[i + 1] === "'") {
+            i += 2;
+            while (i < text.length && text[i] !== "'") {
+              if (text[i] === '\\' && i + 1 < text.length) {
+                normTok += text[i + 1];
+                i += 2;
+                continue;
+              }
+              normTok += text[i];
+              i += 1;
+            }
+            if (i < text.length) i += 1;
+            continue;
+          }
+          if (ch === "'") {
+            const end = text.indexOf("'", i + 1);
+            if (end === -1) break;
+            normTok += text.slice(i + 1, end);
+            i = end + 1;
+            continue;
+          }
+          if (ch === '"') {
+            i += 1;
+            while (i < text.length && text[i] !== '"') {
+              if (text[i] === '\\' && i + 1 < text.length) {
+                normTok += text[i + 1];
+                i += 2;
+                continue;
+              }
+              normTok += text[i];
+              i += 1;
+            }
+            if (i < text.length) i += 1;
+            continue;
+          }
+          normTok += ch;
+          if (
+            ch === '*' ||
+            ch === '?' ||
+            ((ch === '@' || ch === '+' || ch === '!') && text[i + 1] === '(')
+          ) {
+            if (flagCandidate) return true;
+            tokenHasGlob = true;
+          } else if (ch === '[') {
+            if (bracketStart === -1) bracketStart = i;
+          } else if (ch === ']' && bracketStart !== -1) {
+            const literalFirst =
+              i === bracketStart + 1 ||
+              (i === bracketStart + 2 &&
+                (text[bracketStart + 1] === '!' ||
+                  text[bracketStart + 1] === '^'));
+            if (!literalFirst) {
+              if (flagCandidate) return true;
+              tokenHasGlob = true;
+            }
+          }
+          i += 1;
+        }
+        return isUrlGlobToken();
+      };
+      const hasFlagVariableExpansion = (text) => {
+        let i = 0;
+        while (i < text.length) {
+          while (i < text.length && /\s/.test(text[i])) i += 1;
+          if (i >= text.length) break;
+          const tokenStart = i;
+          let hasUnquotedExp = false;
+          let hasQuotedExp = false;
+          let singleDoubleQuotedSpan = false;
+          while (i < text.length && !/\s/.test(text[i])) {
+            const ch = text[i];
+            if (ch === '\\' && i + 1 < text.length) {
+              i += 2;
+              continue;
+            }
+            if (ch === '$' && (text[i + 1] === "'" || text[i + 1] === '"')) {
+              return true;
+            }
+            if (ch === "'") {
+              const end = text.indexOf("'", i + 1);
+              i = end === -1 ? text.length : end + 1;
+              continue;
+            }
+            if (ch === '"') {
+              const qStart = i;
+              i += 1;
+              while (i < text.length && text[i] !== '"') {
+                if (text[i] === '\\' && i + 1 < text.length) {
+                  i += 2;
+                  continue;
+                }
+                if (text[i] === '$') {
+                  const next = text[i + 1];
+                  if (next === '@') return true;
+                  if (next === '{') {
+                    hasQuotedExp = true;
+                    let depth = 1;
+                    i += 2;
+                    while (i < text.length && depth > 0) {
+                      if (text[i] === '\\' && i + 1 < text.length) {
+                        i += 2;
+                        continue;
+                      }
+                      if (text[i] === '@' || text[i] === '"') return true;
+                      if (text[i] === '{') depth += 1;
+                      else if (text[i] === '}') depth -= 1;
+                      i += 1;
+                    }
+                    continue;
+                  }
+                  if (next && /[A-Za-z0-9_*#?!-]/.test(next)) {
+                    hasQuotedExp = true;
+                  }
+                }
+                i += 1;
+              }
+              if (i < text.length) i += 1;
+              if (
+                qStart === tokenStart &&
+                (i >= text.length || /\s/.test(text[i]))
+              ) {
+                singleDoubleQuotedSpan = true;
+              }
+              continue;
+            }
+            if (ch === '$') {
+              const next = text[i + 1];
+              if (next === '{') {
+                hasUnquotedExp = true;
+                let depth = 1;
+                i += 2;
+                while (i < text.length && depth > 0) {
+                  if (text[i] === '\\' && i + 1 < text.length) {
+                    i += 2;
+                    continue;
+                  }
+                  if (text[i] === '{') depth += 1;
+                  else if (text[i] === '}') depth -= 1;
+                  i += 1;
+                }
+                continue;
+              }
+              if (next && /[A-Za-z0-9_@*#?!-]/.test(next)) {
+                hasUnquotedExp = true;
+              }
+            }
+            i += 1;
+          }
+          if (hasUnquotedExp) return true;
+          if (hasQuotedExp) {
+            const rawToken = text.slice(tokenStart, i);
+            const strippedToken = rawToken.slice(1, -1);
+            if (
+              !singleDoubleQuotedSpan ||
+              !/^\/?(?:repos|orgs|users|gists|issues|pulls|search)\//.test(
+                strippedToken,
+              )
+            ) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      const ghSubcommandRest =
+        /^(?:gh\b|co\s+\S|copilot\b|browse(?:\s+-|$)|attestation\s+(?:verify|download)\b|pr\s+(?:-R\S*|--repo\b|(?:merge|close|comment|edit|review|lock|unlock|ready|reopen|view|checks|diff|list|checkout|create|status|update-branch|revert)\b)|api\s+(?:[-/$"'\\{]|[Hh][Tt][Tt][Pp][Ss]?:\/\/|[A-Za-z0-9_-]+\/|user(?:\s|$)|gists\b|notifications\b|graphql\b|markdown\b)|issue\s+(?:-R\S*|--repo\b|(?:create|close|comment|edit|reopen|delete|lock|unlock|transfer|pin|unpin|develop|view|list|status)\b)|workflow\s+(?:-R\S*|--repo\b|(?:run|enable|disable|list|view)\b)|auth\s+(?:login|logout|refresh|setup-git|status|switch|token)\b|repo\s+(?:clone|create|delete|edit|fork|rename|archive|unarchive|sync|autolink|view|list|deploy-key|set-default)\b|release\s+(?:-R\S*|--repo\b|(?:create|delete|edit|upload|download|view|list)\b)|gist\s+(?:create|edit|delete|clone|rename|view|list)\b|secret\s+(?:-R\S*|--repo\b|(?:set|delete|remove|list)\b)|variable\s+(?:-R\S*|--repo\b|(?:set|delete|remove|get|list)\b)|run\s+(?:-R\S*|--repo\b|(?:list|view|watch|rerun|cancel|download|delete)\b)|ssh-key\s+(?:add|delete|list)\b|gpg-key\s+(?:add|delete|list)\b|label\s+(?:-R\S*|--repo\b|(?:create|edit|delete|clone)\b)|cache\s+(?:-R\S*|--repo\b|delete\b)|project\s+(?:-R\S*|--repo\b|(?:create|delete|edit|close|copy|link|unlink|mark-template|item-add|item-create|item-edit|item-delete|item-archive|field-create|field-delete|view|list)\b)|(?:skill|skills)\s+(?:install|publish|update|remove|list)\b|(?:agent-task|agent-tasks|agent|agents)\s+(?:-R\S*|--repo\b|(?:create|view|list)\b)|discussion\s+(?:-R\S*|--repo\b|(?:create|comment|edit|view|list)\b)|config\s+(?:get|set|list|clear-cache)\b|alias\s+(?:set|delete|import|list)\b|(?:extension|extensions|ext)\s+(?:install|remove|upgrade|create|exec|list)\b|(?:codespace|cs)\s+(?:create|delete|ssh|cp|exec|edit|stop|rebuild|ports|code|list)\b)/;
+      const documentedDataGlobs = new Set([
+        '**',
+        '**Boundary.**',
+        '[^*\\n]+?',
+        '*verify*',
+        'AWS_*',
+        '\\s*',
+        '$QWEN_VERIFY_ASSETS_*',
+        'evidence/*.png',
+        'scripts/tests/**',
+        'node_modules/@qwen-code/*',
+        '@qwen-code/*',
+        'url.*.insteadOf',
+        'url.*.pushInsteadOf',
+        'http.<url>.*',
+        'tmp/pr<n>-verify-*/',
+      ]);
+      const readLeadingGlobWord = (str, rawLine = false) => {
+        let i = 0;
+        while (i < str.length) {
+          const ch = str[i];
+          if (
+            (ch === '$' && str[i + 1] === '(') ||
+            ((ch === '<' || ch === '>') && str[i + 1] === '(') ||
+            (ch === '`' && (!rawLine || i > 0))
+          ) {
+            return '$(unsafe)';
+          }
+          if (ch === '\\' && i + 1 < str.length) {
+            i += 2;
+            continue;
+          }
+          if (ch === '$' && str[i + 1] === '{') {
+            const nextIdx = consumeParamExpansion(str, i);
+            if (nextIdx === UNSAFE_REDIR_TARGET) return '$(unsafe)';
+            if (nextIdx < 0) return str.slice(0, i);
+            i = nextIdx;
+            continue;
+          }
+          if (ch === '$' && str[i + 1] === "'") {
+            i += 2;
+            while (i < str.length && str[i] !== "'") {
+              i += str[i] === '\\' && i + 1 < str.length ? 2 : 1;
+            }
+            if (i < str.length) i += 1;
+            continue;
+          }
+          if (ch === "'") {
+            const end = str.indexOf("'", i + 1);
+            if (end === -1) return str.slice(0, i);
+            i = end + 1;
+            continue;
+          }
+          if (ch === '"') {
+            const nextIdx = consumeDoubleQuoted(str, i);
+            if (nextIdx === UNSAFE_REDIR_TARGET) return '$(unsafe)';
+            if (nextIdx < 0) return str.slice(0, i);
+            i = nextIdx;
+            continue;
+          }
+          if (/[\s;|&()<>]/.test(ch)) break;
+          i += 1;
+        }
+        return str.slice(0, i);
+      };
+      const splitQuotedSemicolons = (text) => {
+        const out = [];
+        let start = 0;
+        let noMoreBacktick = false;
+        let noMoreSingle = false;
+        let noMoreDouble = false;
+        for (let i = 0; i < text.length; i += 1) {
+          const ch = text[i];
+          if (ch === '\\' && i + 1 < text.length) {
+            i += 1;
+            continue;
+          }
+          if (ch === '`' && !noMoreBacktick) {
+            const end = text.indexOf('`', i + 1);
+            if (end === -1) {
+              noMoreBacktick = true;
+              continue;
+            }
+            i = end;
+            continue;
+          }
+          if (ch === '$' && text[i + 1] === "'") {
+            i += 2;
+            while (i < text.length && text[i] !== "'") {
+              i += text[i] === '\\' && i + 1 < text.length ? 2 : 1;
+            }
+            continue;
+          }
+          if (ch === "'" && !noMoreSingle) {
+            const end = text.indexOf("'", i + 1);
+            if (end === -1) {
+              noMoreSingle = true;
+              continue;
+            }
+            i = end;
+            continue;
+          }
+          if (ch === '"' && !noMoreDouble) {
+            let j = i + 1;
+            while (j < text.length && text[j] !== '"') {
+              if (text[j] === '\\' && j + 1 < text.length) {
+                j += 2;
+                continue;
+              }
+              if (text[j] === '$' && text[j + 1] === '{') {
+                let braceDepth = 1;
+                j += 2;
+                while (j < text.length && braceDepth > 0) {
+                  if (text[j] === '\\' && j + 1 < text.length) {
+                    j += 2;
+                    continue;
+                  }
+                  if (text[j] === '{') braceDepth += 1;
+                  else if (text[j] === '}') braceDepth -= 1;
+                  j += 1;
+                }
+                continue;
+              }
+              j += 1;
+            }
+            if (j < text.length) {
+              i = j;
+            } else {
+              noMoreDouble = true;
+            }
+            continue;
+          }
+          if (ch === ';') {
+            out.push(text.slice(start, i));
+            start = i + 1;
+          }
+        }
+        out.push(text.slice(start));
+        return out;
+      };
+      const hasBoldProseOutputRedirect = (text) => {
+        let i = 0;
+        let noMoreBacktick = false;
+        let noMoreSingle = false;
+        let noMoreDouble = false;
+        while (i < text.length) {
+          const ch = text[i];
+          if (ch === '\\' && i + 1 < text.length) {
+            i += 2;
+            continue;
+          }
+          if (ch === '`' && !noMoreBacktick) {
+            const end = text.indexOf('`', i + 1);
+            if (end === -1) {
+              noMoreBacktick = true;
+              i += 1;
+              continue;
+            }
+            i = end + 1;
+            continue;
+          }
+          if (ch === "'" && !noMoreSingle) {
+            const end = text.indexOf("'", i + 1);
+            if (end === -1) {
+              noMoreSingle = true;
+              i += 1;
+              continue;
+            }
+            i = end + 1;
+            continue;
+          }
+          if (ch === '"' && !noMoreDouble) {
+            let j = i + 1;
+            while (j < text.length && text[j] !== '"') {
+              j += text[j] === '\\' && j + 1 < text.length ? 2 : 1;
+            }
+            if (j < text.length) {
+              i = j + 1;
+            } else {
+              noMoreDouble = true;
+              i += 1;
+            }
+            continue;
+          }
+          if (ch === '>') return true;
+          i += 1;
+        }
+        return false;
+      };
+      const boldSubstringCommands = [
+        'gh',
+        'make',
+        'bash',
+        'dash',
+        'curl',
+        'docker',
+        'python',
+        'python3',
+        'node',
+        'npm',
+        'npx',
+        'git',
+        'ssh',
+        'sudo',
+        'eval',
+        'exec',
+        'ruby',
+        'perl',
+        'wget',
+        'command',
+        'timeout',
+        'nice',
+        'xargs',
+        'nohup',
+        'doas',
+        'yarn',
+        'pnpm',
+        'qwen',
+        'chmod',
+        'chown',
+        'find',
+        'builtin',
+        'pip3',
+        'cargo',
+        'unzip',
+        'tar',
+        'awk',
+        'sed',
+      ];
+      const isDangerousCommandText = (
+        source,
+        { rawLine = false, depth = 0 } = {},
+      ) => {
+        if (depth > 32) return true;
         const {
           text: stripped,
           wrapped,
@@ -1212,7 +2359,7 @@ describe('local container recipe pins', () => {
         } = stripLeadingWrappers(source);
         if (overflow) return true;
         if (
-          /^(?:[^\s;|&()]*\$\([^)]*\))/.test(stripped) ||
+          /^(?:[<>]\(|[^\s;|&()]*\$\([^)]*\))/.test(stripped) ||
           /^(?:[^\s;|&()'"]|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")*\$(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/.test(
             stripped,
           ) ||
@@ -1220,20 +2367,32 @@ describe('local container recipe pins', () => {
         ) {
           return true;
         }
-        const subshellInner = stripGroupedTail(stripped, '(', ')');
-        if (
-          subshellInner &&
-          !(rawLine && subshellInner.startsWith('`')) &&
-          isDangerousCommandText(subshellInner, { rawLine })
-        ) {
-          return true;
+        const subshellGroup = stripGroupedTail(stripped, '(', ')');
+        if (subshellGroup) {
+          if (subshellGroup.unsafe) return true;
+          if (
+            subshellGroup.inner &&
+            !(rawLine && subshellGroup.inner.startsWith('`')) &&
+            isDangerousCommandText(subshellGroup.inner, {
+              rawLine,
+              depth: depth + 1,
+            })
+          ) {
+            return true;
+          }
         }
-        const braceInner = stripGroupedTail(stripped, '{', '}');
-        if (
-          braceInner &&
-          isDangerousCommandText(braceInner.replace(/;\s*$/, ''), { rawLine })
-        ) {
-          return true;
+        const braceGroup = stripGroupedTail(stripped, '{', '}');
+        if (braceGroup) {
+          if (braceGroup.unsafe) return true;
+          if (
+            braceGroup.inner &&
+            isDangerousCommandText(braceGroup.inner.replace(/;\s*$/, ''), {
+              rawLine,
+              depth: depth + 1,
+            })
+          ) {
+            return true;
+          }
         }
         const headToken = /^[^\s;|&()]+/.exec(stripped)?.[0];
         if (!headToken) return false;
@@ -1246,11 +2405,289 @@ describe('local container recipe pins', () => {
           /,|\.\./.test(headToken.slice(openBrace + 1, closeBrace)) &&
           !(rawLine && headToken.startsWith('`')) &&
           !(!wrapped && rest === '' && /^\{"[^"]+":/.test(headToken));
+        const globWord = /[[\]\\'"${]/.test(headToken)
+          ? readLeadingGlobWord(stripped, rawLine)
+          : headToken;
+        if (globWord === '$(unsafe)') return true;
+        const globRest =
+          globWord.length !== headToken.length
+            ? stripped.slice(globWord.length).trimStart()
+            : rest;
+        const globOpenBrace = globWord.indexOf('{');
+        const globCloseBrace = globWord.lastIndexOf('}');
+        const hasGlobWordBraceExpansion =
+          globWord.length > headToken.length &&
+          globOpenBrace !== -1 &&
+          globCloseBrace > globOpenBrace &&
+          /,|\.\./.test(globWord.slice(globOpenBrace + 1, globCloseBrace)) &&
+          !(rawLine && globWord.startsWith('`')) &&
+          !(!wrapped && globRest === '' && /^\{"[^"]+":/.test(globWord));
+        const headHasGlob =
+          hasUnquotedGlob(globWord) ||
+          (stripped[globWord.length] === '(' && /[?*+@!]$/.test(globWord));
+        const boldStem = headToken
+          .replace(/^\*\*|\*\*[,.:;]?$/g, '')
+          .replace(/[:.]$/, '')
+          .replace(/["']/g, '');
+        const isUnsafeBoldStem =
+          boldStem === '' ||
+          (boldStem.length <= 2 &&
+            !(
+              /^[A-Z]/.test(boldStem) ||
+              /^(?:it\.?\*\*[,.:;]?|\*\*is\*\*)$/.test(headToken)
+            )) ||
+          dangerousCommands.has(boldStem) ||
+          (!headToken.includes('.') &&
+            /^[a-z0-9]{3,}$/.test(boldStem) &&
+            boldSubstringCommands.some((cmd) => cmd.includes(boldStem))) ||
+          /^(?:gh|make|sh|bash|zsh|dash|ksh|git|curl|wget|node|python|python3|rm|cp|mv|env|sudo|eval|exec|command|timeout|nice|xargs|chmod|chown|nc|truncate|nohup|builtin|setsid|caffeinate|doas|ionice|rlwrap|qwen)$/.test(
+            boldStem,
+          ) ||
+          (boldStem === 'Make' &&
+            (headToken.endsWith('**') ||
+              !/^(?:the|a|an|this|that|sure|room|sense|it|your|our|each|every)\b/i.test(
+                rest,
+              )));
+        const isClosingQuoteBoldProse =
+          /^[A-Za-z]+"$/.test(headToken) &&
+          !/[/?[\]]|\$\(|`|[<>]\(/.test(globWord) &&
+          globWord.includes('**') &&
+          globRest.includes('**');
+        const isMarkdownBoldProse =
+          rawLine &&
+          depth === 0 &&
+          headHasGlob &&
+          !wrapped &&
+          stripped[globWord.length] !== '(' &&
+          (isClosingQuoteBoldProse ||
+            (!isUnsafeBoldStem &&
+              !headToken.includes('"') &&
+              ((!headToken.includes("'") &&
+                (/^\*\*[A-Za-z0-9_-]+:\*\*$/.test(headToken) ||
+                  /^\*\*[A-Za-z0-9_.-]+(?:\*\*[,.:;]?)?$/.test(headToken) ||
+                  /^[A-Za-z0-9_-]+\.?\*\*[,.:;]?$/.test(headToken))) ||
+                (/^\*\*[A-Za-z]+'s$/.test(headToken) && !rest.includes("'")))));
+        const clauseStartsDangerous = (clauseText, clauseDepth = 0) => {
+          if (clauseDepth > 8) return true;
+          const trimmedClause = clauseText
+            .replace(/^(?:\([ \t]*|\{[ \t]+)+/, '')
+            .trimStart();
+          let openParens = 0;
+          let closeParens = 0;
+          let openBraces = 0;
+          let closeBraces = 0;
+          for (let ci = 0; ci < trimmedClause.length; ci += 1) {
+            const c = trimmedClause[ci];
+            if (c === '(') openParens += 1;
+            else if (c === ')') closeParens += 1;
+            else if (c === '{') openBraces += 1;
+            else if (c === '}') closeBraces += 1;
+          }
+          let excessParens = Math.max(0, closeParens - openParens);
+          let excessBraces = Math.max(0, closeBraces - openBraces);
+          let endIdx = trimmedClause.length;
+          while (endIdx > 0) {
+            const last = trimmedClause[endIdx - 1];
+            if (last === ' ' || last === '\t') {
+              endIdx -= 1;
+            } else if (last === ')' && excessParens > 0) {
+              excessParens -= 1;
+              endIdx -= 1;
+            } else if (last === '}' && excessBraces > 0) {
+              excessBraces -= 1;
+              endIdx -= 1;
+            } else {
+              break;
+            }
+          }
+          const cleaned = trimmedClause.slice(0, endIdx).trim();
+          if (!cleaned) return false;
+          if (/^[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)/.test(cleaned)) return true;
+          if (/^(?:\d*|\{[A-Za-z_][A-Za-z0-9_]*\})[<>]/.test(cleaned)) {
+            return true;
+          }
+          if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(cleaned)) return true;
+          const strippedClause = stripLeadingWrappers(cleaned);
+          if (strippedClause.overflow) return true;
+          const checkClause = strippedClause.text;
+          if (/^(?:\([ \t]*|\{[ \t]+)/.test(checkClause)) {
+            const unwrapped = checkClause.replace(
+              /^(?:\([ \t]*|\{[ \t]+)+/,
+              '',
+            );
+            if (
+              unwrapped !== checkClause &&
+              clauseStartsDangerous(unwrapped, clauseDepth + 1)
+            ) {
+              return true;
+            }
+          }
+          const innerSub = stripGroupedTail(checkClause, '(', ')');
+          if (
+            innerSub &&
+            (innerSub.unsafe ||
+              (innerSub.inner &&
+                clauseStartsDangerous(innerSub.inner, clauseDepth + 1)))
+          ) {
+            return true;
+          }
+          const innerBrace = stripGroupedTail(checkClause, '{', '}');
+          if (
+            innerBrace &&
+            (innerBrace.unsafe ||
+              (innerBrace.inner &&
+                clauseStartsDangerous(
+                  innerBrace.inner.replace(/;\s*$/, ''),
+                  clauseDepth + 1,
+                )))
+          ) {
+            return true;
+          }
+          const firstTok = /^[^\s;|&()<>]+/.exec(checkClause)?.[0] ?? '';
+          const unquotedTok = firstTok
+            .replaceAll('\\', '')
+            .replace(/["']/g, '');
+          const firstName = unquoteCommandToken(firstTok).name;
+          return (
+            /^(?:\.\/|\/|\.\.\/|scripts\/)/.test(unquotedTok) ||
+            dangerousCommands.has(firstName) ||
+            /^(?:gh|make|sh|bash|zsh|dash|ksh|rm|cp|mv|env|sudo|eval|exec|source|\.|if|for|while|until|case|then|do|coproc|function|alias|qwen|export|unset|chmod|chown|cat|echo|printf|touch|mkdir|kill|ln|dd|tee|trap|declare|typeset|local|hash|enable|builtin|nc|truncate|compgen|pkill)$/.test(
+              firstName,
+            ) ||
+            isDangerousCommandText(checkClause, {
+              rawLine: false,
+              depth: depth + 1,
+            })
+          );
+        };
+        const boldProseRestUnsafe = (text) => {
+          if (
+            /[|&]|\$\(|\$\{|[<>]\(|<<<|\$['"]/.test(text) ||
+            hasBoldProseOutputRedirect(text)
+          ) {
+            return true;
+          }
+          if (text.includes('`')) {
+            let ti = 0;
+            while (ti < text.length) {
+              if (text[ti] === '\\' && ti + 1 < text.length) {
+                ti += 2;
+                continue;
+              }
+              if (text[ti] === '`') {
+                let tj = ti + 1;
+                while (tj < text.length && text[tj] !== '`') {
+                  tj += text[tj] === '\\' && tj + 1 < text.length ? 2 : 1;
+                }
+                if (tj >= text.length) break;
+                const inner = text.slice(ti + 1, tj);
+                ti = tj + 1;
+                if (
+                  inner === '/verify-pr <n>' ||
+                  inner === 'git diff --color=always'
+                ) {
+                  continue;
+                }
+                if (
+                  /\s/.test(inner) ||
+                  /[<>;&|\\'"$]/.test(inner) ||
+                  /^(?:\.\/|\/|\.\.\/|scripts\/)/.test(inner) ||
+                  /\.(?:sh|bash|zsh|py|js|mjs|cjs|rb|pl|bin)$/.test(inner) ||
+                  clauseStartsDangerous(inner) ||
+                  isDangerousCommandText(inner, {
+                    rawLine: false,
+                    depth: depth + 1,
+                  })
+                ) {
+                  return true;
+                }
+                continue;
+              }
+              ti += 1;
+            }
+          }
+          const normRest = text.replaceAll('\\', '').replace(/["']/g, '');
+          if (ghSubcommandRest.test(normRest)) return true;
+          if (text.includes(';')) {
+            const parts = splitQuotedSemicolons(text);
+            for (let pi = 1; pi < parts.length; pi += 1) {
+              const clause = parts[pi].trimStart();
+              if (!clause) continue;
+              if (clauseStartsDangerous(clause)) return true;
+            }
+          }
+          return false;
+        };
+        const hasHeadGlobExpansion =
+          headHasGlob &&
+          !(rawLine && headToken.startsWith('`')) &&
+          (wrapped ||
+            (!rawLine &&
+              (globRest !== '' || !documentedDataGlobs.has(globWord))) ||
+            (rawLine &&
+              (isMarkdownBoldProse
+                ? boldProseRestUnsafe(globRest)
+                : globRest !== '' || !documentedDataGlobs.has(globWord))));
+        const strippedPosRest =
+          rest !== '' && /^\$[0-9]+$/.test(headToken)
+            ? stripLeadingWrappers(rest)
+            : null;
+        const posRestNormalized = strippedPosRest
+          ? strippedPosRest.text.replaceAll('\\', '').replace(/["']/g, '')
+          : '';
+        const posRestFirstName = strippedPosRest
+          ? unquoteCommandToken(
+              /^[^\s;|&()]+/.exec(strippedPosRest.text)?.[0] ?? '',
+            ).name
+          : '';
+        const isDocumentedEnvPathCitation =
+          !rawLine &&
+          !wrapped &&
+          rest === '' &&
+          (documentedDataGlobs.has(headToken) ||
+            headToken === '$HOME/.qwen/settings.json' ||
+            headToken === '$HOME/.qwen-verify-nonce');
+        const isPurePriceQuote = (word) =>
+          rawLine &&
+          rest === '' &&
+          /^"[^"$]*\$[0-9]{2,}(?:\.[0-9]+)?[^"$]*"$/.test(word);
+        const hasPrefixVarConcat = (word) =>
+          !(rawLine && word.startsWith('`')) &&
+          !documentedDataGlobs.has(word) &&
+          /^[^\s;|&()$]+\$[A-Za-z0-9_@*#?!$-]/.test(word) &&
+          !isPurePriceQuote(word);
+        const globWordHasConcatVar =
+          globWord.length > headToken.length &&
+          !(rawLine && globWord.startsWith('`')) &&
+          /\$[A-Za-z0-9_@*#?!$-]/.test(globWord) &&
+          !isPurePriceQuote(globWord);
         if (
           hasHeadBraceExpansion ||
-          /\$\{(?!\{)[^}]*\}/.test(headToken) ||
+          hasGlobWordBraceExpansion ||
+          hasHeadGlobExpansion ||
+          hasParamBraceExpansion(headToken) ||
+          hasParamBraceExpansion(globWord) ||
           (rest !== '' && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(headToken)) ||
-          /^[A-Za-z0-9_./'"\\-]+\$[A-Za-z_][A-Za-z0-9_]*/.test(headToken)
+          (rest !== '' && /^\$[@*#?!$-]+$/.test(headToken)) ||
+          /^\$[@*#?!$-][^\s;|&()]/.test(headToken) ||
+          /^\$[0-9]+[^0-9\s;|&()]/.test(headToken) ||
+          (!isDocumentedEnvPathCitation &&
+            /^\$[A-Za-z_][A-Za-z0-9_]*[^A-Za-z0-9_\s;|&()]/.test(headToken)) ||
+          (strippedPosRest !== null &&
+            (!rawLine ||
+              strippedPosRest.overflow ||
+              /[;|&`<>]|\$\(|\$\{|[<>]\(|\$['"]/.test(rest) ||
+              ghSubcommandRest.test(posRestNormalized) ||
+              dangerousCommands.has(posRestFirstName) ||
+              /^(?:gh|make|sh|bash|zsh|dash|ksh|rm|cp|mv|env|sudo|eval|exec|source|\.|qwen|chmod|chown|dd|tee|nc|truncate)$/.test(
+                posRestFirstName,
+              ) ||
+              isDangerousCommandText(strippedPosRest.text, {
+                rawLine,
+                depth: depth + 1,
+              }))) ||
+          hasPrefixVarConcat(headToken) ||
+          globWordHasConcatVar
         ) {
           return true;
         }
@@ -1261,15 +2698,22 @@ describe('local container recipe pins', () => {
           }
           if (wrapped || obfuscated) return true;
           if (!rest) return false;
-          if (!rawLine && /`[^`]+`|\$\([^)]*\)/.test(rest)) return true;
+          if (/[<>]\(|\$\(|`/.test(rest)) {
+            return true;
+          }
           const normalizedRest = rest
             .replace(/\$'(?:[^'\\]|\\.)*'/g, (m) => m.slice(2, -1))
             .replace(/\$"(?:[^"\\]|\\.)*"/g, (m) => m.slice(2, -1))
             .replaceAll('\\', '')
             .replace(/["']/g, '');
           if (/^api(?:\s|$)/.test(normalizedRest)) {
-            return /(?:^|\s)(?:-X\S*|--method(?:=|\s)\S*|-[fF]\S*|--field(?:=|\s)|--raw-field(?:=|\s)|--input(?:=|\s))/.test(
-              normalizedRest,
+            return (
+              hasFlagVariableExpansion(rest) ||
+              hasBraceExpansionInArgs(rest) ||
+              hasUnquotedFlagGlob(rest) ||
+              /(?:^|\s)(?:-[is]*[XfF]\S*|--(?:method|field|raw-field|input|hostname)(?:=|\s|[<>]|$)|[Hh][Tt][Tt][Pp][Ss]?:\/\/)/.test(
+                normalizedRest,
+              )
             );
           }
           if (/^pr\s+view(?:\s|$)/.test(normalizedRest)) return false;
@@ -1739,21 +3183,27 @@ describe('local container recipe pins', () => {
           }
         }
         const groupedSubshell = stripGroupedTail(text, '(', ')');
-        if (
-          groupedSubshell &&
-          !(rawLine && groupedSubshell.startsWith('`')) &&
-          (await executableBoundary(groupedSubshell, { rawLine }))
-        ) {
-          return true;
+        if (groupedSubshell) {
+          if (groupedSubshell.unsafe) return true;
+          if (
+            groupedSubshell.inner &&
+            !(rawLine && groupedSubshell.inner.startsWith('`')) &&
+            (await executableBoundary(groupedSubshell.inner, { rawLine }))
+          ) {
+            return true;
+          }
         }
         const groupedBrace = stripGroupedTail(text, '{', '}');
-        if (
-          groupedBrace &&
-          (await executableBoundary(groupedBrace.replace(/;\s*$/, ''), {
-            rawLine,
-          }))
-        ) {
-          return true;
+        if (groupedBrace) {
+          if (groupedBrace.unsafe) return true;
+          if (
+            groupedBrace.inner &&
+            (await executableBoundary(groupedBrace.inner.replace(/;\s*$/, ''), {
+              rawLine,
+            }))
+          ) {
+            return true;
+          }
         }
         const executionWrappers = new Set([
           'command',
@@ -1799,7 +3249,7 @@ describe('local container recipe pins', () => {
           /^(?:if|while|until)\s+(?:(?:true|false|command|qwen|node|bash|sh|env|nice|sudo|docker|test)(?=\s|;|$)|\[)/,
           /^[{(]\s*(?:\/|["']?(?:node|bash|sh|qwen)(?=\s|$)|command(?=\s|$)|(?:env|nice|sudo|docker|echo|touch|printf|python3?|true)(?=\s|$))/,
           /^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s/,
-          /^(?:export\s+[A-Za-z_][A-Za-z0-9_]*(?:=|\s|$)|unset(?:\s+[A-Za-z_][A-Za-z0-9_]*)+\s*$|[A-Za-z_][A-Za-z0-9_]*=)/,
+          /^(?:export\s+[A-Za-z_][A-Za-z0-9_]*(?:=|\s|$)|unset(?:\s+[A-Za-z_][A-Za-z0-9_]*)+\s*$|[A-Za-z_][A-Za-z0-9_]*\+?=)/,
           /(?:^|[;&|]\s*)(?:["']?(?:\/[A-Za-z0-9_.-]+)*\/node|node)\s+(?:-e|--eval)(?=\s|$)/,
           /(?:^|[;&|]\s*)[^\s;|&]*\$\([^)]*\)[^\s;|&]*\s+(?:-e|--eval)(?=\s|$)/,
           /(?:^|[;&|]\s*)python3(?=\s|$)/,
@@ -3598,6 +5048,294 @@ describe('local container recipe pins', () => {
       ['bare nested brace expansion', '{gh,a{b}} pr merge <n>'],
       ['bare concat ansi-c', "g$'\\x68' pr merge <n>"],
       ['bare concat locale quote', 'g$"h" pr merge <n>'],
+      ['text fence glob question', '```text\ng? pr merge <n>\n```'],
+      ['text fence glob bracket', '```text\n[g]h pr merge <n>\n```'],
+      ['text fence glob posix bracket', '```text\n[]g]h pr merge <n>\n```'],
+      ['text fence glob star', '```text\ng* pr merge <n>\n```'],
+      ['text fence glob negated', '```text\ng[!x] pr merge <n>\n```'],
+      ['text fence glob leading question', '```text\n?h pr merge <n>\n```'],
+      ['text fence extglob plus', '```text\n+(g)h pr merge <n>\n```'],
+      ['text fence argless glob make', '```text\nm?ke\n```'],
+      ['text fence argless bracket make', '```text\n[m]ake\n```'],
+      ['console glob question', '```console\ng? pr merge <n>\n```'],
+      ['console glob bracket', '```console\n[g]h pr merge <n>\n```'],
+      ['console argless mid-star make', '```console\nm*ke\n```'],
+      ['bare glob question', 'g? pr merge <n>'],
+      ['bare glob bracket', '[g]h pr merge <n>'],
+      ['bare glob posix bracket', '[]g]h pr merge <n>'],
+      ['bare glob star', 'g* pr merge <n>'],
+      ['bare glob double star path', '/usr/bin/gh** pr merge <n>'],
+      ['bare glob negated', 'g[!x] pr merge <n>'],
+      ['bare glob leading question', '?h pr merge <n>'],
+      ['bare extglob plus', '+(g)h pr merge <n>'],
+      ['bare extglob at', '@(gh) pr merge <n>'],
+      ['bare glob make', 'm?ke all'],
+      ['bare glob git', '[g]it push origin main'],
+      ['bare bold wrapped make', '**make** all'],
+      ['bare bold close make', 'make** all'],
+      ['bare bold capitalized make', '**Make all'],
+      ['bare bold pipe gh', '**foo** | gh pr merge <n>'],
+      ['bare bullet pipe gh', '* | gh pr merge <n>'],
+      ['bare gh api glob flag', 'gh api -[X] DELETE repos/a/b'],
+      ['bare gh api extglob flag', 'gh api @(-X) DELETE repos/a/b'],
+      ['bare gh api brace flag', 'gh api {-X,} DELETE repos/a/b'],
+      ['bare gh api var flag', 'gh api $FLAG DELETE repos/a/b'],
+      ['bare gh api combined short flag', 'gh api -iX DELETE repos/a/b'],
+      [
+        'bare gh api hostname override',
+        'gh api --hostname evil.example repos/a/b',
+      ],
+      ['bare special var bash', '$@ bash -c "gh pr merge 1"'],
+      ['bare tilde var command', '~/$cmd pr merge <n>'],
+      ['bare named fd wrapper', '{fd}>/dev/null gh pr merge <n>'],
+      ['bare env append wrapper', 'A+=1 gh pr merge <n>'],
+      ['bare clobber wrapper', '>|/dev/null gh pr merge <n>'],
+      ['bare subshell concat quote redir', "(gh pr merge <n>) > ''/dev/null"],
+      ['bare gh api tight proc subst', 'gh api repos/a/b<(gh pr merge <n>)'],
+      [
+        'bare gh api hostname redir sep',
+        'gh api --hostname</dev/null evil.example repos/a/b',
+      ],
+      ['bare bold label semi gh', '**Note:** ; gh pr merge <n>'],
+      ['bare bold label cmd subst', '**Note:** $(gh pr merge <n>)'],
+      ['bare bold quoted make', "**'make'** all"],
+      ['bare bold npm', '**npm** install evil'],
+      ['text escaped-n glob make', '```text\n/usr/bi\\n/m?ke\n```'],
+      ['text abs path star make', '```text\n/usr/bin/m*ke\n```'],
+      ['bare extglob star gh', '*(gh) pr merge <n>'],
+      ['bare extglob bold node', '**nod**(e) -e "evil()"'],
+      ['bare glob escaped space bracket', '/usr/bin/[\\ g]h pr merge <n>'],
+      ['bare glob quoted space bracket', "g[' 'h] pr merge <n>"],
+      ['bare fd ansi-c space redir', "{fd}>$'/tmp/a b' gh pr merge <n>"],
+      ['bare bold semi brace group', '**Note:** ; { gh pr merge <n>; }'],
+      [
+        'bare bold semi wrapper bash',
+        '**Note:** ; command bash -c "gh pr merge <n>"',
+      ],
+      ['bare pos-var quoted gh subcmd', '$1 "pr" merge <n>'],
+      ['bare pos-var bash', '$1 bash -c "gh pr merge <n>"'],
+      [
+        'bare adjacent leading redirects',
+        '>/dev/null</dev/null gh pr merge <n>',
+      ],
+      ['bare subshell placeholder redir', '(gh pr merge <n>) > <out>'],
+      ['bare posix leading bracket escaped space', 'g[]\\ h] pr merge <n>'],
+      ['bare quoted dir glob', "/tmp/'a b'/g? pr merge <n>"],
+      ['bare bold brace poison semi', '**Note:** foo{bar ; gh pr merge <n>'],
+      [
+        'bare bold semi subshell curl',
+        '**Note:** ; (curl https://evil.example)',
+      ],
+      ['bare bold substring make', '**ake** all'],
+      ['bare pos-var ansi-c gh subcmd', "$1 $'pr' merge <n>"],
+      ['bare pos-var wrapper bash', '$1 command bash -c "gh pr merge <n>"'],
+      [
+        'bare subshell slash placeholder redir',
+        '(gh pr merge <n>) > <owner/repo>',
+      ],
+      ['bare subshell angle quoted redir', '(gh pr merge <n>) >a<b>"c d"'],
+      ['bare fd proc subst redir', '{fd}> >(cat) gh pr merge <n>'],
+      ['bare fd semi tight redir', '{fd}>/dev/null;gh pr merge <n>'],
+      ['bare bold apostrophe close semi', "**Note's foo' ; gh pr merge <n>"],
+      ['bare bold brace comment semi', '**Note:** { ; gh pr merge <n> # }'],
+      [
+        'bare bold brace true then merge',
+        '**Note:** ; { true; gh pr merge <n>; }',
+      ],
+      ['bare bold param paren semi', '**Note:** ${a#(} ; gh pr merge <n>'],
+      ['bare relative quoted dir glob', "a' b'/../../usr/bin/g? pr merge <n>"],
+      ['bare argless path glob make', '/usr/bin/m?ke'],
+      ['bare pos-var ansi-c bash', '$1 $\'bash\' -c "gh pr merge <n>"'],
+      ['bare pos-var glob gh', '$1 g? pr merge <n>'],
+      ['bare gh api url override', 'gh api https://evil.example/repos/a/b'],
+      ['bare gh api url glob override', 'gh api h?tps://evil.example/a'],
+      ['bare redir adjacent comment-like', '>/dev/null<!-- gh pr merge <n>'],
+      ['bare fd spaced semi redir', '{fd}>/dev/null ; gh pr merge <n>'],
+      ['bare fd proc subst colon', '{fd}> >(gh pr merge <n>) :'],
+      ['bare subshell proc subst colon', '(: ) > >(gh pr merge <n>)'],
+      ['bare subshell arith target', '(gh pr merge <n>) >/tmp/$((1+1))'],
+      ['bare bold semi brace expansion', '**Note:** ; {gh,} pr merge <n>'],
+      ['bare bold semi fd redir', '**Note:** ; {fd}>/dev/null gh pr merge <n>'],
+      ['bare bold fd redir overwrite', '**Note:** 2>/tmp/pwned'],
+      ['bare closing quote cmd subst bold', 'a" $(gh pr merge 1)"** foo **bar'],
+      ['text pos-var argless glob make', '```text\n$1 m?ke\n```'],
+      ['bare argless glob make', 'm?ke'],
+      ['bare var empty quote concat', '$1"" pr merge <n>'],
+      ['bare redir locale cmd subst', '{fd}>$"$(gh pr merge <n>)" :'],
+      ['bare env append cmd subst', '>/dev/null A+="$(gh pr merge <n>)" :'],
+      ['bare subshell chain dup fd', '(gh pr merge <n>) >a<x>&1'],
+      ['bare leading redir chain dup fd', '>/dev/null<x>&1 gh pr merge <n>'],
+      [
+        'bare bold nested param quote semi',
+        '**Note:** "${x:-"\'"}" ; gh pr merge <n>',
+      ],
+      ['bare bold quoted word redirect', '**Note:** "x">/tmp/pwned'],
+      ['bare gh api escaped url glob', 'gh api h?tps\\://evil.example/a'],
+      ['bare pos-var literal suffix', '$1h pr merge <n>'],
+      ['bare special var literal suffix', '$@h pr merge <n>'],
+      ['bare special var digit suffix', '$@0 pr merge <n>'],
+      ['bare var path command', '$cmd/curl https://evil.example'],
+      ['bare subshell bg placeholder redir', '(gh pr merge <n>) > <out>&'],
+      [
+        'text fd tab heredoc wrapper',
+        '```text\n{fd}<<- EOF gh pr merge <n>\nEOF\n```',
+      ],
+      [
+        'text subshell tab heredoc',
+        '```text\n(gh pr merge <n>) <<- EOF\nEOF\n```',
+      ],
+      [
+        'bare gh api backtick flag splice',
+        'gh api --met`true`hod DELETE repos/a/b',
+      ],
+      [
+        'bare bold param brace semi',
+        '**Note:** "${x:-"}"}" ; bash -c "gh pr merge <n>"',
+      ],
+      ['bare bold param redirect', '**Note:** "${x:-"\'"}" >/tmp/\'pwned\''],
+      [
+        'bare bold spaced backtick cmd',
+        '**Note:** `yarn --cwd packages/cli build`',
+      ],
+      ['bare pos-var backtick splice', '$1 p`true`r merge <n>'],
+      ['bare pos-var redirect', '$1 >/tmp/pwned'],
+      ['bare pos-var multi-digit suffix', '$10h pr merge <n>'],
+      ['bare var dot suffix', '$x.sh arg1'],
+      [
+        'bare redir nested param cmd subst',
+        '>"${x:-"\'$(gh pr merge <n>)\'"}" :',
+      ],
+      [
+        'bare env append proc subst redir',
+        '>/dev/null A+=1> >(gh pr merge <n>) :',
+      ],
+      ['bare subshell chain redir file', '(gh pr merge <n>) >a<x>&out'],
+      ['bare subshell chain redir spaced', '(gh pr merge <n>) >a<x> /dev/null'],
+      ['bare param quote glob word', '"${x:+"a b"}"/usr/bin/g? pr merge <n>'],
+      ['bare bold unspaced backtick redir', '**Note:** `echo>/tmp/pwned`'],
+      ['bare bold nohup wrapper', '**nohup** bash -c "gh pr merge <n>"'],
+      [
+        'bare env assign tight proc subst',
+        '>/dev/null A=1>(gh pr merge <n>) :',
+      ],
+      ['bare leading redir placeholder name', '>pr<n> gh pr merge <n>'],
+      ['bare subshell param gt redir', '(gh pr merge <n>) >${x:->>>}'],
+      ['bare fd param space redir', '{fd}>${x:-a b} gh pr merge <n>'],
+      ['bare subshell array fd redir', '(gh pr merge <n>) {a[0]}>/dev/null'],
+      [
+        'bare bold escaped quote backtick semi',
+        "**Note:** `a\\\\'` foo ; gh pr merge <n> # '",
+      ],
+      ['bare unquoted param space glob', '${x:+a b}/usr/bin/g? pr merge <n>'],
+      ['bare quoted dir var concat', '"/tmp/a b"/$cmd pr merge <n>'],
+      ['bare subshell param bare brace redir', '(gh pr merge <n>) >${x:-{}'],
+      ['bare subshell param ansi-c redir', "(gh pr merge <n>) >${x:-$'a\\'b'}"],
+      [
+        'bare unquoted param bare brace glob',
+        '${x:+{ a}/usr/bin/g? pr merge <n>',
+      ],
+      [
+        'bare bold escaped tick live backtick',
+        '**Note:** \\`x`gh pr merge <n>`',
+      ],
+      [
+        'bare bold negated brace group semi',
+        '**Note:** ; ! { gh pr merge <n>; }',
+      ],
+      [
+        'bare bold negated subshell comment',
+        '**Note:** ; ! (gh pr merge <n>) # x',
+      ],
+      ['bare quoted var dollar-ten concat', '"$cmd$10" pr merge <n>'],
+      ['bare quoted dollar-ten with args', '"$10" pr merge <n>'],
+      [
+        'bare env interleaved redir option',
+        '>/dev/null e\\nv -u FOO A=1>/dev/null -i gh pr merge <n>',
+      ],
+      ['bare placeholder redir quoted gh', '>pr<n> "gh" pr merge <n>'],
+      [
+        'bare subshell placeholder redir spaced bg',
+        '(gh pr merge <n>) >pr<n> &',
+      ],
+      [
+        'bare subshell placeholder redir chained',
+        '(gh pr merge <n>) >pr<n> >/dev/null',
+      ],
+      ['bare bold escaped tick glob', '**Note:** \\`x`m?ke`'],
+      ['bare bold backtick abs path', '**Note:** `/bin/zsh`'],
+      ['bare bold semi brace cmd', '**Note:** ; {gh,pr,merge,1}'],
+      [
+        'bare nested param double quote space',
+        '${x:+"${y:+" \'"} "}gh pr merge <n>',
+      ],
+      [
+        'bare subshell nested array fd',
+        '(gh pr merge <n>) {a[b[0]]}>/dev/null',
+      ],
+      ['bare closing quote bold redir', 'a" "**>pwned **'],
+      ['bare array fd cmd subst', '{a[$(gh pr merge <n>)]}>/dev/null :'],
+      [
+        'bare subshell array fd cmd subst',
+        '(:) {a[$(gh pr merge <n>)]}>/dev/null',
+      ],
+      ['bare placeholder redir docker', '>pr<n> docker run alpine'],
+      ['bare subshell bg dup fd', '(gh pr merge <n>) &>&1'],
+      ['bare bold digit substring python3', '**hon3** evil.py'],
+      ['bare bold substring chmod', '**hmod** 777 /tmp/x'],
+      [
+        'bare env tight flag redir',
+        '>/dev/null e\\nv -i>/dev/null gh pr merge <n>',
+      ],
+      ['bare quoted dir brace expansion', '"/tmp/a b"/{gh,x} pr merge <n>'],
+      [
+        'bare long trailing shell suffix linear guard',
+        `(gh pr merge <n>) ${' ;'.repeat(200)}`,
+      ],
+      ['bare placeholder redir abs gh', '&>pr<n> /usr/bin/gh pr merge <n>'],
+      ['bare placeholder redir touch', '2>pr<n> touch /tmp/pwned'],
+      [
+        'bare subshell placeholder bg then redir',
+        '(gh pr merge <n>) >pr<n> & >/dev/null',
+      ],
+      ['bare subshell unclosed quote dup fd', '(gh pr merge <n>) >a"b>&1'],
+      [
+        'bare env tight amp redir',
+        '2>/dev/null e\\nv -i&>/dev/null gh pr merge <n>',
+      ],
+      [
+        'bare env unset arg tight cmd subst redir',
+        '>/dev/null e\\nv -u FOO>"$(gh pr merge <n>)" :',
+      ],
+      [
+        'bare env unset interleaved redir',
+        '>/dev/null e\\nv -u>/dev/null FOO gh pr merge <n>',
+      ],
+      ['bare fd chain quoted file then gh', '{fd}>a> "foo" gh pr merge <n>'],
+      ['bare data glob tight redir', '\\s*>/tmp/pwned'],
+      [
+        'bare bold semi herestring bash',
+        '**Note:** ; bash<<<"gh pr merge <n>"',
+      ],
+      [
+        'bare bold semi glued stdin gh',
+        '**Note:** ; gh</dev/null pr merge <n>',
+      ],
+      ['text env path tight redir', '```text\n$FOO/bar>/tmp/pwned\n```'],
+      [
+        'bare env quoted paren unset arg',
+        '>/dev/null e\\nv -u "A(B)" gh pr merge <n>',
+      ],
+      [
+        'bare env spaced redir before unset arg',
+        '>/dev/null e\\nv -u 2>/dev/null FOO gh pr merge <n>',
+      ],
+      ['bare fd chain timeout file then gh', '{fd}>a> timeout gh pr merge <n>'],
+      [
+        'bare bold semi posix func def',
+        '**Note:**; f() { gh pr merge <n>; }; f',
+      ],
+      ['bare quoted prefix cmd subst', "'a b'$(gh pr merge <n>)"],
+      ['bare quoted prefix proc subst', "'a b'<(gh pr merge <n>)"],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
@@ -3605,6 +5343,19 @@ describe('local container recipe pins', () => {
       ).toBe(false);
     }
     for (const hostile of [
+      '`g? pr merge <n>`',
+      '`[g]h pr merge <n>`',
+      '`[]g]h pr merge <n>`',
+      '`g* pr merge <n>`',
+      '`g[!x] pr merge <n>`',
+      '`?h pr merge <n>`',
+      '`+(g)h pr merge <n>`',
+      '`m?ke`',
+      '`m*ke`',
+      '`gh api -[X] DELETE repos/a/b`',
+      '`gh api {-X,} DELETE repos/a/b`',
+      '`gh api $FLAG DELETE repos/a/b`',
+      '`gh api --hostname evil.example repos/a/b`',
       '`gh pr merge <n> --squash --delete-branch`',
       '`gh${IFS}pr${IFS}merge <n>`',
       '`g${x:-h} pr merge <n>`',
@@ -4827,7 +6578,7 @@ describe('local container recipe pins', () => {
       ),
       'an operation after the multi-line span remains executable',
     ).toBe(false);
-  });
+  }, 30_000);
 
   it('base-pins `.qwen` and states that root AGENTS/QWEN.md still come from the PR', () => {
     expect(skill).toContain('git -C <pr-clone> archive "$BASE_OID" -- .qwen');
