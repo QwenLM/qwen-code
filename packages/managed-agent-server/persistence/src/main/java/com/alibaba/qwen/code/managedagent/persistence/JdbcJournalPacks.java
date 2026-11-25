@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ResultSetExtractor;
@@ -13,6 +15,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -60,9 +63,9 @@ public class JdbcJournalPacks {
         this.transactions = transactions;
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public JdbcJournalPacks(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            org.springframework.beans.factory.ObjectProvider<ToolPublicationObjectStore> objects,
+            ObjectProvider<ToolPublicationObjectStore> objects,
             ManagedAgentSettings settings, JournalPackTransactions transactions) {
         this(jdbc, objects.getIfAvailable(), settings, transactions);
     }
@@ -356,7 +359,7 @@ public class JdbcJournalPacks {
                 gzip.write(bytes);
             }
             return out.toByteArray();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Pack compression failed", error);
         }
     }
@@ -364,7 +367,7 @@ public class JdbcJournalPacks {
     private static byte[] gunzip(byte[] compressed) {
         try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
             return gzip.readAllBytes();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Pack decompression failed", error);
         }
     }
@@ -372,7 +375,7 @@ public class JdbcJournalPacks {
     private static byte[] readFully(InputStream stream) {
         try (stream) {
             return stream.readAllBytes();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Pack read failed", error);
         }
     }

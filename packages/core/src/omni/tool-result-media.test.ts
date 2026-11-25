@@ -33,6 +33,7 @@ vi.mock('./index.js', async (importOriginal) => ({
 }));
 
 import { processToolResultOmniMedia } from './tool-result-media.js';
+import { withFixedPolicyHookStop } from './policy/fixed-policy-hook-stop.js';
 
 // A minimal real PNG header so sniffMediaType accepts the bytes as image.
 const PNG_BYTES = Buffer.concat([
@@ -161,6 +162,22 @@ describe('processToolResultOmniMedia', () => {
     const result = await run(parts);
     expect(result).not.toBe(parts);
     expect(result[0]!.fileData?.fileUri).toBe('oss://bucket/key');
+  });
+
+  it('reports a policy stop while preserving all media in the tool result', async () => {
+    const report = vi.fn(() => true);
+    deliverMock.mockImplementation(async (_file, _config, options) => {
+      options.onHookStop('policy stop');
+      return delivery('oss://bucket/key', 'image/png', 'a'.repeat(64));
+    });
+    const result = await withFixedPolicyHookStop(report, () =>
+      run([png(), png()]),
+    );
+    expect(report.mock.calls).toEqual([['policy stop'], ['policy stop']]);
+    expect(result.map((part) => part.fileData?.fileUri)).toEqual([
+      'oss://bucket/key',
+      'oss://bucket/key',
+    ]);
   });
 
   it('gates on the SNIFFED modality, not the declared MIME type', async () => {

@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { StreamInactivityTimeoutError } from '@qwen-code/qwen-code-core/core/stream-guards.js';
 import type { StopFailureErrorType } from '@qwen-code/qwen-code-core';
 
-export function classifyApiError(error: {
-  message: string;
-  status?: number;
-}): StopFailureErrorType {
+export function classifyApiError(
+  error: { message: string; status?: number },
+  cause: unknown = error,
+): StopFailureErrorType {
+  if (cause instanceof StreamInactivityTimeoutError) {
+    return 'unknown';
+  }
+
   const status = error.status;
   const message = error.message?.toLowerCase() ?? '';
 

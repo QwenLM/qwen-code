@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -222,13 +223,13 @@ public final class ManagedExtensionProtocol {
             }
         } else if (!result.keySet().equals(Set.of("operationId", "preparationId", "offset", "totalBytes", "base64"))
                 || !request.get("preparationId").equals(result.get("preparationId"))
-                || !java.util.Objects.equals(BrokerValues.exactLong(request.get("offset")), BrokerValues.exactLong(result.get("offset")))
+                || !Objects.equals(BrokerValues.exactLong(request.get("offset")), BrokerValues.exactLong(result.get("offset")))
                 || !counter(result.get("totalBytes"), 1) || BrokerValues.exactLong(result.get("totalBytes")) > 100L * 1024 * 1024
                 || !(result.get("base64") instanceof String encoded) || encoded.length() > 349528) {
             throw invalidResponse();
         } else {
             try {
-                int length = java.util.Base64.getDecoder().decode(encoded).length;
+                int length = Base64.getDecoder().decode(encoded).length;
                 if (length > 256 * 1024 || length < 1
                         || BrokerValues.exactLong(result.get("offset")) + length > BrokerValues.exactLong(result.get("totalBytes"))) {
                     throw invalidResponse();
@@ -250,7 +251,7 @@ public final class ManagedExtensionProtocol {
     private static boolean skillPath(Object value) {
         return value instanceof String path && path.length() <= 4096 && path.indexOf('\0') < 0
                 && (path.startsWith(".qwen/skills/") || path.startsWith(".agents/skills/"))
-                && !path.contains("\\") && java.util.Arrays.stream(path.split("/", -1))
+                && !path.contains("\\") && Arrays.stream(path.split("/", -1))
                         .noneMatch(segment -> segment.isEmpty() || segment.equals(".") || segment.equals(".."));
     }
 

@@ -22,6 +22,7 @@ const TERMINATE_MODE_WORDING: Record<AgentTerminateMode, string | null> = {
   [AgentTerminateMode.GOAL]: null,
   [AgentTerminateMode.CANCELLED]: null,
   [AgentTerminateMode.SHUTDOWN]: null,
+  [AgentTerminateMode.HOOK_STOPPED]: 'Agent stopped by a hook.',
 };
 
 /**

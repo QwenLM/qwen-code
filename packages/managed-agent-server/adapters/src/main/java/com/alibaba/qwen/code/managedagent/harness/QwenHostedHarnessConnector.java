@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.AgentDefinitionCompiler;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
@@ -46,6 +47,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import javax.net.ssl.SSLContext;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -535,17 +537,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         AttachmentKey key = attachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
+            AgentDefinitionCompiler.Compiled compiled = compiledDefinition(session);
             ref = client().loadSession(new LoadHarnessSession(session.sessionId(), managedSessionStore(session),
                     false, toolProfile(session), false, false,
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)) && !publicChildLaunchAvailable(session))
                     .withHarnessPlacement(placementDescriptor(session))
-                    .withAgentDefinition(agentDefinition(session, false))
+                    .withAgentDefinition(agentDefinition(session, false, compiled))
                     .withModelConfigDigest(modelConfigDigest(session))
                     .withMemoryStoreId(session.memoryStoreId())
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
-                    .withMcpServers(mcpServers(session))
-                    .withHookCatalog(hookCatalog(session))
+                    .withMcpServers(mcpServers(session, compiled))
+                    .withHookCatalog(hookCatalog(compiled))
                     .withPublicChildAgentsVersion(session.publicChildAgentsVersion())
                     .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withPublicChildExtensionAgent(publicChildExtensionAgent(session))
@@ -967,7 +970,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
         try {
             HostedHarnessClient owner = client();
             Map<String, Object> descriptor = owner.prepareManagedPackage(metadata, source);
@@ -982,7 +985,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
         try {
             return client().inspectManagedPackage(metadata, source);
         } catch (HostedHarnessGenerationException error) {
@@ -992,7 +995,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
         try {
             return client().previewManagedPackage(metadata, source);
         } catch (HostedHarnessGenerationException error) {
@@ -1636,19 +1639,20 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             workspaceExecution.authorizeCommittedStop(session);
         }
+        AgentDefinitionCompiler.Compiled compiled = compiledDefinition(session);
         LoadHarnessSession load = new LoadHarnessSession(session.sessionId(),
                         managedSessionStore(session),
                         session.harnessBootId() != null, toolProfile(session),
                         false, false,
                         WorkspaceToolProfiles.isPublicShell(toolProfile(session)) && !publicChildLaunchAvailable(session))
                         .withHarnessPlacement(placementDescriptor(session))
-                        .withAgentDefinition(agentDefinition(session, false))
+                        .withAgentDefinition(agentDefinition(session, false, compiled))
                         .withModelConfigDigest(modelConfigDigest(session))
                         .withMemoryStoreId(session.memoryStoreId())
                         .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
-                        .withMcpServers(mcpServers(session))
-                        .withHookCatalog(hookCatalog(session))
+                        .withMcpServers(mcpServers(session, compiled))
+                        .withHookCatalog(hookCatalog(compiled))
                         .withPublicChildAgentsVersion(session.publicChildAgentsVersion())
                         .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withPublicChildExtensionAgent(publicChildExtensionAgent(session))
@@ -1997,15 +2001,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (store != null) {
                 builder.managedSessionStore(store);
             }
-            List<Map<String, Object>> mcp = mcpServers(session);
+            AgentDefinitionCompiler.Compiled compiled = compiledDefinition(session);
+            List<Map<String, Object>> mcp = mcpServers(session, compiled);
             if (mcp != null) {
                 builder.mcpServers(mcp);
             }
-            Map<String, Object> hooks = hookCatalog(session);
+            Map<String, Object> hooks = hookCatalog(compiled);
             if (hooks != null) {
                 builder.hookCatalog(hooks);
             }
-            Map<String, Object> definition = agentDefinition(session, true);
+            Map<String, Object> definition = agentDefinition(session, true, compiled);
             if (definition != null) {
                 builder.agentDefinition(definition);
             }
@@ -2057,18 +2062,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         String profile = toolProfile(session);
         ManagedSessionStoreConnection store = managedSessionStore(session);
+        AgentDefinitionCompiler.Compiled compiled = compiledDefinition(session);
         LoadHarnessSession request = new LoadHarnessSession(session.sessionId(), store,
                 passiveManagedRuntimeRecovery, profile,
                 driveRuntimeRecovery, cancellationTakeover,
                 WorkspaceToolProfiles.isPublicShell(profile) && !publicChildLaunchAvailable(session))
                 .withHarnessPlacement(placementDescriptor(session))
-                .withAgentDefinition(agentDefinition(session, false))
+                .withAgentDefinition(agentDefinition(session, false, compiled))
                 .withModelConfigDigest(modelConfigDigest(session))
                 .withMemoryStoreId(session.memoryStoreId())
                 .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
-                .withMcpServers(mcpServers(session))
-                .withHookCatalog(hookCatalog(session))
+                .withMcpServers(mcpServers(session, compiled))
+                .withHookCatalog(hookCatalog(compiled))
                 .withPublicChildAgentsVersion(session.publicChildAgentsVersion())
                 .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withPublicChildExtensionAgent(publicChildExtensionAgent(session))
@@ -2216,16 +2222,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         var ref = attachments.get(key);
         if (ref == null) {
             var session = sessions.requireSession(tenantId, sessionId);
+            AgentDefinitionCompiler.Compiled compiled = compiledDefinition(session);
             if (session.workspace() == null || !isWorkspaceFilesAvailable()
                     || !current.capabilities().getFeatures().contains("recovery-cleanup/1")
-                    || WorkspaceToolProfiles.MCP.equals(session.toolProfile()) || hookCatalog(session) != null) {
+                    || WorkspaceToolProfiles.MCP.equals(session.toolProfile()) || hookCatalog(compiled) != null) {
                 return null;
             }
             workspaceExecution.authorizePassiveAttachment(session);
             var loaded = current.loadSession(new LoadHarnessSession(sessionId, managedSessionStore(session), false,
                     toolProfile(session), false, false, WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !publicChildLaunchAvailable(session))
                     .withHarnessPlacement(placementDescriptor(session))
-                    .withAgentDefinition(agentDefinition(session, false))
+                    .withAgentDefinition(agentDefinition(session, false, compiled))
                     .withModelConfigDigest(modelConfigDigest(session))
                     .withMemoryStoreId(session.memoryStoreId())
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
@@ -2575,8 +2582,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return session.toolProfile();
     }
 
+    private AgentDefinitionCompiler.Compiled compiledDefinition(SessionRecord session) {
+        if (session.agentDefinitionDigest() == null || definitions == null) {
+            return null;
+        }
+        return AgentDefinitionCompiler.fromPinnedContent(
+                definitions.pinnedContent(session), session.workspace() != null,
+                session.approvalMode(), session.toolProfile());
+    }
+
     private Map<String, Object> agentDefinition(SessionRecord session,
-            boolean create) {
+            boolean create, AgentDefinitionCompiler.Compiled compiled) {
         if (session.agentDefinitionDigest() == null) {
             return null;
         }
@@ -2590,27 +2606,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (definitions == null || resources == null || !sessionStore.isEnabled()) {
             throw new IllegalStateException("Agent definitions require the Managed Session Store");
         }
-        Map<String, Object> content = definitions.pinnedContent(session);
-        Object model = content.get("model");
-        if (model instanceof Map<?, ?> map && !map.isEmpty()) {
-            pin.put("model", model);
+        if (compiled.modelId() != null) {
+            pin.put("model", Map.of("id", compiled.modelId()));
         }
-        Object instructions = content.get("instructions");
-        if (instructions instanceof String text && !text.isEmpty()) {
+        String instructions = compiled.instructions();
+        if (instructions != null && !instructions.isEmpty()) {
             String workspace = session.workspace() == null ? workspaceId
                     : session.workspace().getWorkspaceId();
             var ref = resources.publishAgentInstructions(session.tenantId(),
-                    workspace, session.sessionId(), text);
+                    workspace, session.sessionId(), instructions);
             pin.put("instructionsRef", Map.of("resourceId", ref.resourceId(),
                     "kind", ref.kind(), "schemaVersion", ref.schemaVersion(),
                     "byteLength", ref.byteLength(), "digest", ref.digest()));
         }
-        List<Map<String, Object>> skills = AgentDefinitionExtensions.skills(
-                content.get("skills"), session.workspace() != null);
-        if (!skills.isEmpty()) {
+        if (!compiled.skills().isEmpty()) {
             String workspace = session.workspace().getWorkspaceId();
             var ref = resources.publishAgentSkills(session.tenantId(), workspace,
-                    session.sessionId(), skills);
+                    session.sessionId(), compiled.skills());
             pin.put("skillsRef", Map.of("resourceId", ref.resourceId(),
                     "kind", ref.kind(), "schemaVersion", ref.schemaVersion(),
                     "byteLength", ref.byteLength(), "digest", ref.digest()));
@@ -2639,13 +2651,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 "byteLength", bytes.length, "digest", digest);
     }
 
-    private List<Map<String, Object>> mcpServers(SessionRecord session) {
-        if (session.agentDefinitionDigest() == null || definitions == null
-                || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
+    private List<Map<String, Object>> mcpServers(SessionRecord session,
+            AgentDefinitionCompiler.Compiled compiled) {
+        if (compiled == null || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return null;
         }
-        List<Map<String, Object>> pins = AgentDefinitionExtensions.mcpServers(
-                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile(), true);
+        List<Map<String, Object>> pins = compiled.mcpServers();
         if (!pins.isEmpty() && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                 && (!client().capabilities().getFeatures().contains("workspace-shell-mcp/1")
                         || !client().capabilities().getLifecycleV2Profiles().contains(session.toolProfile()))) {
@@ -2654,12 +2665,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return pins.isEmpty() ? null : pins;
     }
 
-    private Map<String, Object> hookCatalog(SessionRecord session) {
-        if (session.agentDefinitionDigest() == null || definitions == null) {
-            return null;
-        }
-        return AgentDefinitionExtensions.hookCatalog(
-                definitions.pinnedContent(session).get("hook_catalog"), session.workspace() != null, true);
+    private Map<String, Object> hookCatalog(AgentDefinitionCompiler.Compiled compiled) {
+        return compiled == null ? null : compiled.hookCatalog();
     }
 
     private ManagedSessionStoreConnection managedSessionStore(
