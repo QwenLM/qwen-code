@@ -399,8 +399,76 @@ describe('HookRegistry', () => {
       expect(registry.getAllHooks()).toHaveLength(0);
       expect(mockFeedbackEmitter.emitFeedback).toHaveBeenCalledWith(
         'warning',
-        expect.stringContaining('Invalid hook event name'),
+        'Hook event "InvalidEventName" from user config is not supported and was skipped.',
       );
+    });
+
+    describe('unsupported configuration', () => {
+      const warnings = () =>
+        vi
+          .mocked(mockFeedbackEmitter.emitFeedback)
+          .mock.calls.map(([, message]) => message);
+      const register = (hooks: unknown[]) =>
+        init({ user: pre(hooks as HookConfig[]) }, mockFeedbackEmitter);
+
+      it('skips an unsupported type with a warning', async () => {
+        const registry = await register([
+          { type: 'mcp_tool', server: 'scanner', tool: 'scan' },
+          { type: 'agent', prompt: 'Verify the tests pass' },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(0);
+        expect(warnings()).toEqual([
+          'Hook "scan" for PreToolUse from user config has unsupported type "mcp_tool" and was skipped.',
+          'Hook "Verify the tests pass" for PreToolUse from user config has unsupported type "agent" and was skipped.',
+        ]);
+      });
+
+      it('skips a hook missing its required field with a warning', async () => {
+        const registry = await register([
+          { type: HookType.Http, name: 'audit' },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(0);
+        expect(warnings()).toEqual([
+          'Hook "audit" for PreToolUse from user config has no "url" and was skipped.',
+        ]);
+      });
+
+      it('skips a command hook with args, but not one with an empty list', async () => {
+        const registry = await register([
+          { type: HookType.Command, command: 'node', args: ['check.js'] },
+          { type: HookType.Command, command: '/hooks/check.sh', args: [] },
+        ]);
+        expect(registry.getAllHooks().map((e) => e.config)).toMatchObject([
+          { command: '/hooks/check.sh' },
+        ]);
+        expect(warnings()).toEqual([
+          'Hook "node" for PreToolUse from user config uses "args", which Qwen Code does not support yet, and was skipped.',
+        ]);
+      });
+
+      it('keeps a hook whose unsupported fields are ignored, with a warning', async () => {
+        const registry = await register([
+          {
+            type: HookType.Command,
+            command: 'guard.sh',
+            if: 'Bash(rm *)',
+            onFailure: 'block',
+            once: true,
+          },
+          { type: HookType.Http, url: 'https://audit.example', once: true },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(2);
+        expect(warnings()).toEqual([
+          'Hook "guard.sh" for PreToolUse from user config sets "onFailure", "if", "once", which Qwen Code does not support yet; ignored.',
+        ]);
+      });
+
+      it('strips control characters from the hook label', async () => {
+        await register([{ type: 'agent', prompt: 'bad\u0007\u0000name' }]);
+        expect(warnings()).toEqual([
+          'Hook "badname" for PreToolUse from user config has unsupported type "agent" and was skipped.',
+        ]);
+      });
     });
 
     it('should skip hooks config fields like enabled and disabled', async () => {

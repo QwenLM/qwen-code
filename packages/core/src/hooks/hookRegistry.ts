@@ -11,6 +11,7 @@ import {
   HOOKS_CONFIG_FIELDS,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
 
@@ -341,9 +342,8 @@ export class HookRegistry {
       }
 
       if (!this.isValidEventName(eventName)) {
-        this.feedbackEmitter?.emitFeedback(
-          'warning',
-          `Invalid hook event name: "${eventName}" from ${source} config. Skipping.`,
+        this.warn(
+          `Hook event "${stripAnsiAndControl(eventName)}" from ${source} config is not supported and was skipped.`,
         );
         continue;
       }
@@ -351,8 +351,8 @@ export class HookRegistry {
       const typedEventName = eventName;
 
       if (!Array.isArray(definitions)) {
-        debugLogger.warn(
-          `Hook definitions for event "${eventName}" from source "${source}" is not an array. Skipping.`,
+        this.warn(
+          `Hooks for ${eventName} from ${source} config must be a list and were skipped.`,
         );
         continue;
       }
@@ -382,9 +382,8 @@ export class HookRegistry {
       typeof definition !== 'object' ||
       !Array.isArray(definition.hooks)
     ) {
-      debugLogger.warn(
-        `Discarding invalid hook definition for ${eventName} from ${source}:`,
-        definition,
+      this.warn(
+        `A hook entry for ${eventName} from ${source} config has no "hooks" list and was skipped.`,
       );
       return;
     }
@@ -450,27 +449,23 @@ export class HookRegistry {
     eventName: HookEventName,
     source: HooksConfigSource,
   ): boolean {
+    const raw = config as unknown as Record<string, unknown>;
+    const where = `Hook ${hookLabel(raw)} for ${eventName} from ${source} config`;
     if (
       !config.type ||
       !['command', 'http', 'function', 'prompt'].includes(config.type)
     ) {
-      debugLogger.warn(
-        `Invalid hook ${eventName} from ${source} type: ${config.type}`,
+      this.warn(
+        `${where} has unsupported type "${stripAnsiAndControl(String(config.type))}" and was skipped.`,
       );
       return false;
     }
 
-    if (config.type === 'command' && !config.command) {
-      debugLogger.warn(
-        `Command hook ${eventName} from ${source} missing command field`,
-      );
-      return false;
-    }
-
-    if (config.type === 'http' && !config.url) {
-      debugLogger.warn(
-        `HTTP hook ${eventName} from ${source} missing url field`,
-      );
+    const requiredField = { command: 'command', http: 'url', prompt: 'prompt' }[
+      config.type as 'command' | 'http' | 'prompt'
+    ];
+    if (requiredField && !raw[requiredField]) {
+      this.warn(`${where} has no "${requiredField}" and was skipped.`);
       return false;
     }
 
@@ -481,14 +476,31 @@ export class HookRegistry {
       return false;
     }
 
-    if (config.type === 'prompt' && !config.prompt) {
-      debugLogger.warn(
-        `Prompt hook ${eventName} from ${source} missing prompt field`,
+    const args = raw['args'];
+    if (args !== undefined && !(Array.isArray(args) && args.length === 0)) {
+      this.warn(
+        `${where} uses "args", which Qwen Code does not support yet, and was skipped.`,
       );
       return false;
     }
 
+    const ignored = ['onFailure', 'asyncRewake', 'if', 'once'].filter(
+      (field) =>
+        raw[field] !== undefined &&
+        !(field === 'once' && config.type === 'http'),
+    );
+    if (ignored.length > 0) {
+      this.warn(
+        `${where} sets ${ignored.map((f) => `"${f}"`).join(', ')}, which Qwen Code does not support yet; ignored.`,
+      );
+    }
+
     return true;
+  }
+
+  private warn(message: string): void {
+    debugLogger.warn(message);
+    this.feedbackEmitter?.emitFeedback('warning', message);
   }
 
   /**
@@ -516,4 +528,18 @@ export class HookRegistry {
         return 999;
     }
   }
+}
+
+const HOOK_LABEL_LIMIT = 60;
+
+/** A short, terminal-safe name for a configured hook in a warning. */
+function hookLabel(config: Record<string, unknown>): string {
+  const text = ['name', 'command', 'url', 'tool', 'prompt']
+    .map((field) => config[field])
+    .find(
+      (value): value is string => typeof value === 'string' && !!value.trim(),
+    );
+  const label = stripAnsiAndControl(text ?? '').trim();
+  if (!label) return '(unnamed)';
+  return `"${label.length > HOOK_LABEL_LIMIT ? `${label.slice(0, HOOK_LABEL_LIMIT)}...` : label}"`;
 }

@@ -350,6 +350,7 @@ vi.mock('../hooks/index.js', () => {
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
+  HookSystemMock.prototype.getConfigWarnings = vi.fn().mockReturnValue([]);
   return {
     HookSystem: HookSystemMock,
     createHookOutput: vi.fn(),

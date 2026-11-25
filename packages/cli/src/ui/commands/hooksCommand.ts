@@ -337,6 +337,13 @@ export const hooksCommand: SlashCommand = {
       if (config) {
         try {
           await reloadHooksFromSettings(config, settings);
+          for (const warning of config.getHookSystem()?.getConfigWarnings() ??
+            []) {
+            context.ui.addItem(
+              { type: MessageType.WARNING, text: warning },
+              Date.now(),
+            );
+          }
         } catch (error) {
           // The menu still opens on the hooks loaded so far.
           debugLogger.warn(`Failed to reload hooks for /hooks: ${error}`);

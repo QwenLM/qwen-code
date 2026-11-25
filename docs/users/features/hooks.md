@@ -1851,11 +1851,12 @@ sys.exit(0)
 
 ### A hook does not fire
 
-1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with the warning `Invalid hook event name`.
-2. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
-3. **Folder trust or approval.** Hooks in a project's `.qwen/settings.json` run when you have approved the exact configuration (see [Approving project hooks](#approving-project-hooks)) or the folder is explicitly trusted: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE (see [Trusted Folders](../configuration/trusted-folders.md)). With neither authority they stay withheld in every mode, headless included; with the trust feature on and the folder untrusted, workspace settings do not load at all — trust the folder first. User hooks load regardless of folder trust.
-4. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
-5. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
+1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with a warning that names it.
+2. **Startup warnings.** A hook Qwen Code cannot run as written is reported when the session starts (in the terminal UI and on stderr in headless runs) and again each time the `/hooks` menu reloads them. It is skipped when its `type` is not `command`, `http` or `prompt`, when its required `command`, `url` or `prompt` is missing, or when it sets a non-empty `args` list. Fields that are not supported yet, `onFailure`, `asyncRewake`, `if` and `once` (except on HTTP hooks), are ignored with a warning, and the hook still runs.
+3. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
+4. **Folder trust or approval.** Hooks in a project's `.qwen/settings.json` run when you have approved the exact configuration (see [Approving project hooks](#approving-project-hooks)) or the folder is explicitly trusted: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE (see [Trusted Folders](../configuration/trusted-folders.md)). With neither authority they stay withheld in every mode, headless included; with the trust feature on and the folder untrusted, workspace settings do not load at all — trust the folder first. User hooks load regardless of folder trust.
+5. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
+6. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
    - `[HOOK_REGISTRY]`: `Hook registry initialized with N hook entries`, and hook definitions discarded as invalid
    - `[TRUSTED_HOOKS]`: `Hook <name> started for event <event>` and the matching `ended` line for each run, async hook status, and hook system messages
    - `[HOOK_MATCHER]`: matchers that are not valid regular expressions
@@ -1864,7 +1865,7 @@ sys.exit(0)
 
    Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
 
-6. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls, HTTP security settings and `security.folderTrust` (including trust-store entries) require a restart. Settings-file project hooks are also registered once, so a later IDE trust grant or revocation applies only after that reload or restart.
+7. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls, HTTP security settings and `security.folderTrust` (including trust-store entries) require a restart. Settings-file project hooks are also registered once, so a later IDE trust grant or revocation applies only after that reload or restart.
 
 ### Other checks
 
