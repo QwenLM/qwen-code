@@ -319,6 +319,7 @@ export class ModelsConfig {
       this.resetSubscriptionCatalogs(identity);
     this.subscriptionModelsRevision++;
     this.modelRegistry.setSubscriptionModels(models, metadata);
+    this.clearRegisteredSubscriptionRuntimeModel(models);
   }
 
   invalidateSubscriptionModels(): void {
@@ -354,6 +355,7 @@ export class ModelsConfig {
       result.models,
       result.modelMetadata,
     );
+    this.clearRegisteredSubscriptionRuntimeModel(result.models);
     return result;
   }
 
@@ -375,7 +377,28 @@ export class ModelsConfig {
       });
     this.assertSubscriptionCatalogRefresh(session, identity, true, revision);
     this.modelRegistry.setSubscriptionScenes(result.scenes);
+    this.clearRegisteredSubscriptionRuntimeModel(
+      Object.values(result.scenes).flatMap(
+        (models) => models?.map(({ id }) => id) ?? [],
+      ),
+    );
     return result;
+  }
+
+  private clearRegisteredSubscriptionRuntimeModel(models: string[]): void {
+    const snapshot = this.getActiveRuntimeModelSnapshot();
+    if (
+      snapshot?.authType !== AuthType.QWEN_SUBSCRIPTION ||
+      !models.includes(snapshot.modelId)
+    )
+      return;
+    const model = this.modelRegistry.getModel(
+      snapshot.authType,
+      snapshot.modelId,
+      snapshot.baseUrl,
+    );
+    if (model?.subscriptionChatModel === true)
+      this.clearRuntimeModelSnapshotForAuthType(snapshot.authType);
   }
 
   private resetSubscriptionCatalogs(identity?: string): void {

@@ -19,6 +19,146 @@ import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 
 describe('ModelsConfig', () => {
+  describe('subscription directory runtime reconciliation', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    const runtime = (
+      authType = AuthType.QWEN_SUBSCRIPTION,
+      baseUrl = QWEN_SUBSCRIPTION_BASE_URL,
+    ) => {
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account');
+      const config = new ModelsConfig({
+        initialAuthType: authType,
+        generationConfig: {
+          model: 'current-model',
+          apiKey: 'fixture-key',
+          baseUrl,
+          samplingParams: { temperature: 0.3 },
+        },
+      });
+      expect(config.detectAndCaptureRuntimeModel()).toBeDefined();
+      return config;
+    };
+
+    it.each(['primary', 'copied', 'scenes'] as const)(
+      'replaces the matching runtime entry after a successful %s directory update without switching the model',
+      async (catalog) => {
+        const config = runtime();
+        const generation = structuredClone(config.getGenerationConfig());
+        const sources = structuredClone(config.getGenerationConfigSources());
+        const onChange = vi.fn(async () => {});
+        config.setOnModelChange(onChange);
+        const metadata = [{ id: 'current-model', name: 'Catalog model' }];
+        if (catalog === 'primary') {
+          vi.spyOn(
+            QwenSubscriptionSession.prototype,
+            'getModels',
+          ).mockResolvedValue({
+            models: ['current-model'],
+            modelMetadata: metadata,
+            cached: false,
+          });
+          await config.refreshSubscriptionModels();
+        } else if (catalog === 'copied') {
+          config.setSubscriptionModels(['current-model'], metadata);
+        } else {
+          config.reloadModelProvidersConfig({
+            [AuthType.QWEN_SUBSCRIPTION]: [
+              {
+                id: 'current-model',
+                baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+                subscriptionChatModel: true,
+              },
+            ],
+          });
+          vi.spyOn(
+            QwenSubscriptionSession.prototype,
+            'getScenes',
+          ).mockResolvedValue({
+            scenes: {
+              vision: [{ id: 'current-model', display_name: 'Catalog model' }],
+            },
+            cached: false,
+          });
+          await config.refreshSubscriptionScenes();
+        }
+        expect(config.getActiveRuntimeModelSnapshot()).toBeUndefined();
+        expect(
+          config.getAllConfiguredModels([AuthType.QWEN_SUBSCRIPTION]),
+        ).toEqual([
+          expect.objectContaining({
+            id: 'current-model',
+            label: 'Catalog model',
+          }),
+        ]);
+        expect(config.getGenerationConfig()).toEqual(generation);
+        expect(config.getGenerationConfigSources()).toEqual(sources);
+        expect(config.getCurrentAuthType()).toBe(AuthType.QWEN_SUBSCRIPTION);
+        expect(onChange).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      'different-id',
+      'endpoint',
+      'auth',
+      'scene-only',
+      'failure',
+      'empty',
+      'saved-only',
+    ])('preserves the runtime snapshot for %s', async (scenario) => {
+      const config = runtime(
+        scenario === 'auth' ? AuthType.USE_OPENAI : AuthType.QWEN_SUBSCRIPTION,
+        scenario === 'endpoint'
+          ? 'https://custom.example/v1'
+          : QWEN_SUBSCRIPTION_BASE_URL,
+      );
+      const snapshot = structuredClone(config.getActiveRuntimeModelSnapshot());
+      if (scenario === 'saved-only')
+        config.reloadModelProvidersConfig({
+          [AuthType.QWEN_SUBSCRIPTION]: [
+            {
+              id: 'current-model',
+              baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+              subscriptionChatModel: true,
+            },
+          ],
+        });
+      if (scenario === 'scene-only') {
+        vi.spyOn(
+          QwenSubscriptionSession.prototype,
+          'getScenes',
+        ).mockResolvedValue({
+          scenes: { voice: [{ id: 'current-model' }] },
+          cached: false,
+        });
+        await config.refreshSubscriptionScenes();
+      } else if (scenario === 'failure') {
+        vi.spyOn(
+          QwenSubscriptionSession.prototype,
+          'getModels',
+        ).mockRejectedValue(new Error('unavailable'));
+        await expect(config.refreshSubscriptionModels()).rejects.toThrow(
+          'unavailable',
+        );
+      } else {
+        config.setSubscriptionModels(
+          scenario === 'empty'
+            ? []
+            : [
+                scenario === 'different-id' || scenario === 'saved-only'
+                  ? 'other-model'
+                  : 'current-model',
+              ],
+        );
+      }
+      expect(config.getActiveRuntimeModelSnapshot()).toEqual(snapshot);
+    });
+  });
+
   it('preserves a saved primary route when the first account discovery is a shared scene model', async () => {
     const config = new ModelsConfig({
       initialAuthType: AuthType.QWEN_SUBSCRIPTION,
