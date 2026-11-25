@@ -12,18 +12,21 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,7 +51,7 @@ public class JdbcManagedToolResultStore
         this.sessions = sessions;
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     void captureEvents(String tenant, String workspace, String session, long revision, List<JsonNode> events) {
@@ -134,7 +137,7 @@ public class JdbcManagedToolResultStore
                                                 now));
                             }
                             rows.sort(
-                                    java.util.Comparator.<Map<String, Object>>comparingLong(
+                                    Comparator.<Map<String, Object>>comparingLong(
                                                     row ->
                                                             row.get("due_at")
                                                                             instanceof
@@ -683,7 +686,7 @@ public class JdbcManagedToolResultStore
     private static Source readSource(String json) {
         try {
             return JSON.treeToValue(parse(json), Source.class);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Stored tool result source is invalid", error);
         }
     }

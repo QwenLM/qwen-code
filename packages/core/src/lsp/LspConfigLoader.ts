@@ -87,6 +87,7 @@ export class LspConfigLoader {
         continue;
       }
 
+      const before = configs.length;
       const originBase = `extension ${extension.name}`;
       if (typeof lspServers === 'string') {
         const configPath = this.resolveExtensionConfigPath(
@@ -128,6 +129,11 @@ export class LspConfigLoader {
         debugLogger.warn(
           `LSP config for ${originBase} must be an object or a JSON file path.`,
         );
+      }
+      if (extension.artifactGeneration !== undefined) {
+        for (const config of configs.slice(before)) {
+          config.extensionArtifactRevision = `${extension.id}:${extension.artifactGeneration}`;
+        }
       }
     }
 

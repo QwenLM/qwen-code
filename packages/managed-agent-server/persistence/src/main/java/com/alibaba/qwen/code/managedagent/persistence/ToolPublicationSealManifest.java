@@ -14,9 +14,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.require;
 
@@ -65,7 +68,7 @@ final class ToolPublicationSealManifest {
         require(manifest.path("schemaVersion").asInt(-1) == 1 && manifest.path("seals").isArray()
                 && manifest.path("seals").size() <= 2, "Seal manifest is invalid");
         var result = new ArrayList<Map<String, Object>>();
-        var seen = new java.util.HashSet<String>();
+        var seen = new HashSet<String>();
         for (JsonNode seal : manifest.path("seals")) {
             String stream = seal.path("stream_id").asText();
             require(("stdout".equals(stream) || "stderr".equals(stream)) && seen.add(stream)
@@ -89,7 +92,7 @@ final class ToolPublicationSealManifest {
                 + " AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId);
         List<Map<String, Object>> rows = new ArrayList<>(sealRows(scope, publicationId, null));
         require(rows.stream().noneMatch(row -> stream.equals(row.get("stream_id"))), "Stream was already sealed");
-        Map<String, Object> seal = new java.util.TreeMap<>();
+        Map<String, Object> seal = new TreeMap<>();
         seal.put("scope_key", scope);
         seal.put("publication_id", publicationId);
         seal.put("stream_id", stream);
@@ -98,7 +101,7 @@ final class ToolPublicationSealManifest {
         seal.put("sha256", digest);
         seal.put("operation_id", operationId);
         rows.add(seal);
-        rows.sort(java.util.Comparator.comparing(row -> (String) row.get("stream_id")));
+        rows.sort(Comparator.comparing(row -> (String) row.get("stream_id")));
         ObjectNode manifest = JSON.createObjectNode().put("schemaVersion", 1);
         manifest.set("seals", JSON.valueToTree(rows));
         byte[] bytes = manifest.toString().getBytes(StandardCharsets.UTF_8);

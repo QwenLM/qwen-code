@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.LongSupplier;
 
 /** Discovers committed wake inputs independently of their source relay or MQ notice. */
 @Repository
@@ -37,20 +39,20 @@ public class JdbcWakeRecoveryStore
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Proof> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
     private JdbcJournalPacks packs;
-    private java.util.function.LongSupplier nowMillis = System::currentTimeMillis;
+    private LongSupplier nowMillis = System::currentTimeMillis;
 
     public JdbcWakeRecoveryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         transactions = new TransactionTemplate(new DataSourceTransactionManager(Objects.requireNonNull(jdbc.getDataSource())));
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) {
         this.packs = packs;
     }
 
     /** Test hook: the clock the not-yet-due loop exemption compares against. */
-    void setNowMillis(java.util.function.LongSupplier nowMillis) {
+    void setNowMillis(LongSupplier nowMillis) {
         this.nowMillis = nowMillis;
     }
 

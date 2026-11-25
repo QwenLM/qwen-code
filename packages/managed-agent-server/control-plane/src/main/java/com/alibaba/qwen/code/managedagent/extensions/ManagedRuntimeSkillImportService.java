@@ -8,9 +8,11 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -18,10 +20,13 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
 
 @Service
@@ -30,7 +35,7 @@ public class ManagedRuntimeSkillImportService {
     private final SessionPolicyStore sessions;
     private final HarnessConnector harness;
     private final ObjectMapper json;
-    private final java.util.concurrent.Semaphore downloads = new java.util.concurrent.Semaphore(4);
+    private final Semaphore downloads = new Semaphore(4);
 
     public ManagedRuntimeSkillImportService(ManagedExtensionPackageService packages, SessionPolicyStore sessions,
             HarnessConnector harness, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
@@ -56,7 +61,7 @@ public class ManagedRuntimeSkillImportService {
         if (request.path() == null || request.digest() == null || !request.digest().matches("[a-f0-9]{64}")
                 || !(request.path().startsWith(".qwen/skills/") || request.path().startsWith(".agents/skills/"))
                 || request.path().contains("\\") || request.path().indexOf('\0') >= 0 || request.path().length() > 4096
-                || java.util.Arrays.stream(request.path().split("/", -1)).anyMatch(segment -> segment.isEmpty() || segment.equals(".") || segment.equals(".."))) {
+                || Arrays.stream(request.path().split("/", -1)).anyMatch(segment -> segment.isEmpty() || segment.equals(".") || segment.equals(".."))) {
             throw invalid();
         }
         String operationId = UUID.randomUUID().toString();
@@ -90,7 +95,7 @@ public class ManagedRuntimeSkillImportService {
     public ManagedExtensionPackages.Operation importSnapshot(String tenant, String actor, String sessionId,
             String key, ManagedRuntimeSkills.ImportRequest request) throws IOException {
         SessionRecord session = requireSession(tenant, actor, sessionId);
-        com.alibaba.qwen.code.managedagent.session.ManagedAgentService.validateIdempotencyKey(key);
+        ManagedAgentService.validateIdempotencyKey(key);
         validateImport(request);
         try {
             var existing = packages.lookup(tenant, actor, session.workspace().getWorkspaceId(), "publish", key);
@@ -175,7 +180,7 @@ public class ManagedRuntimeSkillImportService {
         try (var output = Files.newOutputStream(file)) {
             var digest = DigestUtils.getSha256Digest();
             long offset = 0;
-            long deadline = System.nanoTime() + java.time.Duration.ofMinutes(10).toNanos();
+            long deadline = System.nanoTime() + Duration.ofMinutes(10).toNanos();
             while (offset < request.byteLength()) {
                 if (System.nanoTime() > deadline || Thread.currentThread().isInterrupted()) {
                     throw new IOException("Runtime Skill download expired");
@@ -202,7 +207,7 @@ public class ManagedRuntimeSkillImportService {
                 output.write(bytes);
                 offset += bytes.length;
             }
-            if (!request.sourceDigest().equals(org.apache.commons.codec.binary.Hex.encodeHexString(digest.digest()))) {
+            if (!request.sourceDigest().equals(Hex.encodeHexString(digest.digest()))) {
                 throw changed();
             }
         }
