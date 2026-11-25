@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { SchemaValidator } from './schemaValidator.js';
+import {
+  SchemaValidator,
+  withSchemaValidationReporter,
+} from './schemaValidator.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 const debugLogger = vi.hoisted(() => ({
@@ -189,6 +192,14 @@ describe('SchemaValidator', () => {
   });
 
   describe('stringified JSON value coercion', () => {
+    function validateWithNote(schema: object, params: object) {
+      const report = vi.fn<(message: string, note: string) => void>();
+      const message = withSchemaValidationReporter(params, report, () =>
+        SchemaValidator.validate(schema, params),
+      );
+      return { message, report };
+    }
+
     it('parses accepted array/object forms and preserves accepted strings', () => {
       const schema = obj({
         urls: { ...orNull(strings()), default: null },
@@ -227,39 +238,102 @@ describe('SchemaValidator', () => {
       // An array of objects with one bracket too many, passed on as a string.
       const docs =
         '\n[{"pages": [1], "fields": {"a": {"raw_value": "x"}]}, "issues": []}]\n';
-      const error = SchemaValidator.validate(
+      const { message, report } = validateWithNote(
         obj({ docs: arrayOf(obj({ pages: arrayOf({ type: 'integer' }) })) }),
         { docs },
       );
-      expect(error).toMatch(
-        /^params\/docs must be array; params\/docs arrived as a string whose text is not valid JSON \(.*position 50.*\)\. /,
+      expect(message).toBe('params/docs must be array');
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        message,
+        expect.stringMatching(
+          /^; params\/docs arrived as a string whose text is not valid JSON \(.*position 50.*\)\. /,
+        ),
       );
-      expect(error).toContain(
+      const note = report.mock.calls[0][1];
+      expect(note).toContain(
         'Text near the error, with <<HERE>> at that position: "[{\\"pages\\": [1], \\"fields\\": {\\"a\\": {\\"raw_value\\": \\"x\\"}<<HERE>>]}, \\"issues\\": []}]".',
       );
-      expect(error).toMatch(
+      expect(note).toMatch(
         / Fix the text there and send it as a JSON array, not as a string$/,
       );
     });
 
     it('names a nested path once, even under anyOf', () => {
-      const error = SchemaValidator.validate(
+      const { report } = validateWithNote(
         obj({ outer: obj({ config: orNull(obj({ key: {} })) }) }),
         { outer: { config: '{"key": 1,}' } },
       );
-      expect(error).toContain(
+      expect(report).toHaveBeenCalledOnce();
+      const note = report.mock.calls[0][1];
+      expect(note).toContain(
         'params/outer/config arrived as a string whose text is not valid JSON',
       );
-      expect(error?.split('arrived as a string')).toHaveLength(2);
-      expect(error).toContain('send it as a JSON object, not as a string');
+      expect(note.split('arrived as a string')).toHaveLength(2);
+      expect(note).toContain('send it as a JSON object, not as a string');
     });
 
-    it('adds nothing for strings that do not start like JSON', () => {
-      expect(
-        SchemaValidator.validate(obj({ urls: strings() }), {
-          urls: 'hello world',
+    it.each(['hello world', '{"urls":[]}'])(
+      'does not add a syntax diagnosis to %s',
+      (urls) => {
+        const { message, report } = validateWithNote(obj({ urls: strings() }), {
+          urls,
+        });
+        expect(message).toBe('params/urls must be array');
+        expect(report).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      anyOf('array', 'object'),
+      anyOf('object', 'array'),
+      { type: ['array', 'object'] },
+    ])(
+      'preserves the input shape when both arrays and objects are allowed (%j)',
+      (schema) => {
+        const { report } = validateWithNote(obj({ value: schema }), {
+          value: '{"key": 1,}',
+        });
+        expect(report).toHaveBeenCalledOnce();
+        expect(report.mock.calls[0][1]).toContain('send it as a JSON object');
+      },
+    );
+
+    it('does not diagnose a syntax error when a string alternative fails its own constraint', () => {
+      const { message, report } = validateWithNote(
+        obj({
+          value: {
+            anyOf: [{ type: 'array' }, { type: 'string', pattern: '^NOTE:' }],
+          },
         }),
-      ).toBe('params/urls must be array');
+        { value: '[example](https://example.com)' },
+      );
+      expect(message).toContain('must match pattern');
+      expect(report).not.toHaveBeenCalled();
+    });
+
+    it('does not mistake quoted input for a parser offset', () => {
+      const { report } = validateWithNote(obj({ docs: strings() }), {
+        docs: '[position 2]',
+      });
+      expect(report).toHaveBeenCalledOnce();
+      expect(report.mock.calls[0][1]).toContain('Fix the JSON syntax');
+      expect(report.mock.calls[0][1]).not.toContain('<<HERE>>');
+    });
+
+    it('marks the end of a truncated value', () => {
+      const { report } = validateWithNote(obj({ docs: strings() }), {
+        docs: '[tru',
+      });
+      expect(report).toHaveBeenCalledOnce();
+      expect(report.mock.calls[0][1]).toContain('[tru<<HERE>>');
+    });
+
+    it('keeps the default validation error free of argument text', () => {
+      expect(
+        SchemaValidator.validate(obj({ docs: strings() }), {
+          docs: '[remember-this',
+        }),
+      ).toBe('params/docs must be array');
     });
   });
 

@@ -93,6 +93,7 @@ import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
 import { InputFormat } from '../output/types.js';
+import { withModelToolErrorNotes } from '../tools/tool-error.js';
 import { unescapePath } from '../utils/paths.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
@@ -103,6 +104,7 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import { SyntheticOutputTool } from '../tools/syntheticOutput.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import {
@@ -16373,6 +16375,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
   function createRetryScheduler(
     tools: AnyDeclarativeTool[],
     registryOverrides: Record<string, unknown> = {},
+    onErrorPart?: (part: Part) => void,
   ) {
     const byName = toolMap(...tools);
     const lookup = (name: string) => byName.get(name);
@@ -16396,7 +16399,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     );
     return async (...requests: ToolCallRequestInfo[]) => {
       await scheduleBatch(scheduler, ...requests);
-      return getLastErrorMessage(onToolCallsUpdate);
+      return getLastErrorMessage(onToolCallsUpdate, onErrorPart);
     };
   }
 
@@ -16438,7 +16441,10 @@ describe('CoreToolScheduler validation retry loop detection', () => {
   }
 
   /** The first error text in the latest update batch that carries one. */
-  function getLastErrorMessage(onToolCallsUpdate: Mock): string | undefined {
+  function getLastErrorMessage(
+    onToolCallsUpdate: Mock,
+    onErrorPart?: (part: Part) => void,
+  ): string | undefined {
     const batches = onToolCallsUpdate.mock.calls.map(([c]) => c as ToolCall[]);
     for (const call of batches.reverse().flat()) {
       if (call.status !== 'error') continue;
@@ -16446,7 +16452,10 @@ describe('CoreToolScheduler validation retry loop detection', () => {
         const response = part.functionResponse?.response as
           | { error?: string }
           | undefined;
-        if (response?.error) return response.error;
+        if (response?.error) {
+          onErrorPart?.(part);
+          return response.error;
+        }
       }
     }
     return undefined;
@@ -16459,6 +16468,33 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(await send(invalid('c2'))).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
     // Turn 3: same bad params — should trigger directive
     expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('counts repeated malformed tool arguments with different excerpts as one failure type', async () => {
+    const tool = new SyntheticOutputTool({
+      type: 'object',
+      properties: { docs: { type: 'array' } },
+    });
+    const onErrorPart = vi.fn<(part: Part) => void>();
+    const send = createRetryScheduler([tool], {}, onErrorPart);
+    for (const value of [1, 2, 3]) {
+      const error = await send(
+        makeRequest(String(value), tool.name, { docs: `[{"n":${value}},]` }),
+      );
+      expect(error).toContain('params/docs must be array');
+      expect(error).not.toContain('arrived as a string');
+      expect(error?.includes(RETRY_LOOP_STOP_DIRECTIVE)).toBe(value === 3);
+      const part = onErrorPart.mock.lastCall![0];
+      const [model] = withModelToolErrorNotes([
+        { role: 'user', parts: [part] },
+      ]);
+      const modelError = model.parts?.[0].functionResponse?.response?.['error'];
+      if (value < 3) {
+        expect(modelError).toContain('arrived as a string');
+      } else {
+        expect(modelError).toBe(error);
+      }
+    }
   });
 
   it.each([

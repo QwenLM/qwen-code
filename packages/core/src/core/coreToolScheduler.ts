@@ -93,7 +93,11 @@ import { ApprovalMode } from '../config/approval-mode.js';
 import { logToolCall } from '../telemetry/loggers.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { InputFormat } from '../output/types.js';
-import { ToolErrorType } from '../tools/tool-error.js';
+import { setModelToolErrorNote, ToolErrorType } from '../tools/tool-error.js';
+import {
+  withSchemaValidationReporter,
+  type SchemaValidationReporter,
+} from '../utils/schemaValidator.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
@@ -2960,9 +2964,15 @@ export class CoreToolScheduler {
     callId?: string,
     promptId?: string,
     notifyOnCompletion = false,
+    reportValidation?: SchemaValidationReporter,
   ): AnyToolInvocation | Error {
     try {
-      const invocation = tool.build(structuredClone(args));
+      const input = structuredClone(args);
+      const invocation = reportValidation
+        ? withSchemaValidationReporter(input, reportValidation, () =>
+            tool.build(input),
+          )
+        : tool.build(input);
       const notificationAware = invocation as {
         setCompletionNotificationEnabled?: (enabled: boolean) => void;
       };
@@ -3781,6 +3791,7 @@ export class CoreToolScheduler {
           // The call's one PreToolUse hook runs before every input-dependent
           // check, so a replacement input is validated and approved exactly
           // like a model input; the gates above fix the tool's identity.
+          const originalArgs = reqInfo.args;
           const preToolUseTerminal = await this.runPreToolUse(
             reqInfo,
             toolInstance,
@@ -3848,6 +3859,12 @@ export class CoreToolScheduler {
             continue;
           }
 
+          const isOriginalModelInput =
+            originalArgs === policyGate.args &&
+            !reqInfo.isClientInitiated &&
+            reqInfo.source !== 'code_mode' &&
+            (reqInfo.executionOrigin?.kind ?? 'model') === 'model';
+          let diagnostic: { message: string; note: string } | undefined;
           const invocationOrError = runInRequestGoalContext(reqInfo, () =>
             this.buildInvocation(
               toolInstance,
@@ -3855,6 +3872,11 @@ export class CoreToolScheduler {
               reqInfo.callId,
               reqInfo.prompt_id,
               reqInfo.executionOrigin?.kind === 'client',
+              isOriginalModelInput
+                ? (message, note) => {
+                    diagnostic = { message, note };
+                  }
+                : undefined,
             ),
           );
           if (recordPrevalidationCancellation()) continue;
@@ -3892,21 +3914,28 @@ export class CoreToolScheduler {
               invocationOrError.message,
             );
 
-            const finalError =
-              count >= VALIDATION_RETRY_LOOP_THRESHOLD
-                ? new Error(`${targetMessage}${RETRY_LOOP_STOP_DIRECTIVE}`)
-                : displayError;
+            const retryLimitReached = count >= VALIDATION_RETRY_LOOP_THRESHOLD;
+            const finalError = retryLimitReached
+              ? new Error(`${targetMessage}${RETRY_LOOP_STOP_DIRECTIVE}`)
+              : displayError;
 
+            const response = createErrorResponse(
+              reqInfo,
+              finalError,
+              ToolErrorType.INVALID_TOOL_PARAMS,
+              'not_started',
+            );
+            if (
+              !retryLimitReached &&
+              diagnostic?.message === invocationOrError.message
+            ) {
+              setModelToolErrorNote(response.responseParts[0], diagnostic.note);
+            }
             newToolCalls.push({
               status: 'error',
               request: reqInfo,
               tool: toolInstance,
-              response: createErrorResponse(
-                reqInfo,
-                finalError,
-                ToolErrorType.INVALID_TOOL_PARAMS,
-                'not_started',
-              ),
+              response,
               durationMs: 0,
             });
             continue;

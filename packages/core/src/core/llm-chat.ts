@@ -37,6 +37,7 @@ import {
   enforceFunctionResponseBudget,
   minimumFunctionResponseContent,
   isBudgetShrinkablePart,
+  toolResponseTextLength,
 } from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
@@ -114,6 +115,10 @@ import {
   effectiveHistoryEnd,
 } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
+import {
+  limitModelToolErrorNotes,
+  withModelToolErrorNotes,
+} from '../tools/tool-error.js';
 import {
   getToolOutputRecovery,
   setToolOutputRecovery,
@@ -4111,6 +4116,18 @@ export class LlmChat {
           }
         }
 
+        const budgetedParts = userContent.parts;
+        if (
+          budgetedParts &&
+          Number.isFinite(toolOutputBudget) &&
+          (batchBudget === undefined || batchBudget > 0)
+        ) {
+          limitModelToolErrorNotes(
+            budgetedParts,
+            () => toolOutputBudget - toolResponseTextLength(budgetedParts),
+          );
+        }
+
         // Hard-tier rescue: when the estimated prompt size is at or above the
         // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
         // this send instead of waiting for the API to reject the request as too
@@ -6459,7 +6476,11 @@ export class LlmChat {
         }),
       };
       onModelRequestDispatched?.();
-      return generator.generateContentStream(request, prompt_id);
+      const contents = withModelToolErrorNotes(requestContents);
+      return generator.generateContentStream(
+        contents === requestContents ? request : { ...request, contents },
+        prompt_id,
+      );
     };
     const cgConfig = this.config.getContentGeneratorConfig();
     const authType = overrides?.retryAuthType ?? cgConfig?.authType;

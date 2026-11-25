@@ -5,6 +5,7 @@
  */
 
 import { convertToFunctionResponse } from './coreToolScheduler.js';
+import { setModelToolErrorNote } from '../tools/tool-error.js';
 import { truncateAndSaveToFile } from '../tools/truncation.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -1244,6 +1245,49 @@ describe('LlmChat', async () => {
   });
 
   describe('prepared model request recovery', () => {
+    it.each([
+      [100, true],
+      [30, false],
+    ])(
+      'only dispatches private tool validation detail that fits a %s character budget',
+      async (budget, showNote) => {
+        mockConfig.getToolOutputBatchBudget = () => budget;
+        chat.setHistory([
+          content('user', { text: 'prompt' }),
+          content('model', fnCall('structured_output', {}, 'call-1')),
+        ]);
+        const part = fnResponse(
+          'structured_output',
+          { error: 'params/docs must be array' },
+          'call-1',
+        );
+        setModelToolErrorNote(part, '; invalid near <<HERE>>');
+        streamMock().mockResolvedValue(
+          streamOf(stopResponse([{ text: 'done' }])),
+        );
+        const prepared = vi.fn<LlmPreparedRequestCallback>();
+
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: [part] },
+            'prompt',
+            undefined,
+            { onPreparedRequest: prepared },
+          ),
+        );
+
+        expect(prepared).toHaveBeenCalledOnce();
+        expect(JSON.stringify(prepared.mock.calls[0][0])).not.toContain(
+          '<<HERE>>',
+        );
+        expect(JSON.stringify(chat.getHistory())).not.toContain('<<HERE>>');
+        const dispatched = JSON.stringify(streamMock().mock.calls[0][0]);
+        expect(dispatched).toContain('params/docs must be array');
+        expect(dispatched.includes('; invalid near <<HERE>>')).toBe(showNote);
+      },
+    );
+
     it('awaits durability after normalization and before the first provider call', async () => {
       const dispatched = vi.fn();
       let release!: () => void;

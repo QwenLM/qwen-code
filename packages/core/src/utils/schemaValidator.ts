@@ -24,6 +24,24 @@ const Ajv2020Class = (Ajv2020Pkg as any).default || Ajv2020Pkg;
 
 const debugLogger = createDebugLogger('SchemaValidator');
 
+export type SchemaValidationReporter = (message: string, note: string) => void;
+
+const validationReporters = new WeakMap<object, SchemaValidationReporter>();
+
+/** Captures extra diagnostics during the synchronous validation of this input. */
+export function withSchemaValidationReporter<T>(
+  data: object,
+  report: SchemaValidationReporter,
+  run: () => T,
+): T {
+  validationReporters.set(data, report);
+  try {
+    return run();
+  } finally {
+    validationReporters.delete(data);
+  }
+}
+
 const ajvOptions = {
   // See: https://ajv.js.org/options.html#strict-mode-options
   // strictSchema defaults to true and prevents use of JSON schemas that
@@ -471,10 +489,15 @@ function validateWithCoercion(
 
     valid = validate(data);
     if (!valid && validate.errors) {
-      return (
-        validator.errorsText(validate.errors, { dataVar: 'params' }) +
-        describeBrokenJsonStrings(validate.errors, data)
-      );
+      const message = validator.errorsText(validate.errors, {
+        dataVar: 'params',
+      });
+      const report = validationReporters.get(data);
+      if (report) {
+        const note = describeBrokenJsonString(validate.errors, data);
+        if (note) report(message, note);
+      }
+      return message;
     }
   }
   return null;
@@ -487,53 +510,76 @@ function validateWithCoercion(
  * arguments). "must be array" alone does not show that the text is the
  * problem, and the model resends the same text.
  */
-function describeBrokenJsonStrings(
+function describeBrokenJsonString(
   errors: ErrorObject[],
   data: Record<string, unknown>,
 ): string {
-  let notes = '';
-  const seen = new Set<string>();
+  const instancePath = errors.find(
+    (error) => error.keyword === 'type',
+  )?.instancePath;
+  if (instancePath === undefined) return '';
+
+  // Only add a diagnosis when all failed alternatives point to a type
+  // mismatch on this field. A string branch may instead fail a constraint.
+  const types = new Set<string>();
   for (const error of errors) {
-    const expected = String(error.params['type']);
-    if (
-      error.keyword !== 'type' ||
-      (!expected.includes('array') && !expected.includes('object')) ||
-      seen.has(error.instancePath)
-    ) {
-      continue;
-    }
-    seen.add(error.instancePath);
-    let value: unknown = data;
-    for (const part of error.instancePath.split('/').slice(1)) {
-      if (typeof value !== 'object' || value === null) break;
-      value = (value as Record<string, unknown>)[
-        part.replace(/~1/g, '/').replace(/~0/g, '~')
-      ];
-    }
-    if (typeof value !== 'string') continue;
-    const text = value.trim();
-    if (!text.startsWith('[') && !text.startsWith('{')) continue;
-    try {
-      JSON.parse(text);
-    } catch (parseError) {
-      const reason =
-        parseError instanceof Error ? parseError.message : String(parseError);
-      const position = Number(/position (\d+)/.exec(reason)?.[1]);
-      // Marking the exact spot lets the model fix that bracket; given only
-      // the surrounding text, it mostly rewrote the same mistake.
-      const near = Number.isInteger(position)
-        ? ` Text near the error, with <<HERE>> at that position: ${JSON.stringify(
-            text.slice(Math.max(0, position - 80), position) +
-              '<<HERE>>' +
-              text.slice(position, position + 20),
-          )}.`
-        : '';
-      notes +=
-        `; params${error.instancePath} arrived as a string whose text is not valid JSON (${reason}).` +
-        `${near} Fix the text there and send it as a JSON ${expected.includes('array') ? 'array' : 'object'}, not as a string`;
+    if (error.keyword === 'anyOf' || error.keyword === 'oneOf') continue;
+    if (error.keyword !== 'type' || error.instancePath !== instancePath)
+      return '';
+    const expected: unknown = error.params['type'];
+    for (const type of Array.isArray(expected) ? expected : [expected]) {
+      if (typeof type === 'string') types.add(type);
     }
   }
-  return notes;
+  if (types.has('string') || (!types.has('array') && !types.has('object')))
+    return '';
+
+  let value: unknown = data;
+  for (const part of instancePath.split('/').slice(1)) {
+    const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !Object.hasOwn(value, key)
+    ) {
+      return '';
+    }
+    value = (value as Record<string, unknown>)[key];
+  }
+  if (typeof value !== 'string') return '';
+  const text = value.trim();
+  if (!text.startsWith('[') && !text.startsWith('{')) return '';
+  const expected =
+    types.has('object') && (text.startsWith('{') || !types.has('array'))
+      ? 'object'
+      : 'array';
+  try {
+    JSON.parse(text);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    const reason = error.message;
+    const position =
+      reason === 'Unexpected end of JSON input'
+        ? text.length
+        : Number(
+            / at position (\d+) \(line \d+ column \d+\)$/.exec(reason)?.[1],
+          );
+    const hasPosition =
+      Number.isSafeInteger(position) && position <= text.length;
+    const near = hasPosition
+      ? ` Text near the error, with <<HERE>> at that position: ${JSON.stringify(
+          text.slice(Math.max(0, position - 80), position) +
+            '<<HERE>>' +
+            text.slice(position, position + 20),
+        )}.`
+      : '';
+    const fix = hasPosition ? 'Fix the text there' : 'Fix the JSON syntax';
+    return (
+      `; params${instancePath} arrived as a string whose text is not valid JSON (${reason}).` +
+      `${near} ${fix} and send it as a JSON ${expected}, not as a string`
+    );
+  }
+  return '';
 }
 
 /**
