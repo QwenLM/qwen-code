@@ -1215,8 +1215,14 @@ describe('WorkflowRunner', () => {
         }
       } finally {
         finishLoad?.(saved);
-        await start.catch(() => undefined);
+        const handle = await start.catch(() => undefined);
         registry.abortAll();
+        // The background=false arm starts a real run whose checkpoint write
+        // is still in flight after `start` resolves. Wait for the settlement
+        // (it drains the journal and the checkpoint write) before afterEach
+        // removes the storage root, or the recursive rm races the late write
+        // and fails with ENOTEMPTY under load.
+        await handle?.completion.catch(() => undefined);
       }
     },
   );

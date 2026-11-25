@@ -285,7 +285,6 @@ export const RU_PART1: Record<
   'managed.newRequired':
     'Начните новую задачу, чтобы отправить другое сообщение.',
   'managed.truncated': '[Подробности обрезаны]',
-  'managed.question.title': 'Ответьте на вопросы',
   'managed.actions.title': 'Ожидающие запросы',
   'managed.actions.root': 'Эта сессия',
   'managed.actions.child': (v) => `Дочерняя сессия · ${v?.session}`,

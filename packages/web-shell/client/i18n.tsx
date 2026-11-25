@@ -313,7 +313,6 @@ const EN: Messages = {
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
-  'managed.question.title': 'Answer the questions',
   'managed.actions.title': 'Pending requests',
   'managed.actions.root': 'This session',
   'managed.actions.child': (v) => `Child session · ${v?.session}`,
