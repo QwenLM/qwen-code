@@ -7,6 +7,7 @@
 import type { DaemonClient } from './DaemonClient.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import {
+  composeAbortSignals,
   isNonBlockingAccepted,
   matchTurnEvent,
   normalizePendingPromptLimit,
@@ -101,9 +102,16 @@ export interface DaemonReplaySnapshot {
   lifecycleReplayIncomplete?: boolean;
 }
 
+/** Standalone session metadata supplied by a host without a local workspace. */
+type StandaloneSessionMetadata = Omit<DaemonSession, 'workspaceCwd'> & {
+  sourceType: 'standalone';
+  context: { kind: 'standalone' };
+  workspaceCwd?: string;
+};
+
 export interface DaemonSessionClientOptions {
   client: DaemonClient;
-  session: DaemonSession;
+  session: DaemonSession | StandaloneSessionMetadata;
   /** True when load/resume attached to a session with an in-flight prompt. */
   hasActivePrompt?: boolean;
   /** ACP state returned by load/resume; empty for create/attach clients. */
@@ -268,7 +276,7 @@ function createStandaloneRestoredClient(
  */
 export class DaemonSessionClient {
   readonly client: DaemonClient;
-  readonly session: DaemonSession;
+  readonly session: DaemonSession | StandaloneSessionMetadata;
   readonly restoreStrategy: DaemonSessionRestoreStrategy;
   readonly state: DaemonSessionState;
   /**
@@ -313,6 +321,8 @@ export class DaemonSessionClient {
   private hasAcceptedRestStream = false;
   private lastAcceptedRestStreamId: string | undefined;
   private subscriptionActive = false;
+  private eventStreamReady = false;
+  private eventStreamReadiness?: EventTarget;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
   private generatedUiReadGeneration = 0;
@@ -348,11 +358,22 @@ export class DaemonSessionClient {
     this.client = opts.client;
     this.session = { ...opts.session };
     this.updateGeneratedUi(this.session.generatedUi);
-    const context = (opts.session as { context?: { kind?: unknown } }).context;
-    this.restoreStrategy =
-      opts.session.sourceType === 'standalone' && context?.kind === 'standalone'
-        ? { kind: 'standalone' }
-        : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
+    if (
+      opts.session.sourceType === 'standalone' &&
+      'context' in opts.session &&
+      opts.session.context?.kind === 'standalone'
+    ) {
+      this.restoreStrategy = { kind: 'standalone' };
+    } else if (opts.session.workspaceCwd !== undefined) {
+      this.restoreStrategy = {
+        kind: 'workspace',
+        workspaceCwd: opts.session.workspaceCwd,
+      };
+    } else {
+      throw new TypeError(
+        'The session did not identify its workspace or standalone context',
+      );
+    }
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.backgroundTurn = parseDaemonBackgroundTurn(
@@ -624,7 +645,7 @@ export class DaemonSessionClient {
     return this.session.sessionId;
   }
 
-  get workspaceCwd(): string {
+  get workspaceCwd(): string | undefined {
     return this.session.workspaceCwd;
   }
 
@@ -687,6 +708,29 @@ export class DaemonSessionClient {
 
   setLastEventId(lastEventId: number | undefined): void {
     this.lastSeenEventId = validateLastEventId(lastEventId);
+  }
+
+  /** Wait for an accepted live stream before a submission that has no admission cursor. */
+  async waitForEventStream(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.eventStreamReady) return;
+    const readiness = (this.eventStreamReadiness ??= new EventTarget());
+    const deadline = AbortSignal.timeout(30_000);
+    const waitSignal = signal
+      ? composeAbortSignals([signal, deadline])
+      : deadline;
+    await new Promise<void>((resolve, reject) => {
+      const onReady = () => {
+        waitSignal.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        readiness.removeEventListener('ready', onReady);
+        reject(waitSignal.reason);
+      };
+      readiness.addEventListener('ready', onReady, { once: true });
+      waitSignal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   async prompt(
@@ -1551,6 +1595,7 @@ export class DaemonSessionClient {
       if (released) return;
       released = true;
       this.subscriptionActive = false;
+      this.eventStreamReady = false;
     };
     const acquire = () => {
       if (started) return;
@@ -1638,6 +1683,8 @@ export class DaemonSessionClient {
         onSseStreamAccepted: (streamId: string | undefined) => {
           this.hasAcceptedRestStream = true;
           this.lastAcceptedRestStreamId = streamId;
+          this.eventStreamReady = true;
+          this.eventStreamReadiness?.dispatchEvent(new Event('ready'));
         },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
@@ -1661,7 +1708,8 @@ export class DaemonSessionClient {
     }
   }
 
-  private async hydrateReplaySnapshot(signal?: AbortSignal): Promise<void> {
+  /** Resolve attachment references in the replay supplied to a restored client. */
+  async hydrateReplaySnapshot(signal?: AbortSignal): Promise<void> {
     this.replaySnapshot.compactedReplay = await Promise.all(
       this.replaySnapshot.compactedReplay.map(
         async (event) => await this.hydrateEvent(event, signal),

@@ -36,6 +36,7 @@ import type {
   DaemonSessionAttachmentReference,
   PermissionResponse,
   PromptContentBlock,
+  PromptRequest,
 } from '@qwen-code/sdk/daemon';
 import {
   DaemonHttpError,
@@ -110,10 +111,13 @@ import type {
   PendingSessionLoad,
   DaemonProductSessionContext,
 } from './types.js';
+import type { WebShellSessionAdapter } from './session-adapter.js';
 
 interface RefBox<T> {
   current: T;
 }
+
+type PromptAdmission = { promptId: string; completion?: Promise<void> };
 
 function isDaemonSessionDisconnectedError(error: unknown): boolean {
   return (
@@ -234,6 +238,7 @@ function clearPendingLoadTimeout(load: PendingSessionLoad): void {
 export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
+  sessionAdapter?: WebShellSessionAdapter;
   activePromptsRef: RefBox<Map<string, ActivePrompt>>;
   settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
@@ -473,6 +478,7 @@ export function advanceSessionRecoveryGeneration(
 export function createDaemonSessionActions({
   store,
   sessionRef,
+  sessionAdapter,
   activePromptsRef,
   settledPromptsRef,
   pendingSessionLoadRef,
@@ -523,6 +529,30 @@ export function createDaemonSessionActions({
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
+
+  const adapterFor = (session: DaemonSessionClient) =>
+    sessionAdapter && session.restoreStrategy.kind === 'standalone'
+      ? sessionAdapter
+      : undefined;
+
+  async function submitSessionPrompt(
+    session: DaemonSessionClient,
+    request: PromptRequest,
+    signal?: AbortSignal,
+    beforeDispatch?: (clientId: string | undefined) => void,
+  ): Promise<PromptAdmission> {
+    const adapter = adapterFor(session);
+    if (adapter) {
+      signal?.throwIfAborted();
+      beforeDispatch?.(session.clientId);
+      return await adapter.submitPrompt(session, request, signal);
+    }
+    if (beforeDispatch) {
+      return session.submitPrompt(request, signal, beforeDispatch);
+    }
+    if (signal) return session.submitPrompt(request, signal);
+    return session.submitPrompt(request);
+  }
 
   async function refreshSessionRecovery(session: DaemonSessionClient) {
     const generation = advanceSessionRecoveryGeneration(
@@ -1442,6 +1472,13 @@ export function createDaemonSessionActions({
         if (sessionRef.current !== session)
           throw new Error('Session changed before prompt submission');
         ctrl.signal.throwIfAborted();
+        const adapter = adapterFor(session);
+        if (adapter) {
+          await session.waitForEventStream(ctrl.signal);
+          if (sessionRef.current !== session) {
+            throw new Error('Session changed before prompt submission');
+          }
+        }
         const displayedImages = discardAttachments ? [] : normalizedImages;
         const displayedFiles = discardAttachments ? [] : normalizedFiles;
         const inputAnnotations =
@@ -1449,7 +1486,7 @@ export function createDaemonSessionActions({
             ? options.inputAnnotations
             : undefined;
         const shouldAppendOptimisticMessage =
-          options?.optimisticUserMessage !== false;
+          !adapter && options?.optimisticUserMessage !== false;
         const optimisticMessageAppended =
           shouldAppendOptimisticMessage &&
           displayedImages.length === 0 &&
@@ -1520,25 +1557,23 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
-        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        let accepted: PromptAdmission;
         try {
-          const request = promptRequest as Parameters<
-            typeof session.submitPrompt
-          >[0];
+          const request = promptRequest as PromptRequest;
           for (let attempt = 0; ; attempt += 1) {
             try {
-              accepted = options?.beforeDispatch
-                ? await session.submitPrompt(
-                    request,
-                    ctrl.signal,
-                    options.beforeDispatch,
-                  )
-                : await session.submitPrompt(request, ctrl.signal);
+              accepted = await submitSessionPrompt(
+                session,
+                request,
+                ctrl.signal,
+                options?.beforeDispatch,
+              );
               break;
             } catch (error) {
               const retryDelayMs = PROMPT_ADMISSION_RETRY_DELAYS_MS[attempt];
               if (
                 !options?.idempotencyKey ||
+                adapter ||
                 retryDelayMs === undefined ||
                 ctrl.signal.aborted ||
                 sessionRef.current !== session ||
@@ -1612,7 +1647,10 @@ export function createDaemonSessionActions({
           label: text,
           ...(optimisticBlockId ? { blockId: optimisticBlockId } : {}),
         });
-        if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
+        if (
+          !adapter &&
+          activePromptsRef.current.get(sessionId)?.controller === ctrl
+        ) {
           restartEventStream(sessionId);
         }
         registerAcceptedAttachmentSources(
@@ -1624,13 +1662,23 @@ export function createDaemonSessionActions({
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
         options?.onAdmitted?.({ promptId: accepted.promptId });
-        return await waitForAcceptedPromptCompletion(
+        const turnResult = waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,
           sessionId,
           ctrl,
           accepted.promptId,
         );
+        if (!accepted.completion) return await turnResult;
+        const [result] = await Promise.all([
+          turnResult,
+          accepted.completion,
+        ]).catch((error: unknown) => {
+          const pending = activePromptsRef.current.get(sessionId);
+          if (pending?.controller === ctrl) pending.reject?.(error);
+          throw error;
+        });
+        return result;
       } catch (error) {
         if (isAbortError(error)) {
           if (sessionRef.current?.sessionId === sessionId) {
@@ -1837,6 +1885,13 @@ export function createDaemonSessionActions({
         throw new Error('Session changed before prompt submission');
       if (typeof classification !== 'boolean')
         options?.signal?.throwIfAborted();
+      const adapter = adapterFor(session);
+      if (adapter) {
+        await session.waitForEventStream(options?.signal);
+        if (sessionRef.current !== session) {
+          throw new Error('Session changed before prompt submission');
+        }
+      }
       const displayedImages = discardAttachments ? [] : normalizedImages;
       const displayedFiles = discardAttachments ? [] : normalizedFiles;
       const inputAnnotations =
@@ -1844,7 +1899,7 @@ export function createDaemonSessionActions({
           ? options.inputAnnotations
           : undefined;
       const shouldAppendOptimisticMessage =
-        options?.optimisticUserMessage !== false;
+        !adapter && options?.optimisticUserMessage !== false;
       const optimisticMessageAppended =
         shouldAppendOptimisticMessage &&
         displayedImages.length === 0 &&
@@ -1910,12 +1965,14 @@ export function createDaemonSessionActions({
         promptRequest['retry'] = true;
       }
       options?.onAdmissionStarted?.();
-      let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+      let accepted: PromptAdmission;
       try {
-        const request = promptRequest as Parameters<
-          typeof session.submitPrompt
-        >[0];
-        accepted = await session.submitPrompt(request);
+        const request = promptRequest as PromptRequest;
+        accepted = await submitSessionPrompt(
+          session,
+          request,
+          adapter ? options?.signal : undefined,
+        );
       } catch (error) {
         publishStandaloneWorkingDirectoryError(session.sessionId, error);
         const definiteRejection = isDefinitelyRejectedPromptAdmission(error);
@@ -1936,6 +1993,11 @@ export function createDaemonSessionActions({
         }
         throw error;
       }
+      void accepted.completion?.catch((error: unknown) => {
+        if (sessionRef.current === session && !isAbortError(error)) {
+          dispatchActionError(addNotice, 'Prompt failed', error, 'send_prompt');
+        }
+      });
       if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
         store.appendLocalUserMessage(
           text,
@@ -2051,10 +2113,11 @@ export function createDaemonSessionActions({
           promptRequest['retry'] = true;
         }
         options?.onAdmissionStarted?.();
-        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        let accepted: PromptAdmission;
         try {
-          accepted = await session.submitPrompt(
-            promptRequest as Parameters<typeof session.submitPrompt>[0],
+          accepted = await submitSessionPrompt(
+            session,
+            promptRequest as PromptRequest,
           );
         } catch (error) {
           if (isDefinitelyRejectedPromptAdmission(error)) {
@@ -2063,6 +2126,7 @@ export function createDaemonSessionActions({
           throw error;
         }
         options?.onAdmitted?.({ promptId: accepted.promptId });
+        await accepted.completion;
         return { promptId: accepted.promptId };
       } finally {
         await session.detach().catch((error: unknown) => {
@@ -2700,13 +2764,15 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return [];
       try {
+        if (getConnection().sessionContext?.kind === 'standalone') {
+          return await withActionTimeout(
+            session.client.listStandaloneSessions(options),
+            'List sessions timed out',
+          );
+        }
+        if (session.workspaceCwd === undefined) return [];
         return await withActionTimeout(
-          getConnection().sessionContext?.kind === 'standalone'
-            ? session.client.listStandaloneSessions(options)
-            : session.client.listWorkspaceSessions(
-                session.workspaceCwd,
-                options,
-              ),
+          session.client.listWorkspaceSessions(session.workspaceCwd, options),
           'List sessions timed out',
         );
       } catch (error) {
@@ -2950,16 +3016,16 @@ export function createDaemonSessionActions({
           }
           throw new DOMException('Session creation interrupted', 'AbortError');
         }
-        persistStableClientId(nextSession.clientId, nextSession.sessionId);
-        sessionRef.current = nextSession;
-        skipNextCleanupDetachSessionRef.current = nextSession;
         const createdSessionContext =
           targetSessionContext?.kind === 'standalone'
             ? targetSessionContext
-            : {
-                kind: 'workspace' as const,
-                cwd: nextSession.workspaceCwd,
-              };
+            : daemonClientSessionContext(nextSession);
+        if (!createdSessionContext) {
+          throw new Error('The created session did not identify its workspace');
+        }
+        persistStableClientId(nextSession.clientId, nextSession.sessionId);
+        sessionRef.current = nextSession;
+        skipNextCleanupDetachSessionRef.current = nextSession;
         setConnection((current) => {
           const base =
             createdSessionContext.kind === 'workspace'

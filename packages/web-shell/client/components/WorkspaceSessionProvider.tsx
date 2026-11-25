@@ -36,6 +36,7 @@ import {
   hasManagedLocalTarget,
   managedSelectionFromRoute,
 } from './managed/managed-session-storage';
+import type { WebShellSessionAdapter } from '../daemon/session/session-adapter.js';
 
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
@@ -66,6 +67,7 @@ interface WorkspaceSessionProviderProps {
   workspaceId?: string;
   workspaceCwd?: string;
   sessionContext?: DaemonProductSessionContext;
+  sessionAdapter?: WebShellSessionAdapter;
   lockWorkspaceCwd?: string;
   clientId?: string;
   restartSseOnPrompt?: boolean;
@@ -197,6 +199,7 @@ function WorkspaceSessionProviderWorkspace({
   workspaceId,
   workspaceCwd,
   sessionContext,
+  sessionAdapter,
   lockWorkspaceCwd,
   clientId,
   restartSseOnPrompt,
@@ -450,6 +453,11 @@ function WorkspaceSessionProviderWorkspace({
               ? { kind: 'workspace', cwd: targetWorkspace.cwd }
               : undefined))
       }
+      sessionAdapter={
+        !usePrimaryNewSession && sessionContext?.kind === 'standalone'
+          ? sessionAdapter
+          : undefined
+      }
       workspaceCwd={
         sessionContext?.kind === 'workspace' || !sessionContext
           ? targetWorkspace?.cwd
@@ -499,6 +507,7 @@ type StandaloneResolution =
 function StandaloneSessionGate({
   sessionId,
   sessionContext,
+  sessionAdapter,
   attachedSessionId,
   chromeTheme,
   chromeLanguage,
@@ -543,7 +552,8 @@ function StandaloneSessionGate({
     if (
       sessionContext?.kind !== 'standalone' ||
       !standaloneSupported ||
-      managedProvided
+      managedProvided ||
+      sessionAdapter
     )
       return;
     const generation = resolutionGenerationRef.current + 1;
@@ -616,6 +626,7 @@ function StandaloneSessionGate({
     sessionContext?.kind,
     standaloneSupported,
     managedProvided,
+    sessionAdapter,
     workspace.client,
   ]);
 
@@ -623,6 +634,7 @@ function StandaloneSessionGate({
     ...workspaceProviderProps,
     sessionId,
     sessionContext,
+    sessionAdapter,
     chromeTheme,
     chromeLanguage,
     webShellProps: appProps,
@@ -686,7 +698,7 @@ function StandaloneSessionGate({
   if (managedProvided) {
     return <WorkspaceSessionProviderWorkspace {...routedProps} />;
   }
-  if (attachedSessionId === sessionId) {
+  if (sessionAdapter || attachedSessionId === sessionId) {
     return <WorkspaceSessionProviderWorkspace {...routedProps} />;
   }
   if (resolutionSessionId !== sessionId || resolution.status === 'loading') {

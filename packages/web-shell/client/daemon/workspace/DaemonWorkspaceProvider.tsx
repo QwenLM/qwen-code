@@ -14,12 +14,8 @@ import {
   useState,
 } from 'react';
 import { ComposerWorkspaceProvider } from '../../hooks/useComposerWorkspace.js';
-import type {
-  DaemonBrand,
-  DaemonCapabilities,
-  DaemonClient,
-} from '@qwen-code/sdk/daemon';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import type { DaemonBrand, DaemonCapabilities } from '@qwen-code/sdk/daemon';
+import { DaemonClient, DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   DaemonAvailability,
   createDaemonClient,
@@ -103,6 +99,7 @@ export function DaemonWorkspaceProvider({
   token,
   workspaceCwd,
   autoConnect = true,
+  sessionAdapter,
   transport,
   children,
 }: DaemonWorkspaceProviderProps) {
@@ -111,18 +108,19 @@ export function DaemonWorkspaceProvider({
   recordProviderCopy(moduleInstanceId, false);
   const availability = useMemo(
     () =>
-      autoConnect
+      autoConnect && !sessionAdapter
         ? new DaemonAvailability(baseUrl, token, transport?.restFetch)
         : undefined,
-    [baseUrl, token, transport, autoConnect],
+    [baseUrl, token, transport, autoConnect, sessionAdapter],
   );
-  const client = useMemo(
-    () =>
-      autoConnect && availability
-        ? createDaemonClient({ baseUrl, token, transport }, availability)
-        : undefined,
-    [autoConnect, baseUrl, token, transport, availability],
-  );
+  const client = useMemo(() => {
+    if (!autoConnect) return undefined;
+    const options = { baseUrl, token, transport };
+    if (sessionAdapter) {
+      return sessionAdapter.createClient(options, DaemonClient);
+    }
+    return availability ? createDaemonClient(options, availability) : undefined;
+  }, [autoConnect, baseUrl, token, transport, availability, sessionAdapter]);
   const pendingDisposeRef = useRef(new Set<DaemonClient>());
   const clientRef = useRef<DaemonClient | undefined>(client);
   clientRef.current = client;

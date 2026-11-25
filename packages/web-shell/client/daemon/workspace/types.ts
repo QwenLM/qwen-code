@@ -147,6 +147,7 @@ export interface DaemonWorkspaceProviderProps {
   token?: string;
   workspaceCwd?: string;
   autoConnect?: boolean;
+  sessionAdapter?: import('../session/session-adapter.js').WebShellSessionAdapter;
   /**
    * Optional pluggable transport forwarded to `DaemonClient`. When
    * omitted the client uses the default REST+SSE transport.

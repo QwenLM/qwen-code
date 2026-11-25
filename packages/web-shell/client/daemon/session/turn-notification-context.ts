@@ -70,7 +70,6 @@ export const TurnNotificationContext = createContext<
 
 interface NotificationOwner {
   sessionId: string;
-  workspaceCwd: string;
 }
 
 export function useTurnNotificationBinding(
@@ -121,7 +120,7 @@ export function useTurnNotificationBinding(
       ): T {
         if (!baseUrl) return owner;
         const url = new URL(baseUrl, 'http://localhost');
-        const cwd = context.kind === 'workspace' ? owner.workspaceCwd : '';
+        const cwd = context.kind === 'workspace' ? context.cwd : '';
         owners.set(owner, {
           scope: JSON.stringify([
             url.origin,

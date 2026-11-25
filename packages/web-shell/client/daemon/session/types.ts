@@ -34,7 +34,6 @@ import type {
   DaemonSessionRecapResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
-  DaemonSession,
   DaemonSessionClient,
   DaemonSessionPrInfo,
   DaemonSessionSummary,
@@ -247,6 +246,7 @@ export interface DaemonSessionProviderProps {
   workspaceCwd?: string;
   /** Explicit product context. Legacy callers may continue using workspaceCwd. */
   sessionContext?: DaemonProductSessionContext;
+  sessionAdapter?: import('./session-adapter.js').WebShellSessionAdapter;
   /** Session id to load. Undefined keeps the page empty until a prompt creates one. */
   sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
@@ -723,7 +723,7 @@ export interface DaemonSessionActions {
      */
     sourceVersion?: number;
     getCurrentSourceVersion?: () => number;
-  }): Promise<DaemonSession>;
+  }): Promise<DaemonSessionClient | DaemonSessionClient['session']>;
   attachSession(): Promise<void>;
   clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;
   newSession(): Promise<void>;
