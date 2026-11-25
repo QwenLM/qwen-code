@@ -602,6 +602,23 @@ describe('release workflow', () => {
     }
   });
 
+  it('keeps every sparse checkout blob inside the retryable fetch', () => {
+    // The YAML pin above cannot tell a filter that omits objects from one
+    // that keeps them: `blob:none` and `tree:0` both leave the checkout
+    // fetching from the promisor remote after the action's retries are spent.
+    // Only a size-bounded blob filter above GitHub's file-size limit admits
+    // every blob the sparse set can need.
+    let swept = 0;
+    for (const job of Object.values(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.name !== 'Checkout release workflow scripts') continue;
+        swept += 1;
+        expect(step.with.filter, step.name).toMatch(/^blob:limit=\d+[kmg]$/);
+      }
+    }
+    expect(swept).toBeGreaterThan(0);
+  });
+
   it('re-pins trusted runners before every step that runs one', () => {
     // Swept, not hand-listed: a list of protected step names cannot fail for
     // the steps it omits, which is how `Build Bundle and Prepare Package`,
