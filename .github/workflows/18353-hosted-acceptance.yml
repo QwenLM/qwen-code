@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 'd8c6f0804fc32fd60550b91b2b0936de17572ff4'
+          ref: '18d39e1e610579a20ee11d7e49ca09876955be5e'
           persist-credentials: false
       - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
         with:
@@ -42,26 +42,10 @@ jobs:
           package-manager-cache: false
       - name: Build packaged CLI
         run: |
-          python3 - <<'PYTHON'
-          from pathlib import Path
-          source = Path("packages/cli/src/serve/hosted-harness-session/session-http.ts")
-          text = source.read_text()
-          old = "  if (store === undefined) return String(cause);"
-          new = """  if (store === undefined) {
-              const chain: string[] = [];
-              for (let current = cause; current instanceof Error && chain.length < 6; current = current.cause) {
-                chain.push(String(current).slice(0, 400));
-                if (typeof current.cause === "string") chain.push(current.cause.slice(0, 400));
-              }
-              return chain.join(" <- ") || String(cause);
-            }"""
-          assert text.count(old) == 1
-          source.write_text(text.replace(old, new))
-          PYTHON
           corepack enable
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
           test -s dist/cli.js
-          test "$(git rev-parse HEAD)" = 'd8c6f0804fc32fd60550b91b2b0936de17572ff4'
+          test "$(git rev-parse HEAD)" = '18d39e1e610579a20ee11d7e49ca09876955be5e'
       - name: Install matching Java SDK
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
@@ -92,7 +76,7 @@ jobs:
             -Dqwen.cli.entry="$GITHUB_WORKSPACE/dist/cli.js" \
             -Dmysql.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=hosted-fixture verify
-      - name: Report recovery causes from synthetic fixtures
+      - name: Report recovery errors from synthetic fixtures
         if: always()
         run: |
           find "$RUNNER_TEMP/hosted-fixtures" -name harness.log -exec grep -HE "^qwen serve: Hosted Harness recovery remained blocked:" {} + || true
