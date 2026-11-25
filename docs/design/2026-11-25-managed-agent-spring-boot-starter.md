@@ -54,6 +54,7 @@ The Managed catalog is distinct from the host business catalog. Its schema and a
 
 A host that wants no controllers uses the default Java surface. The standalone application retains its existing web assembly; the starter does not remove it.
 
+Extension archive storage is imported through `ManagedAgentConfiguration`, not registered separately in the server-wide auto-configuration index. The existing factory method receives `ManagedAgentProperties` as a parameter and uses `@ConditionalOnMissingBean`, so host-provided `ExtensionArchiveStorage` takes precedence. It does not depend on a class-level `@ConditionalOnBean` evaluated before that configuration has registered the properties. With `qwen.managed-agent.enabled=false`, the Starter does not import `ManagedAgentConfiguration` or create Managed resources.
 
 ## Validation
 

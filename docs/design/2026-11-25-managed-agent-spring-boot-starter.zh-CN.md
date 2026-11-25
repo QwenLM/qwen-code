@@ -54,6 +54,7 @@ Managed catalog 与宿主业务 catalog 不同。其表结构和应用账号由�
 
 宿主不希望新增 Controller 时使用默认 Java 面。独立服务保留现有 Web 装配，Starter 不移除它。
 
+扩展归档存储由 `ManagedAgentConfiguration` 导入，不再单独注册到 server 的全局自动配置索引。现有工厂方法继续以参数注入 `ManagedAgentProperties`，并通过 `@ConditionalOnMissingBean` 优先使用宿主自备的 `ExtensionArchiveStorage`；不再依赖该配置注册属性 Bean 前就会求值的类级 `@ConditionalOnBean`。设置 `qwen.managed-agent.enabled=false` 时，Starter 不导入 `ManagedAgentConfiguration`，也不创建 Managed 资源。
 
 ## 验证
 
