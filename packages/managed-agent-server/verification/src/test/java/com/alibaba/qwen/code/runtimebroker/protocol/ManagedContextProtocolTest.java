@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker.protocol;
 
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.ManagedRuntimeAttestationConformanceTest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -17,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -44,12 +47,17 @@ public class ManagedContextProtocolTest {
                         .validateBoot(map(item.required("boot"))), id);
             }
         }
-        Map<String, Object> boot = map(suite.required("boot"));
+        ManagedContextProtocol.Boot boot = ManagedContextProtocol.parseBoot(
+                map(suite.required("boot")));
         for (JsonNode item : suite.required("readyCases")) {
             String id = item.required("id").asText();
             if (item.required("valid").asBoolean()) {
-                assertDoesNotThrow(() -> ManagedContextProtocol.ready(
-                        map(item.required("ready")), boot), id);
+                ManagedContextProtocol.Ready ready = assertDoesNotThrow(
+                        () -> ManagedContextProtocol.ready(
+                                map(item.required("ready")), boot), id);
+                assertEquals(boot.runtimeInstanceId(), ready.runtimeInstanceId(), id);
+                assertEquals(boot.epoch(), ready.epoch(), id);
+                assertTrue(ready.url().isAbsolute(), id);
             } else {
                 assertThrows(Exception.class, () -> ManagedContextProtocol.ready(
                         map(item.required("ready")), boot), id);
@@ -68,10 +76,75 @@ public class ManagedContextProtocolTest {
                 ManagedContextProtocol.installation(request(), "op-1", "session-1", binding))));
         assertEquals(expected.required("expected").required("body"), JSON.readTree(JsonCodec.encode(
                 ManagedContextProtocol.receipt(seed(), "op-1", "session-1", binding))));
-        Map<String, Object> boot = ManagedContextProtocol.boot(request(), seed());
-        assertEquals(suite.required("boot"), JSON.readTree(JsonCodec.encode(boot)));
+        ManagedContextProtocol.Boot boot = ManagedContextProtocol.boot(request(), seed());
+        assertEquals(suite.required("boot"), JSON.readTree(JsonCodec.encode(boot.toWire())));
+        assertEquals(suite.required("boot"), JSON.readTree(JsonCodec.encode(
+                ManagedContextProtocol.parseBoot(boot.toWire()).toWire())));
         assertEquals(suite.required("attestationResponse"), JSON.readTree(JsonCodec.encode(
-                ManagedContextProtocol.attestationResponse(boot))));
+                ManagedContextProtocol.attestationResponse(boot.toWire()))));
+    }
+
+    @Test
+    void typedBootSnapshotsExtensionsAndRedactsToken() {
+        String cacheDirectory = Path.of("managed-cache").toAbsolutePath().toString();
+        String cgroupRoot = Path.of("managed-cgroup").toAbsolutePath().toString();
+        for (String digest : List.of(
+                ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST,
+                ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST)) {
+            Map<String, Object> configuration = new LinkedHashMap<>(
+                    ManagedExtensionExecutionProfile.configuration(digest,
+                            cacheDirectory,
+                            ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST
+                                    .equals(digest) ? cgroupRoot : null));
+            Map<String, Object> original = Map.copyOf(configuration);
+            ManagedContextProtocol.Boot boot = ManagedContextProtocol.boot(
+                    request(digest), seed(), configuration);
+            configuration.put("cacheDirectory", "/tmp/changed");
+            assertEquals(original, boot.managedExtensions());
+            assertEquals(boot, ManagedContextProtocol.parseBoot(boot.toWire()));
+            assertFalse(boot.toString().contains(seed().getToken()));
+            assertThrows(UnsupportedOperationException.class,
+                    () -> boot.managedExtensions().put("enabled", false));
+            Map<String, Object> raw = new LinkedHashMap<>(boot.toWire());
+            ManagedContextProtocol.Boot parsed = ManagedContextProtocol.parseBoot(raw);
+            raw.put("mountRoot", "/tmp/changed");
+            assertEquals("/runtime/workspaces/workspace-a", parsed.mountRoot());
+        }
+    }
+
+    @Test
+    void preservesDeveloperExtensionCgroupRootAdmission() {
+        String cacheDirectory = Path.of("managed-cache").toAbsolutePath().toString();
+        String cgroupRoot = Path.of("managed-cgroup").toAbsolutePath().toString();
+        Map<String, Object> configuration = new LinkedHashMap<>(
+                ManagedExtensionExecutionProfile.configuration(
+                        ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST,
+                        cacheDirectory, null));
+        configuration.put("cgroupRoot", cgroupRoot);
+        var boot = ManagedContextProtocol.boot(request(
+                ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST),
+                seed(), configuration);
+        assertEquals(cgroupRoot, boot.managedExtensions().get("cgroupRoot"));
+    }
+
+    @Test
+    void typedConfinedBootPreservesAndRequiresThePrivateRoot() {
+        var confined = new RuntimeProvisionRequest(new RuntimeScope("tenant-a", "workspace-a",
+                "7", "/runtime/workspaces/workspace-a", WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST,
+                "session"), "session-a", "local-process", "storage://pvc/workspace-a");
+        Map<String, Object> recipe = Map.of("version", 1,
+                "rootfs", Path.of("rootfs").toAbsolutePath().toString(),
+                "rootfsIdentity", "12:34", "bwrapIdentity", "56:78");
+        var input = new LinkedHashMap<>(recipe);
+        var boot = ManagedContextProtocol.boot(confined, seed(), null, input);
+        input.put("rootfsIdentity", "90:12");
+
+        assertEquals(recipe, boot.toWire().get("privateRoot"));
+        assertEquals(boot, ManagedContextProtocol.parseBoot(boot.toWire()));
+        var withoutRecipe = new LinkedHashMap<>(boot.toWire());
+        withoutRecipe.remove("privateRoot");
+        assertThrows(IllegalArgumentException.class, () -> ManagedContextProtocol.parseBoot(withoutRecipe));
+        assertThrows(IllegalArgumentException.class, () -> ManagedContextProtocol.boot(request(), seed(), null, recipe));
     }
 
     @Test
@@ -120,8 +193,12 @@ public class ManagedContextProtocolTest {
     }
 
     public static RuntimeProvisionRequest request() {
+        return request("sha256:" + "a".repeat(64));
+    }
+
+    private static RuntimeProvisionRequest request(String capabilityDigest) {
         return new RuntimeProvisionRequest(new RuntimeScope("tenant-a", "workspace-a",
-                "7", "/runtime/workspaces/workspace-a", "sha256:" + "a".repeat(64),
+                "7", "/runtime/workspaces/workspace-a", capabilityDigest,
                 "workspace"), null, "local-process", "storage://pvc/workspace-a");
     }
 

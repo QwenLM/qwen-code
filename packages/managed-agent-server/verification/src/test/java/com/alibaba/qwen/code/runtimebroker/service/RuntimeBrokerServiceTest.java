@@ -6949,6 +6949,12 @@ class RuntimeBrokerServiceTest {
         Map<String, Object> nullField = new HashMap<>();
         nullField.put("state", "unknown");
         nullField.put(null, "value");
+        Map<String, Object> settledNull = new HashMap<>();
+        settledNull.put("state", "settled");
+        settledNull.put("result", null);
+        Map<String, Object> executingNull = new HashMap<>();
+        executingNull.put("state", "executing");
+        executingNull.put("result", null);
         List<Map<String, Object>> responses = List.of(
                 nullField,
                 Map.of(),
@@ -6957,6 +6963,8 @@ class RuntimeBrokerServiceTest {
                 Map.of("state", "unknown", "reason", "missing"),
                 Map.of("state", "settled"),
                 Map.of("state", "settled", "result", "success"),
+                settledNull,
+                executingNull,
                 Map.of("state", "settled", "result", Map.of()),
                 Map.of("state", "settled", "result",
                         Map.of("executionStatus", "not_executed")),

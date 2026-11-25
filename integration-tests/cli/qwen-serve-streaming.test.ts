@@ -363,6 +363,7 @@ beforeAll(async () => {
       // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
+      '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
     ],

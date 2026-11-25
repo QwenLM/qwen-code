@@ -6,9 +6,9 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
@@ -52,6 +52,57 @@ public final class ManagedContextProtocol {
             "managedContext", "runtimeInstanceId", "runtimeIncarnation",
             "leaseId", "epoch", "url");
 
+    public record Boot(String runtimeInstanceId, String runtimeIncarnation,
+            String leaseId, String provisionRequestId, String token, long epoch,
+            String tenantId, String workspaceId, String workspaceGeneration,
+            String storageId, String mountRoot, String capabilityDigest,
+            String isolationClass, Map<String, Object> managedExtensions,
+            Map<String, Object> privateRoot) {
+        public Boot {
+            managedExtensions = managedExtensions == null ? null
+                    : BrokerValues.immutableMap(managedExtensions);
+            privateRoot = privateRoot == null ? null
+                    : BrokerValues.immutableMap(privateRoot);
+        }
+
+        public Map<String, Object> toWire() {
+            Map<String, Object> wire = new LinkedHashMap<>();
+            wire.put("type", "boot");
+            wire.put("version", 2);
+            wire.put("managedContext", PROTOCOL);
+            wire.put("runtimeInstanceId", runtimeInstanceId);
+            wire.put("runtimeIncarnation", runtimeIncarnation);
+            wire.put("leaseId", leaseId);
+            wire.put("provisionRequestId", provisionRequestId);
+            wire.put("epoch", epoch);
+            wire.put("token", token);
+            wire.put("tenantId", tenantId);
+            wire.put("workspaceId", workspaceId);
+            wire.put("workspaceGeneration", workspaceGeneration);
+            wire.put("storageId", storageId);
+            wire.put("mountRoot", mountRoot);
+            wire.put("capabilityDigest", capabilityDigest);
+            wire.put("isolationClass", isolationClass);
+            if (managedExtensions != null) {
+                wire.put("managedExtensions", managedExtensions);
+            }
+            if (privateRoot != null) {
+                wire.put("privateRoot", privateRoot);
+            }
+            return Map.copyOf(wire);
+        }
+
+        @Override
+        public String toString() {
+            return "Boot[runtimeInstanceId=" + runtimeInstanceId
+                    + ", leaseId=" + leaseId + ", epoch=" + epoch + "]";
+        }
+    }
+
+    public record Ready(String runtimeInstanceId, String runtimeIncarnation,
+            String leaseId, long epoch, URI url) {
+    }
+
     private ManagedContextProtocol() {
     }
 
@@ -69,16 +120,17 @@ public final class ManagedContextProtocol {
         require(scope.getCapabilityDigest().matches("sha256:[0-9a-f]{64}"));
     }
 
-    public static Map<String, Object> boot(RuntimeProvisionRequest request,
+    public static Boot boot(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed) {
         return boot(request, seed, null);
     }
 
-    public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> extensions) {
+    public static Boot boot(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, Map<String, Object> extensions) {
         return boot(request, seed, extensions, null);
     }
 
-    public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+    public static Boot boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> extensions, Map<?, ?> privateRoot) {
         require(request != null && request.isManagedContext() && seed != null);
         RuntimeScope scope = request.getScope();
@@ -105,8 +157,22 @@ public final class ManagedContextProtocol {
         if (privateRoot != null) {
             boot.put("privateRoot", privateRoot);
         }
-        validateBoot(boot);
-        return Map.copyOf(boot);
+        return parseBoot(boot);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static Boot parseBoot(Map<String, Object> boot) {
+        Map<String, Object> snapshot = BrokerValues.immutableMap(boot);
+        validateBoot(snapshot);
+        return new Boot(string(snapshot, "runtimeInstanceId"),
+                string(snapshot, "runtimeIncarnation"), string(snapshot, "leaseId"),
+                string(snapshot, "provisionRequestId"), string(snapshot, "token"),
+                integer(snapshot.get("epoch")), string(snapshot, "tenantId"),
+                string(snapshot, "workspaceId"), string(snapshot, "workspaceGeneration"),
+                string(snapshot, "storageId"), string(snapshot, "mountRoot"),
+                string(snapshot, "capabilityDigest"), string(snapshot, "isolationClass"),
+                (Map<String, Object>) snapshot.get("managedExtensions"),
+                (Map<String, Object>) snapshot.get("privateRoot"));
     }
 
     public static void validateBoot(Map<String, Object> boot) {
@@ -166,20 +232,20 @@ public final class ManagedContextProtocol {
                 && recipe.get("bwrapIdentity") instanceof String bwrap && bwrap.matches("[0-9]+:[0-9]+");
     }
 
-    public static URI ready(Map<String, Object> ready, Map<String, Object> boot) {
+    public static Ready ready(Map<String, Object> ready, Boot boot) {
         require(ready.keySet().equals(READY_KEYS)
                 && "ready".equals(ready.get("type"))
                 && exactNumber(ready.get("version"), 2)
                 && PROTOCOL.equals(ready.get("managedContext")));
-        for (String key : Set.of("runtimeInstanceId", "runtimeIncarnation",
-                "leaseId")) {
-            require(boot.get(key).equals(ready.get(key)));
-        }
-        require(exactNumber(ready.get("epoch"), integer(boot.get("epoch"))));
+        require(boot.runtimeInstanceId().equals(ready.get("runtimeInstanceId"))
+                && boot.runtimeIncarnation().equals(ready.get("runtimeIncarnation"))
+                && boot.leaseId().equals(ready.get("leaseId")));
+        require(exactNumber(ready.get("epoch"), boot.epoch()));
         String url = string(ready, "url");
         Matcher origin = ORIGIN.matcher(url);
         require(origin.matches() && Integer.parseInt(origin.group(1)) <= 65535);
-        return URI.create(url);
+        return new Ready(boot.runtimeInstanceId(), boot.runtimeIncarnation(),
+                boot.leaseId(), boot.epoch(), URI.create(url));
     }
 
     public static Map<String, Object> attestationRequest(Map<String, Object> boot) {

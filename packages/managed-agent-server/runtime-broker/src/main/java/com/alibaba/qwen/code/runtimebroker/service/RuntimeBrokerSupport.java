@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
+import com.alibaba.qwen.code.runtimebroker.RuntimeExecutionStatus;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
@@ -37,9 +38,6 @@ import java.util.function.Supplier;
 final class RuntimeBrokerSupport {
     private RuntimeBrokerSupport() { }
 
-    static final Set<String> RUNTIME_STATUS_STATES = Set.of(
-            "prepared", "executing", "cancel_requested", "settled",
-            "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
 
     /** Tool v3 publication dispatch: a payload digest and publication grant. */
@@ -280,7 +278,7 @@ final class RuntimeBrokerSupport {
 
     static Map<String, Object> projectV3Status(Map<String, Object> response) {
         Object state = response.get("state");
-        if (!(state instanceof String name) || !RUNTIME_STATUS_STATES.contains(name)
+        if (!(state instanceof String name) || !RuntimeExecutionStatus.State.supports(name)
                 || "settled".equals(name) != (response.get("result") instanceof Map)) {
             throw conflict("runtime_execution_conflict", "Tool v3 returned an invalid status");
         }
