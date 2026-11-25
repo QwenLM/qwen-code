@@ -222,6 +222,45 @@ describe('SchemaValidator', () => {
         ).toEqual({ urls });
       },
     );
+
+    it('points at the syntax error when a string holds broken JSON', () => {
+      // An array of objects with one bracket too many, passed on as a string.
+      const docs =
+        '\n[{"pages": [1], "fields": {"a": {"raw_value": "x"}]}, "issues": []}]\n';
+      const error = SchemaValidator.validate(
+        obj({ docs: arrayOf(obj({ pages: arrayOf({ type: 'integer' }) })) }),
+        { docs },
+      );
+      expect(error).toMatch(
+        /^params\/docs must be array; params\/docs arrived as a string whose text is not valid JSON \(.*position 50.*\)\. /,
+      );
+      expect(error).toContain(
+        'Text near the error, with <<HERE>> at that position: "[{\\"pages\\": [1], \\"fields\\": {\\"a\\": {\\"raw_value\\": \\"x\\"}<<HERE>>]}, \\"issues\\": []}]".',
+      );
+      expect(error).toMatch(
+        / Fix the text there and send it as a JSON array, not as a string$/,
+      );
+    });
+
+    it('names a nested path once, even under anyOf', () => {
+      const error = SchemaValidator.validate(
+        obj({ outer: obj({ config: orNull(obj({ key: {} })) }) }),
+        { outer: { config: '{"key": 1,}' } },
+      );
+      expect(error).toContain(
+        'params/outer/config arrived as a string whose text is not valid JSON',
+      );
+      expect(error?.split('arrived as a string')).toHaveLength(2);
+      expect(error).toContain('send it as a JSON object, not as a string');
+    });
+
+    it('adds nothing for strings that do not start like JSON', () => {
+      expect(
+        SchemaValidator.validate(obj({ urls: strings() }), {
+          urls: 'hello world',
+        }),
+      ).toBe('params/urls must be array');
+    });
   });
 
   describe('numeric string coercion', () => {
