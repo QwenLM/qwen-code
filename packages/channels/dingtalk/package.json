@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-dingtalk",
-  "version": "0.28.3",
+  "version": "0.28.3-nightly.20261125.3e5b47163e",
   "description": "DingTalk channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -25,7 +25,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.28.3",
+    "@qwen-code/channel-base": "0.28.3-nightly.20261125.3e5b47163e",
     "dingtalk-stream-sdk-nodejs": "^2.0.4",
     "proper-lockfile": "^4.1.2",
     "undici": "^7.30.2"
