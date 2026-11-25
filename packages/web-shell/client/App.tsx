@@ -2327,6 +2327,7 @@ type PersistedArtifactPanelTab =
       toolCallId: string;
       taskId?: string;
       taskScope?: 'durable' | 'session';
+      taskSource?: 'cron' | 'wakeup';
       sourceSessionId?: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -2419,19 +2420,39 @@ function resolveScheduledTaskWorkspace(
 interface ScheduledTaskRestoreReference {
   id: string;
   scope: 'durable' | 'session';
+  source?: 'cron' | 'wakeup';
 }
 
 function getScheduledTaskRestoreReference(tab: {
   toolCallId?: string;
   taskId?: unknown;
   taskScope?: unknown;
+  taskSource?: unknown;
 }): ScheduledTaskRestoreReference | undefined {
+  const qualified = /^scheduled:session:(cron|wakeup):(.+)$/u.exec(
+    tab.toolCallId ?? '',
+  );
+  const source =
+    tab.taskSource === 'cron' || tab.taskSource === 'wakeup'
+      ? tab.taskSource
+      : (qualified?.[1] as 'cron' | 'wakeup' | undefined);
   if (
     typeof tab.taskId === 'string' &&
     tab.taskId &&
     (tab.taskScope === 'durable' || tab.taskScope === 'session')
   ) {
-    return { id: tab.taskId, scope: tab.taskScope };
+    return {
+      id: tab.taskId,
+      scope: tab.taskScope,
+      ...(tab.taskScope === 'session' && source ? { source } : {}),
+    };
+  }
+  if (qualified?.[1] && qualified[2]) {
+    return {
+      id: qualified[2],
+      scope: 'session',
+      source: qualified[1] as 'cron' | 'wakeup',
+    };
   }
   const legacy = /^scheduled:(durable|session):(.+)$/u.exec(
     tab.toolCallId ?? '',
@@ -2448,13 +2469,26 @@ function findRestoredScheduledTask(
   const reference = getScheduledTaskRestoreReference(tab);
   // A stopped or consumed task is absent live, but its backend id can still
   // identify the original creation record even with a synthetic toolCallId.
+  const matching = tasks.filter(
+    (task) =>
+      reference &&
+      task.id === reference.id &&
+      task.durable === (reference.scope === 'durable') &&
+      (reference.scope !== 'session' ||
+        !reference.source ||
+        (task.cron === '@wakeup'
+          ? reference.source === 'wakeup'
+          : reference.source === 'cron')),
+  );
+  if (
+    reference?.scope === 'session' &&
+    reference.source === undefined &&
+    matching.length > 1
+  ) {
+    return;
+  }
   return (
-    tasks.find(
-      (task) =>
-        reference &&
-        task.id === reference.id &&
-        task.durable === (reference.scope === 'durable'),
-    ) ?? tasks.find((task) => task.toolCallId === tab.toolCallId)
+    matching[0] ?? tasks.find((task) => task.toolCallId === tab.toolCallId)
   );
 }
 
@@ -2480,6 +2514,7 @@ function parsePersistedArtifactPanelTab(
     'rootToolCallId',
     'taskId',
     'taskScope',
+    'taskSource',
     'parentSessionId',
     'recordId',
     'promptId',
@@ -2566,7 +2601,10 @@ function parsePersistedArtifactPanelTab(
         typeof tab['toolCallId'] !== 'string' ||
         (tab['taskScope'] !== undefined &&
           tab['taskScope'] !== 'durable' &&
-          tab['taskScope'] !== 'session')
+          tab['taskScope'] !== 'session') ||
+        (tab['taskSource'] !== undefined &&
+          tab['taskSource'] !== 'cron' &&
+          tab['taskSource'] !== 'wakeup')
       )
         return;
       return {
@@ -2575,6 +2613,9 @@ function parsePersistedArtifactPanelTab(
         toolCallId: tab['toolCallId'],
         taskId: tab['taskId'],
         taskScope: tab['taskScope'],
+        ...(tab['taskSource'] !== undefined
+          ? { taskSource: tab['taskSource'] }
+          : {}),
         sourceSessionId: tab['sourceSessionId'],
         workspaceCwd: tab['workspaceCwd'],
         workspaceId: tab['workspaceId'],
@@ -2778,7 +2819,8 @@ function serializeArtifactPanelTabs(
             sourceSessionId: tab.sourceSessionId,
           },
         ];
-      case 'scheduled_task':
+      case 'scheduled_task': {
+        const reference = getScheduledTaskRestoreReference(tab.task);
         return [
           {
             id,
@@ -2787,11 +2829,13 @@ function serializeArtifactPanelTabs(
             toolCallId: tab.task.toolCallId,
             taskId: tab.task.id,
             taskScope: tab.task.durable ? 'durable' : 'session',
+            ...(reference?.source ? { taskSource: reference.source } : {}),
             sourceSessionId: tab.sourceSessionId,
             workspaceCwd: tab.workspaceCwd,
             workspaceId: tab.workspaceId,
           },
         ];
+      }
       case 'image':
         return tab.source
           ? [
@@ -2925,7 +2969,13 @@ function serializeArtifactPanelTabs(
                     sourceSessionId: tab.sourceSessionId,
                     toolCallId: tab.toolCallId,
                     ...(reference
-                      ? { taskId: reference.id, taskScope: reference.scope }
+                      ? {
+                          taskId: reference.id,
+                          taskScope: reference.scope,
+                          ...(reference.source
+                            ? { taskSource: reference.source }
+                            : {}),
+                        }
                       : {}),
                     workspaceCwd: tab.workspaceCwd,
                     workspaceId: tab.workspaceId,
@@ -7675,13 +7725,20 @@ export function App({
           ? await sessionActions.getTasks({ silent: true })
           : await workspace.client.sessionTasks(sourceSessionId);
       if (snapshot.sessionId !== sourceSessionId) return undefined;
-      const task = snapshot.scheduledTasks?.find(
-        (item) => item.id === reference.id,
-      );
-      return task
+      const candidates =
+        snapshot.scheduledTasks?.filter(
+          (item) =>
+            item.id === reference.id &&
+            (reference.source === undefined ||
+              item.source === reference.source),
+        ) ?? [];
+      if (reference.source === undefined && candidates.length > 1)
+        return undefined;
+      const task = candidates[0];
+      return task && (task.source === 'cron' || task.source === 'wakeup')
         ? {
             id: task.id,
-            toolCallId: `scheduled:session:${task.id}`,
+            toolCallId: `scheduled:session:${task.source}:${task.id}`,
             title: task.prompt || task.id,
             cron: task.cronExpr,
             prompt: task.prompt,

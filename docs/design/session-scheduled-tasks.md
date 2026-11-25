@@ -20,7 +20,7 @@ The session snapshot exposes only in-memory cron/wakeup metadata for its own ses
 
 Cron cancellation is session-scoped. A durable identifier must never fall back to deleting a global/persistent task. Older daemons may not support the new cancellation kind at all; a missing capability cannot be treated as successful cancellation.
 
-When session cron and a loop wakeup share an ID, the snapshot `source` (`cron` or `wakeup`) is part of the runtime identity used by tabs, Environment state, busy/cancelled state, and the cancellation request through every transport. The selected candidate is cancelled by its exact type, not re-resolved through a generic ID deletion. An omitted `source` remains compatible only with an unambiguous session-only candidate; multiple candidates are refused as `ambiguous` rather than guessed. A same-ID durable candidate is not eligible for deletion through this request.
+When session cron and a loop wakeup share an ID, the snapshot `source` (`cron` or `wakeup`) is part of the runtime identity used by tabs, Environment state, busy/cancelled state, and the cancellation request through every transport. The selected candidate is cancelled by its exact type, not re-resolved through a generic ID deletion. An omitted `source` remains compatible only with an unambiguous session-only candidate; multiple candidates are refused as `ambiguous` rather than guessed. A same-ID durable candidate is not eligible for deletion through this request. Restored tab references retain the session task source as well; a legacy ID-only reference does not infer a type when several candidates exist.
 
 ## 3. Owner and workspace routing
 

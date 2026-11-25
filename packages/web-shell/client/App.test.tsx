@@ -6454,6 +6454,112 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  const verifyRestoredSource = async (
+    source: 'wakeup' | undefined,
+    expectedCron: string | undefined,
+    owner: string,
+  ) => {
+    const taskId = 'shared-restore-source';
+    const cron = {
+      id: taskId,
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Wrong cron sibling',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: null,
+    };
+    const wakeup = {
+      ...cron,
+      source: 'wakeup' as const,
+      cronExpr: '@wakeup',
+      prompt: 'Restore the wakeup, not the cron',
+      recurring: false,
+    };
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: owner,
+      tasks: [],
+      scheduledTasks: [cron, wakeup],
+    });
+    const tabId = `scheduled-task:${owner}:saved-shared-source`;
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: tabId,
+          tabs: [
+            {
+              id: tabId,
+              kind: 'scheduled_task',
+              title: 'Restore by persistent source identity',
+              toolCallId: 'saved-tool-call-without-scheduled-prefix',
+              taskId,
+              taskScope: 'session',
+              ...(source ? { taskSource: source } : {}),
+              sourceSessionId: owner,
+            },
+          ],
+        },
+      }),
+    );
+
+    renderApp();
+    await vi.waitFor(() => {
+      expect(mockWorkspace.client.sessionTasks).toHaveBeenCalled();
+    });
+    await act(async () => {
+      await flush();
+      await flush();
+    });
+
+    expect(mockWorkspace.client.sessionTasks.mock.calls[0]?.[0]).toBe(owner);
+    const scheduledTabs = testState.latestArtifactPanelProps?.tabs.filter(
+      (tab) => tab.kind === 'scheduled_task',
+    );
+    expect(scheduledTabs).toHaveLength(expectedCron ? 1 : 0);
+    if (expectedCron) {
+      expect(
+        scheduledTabs?.[0]?.kind === 'scheduled_task' && scheduledTabs[0].task,
+      ).toMatchObject({
+        id: taskId,
+        cron: '@wakeup',
+        prompt: wakeup.prompt,
+        toolCallId: `scheduled:session:wakeup:${taskId}`,
+      });
+      await vi.waitFor(() => {
+        const saved = JSON.parse(
+          window.localStorage.getItem(
+            'qwen-code-web-shell-right-panel-state',
+          ) ?? '{}',
+        ) as Record<string, { tabs?: Array<Record<string, unknown>> }>;
+        expect(
+          Object.values(saved).some((state) =>
+            state.tabs?.some(
+              (tab) => tab.taskId === taskId && tab.taskSource === 'wakeup',
+            ),
+          ),
+        ).toBe(true);
+      });
+    }
+  };
+
+  it('preserves wakeup source when the same id also has a cron', async () => {
+    await verifyRestoredSource('wakeup', '@wakeup', 'wakeup-source-restorer');
+  });
+
+  it('does not restore an arbitrary source for a legacy ambiguous reference', async () => {
+    await verifyRestoredSource(
+      undefined,
+      undefined,
+      'legacy-ambiguous-restorer',
+    );
+  });
+
   it('normalizes a legacy primary owner identity without changing its task route', async () => {
     const ownedTask = {
       id: 'durable:legacy-primary',

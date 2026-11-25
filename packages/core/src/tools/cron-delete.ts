@@ -69,7 +69,10 @@ class CronDeleteInvocation extends BaseToolInvocation<
         );
         deleted = true;
       } else if (!deleted) {
-        deleted = await scheduler.delete(this.params.id);
+        // Without a stable file snapshot, never reselect a newly written durable.
+        deleted = await scheduler.delete(this.params.id, undefined, {
+          runtimeOnly: true,
+        });
         await removeCronTasks(this.config.getProjectRoot(), [this.params.id], {
           tombstoneOnly: true,
         });

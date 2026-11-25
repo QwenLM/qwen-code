@@ -685,8 +685,10 @@ export class CronScheduler {
   }
 
   /**
-   * Deletes a job by ID. Durable jobs are also removed from disk, and the
-   * removal is awaited — reporting success while the on-disk entry could
+   * Deletes a job by ID. Durable jobs are also removed from disk, unless
+   * runtimeOnly is used by a caller whose file observation did not contain
+   * this job; that caller persists separate deletion intent. The removal is
+   * awaited — reporting success while the on-disk entry could
    * survive would let the task resurface in another session or after a
    * restart. On write failure the job is restored and the error rethrown.
    * Returns true if the job existed.
@@ -694,6 +696,7 @@ export class CronScheduler {
   async delete(
     id: string,
     expectedTaskSessionId: string | null = null,
+    options?: { runtimeOnly?: boolean },
   ): Promise<boolean> {
     const [key, job] = this.#runtimeEntry(id, expectedTaskSessionId);
     // A gate still running for this job must deliver nothing afterwards:
@@ -708,7 +711,7 @@ export class CronScheduler {
     }
 
     this.jobs.delete(key);
-    if (job.durable && this.projectRoot) {
+    if (job.durable && this.projectRoot && !options?.runtimeOnly) {
       this.pendingRemoval.add(key);
       try {
         await updateCronTasks(

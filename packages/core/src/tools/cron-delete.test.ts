@@ -159,6 +159,60 @@ describe('CronDeleteTool', () => {
     expect(result.llmContent).not.toContain('Cancelled job');
   });
 
+  it('does not let a stale unbound runtime delete a newly written unbound task', async () => {
+    const stale = await config._scheduler.createDurable(
+      '* * * * *',
+      'stale unbound',
+      true,
+    );
+    const persistedStale = (await readCronTasks(tmpDir)).find(
+      (task) => task.id === stale.id,
+    );
+    expect(persistedStale).toBeDefined();
+    await writeCronTasks(tmpDir, []);
+    let notifyDelete!: () => void;
+    let releaseDelete!: () => void;
+    const deleteEntered = new Promise<void>((resolve) => {
+      notifyDelete = resolve;
+    });
+    const beforeDelete = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const deleteFromRuntime = config._scheduler.delete.bind(config._scheduler);
+    vi.spyOn(config._scheduler, 'delete').mockImplementation(
+      async (...args) => {
+        notifyDelete();
+        await beforeDelete;
+        return deleteFromRuntime(...args);
+      },
+    );
+    const running = tool
+      .build({ id: stale.id })
+      .execute(new AbortController().signal);
+    await deleteEntered;
+    const later = {
+      ...persistedStale!,
+      prompt: 'new unbound after empty read',
+    };
+    await writeCronTasks(tmpDir, [later]);
+    const bytesBeforeRelease = await fs.readFile(
+      getCronFilePath(tmpDir),
+      'utf8',
+    );
+    releaseDelete();
+
+    const result = await running;
+
+    expect(result.error).toBeUndefined();
+    expect(config._scheduler.list().some((job) => job.id === stale.id)).toBe(
+      false,
+    );
+    expect(await fs.readFile(getCronFilePath(tmpDir), 'utf8')).toBe(
+      bytesBeforeRelease,
+    );
+    expect(await readCronTasks(tmpDir)).toEqual([later]);
+  });
+
   it('returns error for non-existent job', async () => {
     const invocation = tool.build({ id: 'nonexist' });
     const result = await invocation.execute(new AbortController().signal);
