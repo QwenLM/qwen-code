@@ -2,7 +2,7 @@
 
 [English](2026-11-25-managed-agent-execution-definition-spi.md) | [简体中文](2026-11-25-managed-agent-execution-definition-spi.zh-CN.md)
 
-> 状态：设计提案，未实施。修订日期：2026-11-25。
+> 状态：首期 Java preparation 切片已实现并通过本地验证；精确边界与剩余验收见第 8 节。修订日期：2026-11-25。
 >
 > 跟踪：[QwenLM/qwen-code#18289](https://github.com/QwenLM/qwen-code/issues/18289)。宿主侧组合文档由宿主工作区维护；本文维护 MA 的通用输入契约，不涉及任何具体产品目录。
 >
@@ -79,21 +79,24 @@ public interface ManagedAgentDefinitionSource {
     record Context(String tenantId, String actorId, String workspaceId,
             String executionScope, String requestId, Instant deadline) {}
 
-    sealed interface Selection permits Current, Exact {}
+    sealed interface Selection permits Current, Exact, PreRegistered {}
     record Current(String agentKey) implements Selection {}
     record Exact(SourceRef ref) implements Selection {}
 
     record Definition(SourceRef ref, String modelId,
             String instructions, ToolPolicy toolPolicy,
             List<SkillInput> skills, List<ExtensionUse> suites,
-            List<ManagedMcpDefinitionSource.Ref> mcpServers,
             List<BundleRef> bootstrapBundles) {}
 
     record ToolPolicy(String profile, String approvalMode) {}
 }
 ```
 
-接口返回有界文本及精确引用，不是将所有业务设置运行为下载任务。MA 把接收到的字段转为不可变 native Definition 及 resource pins。instructions 与静态 Skill refs 在原生 Session 创建期间，针对该具体 sessionId 发布，而不是提前发布为无作用域的全局资源。
+`PreRegistered` 是 MA 应用入口的选择类型，携带既有完整 `AgentDefinitionRequest`，不会传给宿主 Source。SPI preparation 将 `modelId`、`instructions`、`toolPolicy` 和 inline Skill 映射到 native Definition 字段。Extension Skill 与 Suite 的选择作为非敏感来源/材料引用保存在 metadata；本切片不自动导入或应用它们。sealed Skill JSON 使用显式 `inline`/`extension` 类型标识，以便回放持久化回执。
+
+新的 `Current` 在只有一个注册的 Definition provider 时可以隐式选择；存在多个 provider 时必须显式给出 `Exact` 引用。`projectionDigest` 是宿主提供的精确输入身份，MA 另行计算 command digest 和 native Definition digest。本切片没有独立的 MCP Source。
+
+已完成的 operation 回放使用保存的投影，不重新选择 current。新 operation 会重新对精确 Source 输入授权。已有 Session 创建仍针对具体准入的 sessionId 发布 instructions/静态 Skill refs，而不是提前发布为无作用域全局资源；该应用操作不属于 preparation。
 
 ### 3.2 初始化包
 
@@ -117,7 +120,11 @@ public interface AgentBootstrapBundleSource {
 
 如果流式获取比 URL 间接传递更便宜，也可以使用同源契约提供有界字节流。无需 URL 初始化时，现有 `ManagedExtensionSource.resolve/open` 仍是优选实现。
 
-MA 保存下载/规范化后的不可变制品及精确 pin。一旦保存，后续 Worker preparation 从 MA 已保存的制品获取，不再申请第二个 signed URI。发起过的调用只通过同一 preparation receipt 核查结果，不再用另一个投影签发新地址。
+每次新的 prepare 都会对精确 ref 执行 Source 授权。随后 MA 通过 archive `stat` 按 `Key(tenantId, workspaceId, expectedDigest)` 查找原始不可变制品；只有缺失制品才从签名 URI 流式读取。缓存不会掩盖授权撤销：Source 拒绝仍然使本次 prepare 失败。命中缓存时不下载 body，也不消费 URI 的过期时间，因此旧 URL 过期不会让已保存制品失效。
+
+这条准备路径要求提供 `expectedDigest`；如果提供 `expectedLength`，则必须与实际字节长度一致。MA 保存的是校验过的原始归档，不是签名 URL，也不是对业务配置解包/重新编译的结果。`stat` 是对 `ExtensionArchiveStorage` 新增的窄元数据读取接口；既有 `putIfAbsent/open` 行为不变。只有服务此输入路径的自定义存储才需要实现它。
+
+preparation 最终返回不可变 Definition 和原始材料引用。bootstrap 保存不会注册 Extension catalog 行，也不会产生 settings revision。后续向 Runtime 的投递/应用应从这份 native 制品流式读取，属于独立操作，不由 preparation 自动推定完成。
 
 ### 3.3 Skill 与 suite
 
@@ -131,6 +138,8 @@ MA 保存下载/规范化后的不可变制品及精确 pin。一旦保存，后
 `settingsRevision` 是独立保存/应用的设置身份，绝不是 ZIP 编译的副产物。
 
 ### 3.4 独立 MCP 与凭据
+
+以下为后续协议设计；本首期 Java 切片尚未实现这些 MCP/凭据接口。
 
 ```java
 public interface ManagedMcpDefinitionSource {
@@ -161,11 +170,12 @@ native server revision 是 MA 生成的 JavaScript 安全正整数及 native def
 public interface ManagedAgentDefinitionPreparation {
     PrepareReceipt prepare(Command command);
 
-    record Command(Principal principal, Selection selection,
-            String operationKey) {}
+    record Command(String tenantId, String actorId, String workspaceId,
+            String executionScope, String operationKey,
+            Selection selection, Instant deadline) {}
 
-    record PrepareReceipt(OperationRef operation,
-            NativeDefinitionRef definition, MaterialPlanRef materials) {}
+    record PrepareReceipt(OperationRef operation, AgentDefinition definition,
+            List<PreparedBundle> bundles) {}
 }
 ```
 
@@ -177,16 +187,16 @@ public interface ManagedAgentDefinitionPreparation {
 
 ### 保留的现有记录
 
-| 记录                                                        | 仍负责什么                                                          |
-| ----------------------------------------------------------- | ------------------------------------------------------------------- |
-| `ma_agent_definition`                                       | 按 tenant/id/revision/digest 保存预注册的完整不可变 Definition 内容 |
-| `ma_session`、`ma_turn`、`ma_session_record`、`ma_resource` | 实际 Session、Turn、journal 与不可变内容/引用证据                   |
-| `ma_runtime_binding`                                        | Runtime placement 与 drain/ownership 事实                           |
-| `ma_extension_package` / archive storage                    | 已有 Extension 编译材料与不可变制品                                 |
-| `ma_extension_settings`                                     | 独立保存的加密 settings revision                                    |
-| `ma_request_receipt`                                        | 各自 operation namespace 内已受理的操作身份与可回放结果             |
+| 记录                                                        | 仍负责什么                                                                      |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `ma_agent_definition`                                       | 按 tenant/id/revision/digest 保存不可变 native Definition 内容，不保存 ZIP blob |
+| `ma_session`、`ma_turn`、`ma_session_record`、`ma_resource` | 实际 Session、Turn、journal 与不可变内容/引用证据                               |
+| `ma_runtime_binding`                                        | Runtime placement 与 drain/ownership 事实                                       |
+| `ma_extension_package` / archive storage                    | 已有 Extension 编译材料与不可变制品                                             |
+| `ma_extension_settings`                                     | 独立保存的加密 settings revision                                                |
+| `ma_request_receipt`                                        | 各自 operation namespace 内已受理的操作身份与可回放结果                         |
 
-对于 SPI 生成的 Definition，将 `SourceRef` 与 native Definition、Material Plan，通过实现中选择的 source-preparation/metadata 与 receipt 表示形式关联。这个关联用于判断准确的 native 投影是否已经存在，不能把自由文本 agent 名称当作正确缓存唯一键。
+SPI 生成的 native Definition metadata 保存 `sourceProjection`、非敏感 Extension Skill/Suite 选择和初始化包引用。`SOURCE_DEFINITION_PREPARATION` 回执保存命令摘要、阶段、有效输入、native Definition ref 与不可变 bundle refs。既有 `ma_extension_package` catalog 保持独立；bootstrap 是 archive backend 中按内容摘要定位的原始字节，不会自动成为新的 catalog entry。公开表现中不保存签名定位符或私密 settings 值。
 
 ### 默认不强制新增两张表
 
@@ -214,27 +224,35 @@ sequenceDiagram
     participant Runtime as MA Broker / Runtime Worker
 
     Note over Host,Runtime: PRE_REGISTERED remains the default and keeps its existing API/store flows
-    Host->>Prep: prepare(authenticated Principal, Selection, operationKey)
-    Prep->>Store: Validate Principal; inspect original receipt and exact native projection
-    alt Matching committed native projection exists
-        Store-->>Prep: Exact native Definition/material refs and original receipt
-        Note over Def,Bundle: No host call and no latest lookup
+    Host->>Prep: prepare(caller fields, Selection, operationKey, deadline)
+    Prep->>Store: Require Workspace OPERATOR; find/admit the original operation receipt
+    alt The same operation is settled
+        Store-->>Prep: Original native Definition, bundle refs and receipt
+        Note over Def,Bundle: No provider call and no latest lookup
         Prep-->>Host: PrepareReceipt(original)
-    else New source preparation (or a saved pending stage to continue)
-        Prep->>Store: Admit/continue the exact operation phase before external I/O
-        Prep->>Def: resolve(MA-derived Context, Current / Exact)
-        Def-->>Prep: SourceRef and complete effective Definition
-        Prep->>Store: Preserve exact SourceRef/projection and native Definition identity
-        opt A specified bootstrap package has no matching native artifact
-            Prep->>Bundle: resolve(Context, exact BundleRef)
-            Bundle-->>Prep: Short-lived signed download locator, expected digest and length
-            Prep->>Bundle: Controlled streaming download through the downloader
-            Bundle-->>Prep: Bytes validated against expected limits/digest, never whole-blob in heap
-            Prep->>Store: Save immutable native package and source-to-native mapping
-            Note over Store: No signed URL, Authorization or ZIP bytes in Definition JSON
+    else Pending, or a saved RESOLVED stage to continue
+        Prep->>Store: Admit PENDING before external Source I/O
+        opt A projection still needs resolution
+            Prep->>Def: resolve(MA-checked context, Current / Exact)
+            Def-->>Prep: Exact SourceRef and effective Definition
+            Prep->>Store: Save the exact input as RESOLVED
         end
-        Prep->>Store: Commit native Definition/material plan and original operation
-        Prep-->>Host: PrepareReceipt(native definition/material plan)
+        Prep->>Store: Create/reuse the deterministic native Definition and verify its pin
+        opt The input names bootstrap bundles
+            Prep->>Bundle: resolve(authorized Context, exact BundleRef)
+            Bundle-->>Prep: Exact ref and private signed locator
+            Prep->>Store: Look up the immutable archive by content digest
+            opt The matching native artifact is missing
+                Prep->>Bundle: Bounded HTTPS streaming
+                Bundle-->>Prep: Actual bytes and digest verified in private staging
+                Prep->>Store: putIfAbsent(raw verified archive)
+                Note over Store: No signed URL, Authorization or ZIP bytes in Definition JSON
+            else A matching native archive already exists
+                Note over Bundle,Store: Reuse saved bytes without download, even if the old URL expired
+            end
+        end
+        Prep->>Store: Mark the Definition and bundle refs PREPARED on the original receipt
+        Prep-->>Host: PrepareReceipt(native definition, immutable bundle refs)
     else Same operationKey, different original command
         Store-->>Prep: idempotency conflict
         Prep-->>Host: Reject without selecting latest or inventing a new source identity
@@ -258,7 +276,7 @@ sequenceDiagram
 
 现有 Extension 导入是可复用的接收模式：按块读入私有临时文件，同时计算 hash 和字节数，限制并发准备数量，只有内容验证通过才继续。现有实现的示例是 64 KiB 块和最多四个并发准备操作（`ManagedExtensionPackageService.java:246-290`）。这只是实现模式，不承诺每个部署采用相同大小限制。
 
-对新增初始化下载：
+对已实现的初始化下载：
 
 1. 配置最大包大小与并发下载数量；
 2. 统计实际读取字节，而不是信任 `Content-Length`；
@@ -292,12 +310,20 @@ sequenceDiagram
 
 ## 8. 当前状态与变更说明
 
-上一版把 preparation 与 application 混在一条时序里，还默认引入了两张不明确的 preparation/material 表。本版将首期收敛为：
+首期 Java 切片已在 `feature/managed-agent-definition-input-spi` 实现：Q1 `97e4b6c2efc024e9eba26327352d87c2e5a7c4de`，Q2 `e07b74d2c5`，Q3 `d48bc5a036`。最初的源码阅读基线是 `dev/managed-agent@e8c189fb90a204ab8762f8c8fc8e66d0f833271c`；这些功能分支提交不等于已合并基线或发布制品。
 
-- 来源引用身份输入，加不可变 native Definition/材料持久化；
-- 仅缺少 native 制品时进行一次性初始化，采用有界流式下载；
-- 保留预注册完整 AgentDefinition 的行为；
-- 独立原生应用操作及其回执；
-- 小且通用的 SPI，允许任意宿主实现。
+本切片已实现的行为：
 
-源码阅读基线：`dev/managed-agent@e8c189fb90a204ab8762f8c8fc8e66d0f833271c`。文中作为提案的新名称与表结构，并不代表现有实现。此次仅修订设计，未声称构建、执行、恢复或真实进程验收完成。
+- 嵌入方通过部署配置选择 `PRE_REGISTERED` 或 `SPI`。受信任的 Java 调用方提供调用方字段，MA 在宿主 Source 解析前先检查 Workspace OPERATOR 权限并生成回执 scope；不新增 preparation 公共 HTTP 路由。
+- 精确输入转换为确定性 native Definition，并在写回时核验 revision/digest。既有 receipt 表通过 `SOURCE_DEFINITION_PREPARATION` 保存来源引用、有效输入与材料引用，不新增 preparation/material 表。
+- bootstrap 先对精确 ref 授权，再按内容摘要查找 native 制品；只在缺失时经 HTTPS 有界下载，成功后保存校验通过的原始字节。已完成回放直接使用保存引用，不再次调用 Source，新 operation 也不会通过缓存绕过授权。
+- 原预注册 API/update/get、随机 ID 以及 stored-definition Session 准入保持可用。SPI preparation 不悄悄改写这些数据模型。
+
+实际执行的验证：
+
+- Q1：14 个聚焦测试及 Checkstyle。
+- Q2：32 个聚焦测试，以及一个真实 MySQL 8.4 用例，协调两个 Java 服务并发调用收敛到同一 native 身份与 receipt。
+- Q3：76 个聚焦测试、1 个真实 MySQL preparation 用例，以及随后 28 个授权/下载/回放检查；重叠用例不计作独立覆盖量。
+- Q4 新增 20 个聚焦检查，其中 10 个真实 HTTPS bootstrap 用例覆盖复用、Source 授权撤销、摘要/长度/内容错误、超时、过期、重定向及协调后的缺包并发下载。另行 19 个检查包含同一 bootstrap 套件及 9 个嵌入式 Spring 用例，证明没有宿主 Source provider 时仍能创建 `ManagedAgentDefinitionPreparation`。嵌入环境特有的字符串到 Duration 转换问题已使用 Boot 3.5.16 的 `DurationStyle` 修复。这些代码路径的 Checkstyle 通过。
+
+本切片未实现宿主产品适配、独立 MCP/凭据刷新、Extension Skill/Suite 引用自动导入/应用，以及 bootstrap 制品在 Runtime 生效。未执行真实 Node/Worker apply、真实 OSS 账号或生产宿主绑定；预注册 Session 准入回归不能冒充 SPI 的 Node 执行 E2E。完整 unit/H2、SpotBugs 及 hosted/OS-process profile 需在更广泛验收前由 CI 完成。支持本路径的自定义 archive backend 必须实现 `stat`。已有 Source 复用导入和 Session apply API 保留独立操作及回执，不新增第二套 Session/Turn 状态机。
