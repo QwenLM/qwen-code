@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+
 /** Immutable, preapproved private tool profile; not a Hosted model profile. */
 public final class WorkspaceExecutionProfile {
     public static final String CONFIG_REF = "managed-runtime-tools/1";
@@ -121,7 +123,7 @@ public final class WorkspaceExecutionProfile {
      */
     public static boolean isExternalWorkspaceRequest(RuntimeProvisionRequest request) {
         return request != null
-                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                && RuntimeProviderKinds.EXTERNAL_WORKSPACE
                         .equals(request.getProvisionerKind())
                 && request.isManagedContext()
                 && admitsExternalWorkspaceDigest(request.getScope().getCapabilityDigest())

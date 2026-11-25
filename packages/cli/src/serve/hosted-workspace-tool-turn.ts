@@ -87,6 +87,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceExternalShellProfile,
+  isHostedWorkspacePublicShellProfile,
   isHostedWorkspaceSearchProfile,
   isHostedWorkspaceGlobProfile,
   isHostedWorkspaceReadProfile,
@@ -4659,12 +4660,12 @@ export class HostedWorkspaceToolTurn {
     if (
       !commandStep &&
       isHostedWorkspaceShellProfile(this.profile) &&
+      !isHostedWorkspacePublicShellProfile(this.profile) &&
       !singlePlanExit &&
       !singleQuestion &&
-      !memoryBatch &&
-      !this.publicChildren
+      !memoryBatch
     )
-      return 'shell_profile';
+      return 'team_lead_profile';
     if (!commandStep) {
       const owner = hostedNativeOwnerRefusal({
         mcp: this.mcp?.broker.runtimeSessionId,
@@ -4686,8 +4687,9 @@ export class HostedWorkspaceToolTurn {
             (this.confined && request.call.name === 'run_shell_command') ||
             request.mcp ||
             (commandStep && request.call.name === 'skill') ||
-            (this.publicChildren &&
-              ['agent', 'run_shell_command'].includes(request.call.name)) ||
+            (this.publicChildren && request.call.name === 'agent') ||
+            (isHostedWorkspacePublicShellProfile(this.profile) &&
+              request.call.name === 'run_shell_command') ||
             [
               'read_file',
               'write_file',
@@ -4769,7 +4771,7 @@ export class HostedWorkspaceToolTurn {
         ),
         refusal: batch.refusals[ordinal] ?? null,
         actionId: batch.actionIds.get(ordinal) ?? null,
-        ...(this.publicChildren && request.isShell
+        ...(request.isShell && !this.confined
           ? { publicationId: request.publicationId }
           : {}),
         ...(hookResults ? { hookResults: hookResults[ordinal] } : {}),

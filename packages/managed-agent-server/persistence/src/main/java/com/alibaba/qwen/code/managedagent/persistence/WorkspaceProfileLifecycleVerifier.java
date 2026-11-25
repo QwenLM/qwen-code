@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -11,16 +12,21 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -29,11 +35,11 @@ public class WorkspaceProfileLifecycleVerifier {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final JdbcManagedExtensionRecordStore records;
-    private final org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications;
-    private final org.springframework.beans.factory.ObjectProvider<JdbcManagedToolResultStore> results;
+    private final ObjectProvider<ToolPublicationDataStore> publications;
+    private final ObjectProvider<JdbcManagedToolResultStore> results;
 
-    public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
-            org.springframework.beans.factory.ObjectProvider<JdbcManagedToolResultStore> results) {
+    public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ObjectProvider<ToolPublicationDataStore> publications,
+            ObjectProvider<JdbcManagedToolResultStore> results) {
         this.jdbc = jdbc;
         this.records = new JdbcManagedExtensionRecordStore(jdbc);
         this.publications = publications;
@@ -196,7 +202,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 if (!source.outcomeRef().isNull()) {
                     try {
                         outcome = records.readRecordResource(operation.tenantId(), operation.sessionId(), source.outcomeRef());
-                    } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException invalid) {
+                    } catch (ManagedAgentException invalid) {
                         unsettled();
                     }
                 }
@@ -265,7 +271,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 }
                 JsonNode receipt = records.readRecordResource(operation.tenantId(), operation.sessionId(), record.path("startReceiptRef"));
                 if (!call.equals(receipt.path("executionCallId").asText())
-                        || !java.util.Objects.equals(start.getReference().get("callId"), receipt.path("runtimeCallId").asText())
+                        || !Objects.equals(start.getReference().get("callId"), receipt.path("runtimeCallId").asText())
                         || !Long.toString(start.getRuntimeGeneration()).equals(receipt.path("bindingGeneration").asText())
                         || !"exited".equals(process.getResult().get("state"))
                         || exitCode.isNull() && exitSignal.isNull()) {
@@ -281,9 +287,9 @@ public class WorkspaceProfileLifecycleVerifier {
         }
     }
 
-    private java.util.Set<String> backgroundCalls(OperationRecord operation) {
+    private Set<String> backgroundCalls(OperationRecord operation) {
         // Detached output is verified against its record and physical exit, not a foreground receipt.
-        var calls = new java.util.HashSet<String>();
+        var calls = new HashSet<String>();
         for (String domain : List.of("child_run", "monitor_run")) {
             for (JsonNode record : records.listRecords(operation.tenantId(), operation.sessionId(), domain)) {
                 if ("monitor_run".equals(domain) || "shell".equals(record.path("kind").asText())) {
@@ -294,8 +300,8 @@ public class WorkspaceProfileLifecycleVerifier {
         return calls;
     }
 
-    private java.util.Set<String> nativeInlineInputs(OperationRecord operation, boolean confined) {
-        var inputs = new java.util.HashSet<String>();
+    private Set<String> nativeInlineInputs(OperationRecord operation, boolean confined) {
+        var inputs = new HashSet<String>();
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
                 + " FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                 + " AND kind = ? AND state = 'REFERENCED' FOR UPDATE",
@@ -351,7 +357,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 || !execution.getBindingId().equals(binding.path("runtimeBindingId").asText())
                 || !Long.toString(execution.getRuntimeGeneration()).equals(binding.path("bindingGeneration").asText())
                 || !execution.getRequestDigest().equals(binding.path("requestDigest").asText())
-                || !java.util.Objects.equals(execution.getReference().get("argsDigest"), binding.path("reference").path("argsDigest").asText())) {
+                || !Objects.equals(execution.getReference().get("argsDigest"), binding.path("reference").path("argsDigest").asText())) {
             unsettled();
         }
     }
@@ -359,7 +365,7 @@ public class WorkspaceProfileLifecycleVerifier {
     private JdbcManagedToolResultStore.Source source(String text) {
         try {
             return JSON.readValue(text, JdbcManagedToolResultStore.Source.class);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
         }
     }
@@ -389,8 +395,8 @@ public class WorkspaceProfileLifecycleVerifier {
         }
         if (!"process_pipes".equals(manifest.path("captureScope").asText())
                 || !"complete_required".equals(manifest.path("capturePolicy").asText())
-                || !java.util.Objects.equals(execution.getReference().get("callId"), manifest.path("callId").asText())
-                || !java.util.Objects.equals(invocationDigest, manifest.path("invocationDigest").asText())
+                || !Objects.equals(execution.getReference().get("callId"), manifest.path("callId").asText())
+                || !Objects.equals(invocationDigest, manifest.path("invocationDigest").asText())
                 || !operation.tenantId().equals(manifest.path("tenantId").asText())
                 || !operation.sessionId().equals(manifest.path("sessionId").asText())
                 || !execution.getTurnId().equals(manifest.path("turnId").asText())
@@ -401,7 +407,7 @@ public class WorkspaceProfileLifecycleVerifier {
             unsettled();
         }
         String capture = manifest.path("captureId").asText();
-        var streams = new java.util.HashSet<String>();
+        var streams = new HashSet<String>();
         boolean complete = true;
         boolean emptyIncomplete = true;
         for (JsonNode content : manifest.path("contents")) {
@@ -496,7 +502,7 @@ public class WorkspaceProfileLifecycleVerifier {
     private static String id(String capture, String stream, Object ordinal) {
         try {
             return ToolPublicationContract.sha256(JSON.writeValueAsBytes(List.of(capture, stream, ordinal)));
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException(error);
         }
     }

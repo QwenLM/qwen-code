@@ -46,6 +46,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import javax.net.ssl.SSLContext;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -967,7 +968,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
         try {
             HostedHarnessClient owner = client();
             Map<String, Object> descriptor = owner.prepareManagedPackage(metadata, source);
@@ -982,7 +983,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
         try {
             return client().inspectManagedPackage(metadata, source);
         } catch (HostedHarnessGenerationException error) {
@@ -992,7 +993,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
         try {
             return client().previewManagedPackage(metadata, source);
         } catch (HostedHarnessGenerationException error) {

@@ -14,6 +14,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -142,7 +144,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
         return new RoutePage(more ? rows.subList(0, limit) : rows, more);
     }
 
-    private ChannelRoute row(java.sql.ResultSet row, int index) throws java.sql.SQLException {
+    private ChannelRoute row(ResultSet row, int index) throws SQLException {
         JsonNode body = JdbcManagedToolResultStore.parse(row.getString("request_json"));
         JsonNode result = row.getString("result_json") == null ? JSON.createObjectNode()
                 : JdbcManagedToolResultStore.parse(row.getString("result_json"));

@@ -297,19 +297,30 @@ export async function readHostedApprovalContinuation(
     throw new Error(
       'Original assistant batch does not match the continuation.',
     );
-  const publicShell = plan.publicChildModel !== undefined;
-  const savedDefinition =
-    publicShell ||
-    plan.calls.some((item) => item.call?.name === 'run_shell_command')
-      ? JSON.parse(
+  const publicChildren = plan.publicChildModel !== undefined;
+  const shellPlan = plan.calls.some(
+    (item) =>
+      item?.call?.name === 'run_shell_command' ||
+      Object.hasOwn(item ?? {}, 'publicationId'),
+  );
+  // The pinned definition records the profile and Shell lane the plan was
+  // captured under, and a load cannot change either.
+  const definition =
+    publicChildren || shellPlan
+      ? (JSON.parse(
           (await session.resources.read(header.definitionRef)).toString('utf8'),
-        )
+        ) as {
+          toolProfile?: unknown;
+          publicChildAgentsVersion?: unknown;
+          captureBytes?: unknown;
+          foregroundOnly?: unknown;
+        })
       : undefined;
   const confinedShell =
     plan.runtime !== null &&
-    savedDefinition?.toolProfile === CONFINED_SHELL_PROFILE &&
-    savedDefinition.foregroundOnly === true;
-  if (publicShell) {
+    definition?.toolProfile === CONFINED_SHELL_PROFILE &&
+    definition.foregroundOnly === true;
+  if (publicChildren) {
     const model = plan.publicChildModel!;
     parsePublicChildModelRoute(model.route);
     if (
@@ -320,11 +331,18 @@ export async function readHostedApprovalContinuation(
     )
       throw new Error('Invalid public child model pin.');
     if (
-      savedDefinition?.publicChildAgentsVersion !== 1 ||
-      !isHostedWorkspacePublicShellProfile(savedDefinition.toolProfile)
+      definition!.publicChildAgentsVersion !== 1 ||
+      !isHostedWorkspacePublicShellProfile(definition!.toolProfile)
     )
       throw new HostedPublicChildRecoveryProfileChanged();
   }
+  if (
+    shellPlan &&
+    !confinedShell &&
+    !isHostedWorkspacePublicShellProfile(definition!.toolProfile)
+  )
+    throw new Error(conflict);
+  const publicationLane = definition?.captureBytes !== undefined;
   const ids = new Set<string>();
   const runtimeIds = new Set<string>();
   const partIndexes = new Set<number>();
@@ -348,14 +366,15 @@ export async function readHostedApprovalContinuation(
           (Object.hasOwn(item, 'publicationId') ? 1 : 0) +
           (hooksPlan ? 1 : 0) ||
       (hooksPlan && !validHookResults(item.hookResults)) ||
+      Object.hasOwn(item, 'publicationId') !==
+        (!confinedShell && item.call?.name === 'run_shell_command') ||
       (Object.hasOwn(item, 'publicationId') &&
-        (!publicShell ||
-          item.call?.name !== 'run_shell_command' ||
-          (item.publicationId !== null &&
-            (typeof item.publicationId !== 'string' ||
-              !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(
-                item.publicationId,
-              ))))) ||
+        (publicationLane
+          ? typeof item.publicationId !== 'string' ||
+            !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(
+              item.publicationId,
+            )
+          : item.publicationId !== null)) ||
       !item.call ||
       (confinedShell && item.call.name !== 'run_shell_command') ||
       !(
@@ -364,8 +383,8 @@ export async function readHostedApprovalContinuation(
         isHostedMcpModelToolName(item.call.name) ||
         (plan.commandStep && item.call.name === 'skill') ||
         publicPlanExit ||
-        (confinedShell && item.call.name === 'run_shell_command') ||
-        (publicShell && ['agent', 'run_shell_command'].includes(item.call.name))
+        (publicChildren && item.call.name === 'agent') ||
+        item.call.name === 'run_shell_command'
       ) ||
       item.call.prompt_id !== promptId ||
       item.call.wasOutputTruncated ||

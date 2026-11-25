@@ -8,13 +8,17 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.PessimisticLockingFailureException;
@@ -27,6 +31,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,7 +45,7 @@ import java.util.concurrent.Semaphore;
 @Component
 public class WorkspaceFileUploadStore {
     private LocalWorkspaceFiles localFiles;
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public void configureLocalFiles(LocalWorkspaceFiles value) { localFiles = value; }
 
     private static final Logger LOG = LoggerFactory.getLogger(WorkspaceFileUploadStore.class);
@@ -313,9 +318,9 @@ public class WorkspaceFileUploadStore {
     private UploadStatus exchange(Operation operation, byte[] bytes) {
         Frozen target = operation.target();
         String backend = target.remote() == null
-                ? com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS
-                : com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS;
-        if (!com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties).includes(backend)) {
+                ? RuntimeProviderKinds.LOCAL_PROCESS
+                : RuntimeProviderKinds.SSH_PROCESS;
+        if (!RuntimeBackendSelection.from(properties).includes(backend)) {
             throw pending();
         }
         Map<String, Object> message = new LinkedHashMap<>();
@@ -423,7 +428,7 @@ public class WorkspaceFileUploadStore {
     private String encode(Object value) {
         try {
             return mapper.writeValueAsString(value);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }
@@ -458,7 +463,7 @@ public class WorkspaceFileUploadStore {
         validateId(uploadId);
         if (revision == null || !revision.matches("[a-f0-9]{64}") || path == null || path.length() > 1024
                 || path.codePoints().anyMatch(value -> Character.isISOControl(value) || value >= 0xd800 && value <= 0xdfff)
-                || path.contains("\\") || java.util.Arrays.stream(path.split("/", -1)).anyMatch(part -> part.isEmpty()
+                || path.contains("\\") || Arrays.stream(path.split("/", -1)).anyMatch(part -> part.isEmpty()
                         || part.equals(".") || part.equals("..") || part.equals(".git") || part.equals(".qwen-child-workspaces")
                         || part.startsWith(".qwen-managed-"))) {
             throw invalid();
