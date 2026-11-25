@@ -1357,6 +1357,19 @@ function modelStreamError(error: StructuredError): unknown {
   );
 }
 
+function repetitiveToolCallsRequestError(
+  errorMessage: string,
+): RequestError | undefined {
+  if (!isRepetitiveToolCallsError(errorMessage)) return undefined;
+  const message = errorMessage.includes(REPETITIVE_TOOL_CALLS_HINT)
+    ? errorMessage
+    : errorMessage + REPETITIVE_TOOL_CALLS_HINT;
+  return new RequestError(-32603, message, {
+    errorKind: 'repetitive_tool_calls',
+    details: message,
+  });
+}
+
 function createLoopDetectedTurnError(
   loopState: Pick<DaemonToolLoopState, 'loopType' | 'loopDetail'>,
 ): RequestError {
@@ -10097,11 +10110,7 @@ export class Session implements SessionContext {
       });
     }
 
-    if (isRepetitiveToolCallsError(errorMessage)) {
-      const message = errorMessage + REPETITIVE_TOOL_CALLS_HINT;
-      throw new RequestError(-32603, message, { details: message });
-    }
-    throw error;
+    throw repetitiveToolCallsRequestError(errorMessage) ?? error;
   }
 
   async #handleStopHookLoop(
@@ -11128,7 +11137,7 @@ export class Session implements SessionContext {
         if (errorStatus === 429) {
           throw new RequestError(429, 'Rate limit exceeded. Try again later.');
         }
-        throw error;
+        throw repetitiveToolCallsRequestError(errorMessage) ?? error;
       } finally {
         this.mods?.settleModelText(
           modelTextAttempt,
