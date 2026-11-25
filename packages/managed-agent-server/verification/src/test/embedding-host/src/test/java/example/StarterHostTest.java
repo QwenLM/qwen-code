@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.Test;
 import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.WebApplicationType;
@@ -85,6 +86,18 @@ class StarterHostTest {
         }
     }
 
+    @Test
+    void callsAfterShutdownRejectWithoutRawContextFailure() {
+        ManagedAgentService service;
+        try (var context = start("--qwen.managed-agent.datasource.url=" + url())) {
+            service = context.getBean(ManagedAgentService.class);
+        }
+        assertThatThrownBy(() -> service.getPublicSession(
+                new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "owner", null), "missing"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Embedded Managed Agent is unavailable");
+    }
+
     private static ConfigurableApplicationContext start(String... arguments) {
         String[] enabled = new String[arguments.length + 1];
         enabled[0] = "--qwen.managed-agent.enabled=true";
@@ -122,8 +135,10 @@ class StarterHostTest {
         }
 
         @Bean
-        HostConsumer hostConsumer(ManagedAgentService service, ManagedAgentDefinitionPreparation definitions,
-                ManagedAgentBootstrapPreparation bootstraps) {
+        HostConsumer hostConsumer(
+                @Qualifier("managedAgentService") ManagedAgentService service,
+                @Qualifier("managedDefinitionPreparationService") ManagedAgentDefinitionPreparation definitions,
+                @Qualifier("managedAgentBootstrapPreparationService") ManagedAgentBootstrapPreparation bootstraps) {
             return new HostConsumer(service, definitions, bootstraps);
         }
     }

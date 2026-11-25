@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.EmbeddedManagedAgentBootstrap;
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionPreparation;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import org.springframework.beans.factory.FactoryBean;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -22,17 +23,17 @@ public class ManagedAgentAutoConfiguration {
     }
 
     @Bean(name = "managedAgentService", destroyMethod = "")
-    ManagedAgentService managedAgentService(EmbeddedManagedAgentBootstrap bootstrap) {
+    FactoryBean<ManagedAgentService> managedAgentService(EmbeddedManagedAgentBootstrap bootstrap) {
         return bootstrap.bridge(ManagedAgentService.class);
     }
 
     @Bean(name = "managedDefinitionPreparationService", destroyMethod = "")
-    ManagedAgentDefinitionPreparation managedDefinitionPreparationService(EmbeddedManagedAgentBootstrap bootstrap) {
+    FactoryBean<ManagedAgentDefinitionPreparation> managedDefinitionPreparationService(EmbeddedManagedAgentBootstrap bootstrap) {
         return bootstrap.bridge(ManagedAgentDefinitionPreparation.class);
     }
 
     @Bean(name = "managedAgentBootstrapPreparationService", destroyMethod = "")
-    ManagedAgentBootstrapPreparation managedAgentBootstrapPreparationService(EmbeddedManagedAgentBootstrap bootstrap) {
+    FactoryBean<ManagedAgentBootstrapPreparation> managedAgentBootstrapPreparationService(EmbeddedManagedAgentBootstrap bootstrap) {
         return bootstrap.bridge(ManagedAgentBootstrapPreparation.class);
     }
 }

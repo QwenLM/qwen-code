@@ -72,7 +72,9 @@ class EmbeddedManagedAgentStartupMySqlIT {
             try (var context = start(database)) {
                 var bootstrap = context.getBean(EmbeddedManagedAgentBootstrap.class);
                 assertThat(context.getBean(BusinessBean.class).value()).isEqualTo("host");
-                assertUnavailable(context).hasRootCauseInstanceOf(SQLException.class);
+                assertUnavailable(context)
+                        .hasRootCauseInstanceOf(SQLException.class)
+                        .hasStackTraceContaining("Managed schema column is missing: ma_agent_definition.definition_json");
                 assertThat(bootstrap.isAvailable()).isFalse();
                 try (var columns = connection.getMetaData().getColumns(
                         connection.getCatalog(), null, "ma_agent_definition", "definition_json")) {

@@ -3,9 +3,12 @@ package com.alibaba.qwen.code.managedagent.config;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.aop.ProxyMethodInvocation;
 import org.springframework.aop.TargetSource;
 import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.beans.factory.FactoryBean;
 import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.beans.factory.config.AbstractFactoryBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
@@ -24,7 +27,11 @@ public final class EmbeddedManagedAgentBootstrap implements AutoCloseable, Smart
         this.environment = environment;
     }
 
-    public <T> T bridge(Class<T> service) {
+    public <T> FactoryBean<T> bridge(Class<T> service) {
+        return new ServiceFactory<>(this, service);
+    }
+
+    private <T> T createProxy(Class<T> service) {
         var proxy = new ProxyFactory();
         if (service.isInterface()) {
             proxy.setInterfaces(service);
@@ -65,9 +72,9 @@ public final class EmbeddedManagedAgentBootstrap implements AutoCloseable, Smart
         }
     }
 
-    private Object resolve(Class<?> service) {
+    private synchronized Object resolve(Class<?> service) {
         initialize();
-        if (initializationFailure != null) {
+        if (initializationFailure != null || !context.isActive()) {
             throw new IllegalStateException("Embedded Managed Agent is unavailable", initializationFailure);
         }
         return context.getBean(service);
@@ -77,6 +84,26 @@ public final class EmbeddedManagedAgentBootstrap implements AutoCloseable, Smart
     public synchronized void close() {
         if (context != null && context.isActive()) {
             context.close();
+        }
+    }
+
+    private static final class ServiceFactory<T> extends AbstractFactoryBean<T> {
+        private final EmbeddedManagedAgentBootstrap owner;
+        private final Class<T> service;
+
+        private ServiceFactory(EmbeddedManagedAgentBootstrap owner, Class<T> service) {
+            this.owner = owner;
+            this.service = service;
+        }
+
+        @Override
+        public Class<?> getObjectType() {
+            return service;
+        }
+
+        @Override
+        protected T createInstance() {
+            return owner.createProxy(service);
         }
     }
 
@@ -105,10 +132,11 @@ public final class EmbeddedManagedAgentBootstrap implements AutoCloseable, Smart
         @Override
         public Object invoke(org.aopalliance.intercept.MethodInvocation invocation) throws Throwable {
             if (invocation.getMethod().getDeclaringClass() == Object.class) {
+                Object proxy = ((ProxyMethodInvocation) invocation).getProxy();
                 return switch (invocation.getMethod().getName()) {
                     case "toString" -> "Embedded Managed Agent proxy for " + service.getName();
-                    case "equals" -> invocation.getThis() == invocation.getArguments()[0];
-                    default -> System.identityHashCode(invocation.getThis());
+                    case "equals" -> proxy == invocation.getArguments()[0];
+                    default -> System.identityHashCode(proxy);
                 };
             }
             return invocation.proceed();
