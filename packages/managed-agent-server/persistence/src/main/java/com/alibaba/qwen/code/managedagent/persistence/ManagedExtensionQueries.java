@@ -12,11 +12,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 final class ManagedExtensionQueries {
     private ManagedExtensionQueries() { }
@@ -116,13 +118,13 @@ final class ManagedExtensionQueries {
         if (window.size() > limit && window.get(limit - 1).createdAt() == window.get(limit).createdAt()) {
             long boundary = window.get(limit).createdAt();
             List<TimedTask> merged = window.stream().filter(row -> row.createdAt() > boundary)
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+                    .collect(Collectors.toCollection(ArrayList::new));
             merged.addAll(jdbc.query(select + " AND gmt_create = ?", timed, tenant, session, boundary));
             window = merged;
         }
         rows.addAll(window);
-        rows.sort(java.util.Comparator.comparingLong(TimedTask::createdAt).reversed()
-                .thenComparing(row -> row.row().taskId(), java.util.Comparator.reverseOrder()));
+        rows.sort(Comparator.comparingLong(TimedTask::createdAt).reversed()
+                .thenComparing(row -> row.row().taskId(), Comparator.reverseOrder()));
         boolean hasMore = rows.size() > limit;
         return new TaskPage(rows.stream().limit(limit).map(TimedTask::row).toList(), hasMore);
     }

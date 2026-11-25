@@ -5,7 +5,9 @@ import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
+import com.alibaba.qwen.code.runtimebroker.RuntimeExecutionStatus;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -16,8 +18,8 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 
+import java.io.IOException;
 import java.time.Duration;
-import java.util.concurrent.TimeoutException;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,15 +31,13 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 final class RuntimeBrokerSupport {
     private RuntimeBrokerSupport() { }
 
-    static final Set<String> RUNTIME_STATUS_STATES = Set.of(
-            "prepared", "executing", "cancel_requested", "settled",
-            "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
 
     /** Tool v3 publication dispatch: a payload digest and publication grant. */
@@ -269,7 +269,7 @@ final class RuntimeBrokerSupport {
 
     static Map<String, Object> projectV3Status(Map<String, Object> response) {
         Object state = response.get("state");
-        if (!(state instanceof String name) || !RUNTIME_STATUS_STATES.contains(name)
+        if (!(state instanceof String name) || !RuntimeExecutionStatus.State.supports(name)
                 || "settled".equals(name) != (response.get("result") instanceof Map)) {
             throw conflict("runtime_execution_conflict", "Tool v3 returned an invalid status");
         }
@@ -403,7 +403,7 @@ final class RuntimeBrokerSupport {
      * recoverable instead of blocking it: the provider may answer on retry.
      */
     static boolean retryableExternalWorkspaceProvision(
-            com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request, Throwable cause) {
+            RuntimeProvisionRequest request, Throwable cause) {
         if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
             return false;
         }
@@ -414,7 +414,7 @@ final class RuntimeBrokerSupport {
                                     || "runtime_broker_provision_timeout".equals(failure.getCode())
                                     || "managed_runtime_unavailable".equals(failure.getCode())));
         }
-        return cause instanceof java.io.IOException || cause instanceof TimeoutException;
+        return cause instanceof IOException || cause instanceof TimeoutException;
     }
 
     /**
@@ -423,7 +423,7 @@ final class RuntimeBrokerSupport {
      * re-provisioning.
      */
     static boolean shouldReconcileExternalWorkspace(
-            com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request,
+            RuntimeProvisionRequest request,
             RuntimeBindingRecord record) {
         return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
                 && record.getResourceHandle() != null && record.getLease() != null

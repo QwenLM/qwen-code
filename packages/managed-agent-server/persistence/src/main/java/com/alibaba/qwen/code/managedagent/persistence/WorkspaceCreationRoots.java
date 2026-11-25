@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -15,6 +16,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -190,13 +192,11 @@ final class WorkspaceCreationRoots {
                         || value.sourceGeneration() != null
                         || value.localRoot() == null && value.cwdRelative() != null
                         || value.localRoot() != null && (value.cwdRelative() == null
-                            || !value.cwdRelative().equals(com.alibaba.qwen.code.runtimebroker.managedworkspace
-                                .WorkspaceRelativePath.normalize(value.cwdRelative()))))
+                            || !value.cwdRelative().equals(WorkspaceRelativePath.normalize(value.cwdRelative()))))
                     || value.sourceWorkspaceId() != null && (StringUtils.isBlank(value.sourceWorkspaceId())
                         || value.sourceGeneration() == null || value.sourceGeneration() < 1
                         || value.localRoot() != null || StringUtils.isBlank(value.storageId()) || value.cwdRelative() == null
-                        || !value.cwdRelative().equals(com.alibaba.qwen.code.runtimebroker.managedworkspace
-                            .WorkspaceRelativePath.normalize(value.cwdRelative())))) {
+                        || !value.cwdRelative().equals(WorkspaceRelativePath.normalize(value.cwdRelative())))) {
                 throw new IllegalArgumentException();
             }
             if (value.localRoot() != null) {
@@ -217,7 +217,7 @@ final class WorkspaceCreationRoots {
         try {
             Files.createDirectory(path, PosixFilePermissions.asFileAttribute(
                     PosixFilePermissions.fromString("rwx------")));
-        } catch (java.nio.file.FileAlreadyExistsException existing) {
+        } catch (FileAlreadyExistsException existing) {
             directoryKey(path);
         }
         directoryKey(path);

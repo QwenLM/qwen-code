@@ -236,7 +236,11 @@ describe('JUnit report upload paths', () => {
     const laneWorkspaces = Object.keys(configModules).filter(
       (name) => name !== 'scripts/tests',
     );
-    const declared = declaredWorkspaceDirs(repoRoot);
+    // packages/harness/* rename test:ci to test:harness:ci, so the lane never
+    // runs them and they write no report for the publisher to reach.
+    const declared = declaredWorkspaceDirs(repoRoot).filter(
+      (dir) => !dir.startsWith('packages/harness/'),
+    );
     expect(
       laneWorkspaces.filter((name) => !declared.includes(name)),
       'lane workspace missing from pnpm-workspace.yaml/package.json',
