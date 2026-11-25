@@ -7,6 +7,7 @@
 import { userPromptTimestamp } from './last-user-prompt-time.js';
 import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
+import type { GeneratedUiStateRecordPayload } from './generated-ui-state.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
@@ -21,7 +22,11 @@ import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import path from 'node:path';
 import fs from 'node:fs';
-import { isManagedExecutionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import {
+  isManagedExecutionTranscriptSync,
+  readManagedExecutionEvidenceSync,
+} from '../utils/sessionStorageUtils.js';
+import { withoutCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import {
   SessionExecutionEngineError,
   type SessionExecutionEngine,
@@ -57,6 +62,10 @@ import {
   truncateTitleForList,
   writeSessionTitleSidecar,
 } from './session-title-sidecar.js';
+import {
+  sessionArtifactSummarySidecarPath,
+  writeSessionArtifactSummarySidecar,
+} from './session-artifact-summary-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -80,7 +89,10 @@ import {
   type SessionWriterCommitProof,
   SessionWriterLease,
 } from './session-writer-lease.js';
-import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import {
+  GENERATED_UI_STATE_SUBTYPE,
+  prepareTranscriptRecords,
+} from '../utils/transcript-records.js';
 import {
   getApiHistoryPromptId,
   isApiHistoryDirectoryContext,
@@ -107,10 +119,16 @@ import type {
   AgentMessageRecordPayload,
 } from '../agents/session-agents/contract.js';
 import type {
+  GoalRecord,
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
   TranscriptCursor,
 } from '../goals/goal-protocol.js';
+import {
+  deleteSessionGoalSidecar,
+  projectGoalSidecar,
+  writeSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import {
   collectPendingBranchToolCalls,
   resolveCompletedTurnBranchCandidateFromRecords,
@@ -461,6 +479,7 @@ export interface ChatRecord {
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
     | 'session_sources_snapshot'
+    | 'generated_ui_state'
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
@@ -512,6 +531,14 @@ export interface ChatRecord {
    * Pinned by the cap-refusal case in `client.test.ts`.
    */
   deliveredTurn?: boolean;
+  /**
+   * Marks a `subtype: 'notification'` record that is really a Teammate turn
+   * (the leader receiving a teammate message). Teammate envelopes record like
+   * notifications for UI restoration, but the live Prompts statistic counts
+   * them (UserQuery/Cron/Teammate), so the resume seed must count them while
+   * excluding cold background notifications (R17-1).
+   */
+  teammateTurn?: boolean;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -582,6 +609,7 @@ export interface ChatRecord {
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
     | SessionSourcesSnapshot
+    | GeneratedUiStateRecordPayload
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | GoalTurnEndRecordPayload
@@ -644,6 +672,7 @@ export interface NotificationRecordPayload {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    fromSession?: { sessionId: string; workspaceCwd: string };
   };
 }
 
@@ -1187,9 +1216,14 @@ export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
 
+interface StrictRecordAppendOptions {
+  updateActiveTail?: boolean;
+  expectedBranchGeneration?: number;
+}
+
 interface BufferedRecordAppend {
   record: ChatRecord;
-  options: { updateActiveTail?: boolean } | undefined;
+  options: StrictRecordAppendOptions | undefined;
   resolve?: () => void;
   reject?: (error: unknown) => void;
 }
@@ -1246,6 +1280,9 @@ export interface ChatRecordingRestoreState {
 export class ChatRecordingService {
   /** UUID of the active logical tail, including records queued for writing. */
   private lastRecordUuid: string | null = null;
+  /** Bumped whenever the active branch is replaced (rewind, reset). */
+  private branchGeneration = 0;
+  private branchCancellation?: AbortController;
   /** UUID of the last active-tail record confirmed written to disk. */
   private lastPersistedRecordUuid: string | null = null;
   /** Active chain mirrored in memory so end-of-turn validation is incremental. */
@@ -1488,6 +1525,59 @@ export class ChatRecordingService {
     return chatsDir;
   }
 
+  /** Resolve the existing local transcript without initializing a writer. */
+  async getExistingTranscriptPath(): Promise<string | undefined> {
+    try {
+      const sessionId = this.getSessionId();
+      const lease = this.binding?.lease;
+      if (
+        this.managedSink ||
+        this.config.getExecutionEnvironment?.() ||
+        this.config.getFileSystemService?.()?.textFileIo ||
+        this.state !== 'active' ||
+        !this.acceptingWrites ||
+        this.writeFailure ||
+        sessionId !== this.config.getSessionId() ||
+        (this.writerLeaseRequired && !lease) ||
+        lease?.isReleased
+      )
+        return undefined;
+      const filename = `${sessionId}.jsonl`;
+      // An exact grep glob must remain a literal basename, even if an SDK
+      // caller bypassed CLI session ID validation.
+      if (
+        !/^[a-zA-Z0-9._-]+$/.test(sessionId) ||
+        path.basename(filename) !== filename
+      ) {
+        return undefined;
+      }
+      const transcriptPath = path.join(
+        this.config.storage.getProjectDir(),
+        'chats',
+        filename,
+      );
+      if (
+        !path.isAbsolute(transcriptPath) ||
+        (lease && lease.transcriptPath !== transcriptPath) ||
+        (this.cachedConversationFile &&
+          this.cachedConversationFile !== transcriptPath)
+      )
+        return undefined;
+      const stat = fs.lstatSync(transcriptPath);
+      if (!stat.isFile() || stat.size === 0) return undefined;
+      await lease?.assertOwnedAndUnchanged();
+      if (sessionId !== this.config.getSessionId() || this.state !== 'active') {
+        return undefined;
+      }
+      return readManagedExecutionEvidenceSync(transcriptPath) === false
+        ? transcriptPath
+        : undefined;
+    } catch {
+      // The hint is optional; a missing or unreadable transcript is no error.
+      return undefined;
+    }
+  }
+
   private ensureConversationFile(): string {
     if (this.cachedConversationFile) return this.cachedConversationFile;
     const conversationFile = path.join(
@@ -1516,6 +1606,13 @@ export class ChatRecordingService {
 
   private titleSidecarPath(): string {
     return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
+  }
+
+  private artifactSummarySidecarPath(): string {
+    return sessionArtifactSummarySidecarPath(
+      this.ensureChatsDir(),
+      this.getSessionId(),
+    );
   }
 
   /**
@@ -1618,6 +1715,7 @@ export class ChatRecordingService {
     this.currentSessionWorkflowMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
+    this.advanceBranch();
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
@@ -1996,11 +2094,18 @@ export class ChatRecordingService {
 
   private async appendRecordStrict(
     record: ChatRecord,
-    options?: { updateActiveTail?: boolean },
+    options?: StrictRecordAppendOptions,
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
     if (!this.acceptingWrites || this.state !== 'active')
       throw new SessionWriterUnavailableError();
+    if (
+      options?.expectedBranchGeneration !== undefined &&
+      this.branchGeneration !== options.expectedBranchGeneration
+    )
+      throw new Error(
+        'Cannot save view state during a transcript branch change',
+      );
     if (this.refusesManagedRecord(record)) {
       throw new ManagedSessionRecordRefusedError(record);
     }
@@ -2690,7 +2795,40 @@ export class ChatRecordingService {
       },
     };
     await this.appendRecordStrict(record);
+    this.refreshGoalProjection(payload.snapshot.goal);
     return record;
+  }
+
+  /**
+   * Keeps the sidebar goal marker independent of the live-only Goals
+   * listing: the session catalog reads this sidecar from disk, so unloaded
+   * and archived sessions show their marker too. Best-effort by contract —
+   * the transcript stays canonical, and a sidecar failure only delays the
+   * marker until the next transition or load (the same lag the PR badge
+   * accepts). Called by the journal hook on every transition and once by
+   * Config after goal restore, so sessions journaled before the sidecar
+   * existed gain a marker on their next load. Managed logs own their
+   * metadata and are skipped.
+   */
+  refreshGoalProjection(goal: GoalRecord | null): void {
+    if (this.managedSink) return;
+    const sessionId = this.getSessionId();
+    const sidecarPath = path.join(
+      this.ensureChatsDir(),
+      `${sessionId}.goal.json`,
+    );
+    const mutation = goal
+      ? writeSessionGoalSidecar(sidecarPath, projectGoalSidecar(goal))
+      : deleteSessionGoalSidecar(sidecarPath);
+    void mutation
+      .then(() => {
+        this.config.getSessionService().emitSessionGoalChanged(sessionId);
+      })
+      .catch((error) => {
+        debugLogger.warn(
+          `Goal sidecar write failed for ${sessionId}; the sidebar marker may lag until the next transition: ${error}`,
+        );
+      });
   }
 
   /**
@@ -2893,6 +3031,7 @@ export class ChatRecordingService {
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
     deliveredTurn?: boolean,
+    teammateTurn?: boolean,
   ): void {
     this.recordNotificationLike(
       message,
@@ -2901,6 +3040,7 @@ export class ChatRecordingService {
       backgroundTask,
       goalContext,
       deliveredTurn,
+      teammateTurn,
     );
   }
 
@@ -3068,6 +3208,7 @@ export class ChatRecordingService {
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
     deliveredTurn?: boolean,
+    teammateTurn?: boolean,
   ): void {
     try {
       const record = this.createNotificationRecord(
@@ -3077,6 +3218,7 @@ export class ChatRecordingService {
         backgroundTask,
         goalContext,
         deliveredTurn,
+        teammateTurn,
       );
       this.appendRecord(record);
     } catch (error) {
@@ -3091,6 +3233,7 @@ export class ChatRecordingService {
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
     deliveredTurn?: boolean,
+    teammateTurn?: boolean,
   ): ChatRecord {
     return {
       ...this.createBaseRecord('user'),
@@ -3098,6 +3241,7 @@ export class ChatRecordingService {
       provenance: 'system',
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
       ...(deliveredTurn ? { deliveredTurn: true } : {}),
+      ...(teammateTurn ? { teammateTurn: true } : {}),
       message: createUserContent(message),
       systemPayload: displayText
         ? {
@@ -3650,6 +3794,7 @@ export class ChatRecordingService {
       if (!input.isCurrent()) return false;
       const rewindWrite = strict(rewind);
       committed = true;
+      this.advanceBranch();
       projectTurns(retained);
       this.resetExternalRecordIndex();
       this.lastAttributionSnapshotJson = undefined;
@@ -3749,7 +3894,9 @@ export class ChatRecordingService {
     try {
       // Own the containers before hook rescue replaces parts on live entries;
       // spread preserves the symbol metadata used to derive prompt identities.
-      const compressedHistory = payload.compressedHistory.map((content) => ({
+      const compressedHistory = withoutCompactionTranscriptHint(
+        payload.compressedHistory,
+      ).map((content) => ({
         ...content,
         ...(content.parts ? { parts: [...content.parts] } : {}),
       }));
@@ -3905,6 +4052,7 @@ export class ChatRecordingService {
       this.pendingHookTurnParents.clear();
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
+      this.advanceBranch();
       const projectionStart = Math.max(
         0,
         this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
@@ -3989,6 +4137,7 @@ export class ChatRecordingService {
     this.pendingHookTurnParents.clear();
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
+    this.advanceBranch();
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
@@ -4075,10 +4224,28 @@ export class ChatRecordingService {
     customTitle: string,
     titleSource: TitleSource = 'manual',
   ): Promise<boolean> {
+    return this.persistExplicitTitle(customTitle, titleSource);
+  }
+
+  async recordInitialTitle(customTitle: string): Promise<boolean> {
+    if (this.currentCustomTitle || this.pendingTitleWrites > 0) return false;
+    const onDisk = this.config
+      .getSessionService()
+      .getSessionTitleInfo(this.getSessionId());
+    if (onDisk.title) return false;
+    // The daemon publishes after checking for a concurrent manual rename.
+    return this.persistExplicitTitle(customTitle, 'auto', false);
+  }
+
+  private async persistExplicitTitle(
+    customTitle: string,
+    titleSource: TitleSource,
+    notify = true,
+  ): Promise<boolean> {
     this.pendingExplicitTitleWrites++;
     this.autoTitleController?.abort();
     try {
-      return await this.persistCustomTitle(customTitle, titleSource);
+      return await this.persistCustomTitle(customTitle, titleSource, notify);
     } finally {
       this.pendingExplicitTitleWrites--;
     }
@@ -4087,6 +4254,7 @@ export class ChatRecordingService {
   private async persistCustomTitle(
     customTitle: string,
     titleSource: TitleSource,
+    notify = true,
   ): Promise<boolean> {
     this.pendingTitleWrites++;
     let persisted = false;
@@ -4107,14 +4275,16 @@ export class ChatRecordingService {
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       this.persistListTitle(customTitle, titleSource);
-      try {
-        this.titleRecordedCallback?.(
-          customTitle,
-          titleSource,
-          record.sessionId,
-        );
-      } catch {
-        // Observer errors must never break title recording.
+      if (notify) {
+        try {
+          this.titleRecordedCallback?.(
+            customTitle,
+            titleSource,
+            record.sessionId,
+          );
+        } catch {
+          // Observer errors must never break title recording.
+        }
       }
       persisted = true;
       return true;
@@ -4587,6 +4757,14 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    // Derived list cache, refreshed after the authoritative append. Older
+    // records carry no count; the load-time seed covers those sessions.
+    if (payload.artifactCount !== undefined) {
+      writeSessionArtifactSummarySidecar(
+        this.artifactSummarySidecarPath(),
+        payload.artifactCount,
+      );
+    }
   }
 
   async recordSessionArtifactSnapshot(
@@ -4599,7 +4777,50 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    writeSessionArtifactSummarySidecar(
+      this.artifactSummarySidecarPath(),
+      payload.artifacts.length,
+    );
   }
+  /** Identifies the current active branch; changes when it is replaced. */
+  getBranchGeneration(): number {
+    return this.branchGeneration;
+  }
+
+  /** Cancels work tied to the current branch when that branch is replaced. */
+  getBranchAbortSignal(): AbortSignal {
+    return (this.branchCancellation ??= new AbortController()).signal;
+  }
+
+  private advanceBranch(): void {
+    this.branchGeneration += 1;
+    const previous = this.branchCancellation;
+    this.branchCancellation = undefined;
+    previous?.abort();
+  }
+
+  /**
+   * One card's saved view state, beside the active tail. A save needs a
+   * conversation record to hang from; without one it could not be read back.
+   */
+  async recordGeneratedUiState(
+    payload: GeneratedUiStateRecordPayload,
+    generation: number,
+  ): Promise<void> {
+    if (this.lastRecordUuid === null)
+      throw new Error('There is no conversation to attach view state to');
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: GENERATED_UI_STATE_SUBTYPE,
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, {
+      updateActiveTail: false,
+      expectedBranchGeneration: generation,
+    });
+  }
+
   async recordSessionSourcesSnapshot(
     payload: SessionSourcesSnapshot,
   ): Promise<void> {

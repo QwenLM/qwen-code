@@ -2,6 +2,14 @@
 
 [English](background-notification-turns.md) | [简体中文](background-notification-turns.zh-CN.md)
 
+## Live-replay coalescing — merged
+
+**Merged:** [PR #17862](https://github.com/QwenLM/qwen-code/pull/17862), squash commit [`48ff083de4e5c328598293d4d86c13014dd73357`](https://github.com/QwenLM/qwen-code/commit/48ff083de4e5c328598293d4d86c13014dd73357). Compatible message and thought chunks from the same background execution now coalesce in the live journal. The boundary is the complete normalized background-turn descriptor: different descriptors, invalid descriptors, and unknown extension fields stay separate. This prevents earlier optional attribution from being replaced by a later chunk's metadata.
+
+The [real-HTTP and completed-CI supplement](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7028422487) reports 150 script assertions across independently compiled base/head replay comparisons, five killed production-guard mutations, and real daemon full/summary `/load` checks with complete descriptor preservation through terminal compaction. The collocated `compactionEngine.test.ts` suite passes 152/152. A different [engine and identity-mutation ledger](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7027993738) separately reports 186 script assertions. They overlap in scope and use different fixtures, so these totals must not be added as if they were distinct coverage. Journal bounds and adaptive budget policy were not removed, and the default-cap control still reports truncation.
+
+**Deferred:** the pre-existing completed-turn slot path may still coalesce across different background-turn identities and lose earlier metadata. That behavior is not fixed by this PR. [Issue #17914](https://github.com/QwenLM/qwen-code/issues/17914), [its original non-blocking review thread](https://github.com/QwenLM/qwen-code/pull/17862#discussion_r4637214828), and [the thread's follow-up comment linking the issue](https://github.com/QwenLM/qwen-code/pull/17862#discussion_r4639238655) track this separate work without implying a completed fix.
+
 ## Problem
 
 Background results enter a Session queue, but their automatic execution never enters the bridge prompt lifecycle. Notifications can inherit a previous RPC prompt ID before its terminal event, later output loses its outer prompt ID, and live-state reports idle during real work. User steering can therefore be promoted into an interrupting prompt. The current user-input and stop paths also discard queued results.

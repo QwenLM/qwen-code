@@ -330,6 +330,23 @@ describe('permissionUtils', () => {
     ).toEqual([]);
   });
 
+  it('forwards explicit execution approval details without changing other exec approvals', () => {
+    const confirmation = {
+      type: 'exec' as const,
+      title: 'Delegate to another workspace',
+      command: 'Summarize the README.\nInclude the version.',
+      rootCommand: 'create_sub_session',
+      onConfirm: async () => undefined,
+    };
+    const approvalText = `Workspace: "/repos/b"\n\n${confirmation.command}`;
+    expect(
+      buildPermissionRequestContent({ ...confirmation, approvalText }),
+    ).toEqual([
+      { type: 'content', content: { type: 'text', text: approvalText } },
+    ]);
+    expect(buildPermissionRequestContent(confirmation)).toEqual([]);
+  });
+
   it('places warnings before edit diff content', () => {
     const content = buildPermissionRequestContent({
       type: 'edit',

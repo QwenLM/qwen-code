@@ -110,7 +110,7 @@ Commands for managing AI tools and models.
 | `/model`              | Switch model used in current session                                                             | `/model`, `/model <model-id>` (switch immediately)                                                        |
 | `/model --fast`       | Set a lighter model for prompt suggestions                                                       | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`      | Set the model used for voice transcription                                                       | `/model --voice <model-id>`                                                                               |
-| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model                 | `/model --vision <model-id>`                                                                              |
+| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model, or its timeout | `/model --vision <model-id>`, `/model --vision --timeout 60` (seconds; also `60s`, `90000ms`)             |
 | `/model --compaction` | Set the model used for chat compression                                                          | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
 | `/model --image`      | Set an image-generation-capable model for the built-in image generation tool                     | `/model --image <model-id>`                                                                               |
 | `/effort`             | Set reasoning effort for thinking-capable models                                                 | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
@@ -171,10 +171,10 @@ See [Code Review](./code-review.md) for full `/review` documentation, and [Autof
 
 The `/btw` command allows you to ask quick side questions without interrupting or affecting the main conversation flow.
 
-| Command                | Description                           |
-| ---------------------- | ------------------------------------- |
-| `/btw <your question>` | Ask a quick side question             |
-| `?btw <your question>` | Alternative syntax for side questions |
+| Command                | Description                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| `/btw <your question>` | Ask a side question.                                                                           |
+| `?btw <your question>` | Ask a side question in OpenTUI. In Ink, this sends a regular message to the main conversation. |
 
 **How It Works:**
 
@@ -615,6 +615,8 @@ Use {{args}} for parameter injection.
 | ---------------- | --------------------------------------- | --------------------- | ------------------------ |
 | Raw Injection    | `prompt = "Fix: {{args}}"`              | `/fix "Button issue"` | `Fix: "Button issue"`    |
 | In Shell Command | `prompt = "Search: !{grep {{args}} .}"` | `/search "hello"`     | Execute `grep "hello" .` |
+
+Argument text is inserted literally: dollar sequences such as `$$` and `$&` keep their characters, and placeholder names inside the arguments are not expanded again. Arguments inside `!{...}` still receive shell escaping before permission checks and execution.
 
 #### 2. Default Parameter Processing
 

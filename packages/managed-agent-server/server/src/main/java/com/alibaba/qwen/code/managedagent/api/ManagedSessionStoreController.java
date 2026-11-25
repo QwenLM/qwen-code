@@ -52,6 +52,14 @@ public class ManagedSessionStoreController {
     private final com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects;
     @org.springframework.beans.factory.annotation.Autowired
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
+    @org.springframework.beans.factory.annotation.Value("${qwen.managed-agent.wake-dispatch.enabled:false}")
+    private boolean wakeDispatch;
+    @org.springframework.beans.factory.annotation.Value("${qwen.managed-agent.action-parking.enabled:false}")
+    private boolean actionParking;
+
+    @org.springframework.beans.factory.annotation.Value(
+            "${qwen.managed-agent.runtime-observation.enabled:false}")
+    private boolean runtimeObservation;
 
     public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
             ManagedNativeJournalSnapshots snapshots,
@@ -146,8 +154,8 @@ public class ManagedSessionStoreController {
                     String writerToken,
             @Valid @RequestBody AcquireWriterRequest request,
             @RequestHeader HttpHeaders headers) {
-        return store.acquireWriter(tenant.tenantId(), sessionId,
-                writerToken, request, lifecycleAuthority(headers));
+        return advertise(store.acquireWriter(tenant.tenantId(), sessionId,
+                writerToken, request, lifecycleAuthority(headers)));
     }
 
     @PostMapping("/writers:renew")
@@ -157,8 +165,17 @@ public class ManagedSessionStoreController {
                     String writerToken,
             @Valid @RequestBody RenewWriterRequest request,
             @RequestHeader HttpHeaders headers) {
-        return store.renewWriter(tenant.tenantId(), sessionId,
-                writerToken, request, lifecycleAuthority(headers));
+        return advertise(store.renewWriter(tenant.tenantId(), sessionId,
+                writerToken, request, lifecycleAuthority(headers)));
+    }
+
+    private WriterGrant advertise(WriterGrant grant) {
+        if (grant == null) {
+            return null;
+        }
+        WriterGrant advertised = wakeDispatch ? grant.withWakeDispatch() : grant;
+        advertised = runtimeObservation ? advertised.withRuntimeObservation() : advertised;
+        return actionParking ? advertised.withActionParking() : advertised;
     }
 
     @PostMapping("/writers:seal")

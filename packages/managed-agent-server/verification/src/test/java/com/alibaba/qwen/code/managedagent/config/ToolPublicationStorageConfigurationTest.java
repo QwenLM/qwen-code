@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
 import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
@@ -48,7 +47,6 @@ class ToolPublicationStorageConfigurationTest {
             .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> mock(PlatformTransactionManager.class))
             .withBean(JdbcManagedSessionStore.class, () -> mock(JdbcManagedSessionStore.class))
             .withBean(HarnessRules.class, SdkHarnessRules::new)
-            .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
             .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
             .withBean(ToolExecutionRepository.class, () -> mock(ToolExecutionRepository.class))
             .withBean(RuntimeBindingRepository.class, () -> mock(RuntimeBindingRepository.class))

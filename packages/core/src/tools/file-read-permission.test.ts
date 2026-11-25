@@ -19,6 +19,7 @@ import {
 } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { runWithTurnSkillSnapshot } from '../skills/turn-skill-snapshot.js';
 import { clearAutoMemoryRootCache } from '../memory/paths.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { getFileReadDefaultPermission } from './file-read-permission.js';
@@ -68,6 +69,39 @@ function makeConfig(overrides: { plansDir?: string } = {}): Config {
 function permissionFor(requestedPath: string) {
   return getFileReadDefaultPermission(makeConfig(), requestedPath);
 }
+
+it('uses the original Skill file policy only inside the captured turn', () => {
+  const original = path.join(layout.workspace, 'fixture', 'SKILL.md');
+  const staged = path.join(layout.base, 'turn-skills', 'SKILL.md');
+  fs.mkdirSync(path.dirname(staged), { recursive: true });
+  fs.writeFileSync(staged, 'Fixture');
+  expect(permissionFor(staged)).toBe('ask');
+
+  runWithTurnSkillSnapshot(
+    {
+      version: 1,
+      id: 'test',
+      digest: 'test',
+      skills: [
+        {
+          name: 'fixture',
+          description: 'Fixture',
+          body: 'Fixture',
+          level: 'project',
+          filePath: staged,
+          sourceFilePath: original,
+        },
+      ],
+    },
+    () => {
+      expect(permissionFor(staged)).toBe(permissionFor(original));
+      expect(permissionFor(staged)).toBe('allow');
+      expect(permissionFor(layout.secretFile)).toBe('ask');
+    },
+  );
+
+  expect(permissionFor(staged)).toBe('ask');
+});
 
 beforeAll(() => {
   const base = fs.realpathSync(

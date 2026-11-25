@@ -14,7 +14,7 @@ Server 和 Broker 必须继续在 MySQL 8.4 与 H2 上初始化和校验同一�
 ## 决策
 
 - 每张表增加无符号、自增且唯一的 `id`，除 `ma_session` 和 `ma_tenant_guard` 外均用作主键。
-  这两张表保留原业务主键 `(tenant_id, session_id)` 和 `(tenant_key, guard_domain)`。
+  这两张表保留原业务主键 `(tenant_id, session_id)` 和 `(tenant_id, guard_domain)`。
   两表通过 upsert 协调已有记录；以 `id` 作为聚簇主键时，原生 MySQL 已捕获取锁过程中的
   `PRIMARY` supremum 锁，阻塞了无关 Session、租户及锁域。
   保留业务聚簇和单独的 `id` 唯一索引，以保留现有首次创建及加锁读取协议。

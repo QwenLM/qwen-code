@@ -103,7 +103,7 @@ jobs:
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-ci-bot')
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot'))
     permissions:
       contents: 'read'
       pull-requests: 'read'
@@ -229,11 +229,11 @@ jobs:
     # the requested reviewer can reach review-pr, so the human-requested
     # siblings must skip here instead of each spending a runner. KEEP IN
     # SYNC with the review_requested clauses in precheck-pr.if and
-    # authorize.if, and with the bot_login constant below.
+    # authorize.if, and with the bot_login expression below.
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested' &&
-      github.event.requested_reviewer.login == 'qwen-code-ci-bot'
+      github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions: {}
     outputs:
@@ -242,7 +242,7 @@ jobs:
       - name: 'Set review constants'
         id: 'values'
         run: |-
-          echo "bot_login=qwen-code-ci-bot" >> "$GITHUB_OUTPUT"
+          echo "bot_login=${{ vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot' }}" >> "$GITHUB_OUTPUT"
 
   delay-automatic-review:
     needs: ['authorize']
@@ -339,7 +339,7 @@ jobs:
        needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name != 'pull_request_target' ||
        github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-ci-bot') &&
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')) &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.command == 'resolve') ||
@@ -1158,6 +1158,51 @@ jobs:
           scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
           echo "dir=$scratch" >> "$GITHUB_OUTPUT"
 
+      # Decide the execution-sandbox policy from what this runner can actually
+      # do, and say so. `required` is the point — a review that cannot contain
+      # the PR's own install/build/test reports no evidence rather than running
+      # it with this step's GH_TOKEN and OPENAI_API_KEY — but `required` on a
+      # host that cannot satisfy it is not a security win, it is a review that
+      # fails its own install (a contained command that fails is a
+      # PR-attributed failure, and a refused prebuild leaves the tree bare for
+      # every agent, #10108). Measured on the `ecs-review` pool 2026-11-16: the
+      # daemon answers, and `ghcr.io/qwenlm/qwen-code:<version>` does not pull
+      # (TLS handshake timeout to the blob CDN). So: `required` when both halves
+      # hold, `off` — today's behaviour — with a warning and a summary line
+      # when they do not, and containment turns on by itself once the pool can
+      # pull the image. The image resolves through the repo's resolver first,
+      # so an unpublished tag cannot be charged to the PR under review.
+      - name: 'Resolve review sandbox'
+        id: 'review_sandbox'
+        if: "steps.context.outputs.should_run == 'true'"
+        # Absolute and step-scoped: the resolver's export is derived from this
+        # binary's stdout, and an appended $GITHUB_ENV value or a $GITHUB_PATH
+        # shadow in the runner-writable qwen-bin dir would otherwise steer it
+        # (#9527). The same pin the other sandboxed jobs use.
+        env:
+          SANDBOX_COMMAND: '/usr/bin/docker'
+        shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
+        run: |-
+          policy='off'
+          # A daemon round trip, not presence on PATH: a client with no
+          # reachable daemon is the shape that then refuses every reviewed
+          # command deep inside the prebuild (cli lib/sandboxed-exec.ts).
+          if ! "${SANDBOX_COMMAND}" info > /dev/null 2>&1; then
+            echo "::warning::no container daemon answered '${SANDBOX_COMMAND} info' on this review runner; the PR's own install/build/test run unsandboxed for this review."
+          elif ! node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"; then
+            echo "::warning::the review sandbox image is not available on this runner; the PR's own install/build/test run unsandboxed for this review."
+          else
+            policy='required'
+          fi
+          echo "sandbox_policy=$policy"
+          {
+            echo "### Review sandbox"
+            echo "runtime: ${SANDBOX_COMMAND}"
+            echo "policy: $policy"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "policy=$policy" >> "$GITHUB_OUTPUT"
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1252,6 +1297,31 @@ jobs:
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
+          # The #9556 execution sandbox around the PR's own install/build/test.
+          # Without it those commands inherit this step's GH_TOKEN and
+          # OPENAI_API_KEY, and a `postinstall` reads both in one line.
+          # `required` only when the 'Resolve review sandbox' step above found a
+          # runtime AND an image; `off` (today's behaviour) with a warning and a
+          # summary line otherwise. `required` on a host that cannot satisfy it
+          # would fail the PR's own install instead of containing it, and a
+          # silently refused prebuild leaves the tree bare for every agent
+          # (#10108) — so the policy follows what the runner can do, visibly.
+          # A contained command that fails for environmental reasons (no git in
+          # the mount, image toolchain gaps, egress) is a PR-attributed
+          # failure, not "unavailable". It does NOT contain the agent's own
+          # shell probes, so #9556 stays open. Mechanism: cli
+          # lib/sandboxed-exec.ts; the CI row of the design.
+          QWEN_REVIEW_SANDBOX: '${{ steps.review_sandbox.outputs.policy }}'
+          # The digest-bound image the resolver pulled, through its step
+          # OUTPUT: later steps can append $GITHUB_ENV, so only the expression
+          # context is unsteerable (#9527). Empty when the resolver did not
+          # run; `policy` is `off` then, so it is not read.
+          QWEN_SANDBOX_IMAGE: '${{ steps.review_sandbox.outputs.image }}'
+          # Step env outranks an appended value, and the docker CLI skips an
+          # empty one; DOCKER_CONTEXT pins the pool-shared context so neither
+          # can steer the endpoint the sandbox runs against (#9527).
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail

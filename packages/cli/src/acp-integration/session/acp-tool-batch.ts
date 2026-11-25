@@ -14,6 +14,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
+import type { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { createToolLifecycle } from '@qwen-code/qwen-code-core/telemetry/tool-lifecycle.js';
 import {
   canonicalToolName,
@@ -32,9 +33,10 @@ import {
   type AgentLoopStopReason,
   type AgentLoopToolResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
-import type {
-  ToolCall,
-  WaitingToolCall,
+import {
+  createCancelledResponse,
+  type ToolCall,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ToolExecutionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import type {
@@ -126,6 +128,7 @@ interface CallState {
   name: string;
   lifecycle?: ReturnType<typeof createToolLifecycle>;
   execution?: { status: ToolExecutionStatus; durationMs: number };
+  runtimeSettled?: boolean;
   approvalModeAtStart?: ApprovalMode;
   settleRelatedAgent?: (succeeded: boolean) => void;
   invocation?: unknown;
@@ -155,10 +158,20 @@ export async function runAcpToolBatch(
     signal: AbortSignal;
     duplicates: AgentLoopDuplicateState;
     onFullTurnModel?: (model: string) => boolean;
+    onShellMovable?: (
+      callId: string,
+      promote: AbortController | undefined,
+    ) => void;
+    onCallSettled?: (
+      callId: string,
+      status: AgentLoopToolResult['status'],
+    ) => void;
   },
 ): Promise<AcpToolBatchResult> {
   const { config } = host.ctx;
+  const batchCallIds = new Set(options.requests.map(({ callId }) => callId));
   const { signal } = options;
+  const managed = config.getSessionExecutionEngine?.() === 'managed';
   // Tools run under their own signal, so a cancelled permission request can
   // stop the rest of the batch without cancelling the turn.
   const tools = new AbortController();
@@ -214,6 +227,10 @@ export async function runAcpToolBatch(
     return state;
   };
   const latest = new Map<string, ToolCall>();
+  const runningRuntimeCalls = new Set<string>();
+  let runtimeSettlement: Promise<void> | undefined;
+  let resolveRuntimeSettlement: (() => void) | undefined;
+  let runtimeBatchError: ManagedRuntimeOutcomeUnknownError | undefined;
   const answered = new WeakSet<ToolCallConfirmationDetails>();
   // The scheduler runs the batch from the last answer's `onConfirm`, so an
   // approval runs beside the updates, not in their queue.
@@ -367,6 +384,7 @@ export async function runAcpToolBatch(
   const started = (callId: string, startedAt: number) => {
     const call = latest.get(callId);
     if (!call) return;
+    if (managed) runningRuntimeCalls.add(callId);
     const state = stateOf(call.request);
     state.approvalModeAtStart = config.getApprovalMode();
     if (canonicalToolName(call.request.name) === ToolNames.SEND_MESSAGE) {
@@ -393,12 +411,41 @@ export async function runAcpToolBatch(
     }
   };
 
-  const settle = (call: ToolCall & { response: ToolCallResponseLike }) => {
-    const state = stateOf(call.request);
+  const getPendingToolSettlement = () => {
+    if (runningRuntimeCalls.size === 0) {
+      return runtimeBatchError && Promise.reject(runtimeBatchError);
+    }
+    runtimeSettlement ??= new Promise<void>((resolve) => {
+      resolveRuntimeSettlement = resolve;
+    });
+    return runtimeSettlement.then(() => {
+      if (runtimeBatchError) throw runtimeBatchError;
+    });
+  };
+
+  const markRuntimeCallSettled = (callId: string) => {
+    runningRuntimeCalls.delete(callId);
+    if (runningRuntimeCalls.size !== 0) return;
+    resolveRuntimeSettlement?.();
+    runtimeSettlement = undefined;
+    resolveRuntimeSettlement = undefined;
+  };
+
+  const settle = ({
+    request,
+    response,
+    status,
+    startTime,
+  }: Pick<ToolCall, 'request' | 'startTime'> & {
+    response: ToolCallResponseLike;
+    status: AgentLoopToolResult['status'];
+  }) => {
+    const state = stateOf(request);
     if (state.settled) return;
     state.settled = true;
-    const { request, response } = call;
-    const status = call.status as 'success' | 'error' | 'cancelled';
+    if (batchCallIds.has(request.callId)) {
+      options.onCallSettled?.(request.callId, status);
+    }
     state.settleRelatedAgent?.(status === 'success');
     state.cleanupTracker?.();
     const isTodoWrite =
@@ -456,14 +503,14 @@ export async function runAcpToolBatch(
       return;
     }
     const durationMs =
-      call.startTime === undefined ? undefined : Date.now() - call.startTime;
+      startTime === undefined ? undefined : Date.now() - startTime;
     emit(
       () =>
         host.toolCallEmitter.emitResult({
           callId: request.callId,
           toolName: request.name,
           args: request.args,
-          startedAt: call.startTime,
+          startedAt: startTime,
           durationMs,
           message: response.responseParts,
           resultDisplay: response.resultDisplay,
@@ -479,14 +526,27 @@ export async function runAcpToolBatch(
   };
 
   const onToolCallsUpdate = (calls: ToolCall[]) => {
+    if (closed && !drainCompletedUpdates) return;
     for (const call of calls) {
       latest.set(call.request.callId, call);
       const state = stateOf(call.request);
       switch (call.status) {
         case 'validating':
         case 'scheduled':
+          trackAgent(call, state);
+          break;
         case 'executing':
           trackAgent(call, state);
+          if (
+            batchCallIds.has(call.request.callId) &&
+            !state.settled &&
+            canonicalToolName(call.request.name) === ToolNames.SHELL
+          ) {
+            options.onShellMovable?.(
+              call.request.callId,
+              call.promoteAbortController,
+            );
+          }
           break;
         case 'awaiting_approval':
           trackAgent(call, state);
@@ -495,6 +555,7 @@ export async function runAcpToolBatch(
             const approval = emissions
               .then(() => approve(call, state))
               .catch((error) => {
+                if (closed) return;
                 debugLogger.error(
                   `Approval of ${call.request.name} failed:`,
                   error,
@@ -556,7 +617,14 @@ export async function runAcpToolBatch(
     const batch = await options.loop.runBatch({
       ...options.duplicates,
       toolSignal: tools.signal,
+      ...(managed && { getPendingToolSettlement }),
       executor: createSchedulerExecutor(config, {
+        onManagedRuntimeOutcomeUnknown: (error, callId) => {
+          runtimeBatchError ??= error;
+          closed = true;
+          tools.abort(error);
+          markRuntimeCallSettled(callId);
+        },
         onToolCallsUpdate,
         outputUpdateHandler,
         onToolExecutionStarted: started,
@@ -564,6 +632,14 @@ export async function runAcpToolBatch(
           const state = states.get(callId);
           if (state) state.execution = { status, durationMs };
         },
+        ...(managed && {
+          getPendingToolSettlement,
+          onManagedToolExecutionSettled: (callId) => {
+            const state = states.get(callId);
+            if (state) state.runtimeSettled = true;
+            markRuntimeCallSettled(callId);
+          },
+        }),
         onToolResultFullTurnModel: options.onFullTurnModel,
         refuseToolCall: (request) => host.refuseToolCall(request),
         ...(host.isTrustedLiveTool && {
@@ -587,6 +663,7 @@ export async function runAcpToolBatch(
       onToolResult: (result) => {
         results.set(result.request, result);
         if (result.origin === 'replayed' || result.origin === 'duplicate') {
+          options.onCallSettled?.(result.request.callId, result.status);
           emitDuplicate(host, result, (task, what) => emit(task, what, true));
         }
       },
@@ -603,6 +680,7 @@ export async function runAcpToolBatch(
         let result = results.get(request);
         if (!result && !seen.has(request.callId)) {
           const call = latest.get(request.callId);
+          const state = states.get(request.callId);
           if (
             call?.status === 'success' ||
             call?.status === 'error' ||
@@ -615,11 +693,23 @@ export async function runAcpToolBatch(
               status: call.status,
               origin: 'executed',
             };
-            if (call.response.executionStatus !== 'not_started') {
-              config
-                .getLlmClient()
-                .recordCompletedToolCall(call.request.name, call.request.args);
-            }
+          } else if (call && state?.runtimeSettled && state.execution) {
+            // The Runtime settled, but PostToolUse may still withhold its output.
+            result = {
+              request,
+              executionRequest: call.request,
+              response: createCancelledResponse(
+                call.request,
+                'The turn was cancelled before the tool output was ready. Stop and await further instructions; do not retry.',
+                state.execution.status,
+              ),
+              status: 'cancelled',
+              origin: 'executed',
+            };
+          }
+          if (result && result.response.executionStatus !== 'not_started') {
+            const { name, args } = result.executionRequest;
+            config.getLlmClient().recordCompletedToolCall(name, args);
           }
         }
         seen.add(request.callId);
@@ -639,8 +729,12 @@ export async function runAcpToolBatch(
         false,
       );
       const kept = completed.map((result, index) => {
-        const { response, status, executionRequest } = result;
+        const { request, response, status, executionRequest } = result;
         const { responseParts } = budgeted[index];
+        const call = latest.get(request.callId);
+        if (call && states.get(request.callId)?.runtimeSettled) {
+          settle({ ...call, status, response: { ...response, responseParts } });
+        }
         config.getChatRecordingService()?.recordToolResult(
           responseParts,
           {
@@ -682,6 +776,7 @@ export async function runAcpToolBatch(
     };
   } finally {
     closed = true;
+    resolveRuntimeSettlement?.();
     signal.removeEventListener('abort', abortTools);
     for (const state of states.values()) {
       if (!state.settled) state.settleRelatedAgent?.(false);

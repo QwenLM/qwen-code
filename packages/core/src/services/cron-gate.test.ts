@@ -494,6 +494,7 @@ describe('createCronGateRunner', () => {
       'git > /dev/null push origin main',
       'npm > /tmp/log install',
       'npm install && git status',
+      "echo 'done'>>build.log",
     ])('runs %s after saving the rules displayed by its hint', async (gate) => {
       const { permissionRules = [] } = await suggestCommandRules(
         gate,
@@ -527,7 +528,6 @@ describe('createCronGateRunner', () => {
 
     it.each([
       'git log --oneline $(date)',
-      "echo 'done'>>build.log",
       'git push origin main 3>/tmp/protected',
       'npm install && git log $(date)',
     ])('omits a hint that cannot approve the whole gate: %s', async (gate) => {

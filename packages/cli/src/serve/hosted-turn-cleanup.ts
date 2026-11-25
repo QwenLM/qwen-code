@@ -239,6 +239,31 @@ export function hasHostedCleanupDebt(session: ManagedSession): boolean {
   return [...states.values()].some((state) => state === 'owed');
 }
 
+export async function hasHostedCleanupDebtExcluding(
+  session: ManagedSession,
+  promptId: string,
+): Promise<boolean> {
+  const authority = session.authority;
+  const snapshotSequence = authority.committedSequence;
+  const latest = new Map(
+    authority
+      .eventsInSequenceRange(1, snapshotSequence)
+      .filter((event) => event.kind === 'hosted.cleanup')
+      .map((event) => [event.payload['cleanupId'], event]),
+  );
+  for (const event of latest.values()) {
+    if (event.payload['state'] !== 'owed') continue;
+    const descriptor = await readDescriptor(
+      session,
+      event.payload['descriptorRef'],
+    );
+    if (descriptor.promptId !== promptId) return true;
+  }
+  // Debt committed while descriptors were read is absent from the snapshot;
+  // report debt conservatively rather than admit an unsafe suspension.
+  return authority.committedSequence !== snapshotSequence;
+}
+
 async function hasBackgroundHoldEvidence(
   session: ManagedSession,
   descriptor: CleanupDescriptor,
@@ -296,6 +321,67 @@ async function hasBackgroundHoldEvidence(
   return held && authority.committedSequence === sequence;
 }
 
+/**
+ * Whether every unsettled run and owed cleanup of this committed prefix is a
+ * verified background hold whose worker owns the observation pull (§4.8).
+ * Only then may a suspension exempt the background terms and certify them at
+ * its seal: a child_agent or workflow run, a lost or old-generation runtime,
+ * a missing start receipt, or a binding whose worker never took over the
+ * capture all keep the Session resident.
+ */
+export async function backgroundSuspensionCertificate(
+  session: ManagedSession,
+  observationBindings: ReadonlySet<string> | undefined,
+): Promise<boolean> {
+  if (!observationBindings || observationBindings.size === 0) return false;
+  const authority = session.authority;
+  const sequence = authority.committedSequence;
+  let held = 0;
+  for (const domain of ['child_run', 'monitor_run'] as const) {
+    for (const entry of authority.extensionRecordsInDomain(domain)) {
+      const record =
+        domain === 'child_run'
+          ? parseChildRun(entry.record)
+          : parseMonitorRun(entry.record);
+      if ('kind' in record && record.kind !== 'shell') {
+        if (!['settled', 'failed', 'cancelled'].includes(entry.run.state))
+          return false;
+        continue;
+      }
+      const run = record.run;
+      if (['settled', 'not_started_proven'].includes(run.execution ?? ''))
+        continue;
+      if (
+        !run.runtime ||
+        !observationBindings.has(
+          `${run.runtime.runtimeBindingId}@${run.runtime.generation}`,
+        ) ||
+        !record.startReceiptRef ||
+        !['running', 'waiting'].includes(run.state) ||
+        run.execution !== 'running_attached'
+      )
+        return false;
+      held += 1;
+    }
+  }
+  if (held === 0) return false;
+  const latest = new Map(
+    authority
+      .eventsInSequenceRange(1, sequence)
+      .filter((event) => event.kind === 'hosted.cleanup')
+      .map((event) => [event.payload['cleanupId'], event]),
+  );
+  for (const event of latest.values()) {
+    if (event.payload['state'] !== 'owed') continue;
+    const descriptor = await readDescriptor(
+      session,
+      event.payload['descriptorRef'],
+    );
+    if (!(await hasBackgroundHoldEvidence(session, descriptor))) return false;
+  }
+  return authority.committedSequence === sequence;
+}
+
 export async function hasBlockingHostedCleanupDebt(
   session: ManagedSession,
   holds?: ReadonlyMap<string, HostedCleanupHold>,
@@ -331,6 +417,7 @@ export async function reconcileHostedTurnCleanup(
   options: HostedWorkspaceBrokerOptions,
   promptId?: string,
   drain = false,
+  excludedPromptId?: string,
 ): Promise<HostedCleanupResult> {
   const events = session.authority.eventsInSequenceRange(
     1,
@@ -348,6 +435,7 @@ export async function reconcileHostedTurnCleanup(
       event.payload['descriptorRef'],
     );
     if (promptId && descriptor.promptId !== promptId) continue;
+    if (descriptor.promptId === excludedPromptId) continue;
     const state = event.payload['state'] as 'owed' | 'confirmed';
     states.set(descriptor.promptId, state);
     if (state !== 'owed') continue;

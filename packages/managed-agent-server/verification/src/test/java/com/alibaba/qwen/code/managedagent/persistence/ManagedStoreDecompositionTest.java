@@ -30,6 +30,7 @@ class ManagedStoreDecompositionTest {
             AgentSessionCommands.class,
             AgentLifecycleOperations.class,
             AgentSessionAdmissions.class,
+            AgentActionParking.class,
             AgentTurnExecution.class,
             AgentExecutionOperations.class,
             JournalStoreRows.class,
@@ -105,6 +106,7 @@ class ManagedStoreDecompositionTest {
                 beginSessionMutation/6::REQUIRED:DEFAULT:false
                 beginSessionMutation/7::REQUIRED:DEFAULT:false completeSessionMutation/7::REQUIRED:DEFAULT:false abandonSessionMutation/4::REQUIRED:DEFAULT:false
                 beginOperation/6::REQUIRED:DEFAULT:false workspaceFilesEnabled/0:- workspaceShellEnabled/0:-
+                creationToolProfile/5::REQUIRED:DEFAULT:false
                 beginWorkspaceClose/7::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/8::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/9::REQUIRED:DEFAULT:false
                 hasCompletedWorkspaceClose/2:- completedWorkspaceCloses/2:- unarchiveWorkspaceSession/5::REQUIRED:DEFAULT:false
                 beginChildClose/8::REQUIRED:DEFAULT:false beginContextCompression/8::REQUIRED:DEFAULT:false contextCompressionState/2:-
@@ -134,7 +136,7 @@ class ManagedStoreDecompositionTest {
                 deferMaterializationTarget/2::REQUIRED:DEFAULT:false findDispatchable/2:- findRuntimeRecoveryParked/2:-
                 claimTurn/5::REQUIRED:DEFAULT:false renewTurn/5::REQUIRED:DEFAULT:false releaseTurnLease/4::REQUIRED:DEFAULT:false
                 markTurnRecoveryBlocked/6::REQUIRED:DEFAULT:false markTurnFailureRecovery/5::REQUIRED:DEFAULT:false requestRecoveryRecheck/3::REQUIRED:DEFAULT:false
-                parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
+                parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false parkTurnForAction/4::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
                 bindHarness/5::REQUIRED:DEFAULT:false bindSessionHarness/3::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
                 withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
                 retractContinuationOutput/6::REQUIRED:DEFAULT:false retractHarnessTurnOutput/7::REQUIRED:DEFAULT:false retractHarnessTurnOutput/10::REQUIRED:DEFAULT:false

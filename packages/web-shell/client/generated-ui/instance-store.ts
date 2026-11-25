@@ -53,6 +53,7 @@ export interface GeneratedUiInstance {
   canMessage: boolean;
   token?: object;
   lease?: Lease;
+  reloadOnGrant?: boolean;
   leaseGeneration?: number;
   parkedAt?: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -62,7 +63,7 @@ export interface GeneratedUiInstance {
     reopened: boolean;
     getSignal(): AbortSignal;
     isVisible(): boolean;
-    reset(): void;
+    reset(clear?: () => Promise<boolean>): void;
   };
 }
 
@@ -91,7 +92,7 @@ export function instanceKey(
 export function resourceKey(
   display: McpAppDisplay,
   eventEpoch?: string,
-  capabilities?: { tools: boolean; messages: boolean },
+  capabilities?: { tools: boolean; messages: boolean; viewState?: boolean },
 ) {
   return JSON.stringify(
     [
@@ -234,6 +235,11 @@ export class GeneratedUiInstanceStore {
       reset: slot.reset,
     };
     entry.leaseGeneration = entry.lease.generation;
+    if (entry.reloadOnGrant) {
+      entry.reloadOnGrant = false;
+      entry.id = ++this.generation;
+      this.changed();
+    }
   }
 
   attach(
@@ -287,6 +293,7 @@ export class GeneratedUiInstanceStore {
         runtime: undefined!,
       };
       const instance = entry;
+      let viewStateReadFrame: number | undefined;
       entry.tools = {
         sessionId: entry.sessionId,
         callTool: async (request, signal) => {
@@ -305,6 +312,39 @@ export class GeneratedUiInstanceStore {
             throw new Error('Generated UI owner changed');
           return result;
         },
+        ...(slot.tools?.viewState
+          ? {
+              viewState: {
+                get: async (cardId) => {
+                  // The App reads only once at startup. Retry with a new frame
+                  // if that read happened while the card had no active lease.
+                  if (this.current(instance)) viewStateReadFrame = instance.id;
+                  else if (viewStateReadFrame !== instance.id)
+                    instance.reloadOnGrant = true;
+                  return this.viewState(instance).get(cardId);
+                },
+                set: async (cardId, write) =>
+                  this.viewState(instance).set(cardId, write),
+                captureWrite: () => {
+                  const lease = instance.lease;
+                  const viewState = this.viewState(instance);
+                  const { token, id } = instance;
+                  // Folding revokes the lease for new requests. A save the
+                  // host already accepted can finish against the same owner.
+                  return async (cardId, write) => {
+                    if (
+                      this.records.get(instance.key)?.entry !== instance ||
+                      instance.id !== id ||
+                      instance.token !== token ||
+                      !lease?.owner.isCurrent()
+                    )
+                      throw new Error('Generated UI owner changed');
+                    return viewState.set(cardId, write);
+                  };
+                },
+              },
+            }
+          : {}),
       };
       entry.messages = {
         sessionId: entry.sessionId,
@@ -337,8 +377,21 @@ export class GeneratedUiInstanceStore {
             ? instance.lease!.controller.signal
             : this.revoked,
         isVisible: () => this.current(instance),
-        reset: () => {
-          if (this.current(instance)) instance.lease!.reset();
+        reset: (clear) => {
+          const lease = instance.lease;
+          if (!this.current(instance, lease)) return;
+          if (!clear) return lease.reset();
+          const id = instance.id;
+          void clear().then((cleared) => {
+            if (
+              !cleared ||
+              this.records.get(instance.key)?.entry !== instance ||
+              instance.id !== id
+            )
+              return;
+            if (this.current(instance)) instance.lease!.reset();
+            else instance.reloadOnGrant = true;
+          });
         },
       };
       record = { scopeId: entry.scopeId, sessionId: entry.sessionId, entry };
@@ -355,6 +408,19 @@ export class GeneratedUiInstanceStore {
     this.grant(entry, slot);
     if (wasParked || !this.snapshot.includes(entry)) this.changed();
     return entry;
+  }
+
+  // New state requests require the card's current owner lease.
+  private viewState(instance: GeneratedUiInstance) {
+    const lease = instance.lease;
+    const viewState = lease?.host.tools?.viewState;
+    if (
+      !this.current(instance, lease) ||
+      !viewState ||
+      lease.host.tools?.sessionId !== instance.sessionId
+    )
+      throw new Error('Generated UI is inactive');
+    return viewState;
   }
 
   update(slot: InstanceSlot) {

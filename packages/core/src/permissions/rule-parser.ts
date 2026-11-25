@@ -54,6 +54,28 @@ const debugLogger = createDebugLogger('PERMISSIONS');
 function toPosixPath(p: string): string {
   return p.replace(/\\/g, '/');
 }
+
+/**
+ * A Windows absolute path in rule-specifier spelling: a drive letter
+ * (`D:/dir`, `D:\dir`) or a UNC root (`\\server\share`).
+ *
+ * Detected lexically rather than through `path.isAbsolute`, whose verdict
+ * follows the host platform: the same settings.json must resolve identically
+ * on Windows and POSIX.
+ */
+function isWindowsAbsolutePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p);
+}
+
+/**
+ * No Windows file path starts with `/D:/` — drive paths begin at the drive
+ * letter — so the separator the `//` grammar prefix leaves in front of one has
+ * to go as well. POSIX roots (`/Users/alice`) are returned unchanged.
+ */
+function dropSlashBeforeDriveLetter(absolute: string): string {
+  const drive = absolute.match(/^\/+([A-Za-z]:\/.*)$/);
+  return drive ? drive[1] : absolute;
+}
 import type {
   PermissionCheckContext,
   PermissionRule,
@@ -749,9 +771,15 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         // Append `/**` so the gitignore-style glob matches all files in the
         // directory recursively (picomatch uses `**` for recursive descent).
         // resolvePathPattern("//foo/**") → "/foo/**" — round-trips correctly.
-        const specifier = dirPath.startsWith('/')
-          ? `/${dirPath}/**`
-          : `${dirPath}/**`;
+        // A Windows dirPath carries no leading separator, so it needs both
+        // slashes: persisting the bare `D:\proj/**` form left every "Always
+        // Allow" rule unmatchable and re-prompted for the same directory
+        // forever (#17802).
+        const posixDir = toPosixPath(dirPath);
+        const specifier =
+          posixDir.startsWith('/') || isWindowsAbsolutePath(dirPath)
+            ? `//${posixDir.replace(/^\/+/, '')}/**`
+            : `${posixDir}/**`;
         return [`${displayName}(${specifier})`];
       }
       return [displayName];
@@ -1940,6 +1968,9 @@ function stripLeadingVariableAssignments(command: string): string {
  *
  * WARNING: `/Users/alice/file` is NOT an absolute path — it's relative to
  * the project root. Use `//Users/alice/file` for absolute paths.
+ *
+ * On Windows an absolute path keeps its drive letter: `D:/dir/**`,
+ * `D:\dir/**` and `//D:/dir/**` all resolve to `D:/dir/**`.
  */
 export function resolvePathPattern(
   specifier: string,
@@ -1948,7 +1979,8 @@ export function resolvePathPattern(
 ): string {
   if (specifier.startsWith('//')) {
     // Absolute path from filesystem root: `//path` → `/path`
-    return specifier.substring(1);
+    // `//D:/dir/**` → `D:/dir/**`, not `/D:/dir/**` (#17802).
+    return dropSlashBeforeDriveLetter(toPosixPath(specifier.substring(1)));
   }
 
   if (specifier.startsWith('~/')) {
@@ -1965,6 +1997,12 @@ export function resolvePathPattern(
   if (specifier.startsWith('./')) {
     // Relative to current working directory
     return toPosixPath(path.join(cwd, specifier.substring(2)));
+  }
+
+  // Already rooted: joining it onto cwd would yield `<cwd>/D:/dir/**`, which
+  // matches no file (#17802).
+  if (isWindowsAbsolutePath(specifier)) {
+    return toPosixPath(specifier);
   }
 
   // No prefix: relative to current working directory

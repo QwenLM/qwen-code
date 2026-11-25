@@ -8,6 +8,51 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  user: 'user',
+  assistant: 'assistant',
+  thinking: 'thinking',
+  task: 'task',
+  compaction: 'compaction',
+  info: 'info',
+  warning: 'warning',
+  retry: 'retry',
+  'stop-hook': 'stop-hook',
+  'away-recap': 'away-recap',
+  'user-shell': 'user-shell',
+  advisor: 'advisor',
+  'arena-agent': 'arena-agent',
+  'arena-session': 'arena-session',
+  goal: 'goal',
+  'Protected input': 'Protected input',
+  'Focused input. Cursor: {{position}}': 'Focused input. Cursor: {{position}}',
+  'Unfocused input.': 'Unfocused input.',
+  'Focused Prompt: {{value}}': 'Focused Prompt: {{value}}',
+  'Prompt: {{value}}': 'Prompt: {{value}}',
+  'Focused Input: {{value}}': 'Focused Input: {{value}}',
+  'Input: {{value}}': 'Input: {{value}}',
+  'Placeholder: {{value}}': 'Placeholder: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Selected {{value}}',
+  'Disabled {{value}}': 'Disabled {{value}}',
+  'Focused Toggle on: {{value}}': 'Focused Toggle on: {{value}}',
+  'Focused Toggle off: {{value}}': 'Focused Toggle off: {{value}}',
+  'Toggle on: {{value}}': 'Toggle on: {{value}}',
+  'Toggle off: {{value}}': 'Toggle off: {{value}}',
+  'Conversation cleared.': 'Conversation cleared.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revision {{value}}',
+  Dialog: 'Dialog',
+  'Dialog closed. Focus: prompt.': 'Dialog closed. Focus: prompt.',
+  'Dialog closed.': 'Dialog closed.',
+  'Waiting for confirmation': 'Waiting for confirmation',
+  'Working. Escape to cancel.': 'Working. Escape to cancel.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'History items {{start}}-{{end}} of {{total}}',
+  'Worktree: {{value}}': 'Worktree: {{value}}',
+  'Workflow mode: on': 'Workflow mode: on',
+  'Workflow mode: on (unavailable)': 'Workflow mode: on (unavailable)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.",
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":
@@ -784,8 +829,8 @@ export default {
   // ============================================================================
   'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
   'Mods (Experimental)': 'Mods (Experimental)',
-  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
-    'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
@@ -796,6 +841,7 @@ export default {
   'Debug Keystroke Logging': 'Debug Keystroke Logging',
   'Language: UI': 'Language: UI',
   'Language: Model': 'Language: Model',
+  'Language: Display Translation': 'Language: Display Translation',
   'Output Format': 'Output Format',
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
@@ -1740,6 +1786,8 @@ export default {
     'Could not compress chat history because the compression summary was truncated.',
   'Could not compress chat history due to an API error.':
     'Could not compress chat history due to an API error.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Could not compress chat history because it is too large for the context window.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1959,6 +2007,18 @@ export default {
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'Set the vision bridge timeout in seconds (use with --vision)',
+  '--timeout can only be used with --vision.':
+    '--timeout can only be used with --vision.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.',
+  'Vision bridge timeout: {{timeout}}': 'Vision bridge timeout: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.',
+  '{{timeout}} (default)': '{{timeout}} (default)',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":

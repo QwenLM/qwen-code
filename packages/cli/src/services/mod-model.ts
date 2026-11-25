@@ -161,6 +161,7 @@ export async function completeModModel(
   config: Config,
   input: ModModelCompleteInput,
   signal: AbortSignal,
+  mayDispatch?: () => boolean,
 ): Promise<ModModelCompleteResult> {
   if (signal.aborted)
     return { isAnswered: false, reason: 'aborted', usage: { ...NO_USAGE } };
@@ -180,8 +181,9 @@ export async function completeModModel(
       : AbortSignal.any([signal, AbortSignal.timeout(input.timeoutMs)]);
   let onAbort: (() => void) | undefined;
   try {
-    const request = Promise.resolve().then(() =>
-      config.getBaseLlmClient().generateText({
+    const request = Promise.resolve().then(() => {
+      if (mayDispatch?.() === false) return undefined;
+      return config.getBaseLlmClient().generateText({
         contents: [{ role: 'user', parts: [{ text: input.prompt }] }],
         model: model.selector,
         ...(typeof input.system === 'string' &&
@@ -200,14 +202,16 @@ export async function completeModModel(
           thinkingConfig: { includeThoughts: input.effort !== undefined },
         },
         isolatedRequest: true,
-      }),
-    );
+      });
+    });
     // Generator setup can be waiting on a shared credential refresh.
     const cancelled = new Promise<never>((_, reject) => {
       onAbort = () => reject(abortSignal.reason);
       abortSignal.addEventListener('abort', onAbort, { once: true });
     });
     const result = await Promise.race([request, cancelled]);
+    if (result === undefined)
+      return { isAnswered: false, reason: 'aborted', usage: { ...NO_USAGE } };
     const usage = modModelUsage(
       result.usage,
       model.authType ?? config.getContentGeneratorConfig()?.authType,

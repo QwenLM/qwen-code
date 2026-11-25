@@ -139,6 +139,11 @@ function sortedEntries(
 export function fingerprint(cfg: MCPServerConfig): PoolKey {
   const canonical = {
     transport: mcpTransportOf(cfg),
+    // Reinstalling at the same path can leave command, arguments, and env
+    // identical while changing the executable or the script it loads.
+    ...(cfg.extensionArtifactRevision
+      ? { extensionArtifactRevision: cfg.extensionArtifactRevision }
+      : {}),
     command: cfg.command ?? null,
     args: cfg.args ?? [],
     cwd: cfg.cwd ?? null,

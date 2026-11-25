@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildComposerPrompt,
   buildComposerPromptWithInlineTagPlacements,
+  computeCaretTarget,
   getComposerTagDisplay,
   getComposerTagLabel,
   getComposerTagValue,
@@ -9,6 +10,115 @@ import {
   replaceInlineTagPlacements,
   serializeComposerTag,
 } from './useComposerCore';
+
+describe('touch editing-key caret targets', () => {
+  it('moves right one character and clamps at the document end', () => {
+    expect(computeCaretTarget('abc', 1, 1, 'right')).toBe(2);
+    expect(computeCaretTarget('abc', 3, 3, 'right')).toBe(3);
+  });
+
+  it('collapses a selection to its end when moving right', () => {
+    expect(computeCaretTarget('abc', 0, 2, 'right')).toBe(2);
+  });
+
+  it('keeps the column across lines and clamps to shorter lines', () => {
+    expect(computeCaretTarget('aa\nbbb\ncc', 6, 6, 'up')).toBe(2);
+    expect(computeCaretTarget('aaaa\nbb\ncccc', 10, 10, 'up')).toBe(7);
+    expect(computeCaretTarget('aa\nbbb', 1, 1, 'down')).toBe(4);
+  });
+
+  it('clamps to the document edges when leaving the first or last line', () => {
+    expect(computeCaretTarget('aa\nbb', 1, 1, 'up')).toBe(0);
+    expect(computeCaretTarget('aa\nbb', 4, 4, 'down')).toBe(5);
+  });
+
+  it('lands on empty lines with a zero column', () => {
+    expect(computeCaretTarget('a\n\nb', 3, 3, 'up')).toBe(2);
+  });
+
+  it('moves from the forward selection head (end), not its anchor', () => {
+    expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'up')).toBe(2);
+    expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'down')).toBe(9);
+  });
+
+  it('uses the active start of a backward selection for vertical moves', () => {
+    expect(
+      computeCaretTarget(
+        'aa\nbbb\ncc',
+        1,
+        5,
+        'up',
+        undefined,
+        undefined,
+        'backward',
+      ),
+    ).toBe(0);
+    expect(
+      computeCaretTarget(
+        'aa\nbbb\ncc',
+        1,
+        5,
+        'down',
+        undefined,
+        undefined,
+        'backward',
+      ),
+    ).toBe(4);
+  });
+
+  it('steps a whole grapheme so inserting never splits a surrogate pair', () => {
+    const caret = computeCaretTarget('A😀B', 1, 1, 'right');
+    expect(caret).toBe(3);
+    const next = 'A😀B'.slice(0, caret) + '/' + 'A😀B'.slice(caret);
+    expect(next).toBe('A😀/B');
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(next)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(next)).toBe(false);
+    expect(computeCaretTarget('A😀B', 3, 3, 'right')).toBe(4);
+
+    const family = '👨‍👩‍👧‍👦';
+    const draft = `A${family}B`;
+    const familyCaret = computeCaretTarget(draft, 1, 1, 'right');
+    expect(familyCaret).toBe(12);
+    expect(draft.slice(0, familyCaret) + '/' + draft.slice(familyCaret)).toBe(
+      `A${family}/B`,
+    );
+    expect(computeCaretTarget('Ae\u0301B', 1, 1, 'right')).toBe(3);
+  });
+
+  it('clamps vertical moves to grapheme boundaries on astral lines', () => {
+    expect(computeCaretTarget('a\n😀b', 1, 1, 'down')).toBe(4);
+    expect(computeCaretTarget('😀b\na', 2, 2, 'down')).toBe(5);
+    expect(computeCaretTarget('a\n😀b', 4, 4, 'up')).toBe(1);
+  });
+
+  it('holds the preferred column across a vertical run', () => {
+    const text = 'aaaa\nbb\ncccc';
+    const first = computeCaretTarget(text, 12, 12, 'up');
+    expect(first).toBe(7);
+    expect(computeCaretTarget(text, first, first, 'up', undefined, 4)).toBe(4);
+    expect(computeCaretTarget(text, 7, 7, 'up')).toBe(2);
+  });
+
+  it('moves between the supplied displayed lines, not only newlines', () => {
+    expect(computeCaretTarget('aaaaaa', 4, 4, 'up', [0, 3])).toBe(1);
+    expect(computeCaretTarget('aaaaaa', 1, 1, 'down', [0, 3])).toBe(4);
+    expect(computeCaretTarget('aaaaaa', 4, 4, 'down', [0, 3])).toBe(6);
+  });
+
+  it('clamps up-moves to the whole last grapheme of a wrapped line', () => {
+    const text = '😀' + 'a'.repeat(60);
+    // Soft-wrap after the emoji: the line end is the wrap boundary itself,
+    // not boundary-1, or the emoji's last surrogate unit would be chopped.
+    const caret = computeCaretTarget(text, 6, 6, 'up', [0, 2]);
+    expect(caret).toBe(2);
+    const next = text.slice(0, caret) + '/' + text.slice(caret);
+    expect(next.startsWith('😀/')).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(next)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(next)).toBe(false);
+    // An explicit newline keeps the historical skip-the-'\n' behavior.
+    expect(computeCaretTarget('😀\naa', 4, 4, 'up')).toBe(2);
+  });
+});
 
 describe('follow-up completion helpers', () => {
   it('uses the full suggestion when the editor is empty', () => {

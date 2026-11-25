@@ -675,6 +675,43 @@ export function decodeAnsiCEscape(
 }
 
 /**
+ * True when `text` holds an ANSI-C `$'…'` escape whose parsed value cannot
+ * be assumed to match bash's bytes. Byte-valued escapes ≥ 0x80 can differ,
+ * and `\u`/`\U` output depends on the shell locale and can encode surrogate
+ * code points differently. Consumers must fail closed on these forms.
+ */
+export function hasByteValuedAnsiCEscape(text: string): boolean {
+  for (let index = 0; index + 1 < text.length; index++) {
+    if (text[index] !== '$' || text[index + 1] !== "'") continue;
+    index += 2;
+    while (index < text.length && text[index] !== "'") {
+      if (text[index] !== '\\') {
+        index++;
+        continue;
+      }
+      const escape = decodeAnsiCEscape(text, index);
+      if (escape === null) {
+        index += 2;
+        continue;
+      }
+      const marker = text[index + 1]!;
+      if (marker === 'u' || marker === 'U') {
+        return true;
+      } else if (marker === 'x') {
+        if (escape.bytes[0]! >= 0x80) return true;
+      } else if (marker >= '0' && marker <= '7') {
+        // Both decoders mask to a byte, so compare the resulting byte:
+        // `\477` agrees on `?`, while `\600` differs from U+0080.
+        const digits = /^[0-7]{1,3}/.exec(text.slice(index + 1))![0];
+        if ((parseInt(digits, 8) & 0xff) >= 0x80) return true;
+      }
+      index += escape.length;
+    }
+  }
+  return false;
+}
+
+/**
  * UTF-8 encode a numeric code point, including the surrogate range and the
  * 0x110000–0x1FFFFF range bash still writes in the four-byte form.
  */
