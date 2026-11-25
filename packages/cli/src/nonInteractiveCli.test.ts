@@ -2747,6 +2747,63 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('ends the turn on a tool hook stop and keeps the results in history', async () => {
+    useSharedLoopWithModToolHooks();
+    setupMetricsMock();
+    const parts = [
+      {
+        functionResponse: {
+          id: 'hook-stop-call',
+          name: 'read_file',
+          response: { output: 'read' },
+        },
+      },
+    ];
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'hook-stop-call',
+      responseParts: parts,
+      resultDisplay: 'read',
+      error: undefined,
+      errorType: undefined,
+      hookStopReason: 'budget spent',
+    });
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'hook-stop-call',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'hook-stop',
+          },
+        },
+      ]),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'read it',
+      'hook-stop',
+    );
+
+    expect(exitCode).toBe(0);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    expect(mockLlmClient.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ id: 'hook-stop-call' }),
+        }),
+      ],
+    });
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'A hook stopped the turn: budget spent\n',
+    );
+  });
+
   it('streams Goal state changes that happen while a headless turn settles', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);

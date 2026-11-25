@@ -268,7 +268,6 @@ export const ZH_TW: Record<string, MessageValue> = {
   'managed.discarded': '已丟棄本次請求。草稿已放回輸入框。',
   'managed.newRequired': '請新建任務後傳送訊息。',
   'managed.truncated': '[詳情已截斷]',
-  'managed.question.title': '請回答以下問題',
   'managed.actions.title': '待處理請求',
   'managed.actions.root': '當前會話',
   'managed.actions.child': (v) => `子會話 · ${v?.session}`,
