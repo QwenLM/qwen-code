@@ -572,6 +572,47 @@ jobs:
           RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-release'
         run: '.release-workflow/.github/scripts/run-release-docker-integration.sh cleanup'
 
+  login_e2e_gate:
+    name: 'Login Path Gate (Qwen Account)'
+    # Hard release gate: the Qwen-account login path must complete end to end
+    # (device flow -> web sign-in/approve over HTTP -> daemon credentials).
+    # Deliberately NO force_skip_tests escape hatch: publish requires this job
+    # to succeed even when the other validation lanes are skipped.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 20
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    permissions:
+      contents: 'read'
+    # Test-account secrets are injected into this job only; every other job
+    # (including all PR-code lanes) stays credential-free.
+    env:
+      QWEN_E2E_LOGIN_EMAIL: '${{ secrets.QWEN_E2E_LOGIN_EMAIL }}'
+      QWEN_E2E_LOGIN_PASSWORD: '${{ secrets.QWEN_E2E_LOGIN_PASSWORD }}'
+    steps:
+      - *restore_release_workspace
+
+      # Fail closed on missing secrets so an unconfigured repo can never turn
+      # this gate into a silent skip.
+      - name: 'Require login gate credentials'
+        run: |-
+          if [ -z "${QWEN_E2E_LOGIN_EMAIL}" ] || [ -z "${QWEN_E2E_LOGIN_PASSWORD}" ]; then
+            echo "::error::QWEN_E2E_LOGIN_EMAIL / QWEN_E2E_LOGIN_PASSWORD secrets are not configured; the login path gate cannot run."
+            exit 1
+          fi
+
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
+      - *install_release_dependencies
+      - *download_release_build
+      - *unpack_release_build
+
+      - name: 'Run Login Path Gate'
+        run: 'npm run test:release:login-gate'
+
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'
     needs: 'prepare'
@@ -740,12 +781,14 @@ jobs:
       - 'quality'
       - 'integration_none'
       - 'integration_docker'
+      - 'login_e2e_gate'
       - 'audio_capture_prebuilds'
       - 'build_release'
     if: |-
       ${{
         always() &&
         needs.prepare.result == 'success' &&
+        needs.login_e2e_gate.result == 'success' &&
         (
           needs.build_release.result == 'success' ||
           (needs.build_release.result == 'skipped' && (github.repository != 'QwenLM/qwen-code' || vars.ECS_RELEASE_HOST_RUNNER_ENABLED != 'true'))
@@ -954,6 +997,7 @@ jobs:
       - 'quality'
       - 'integration_none'
       - 'integration_docker'
+      - 'login_e2e_gate'
       - 'audio_capture_prebuilds'
       - 'build_release'
       - 'publish'
@@ -966,6 +1010,7 @@ jobs:
         ) &&
         (
           needs.prepare.result == 'failure' ||
+          needs.login_e2e_gate.result == 'failure' ||
           needs.audio_capture_prebuilds.result == 'failure' ||
           needs.build_release.result == 'failure' ||
           needs.quality.result == 'failure' ||
@@ -1008,6 +1053,7 @@ jobs:
           QUALITY_RESULT: '${{ needs.quality.result }}'
           INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
           INTEGRATION_DOCKER_RESULT: '${{ needs.integration_docker.result }}'
+          LOGIN_GATE_RESULT: '${{ needs.login_e2e_gate.result }}'
           AUDIO_PREBUILDS_RESULT: '${{ needs.audio_capture_prebuilds.result }}'
           BUILD_RELEASE_RESULT: '${{ needs.build_release.result }}'
           PUBLISH_RESULT: '${{ needs.publish.result }}'
