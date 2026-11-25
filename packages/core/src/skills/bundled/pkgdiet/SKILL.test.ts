@@ -87,6 +87,12 @@ describe('bundled pkgdiet skill', () => {
     // The bundled body cannot police its own shadowing, so it must not claim to (R11-1)
     expect(normalizedBody).not.toContain('skill provenance');
     expect(normalizedBody).not.toContain('named `pkgdiet` exists');
+    expect(normalizedBody).not.toMatch(
+      /(?:skill\s+(?:provenance|origin|shadowing|override)|project-?\s*or\s*user-scope\s*skill|same-named\s*skill|skill\s*named\s*[`']?pkgdiet[`']?)[\s\S]{0,80}(?:halt|stop|abort|untrusted|reject|prevent)/i,
+    );
+    expect(normalizedBody).not.toMatch(
+      /(?:halt|stop|abort|treat\s+as\s+untrusted)[\s\S]{0,80}(?:skill\s+(?:provenance|origin|shadowing|override)|project-?\s*or\s*user-scope\s*skill|same-named\s*skill)/i,
+    );
 
     // Hoisted provenance fail-closed check (R7-1)
     expect(normalizedBody).toContain(
@@ -336,9 +342,23 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'For a `package.json` script, read the script body and gate any registry-fetching command inside it; otherwise treat the command as a registry fetch and run the check',
     );
-    // npm ci is a fetch-capable command, never exempt as a lockfile restore (R12-1)
+    // npm ci is a fetch-capable command, never exempt under any wording (R12-1)
     expect(normalizedBody).not.toContain('bare lockfile restore');
     expect(normalizedBody).not.toContain('lockfile restore');
+    expect(normalizedBody).not.toMatch(
+      /(?:npm\s+ci|lockfile|frozen-lockfile|clean[- ]install)[\s\S]{0,80}(?:exempt|out of scope|skip|bypass|not evaluated|ignore)/i,
+    );
+    expect(normalizedBody).not.toMatch(
+      /(?:exempt|out of scope|skip|bypass|not evaluated|ignore)[\s\S]{0,80}(?:npm\s+ci|lockfile|frozen-lockfile|clean[- ]install)/i,
+    );
+
+    // Positive assertion: npm ci is strictly in scope and must be evaluated (R12-1)
+    expect(normalizedBody).toMatch(
+      /(?:npm install\/ci\/add|`npm install`\/`ci`\/`add`)[^.]*remains in scope and must be evaluated/,
+    );
+    expect(normalizedBody).toMatch(
+      /(?:npm\s+ci|`ci`)[^.]*remains in scope and must be evaluated/i,
+    );
 
     // Concrete name resolution & scaffolder mapping (R7-4, R10-2)
     expect(normalizedBody).toContain('cannot be resolved');
