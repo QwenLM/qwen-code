@@ -86,6 +86,7 @@
     "markdown-it": "^15.0.3",
     "minimatch": "^11.0.8",
     "open": "^10.2.0",
+    "opencc-js": "^1.4.2",
     "p-limit": "^7.3.0",
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",

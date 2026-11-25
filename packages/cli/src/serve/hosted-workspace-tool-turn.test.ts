@@ -3920,6 +3920,57 @@ it.each([false, true])(
   },
 );
 
+// S5 (#18149): a Hooks plan resumes only on a Hooks Session, and only while
+// the journal still holds exactly the Hook results the plan recorded. An
+// occurrence with a record but no result reads as undefined.
+it.each([
+  ['a Session without Hooks', false, [] as const],
+  ['an occurrence with no result', true, undefined],
+  [
+    'a different result',
+    true,
+    [{ event: 'PreToolUse', resultDigest: 'b'.repeat(64) }] as const,
+  ],
+])('declines a saved Hooks batch on %s', async (_, hooks, current) => {
+  const call = { ...calls[0], args: { file_path: 'a.txt' } };
+  const saved = {
+    plan: {
+      promptId: 'prompt',
+      runtime: {
+        runtimeSessionId: 'extensions-components-owner',
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      },
+      calls: [
+        {
+          call,
+          hookResults: [{ event: 'PreToolUse', resultDigest: 'a'.repeat(64) }],
+        },
+      ],
+    },
+  };
+  const receiver = {
+    session,
+    hooks: hooks
+      ? { broker: { runtimeSessionId: 'extensions-components-owner' } }
+      : undefined,
+    broker: { ...broker, runtimeSessionId: 'extensions-components-owner' },
+    promptId: 'prompt',
+    savedToolHookResults: vi.fn().mockReturnValue(current),
+    executeNative: vi.fn(),
+  };
+  await expect(
+    Reflect.apply(
+      HostedWorkspaceToolTurn.prototype.resumeSavedNativeBatch,
+      receiver,
+      [saved, 1, new AbortController().signal],
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(receiver.executeNative).not.toHaveBeenCalled();
+});
+
 // #13753 I3: the read profile's two tools dispatch like any profile's.
 it('dispatches read_file and glob on the read profile', async () => {
   turn = new HostedWorkspaceToolTurn(
