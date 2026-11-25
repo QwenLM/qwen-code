@@ -1847,7 +1847,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     releaseSignals();
     process.kill(process.pid, sig);
   }
-  for (const s of REAP_SIGNALS) process.on(s, onSignal);
+  // Capture's cleanup and re-raise must precede hooks like signal-exit.
+  for (const s of REAP_SIGNALS) process.prependListener(s, onSignal);
 
   let ansText = '';
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
