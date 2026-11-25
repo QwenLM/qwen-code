@@ -2,10 +2,10 @@ import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import type { WebShellProps } from '../App';
 import '../styles/standalone.css';
+// Include the shell module graph in document load so boot retry can cover it.
+import { WebShellWithProviders } from '../index';
 
 const params = new URLSearchParams(window.location.search);
-const indexEntry = '../index.tsx';
-const { WebShellWithProviders } = await import(/* @vite-ignore */ indexEntry);
 const splitSessionIds = params.get('split')?.split(',');
 document.documentElement.classList.add('theme-dark', 'dark');
 
