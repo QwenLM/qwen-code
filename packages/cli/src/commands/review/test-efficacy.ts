@@ -72,14 +72,18 @@ import {
   containerCommand,
   containerName,
   containerPathFor,
-  killContainer,
+  describeExecutionBoundary,
   mountRootFor,
+  reapContainer,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
   runtimeClientEnv,
   sandboxVerdict,
+  trustInputFromPlan,
   type ContainerRuntime,
+  type ReviewTeardownStatus,
+  type ReviewTrustInput,
 } from './lib/sandboxed-exec.js';
 import {
   checkoutFilterCommands,
@@ -1574,13 +1578,14 @@ export function probeCleanupFailureDetail(
 function probeContainer(
   command: string,
   probeTree: string,
+  trustContext?: ReviewTrustInput,
 ): {
   file: string;
   args: string[];
   name: string;
   runtime: ContainerRuntime;
 } | null {
-  const verdict = sandboxVerdict();
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(probeTree);
   if (tmpDir === null) return null;
@@ -1774,6 +1779,8 @@ function runProbeSuite(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): {
   perFile: ProbeResult[];
   ms: number;
@@ -1798,7 +1805,10 @@ function runProbeSuite(
   // statement about the PR's own suite. Canonicalise what crosses the
   // boundary, and only there — the direct path keeps the caller's spelling.
   let farmRoot = dependencyRoot;
-  if (sandboxVerdict().kind === 'container') {
+  if (
+    sandboxVerdict(undefined, undefined, undefined, trustContext).kind ===
+    'container'
+  ) {
     try {
       farmRoot = realpathSync(dependencyRoot);
     } catch {
@@ -1823,7 +1833,7 @@ function runProbeSuite(
   const suite = `node ${shellQuotePath(
     findVitestBin(dependencyRoot),
   )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
-  const boxed = probeContainer(suite, probeTree);
+  const boxed = probeContainer(suite, probeTree, trustContext);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
         cwd: probeTree,
@@ -1871,9 +1881,9 @@ function runProbeSuite(
   // which message wins.
   if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — `--rm` fires
-    // only on a self-exit. Reach the daemon before reporting, or a
-    // TERM-ignoring suite keeps this mount writable past the end of the review.
-    killContainer(boxed.runtime, boxed.name);
+    // only on a self-exit. Reach the daemon and verify teardown before reporting.
+    const reap = reapContainer(boxed.runtime, boxed.name);
+    onTeardown?.(reap.status);
   }
   if (r.error)
     throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
@@ -2145,6 +2155,8 @@ export function runOneHunkProbe(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
@@ -2231,6 +2243,8 @@ export function runOneHunkProbe(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2299,6 +2313,8 @@ export function runControlMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
   // A probe file reached through a symlink — at the leaf or an ancestor —
@@ -2334,6 +2350,8 @@ export function runControlMutant(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
       );
       // `gated` is the runner's "went red" verdict; anything else — still
       // green, collected nothing, crashed — means the control did NOT
@@ -2366,6 +2384,8 @@ export function runOneMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   if (probeTargetEscapes(probeTree, mutant.file)) {
@@ -2435,6 +2455,8 @@ export function runOneMutant(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2618,7 +2640,29 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // The probe tree this phase WOULD build, named before it exists — the gate
   // has to answer before anything is created, and `probeWorktreePath` is a
   // pure path function.
-  const sandboxRefusal = refuseUnsandboxedPhase(probeWorktreePath(worktree));
+  const trustContext = trustInputFromPlan(report);
+  const teardownState: { status: ReviewTeardownStatus } = {
+    status: 'not-applicable',
+  };
+  const recordTeardown = (status: ReviewTeardownStatus): void => {
+    if (status === 'failed') {
+      teardownState.status = 'failed';
+    } else if (status === 'partial' && teardownState.status !== 'failed') {
+      teardownState.status = 'partial';
+    } else if (
+      status === 'clean' &&
+      teardownState.status === 'not-applicable'
+    ) {
+      teardownState.status = 'clean';
+    }
+  };
+  const sandboxRefusal = refuseUnsandboxedPhase(
+    probeWorktreePath(worktree),
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
   if (sandboxRefusal) {
     noteMutants(
       `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +
@@ -2882,6 +2926,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           mutantDeadline,
           now,
           worktree,
+          trustContext,
+          recordTeardown,
         );
         noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
@@ -2936,6 +2982,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               // two are the same) — and the control is the run that decides
               // whether ANY mutant verdict is trusted.
               worktree,
+              trustContext,
+              recordTeardown,
             );
             if (harnessValidated === null) {
               // THREE causes share this `null` and the note must not name one:
@@ -3011,6 +3059,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                trustContext,
+                recordTeardown,
               ),
             );
           }
@@ -3062,6 +3112,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                trustContext,
+                recordTeardown,
               ),
             );
           }
@@ -3214,6 +3266,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           startedAt + TOTAL_BUDGET_MS,
           now,
           worktree,
+          trustContext,
+          recordTeardown,
         );
         noteDependencyFarm(revertRun.exposed);
         results.push(...revertRun.perFile);
@@ -3382,6 +3436,30 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     },
     findings,
     cleanupFailure,
+    executionBoundary: (() => {
+      const verdict = sandboxRefusal
+        ? ({ kind: 'refused', reason: sandboxRefusal } as const)
+        : sandboxVerdict(undefined, undefined, undefined, trustContext);
+      const mountable = mountRootFor(probeWorktreePath(worktree)) !== null;
+      const effectiveBackend =
+        verdict.kind === 'refused'
+          ? 'refused'
+          : verdict.kind === 'container' && mountable
+            ? 'container'
+            : 'direct';
+      const boundaryNote =
+        teardownState.status === 'failed'
+          ? 'container teardown verification failed — a timed-out probe container may still be running'
+          : verdict.kind === 'container' && !mountable
+            ? 'probe tree is not under a review temp dir, so probes ran directly rather than in a container'
+            : undefined;
+      return describeExecutionBoundary({
+        backend: effectiveBackend,
+        trustContext,
+        teardownStatus: teardownState.status,
+        ...(boundaryNote !== undefined ? { note: boundaryNote } : {}),
+      });
+    })(),
   };
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, JSON.stringify(result, null, 2), 'utf8');

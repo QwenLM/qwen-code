@@ -1625,7 +1625,7 @@ async function runPreparedHostedHarnessTextTurn(
           stop_hook_active: stopHookActive,
           last_assistant_message: text,
         });
-        if (stopped?.isBlockingDecision() || stopped?.shouldStopExecution()) {
+        if (stopped?.isBlockingDecision()) {
           stopHookActive = true;
           request = [
             { text: stopped.getEffectiveReason() || 'Continue working.' },
