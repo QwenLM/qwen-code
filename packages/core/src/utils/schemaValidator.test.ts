@@ -305,6 +305,114 @@ describe('SchemaValidator', () => {
       },
     );
 
+    it.each(['anyOf', 'oneOf'])(
+      'uses the selected tag to diagnose a malformed field under %s',
+      (keyword) => {
+        const schema = obj({
+          'report section': {
+            [keyword]: [
+              obj(
+                { kind: { const: 'file' }, file: { type: 'string' } },
+                'file',
+              ),
+              obj({ kind: { const: 'docs' }, docs: strings() }, 'docs'),
+            ],
+          },
+        });
+        const { report } = validateWithNote(schema, {
+          'report section': { kind: 'docs', docs: '[1,]' },
+        });
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining(
+            'params/report section/docs arrived as a string',
+          ),
+        );
+        expect(
+          validateWithNote(schema, {
+            'report section': { kind: 'other', docs: '[1,]' },
+          }).report,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it('keeps errors from a tagged definition reused by the selected branch', () => {
+      const schema = {
+        $defs: {
+          File: obj({ kind: { const: 'file' }, entries: strings() }, 'entries'),
+          Docs: obj({
+            kind: { const: 'docs' },
+            file: { $ref: '#/$defs/File' },
+          }),
+        },
+        oneOf: [{ $ref: '#/$defs/File' }, { $ref: '#/$defs/Docs' }],
+      };
+      const file = { kind: 'file', entries: '[1,]' };
+      // The other branch fails required (without entries) or const (with it).
+      for (const params of [
+        { kind: 'docs', file },
+        { kind: 'docs', file, entries: [] },
+      ]) {
+        const { report } = validateWithNote(schema, params);
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining('params/file/entries arrived as a string'),
+        );
+      }
+    });
+
+    it('withholds the hint when two tags select different alternatives', () => {
+      const { report } = validateWithNote(
+        {
+          oneOf: [
+            obj({
+              docs: strings(),
+              kind: { const: 'docs' },
+              format: { const: 'list' },
+            }),
+            obj({ kind: { const: 'file' }, format: { const: 'path' } }),
+          ],
+        },
+        { kind: 'docs', format: 'path', docs: '[1,]' },
+      );
+      expect(report).not.toHaveBeenCalled();
+    });
+
+    it('keeps the generic error when a rejected branch contributes nested alternatives', () => {
+      const { report } = validateWithNote(
+        {
+          anyOf: [
+            obj({ kind: { const: 'docs' }, docs: strings() }),
+            obj({ docs: anyOf('object', 'null'), kind: { const: 'file' } }),
+          ],
+        },
+        { kind: 'docs', docs: '{"x":,}' },
+      );
+      expect(report).not.toHaveBeenCalled();
+    });
+
+    it.each(['file', 'docs'])(
+      'uses the selected type when the inactive branch checks %s before the tag',
+      (firstProperty) => {
+        const { report } = validateWithNote(
+          {
+            anyOf: [
+              obj({ kind: { const: 'docs' }, docs: strings() }),
+              obj({
+                [firstProperty]: { type: 'object' },
+                kind: { const: 'file' },
+              }),
+            ],
+          },
+          { kind: 'docs', file: 1, docs: '{"x":,}' },
+        );
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          expect.any(String),
+          expect.stringContaining('send it as a JSON array'),
+        );
+      },
+    );
+
     it.each([
       anyOf('array', 'object'),
       anyOf('object', 'array'),
@@ -365,6 +473,30 @@ describe('SchemaValidator', () => {
       });
       expect(report).toHaveBeenCalledOnce();
       expect(report.mock.calls[0][1]).toContain('[tru<<HERE>>');
+    });
+
+    it('bounds quoted input in a parser error without an offset', () => {
+      const identifier = 'x'.repeat(200);
+      const docs = `[${identifier}]`;
+      const parse = JSON.parse;
+      const spy = vi
+        .spyOn(JSON, 'parse')
+        .mockImplementation((text, reviver) => {
+          if (text === docs) {
+            throw new SyntaxError(
+              `JSON Parse error: Unexpected identifier "${identifier}"`,
+            );
+          }
+          return parse(text, reviver);
+        });
+      try {
+        const { report } = validateWithNote(obj({ docs: strings() }), { docs });
+        const note = report.mock.calls[0][1];
+        expect(note).toContain('Unexpected identifier');
+        expect(note).not.toContain('x'.repeat(101));
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('keeps the default validation error free of argument text', () => {

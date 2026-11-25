@@ -10,6 +10,8 @@ import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import type { ToolCallRequestInfo } from '../core/turn.js';
+import { executeToolCall } from '../core/nonInteractiveToolExecutor.js';
+import { withModelToolErrorNotes } from '../tools/tool-error.js';
 import {
   finalizeToolResponses,
   toolResponseTextLength,
@@ -40,6 +42,53 @@ describe('Mod tool request projection', () => {
     expect(await modToolRequest(config, request)).toEqual(request);
     expect(load).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'returns only model-authored validation detail through a Mod (rewritten: %s)',
+    async (rewrite) => {
+      const { config, registry, request } = setup();
+      const tool = new MockTool({
+        name: 'list_rows',
+        params: {
+          type: 'object',
+          properties: {
+            options: {
+              type: 'object',
+              properties: { rows: { type: 'array' } },
+            },
+          },
+        },
+      });
+      registry.registerTool(tool);
+      const args = { options: { rows: '["from-model",]' } };
+      const response = await executeToolCall(
+        config,
+        { ...request, name: tool.name, args },
+        new AbortController().signal,
+        {
+          recordToolResult: false,
+          modToolCall: async (input, next, signal) => {
+            if (rewrite) {
+              (input['options'] as typeof args.options).rows = '["from-mod",]';
+            }
+            return next(input, signal, async (_input, verdict) => verdict);
+          },
+        },
+      );
+      const error = 'params/options/rows must be array';
+      expect(response.error?.message).toBe(error);
+      const [model] = withModelToolErrorNotes([
+        { role: 'user', parts: response.responseParts },
+      ]);
+      const modelError = model.parts?.[0].functionResponse?.response?.['error'];
+      if (rewrite) {
+        expect(modelError).toBe(error);
+      } else {
+        expect(modelError).toContain('from-model');
+      }
+      expect(args.options.rows).toBe('["from-model",]');
+    },
+  );
 
   it('resolves case-insensitive lazy deferred targets while retaining the original wrapper', async () => {
     const { config, request, load } = setup();

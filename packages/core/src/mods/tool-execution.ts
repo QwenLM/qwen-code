@@ -120,7 +120,7 @@ export async function executeModTool(
   let answer: ModToolResult;
   try {
     answer = await middleware(
-      input,
+      structuredClone(input),
       async (changed, active, check) => {
         active.throwIfAborted();
         validateInput('tool.call', changed, input);
@@ -136,6 +136,9 @@ export async function executeModTool(
                 args: { ...request.args, arguments: structuredClone(args) },
               }
             : { ...request, args: structuredClone(args) };
+        if (!isDeepStrictEqual(args, execution.args)) {
+          nativeRequest.argsModifiedByMod = true;
+        }
         const completed = await execute(nativeRequest, active, check);
         latest = completed;
         if (

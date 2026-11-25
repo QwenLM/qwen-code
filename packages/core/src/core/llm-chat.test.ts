@@ -1254,14 +1254,16 @@ describe('LlmChat', async () => {
         mockConfig.getToolOutputBatchBudget = () => budget;
         chat.setHistory([
           content('user', { text: 'prompt' }),
-          content('model', fnCall('structured_output', {}, 'call-1')),
+          content(
+            'model',
+            fnCall('structured_output', {}, 'call-1'),
+            fnCall('tool_search', {}, 'call-2'),
+          ),
         ]);
-        const part = fnResponse(
-          'structured_output',
-          { error: 'params/docs must be array' },
-          'call-1',
-        );
-        setModelToolErrorNote(part, '; invalid near <<HERE>>');
+        const error = 'params/docs must be array';
+        const note = '; invalid near <<HERE>>';
+        const part = fnResponse('structured_output', { error }, 'call-1');
+        setModelToolErrorNote(part, note);
         streamMock().mockResolvedValue(
           streamOf(stopResponse([{ text: 'done' }])),
         );
@@ -1270,7 +1272,17 @@ describe('LlmChat', async () => {
         await drain(
           await chat.sendMessageStream(
             'test-model',
-            { message: [part] },
+            {
+              message: [
+                part,
+                fnResponse(
+                  'tool_search',
+                  { output: 'x'.repeat(200) },
+                  'call-2',
+                ),
+                { text: 'a'.repeat(200) },
+              ],
+            },
             'prompt',
             undefined,
             { onPreparedRequest: prepared },
@@ -1282,9 +1294,22 @@ describe('LlmChat', async () => {
           '<<HERE>>',
         );
         expect(JSON.stringify(chat.getHistory())).not.toContain('<<HERE>>');
-        const dispatched = JSON.stringify(streamMock().mock.calls[0][0]);
-        expect(dispatched).toContain('params/docs must be array');
-        expect(dispatched.includes('; invalid near <<HERE>>')).toBe(showNote);
+        const dispatched = (requestAt(0).contents as Content[])
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.functionResponse?.id === 'call-1');
+        expect(dispatched[0].functionResponse?.response?.['error']).toBe(
+          showNote ? error + note : error,
+        );
+        const expected = measureToolOutput(dispatched);
+        expect(logToolResultSize).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            call_id: 'call-1',
+            layer: 'injection',
+            injected_content_length: expected.chars,
+            injected_estimated_tokens: expected.estimatedTokens,
+          }),
+        );
       },
     );
 

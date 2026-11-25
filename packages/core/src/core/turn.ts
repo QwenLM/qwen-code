@@ -226,6 +226,8 @@ export interface ToolCallRequestInfo {
   providerCallId?: string;
   name: string;
   args: Record<string, unknown>;
+  /** A Mod supplied replacement input, which may contain local-only data. */
+  argsModifiedByMod?: boolean;
   isClientInitiated: boolean;
   prompt_id: string;
   response_id?: string;

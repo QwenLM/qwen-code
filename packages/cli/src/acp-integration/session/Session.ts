@@ -59,6 +59,11 @@ import {
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { buildWithSchemaValidationNote } from '@qwen-code/qwen-code-core/utils/schemaValidator.js';
+import {
+  setModelToolErrorNote,
+  copyModelToolErrorNote,
+} from '@qwen-code/qwen-code-core/tools/tool-error.js';
 import { buildSyntheticToolResponseParts } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
@@ -18062,6 +18067,7 @@ export class Session implements SessionContext {
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
         invalidToolParamsName?: string;
+        validationNote?: string;
         stopAfterPermissionCancel?: boolean;
         skipPersistence?: boolean;
         settledMetadata?: {
@@ -18170,6 +18176,12 @@ export class Session implements SessionContext {
           opts.invalidToolParamsName ?? toolName,
           error,
         );
+      if (!loopDetected && opts.validationNote) {
+        setModelToolErrorNote(errorParts[0], opts.validationNote);
+        if (modelErrorParts !== errorParts) {
+          copyModelToolErrorNote(errorParts[0], modelErrorParts[0]);
+        }
+      }
       return {
         parts: modelErrorParts,
         stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
@@ -18478,6 +18490,7 @@ export class Session implements SessionContext {
         // permission and approval as the model's input; the checks above fix
         // the tool's identity, which the hook cannot change.
         const toolUseId = generateToolUseId();
+        const modelArgs = args;
         const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
         const messageBusForTool = this.config.getMessageBus?.();
         if (hooksEnabledForTool && messageBusForTool) {
@@ -18608,6 +18621,7 @@ export class Session implements SessionContext {
         let approvalMode = this.config.getApprovalMode();
 
         let toolBuildSucceeded = false;
+        let validationNote: string | undefined;
         try {
           const buildInvocation = (input: Record<string, unknown>) => {
             const built = appExecution
@@ -18623,7 +18637,15 @@ export class Session implements SessionContext {
             callIdAware.setCallId?.(callId);
             return built;
           };
-          let invocation = buildInvocation(args);
+          let invocation = buildWithSchemaValidationNote(
+            args,
+            () => buildInvocation(args),
+            args === modelArgs && !codeModeContext && !appExecution
+              ? (note) => {
+                  validationNote = note;
+                }
+              : undefined,
+          );
           builtInvocation = invocation;
           toolBuildSucceeded = true;
           // A complete call that builds is the model's recovery, as when the
@@ -21108,6 +21130,7 @@ export class Session implements SessionContext {
               errorType,
               executionStatus,
               recordInvalidToolParams: !toolBuildSucceeded,
+              validationNote: status === 'error' ? validationNote : undefined,
               stopAfterPermissionCancel: nestedPermissionCancelled,
             },
           );

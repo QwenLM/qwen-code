@@ -94,10 +94,7 @@ import { logToolCall } from '../telemetry/loggers.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { InputFormat } from '../output/types.js';
 import { setModelToolErrorNote, ToolErrorType } from '../tools/tool-error.js';
-import {
-  withSchemaValidationReporter,
-  type SchemaValidationReporter,
-} from '../utils/schemaValidator.js';
+import { buildWithSchemaValidationNote } from '../utils/schemaValidator.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
@@ -2964,15 +2961,15 @@ export class CoreToolScheduler {
     callId?: string,
     promptId?: string,
     notifyOnCompletion = false,
-    reportValidation?: SchemaValidationReporter,
+    onValidationNote?: (note: string) => void,
   ): AnyToolInvocation | Error {
     try {
       const input = structuredClone(args);
-      const invocation = reportValidation
-        ? withSchemaValidationReporter(input, reportValidation, () =>
-            tool.build(input),
-          )
-        : tool.build(input);
+      const invocation = buildWithSchemaValidationNote(
+        input,
+        () => tool.build(input),
+        onValidationNote,
+      );
       const notificationAware = invocation as {
         setCompletionNotificationEnabled?: (enabled: boolean) => void;
       };
@@ -3861,10 +3858,11 @@ export class CoreToolScheduler {
 
           const isOriginalModelInput =
             originalArgs === policyGate.args &&
+            !reqInfo.argsModifiedByMod &&
             !reqInfo.isClientInitiated &&
             reqInfo.source !== 'code_mode' &&
             (reqInfo.executionOrigin?.kind ?? 'model') === 'model';
-          let diagnostic: { message: string; note: string } | undefined;
+          let validationNote: string | undefined;
           const invocationOrError = runInRequestGoalContext(reqInfo, () =>
             this.buildInvocation(
               toolInstance,
@@ -3873,8 +3871,8 @@ export class CoreToolScheduler {
               reqInfo.prompt_id,
               reqInfo.executionOrigin?.kind === 'client',
               isOriginalModelInput
-                ? (message, note) => {
-                    diagnostic = { message, note };
+                ? (note) => {
+                    validationNote = note;
                   }
                 : undefined,
             ),
@@ -3925,11 +3923,8 @@ export class CoreToolScheduler {
               ToolErrorType.INVALID_TOOL_PARAMS,
               'not_started',
             );
-            if (
-              !retryLimitReached &&
-              diagnostic?.message === invocationOrError.message
-            ) {
-              setModelToolErrorNote(response.responseParts[0], diagnostic.note);
+            if (!retryLimitReached && validationNote) {
+              setModelToolErrorNote(response.responseParts[0], validationNote);
             }
             newToolCalls.push({
               status: 'error',

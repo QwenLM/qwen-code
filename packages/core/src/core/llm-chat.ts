@@ -37,7 +37,7 @@ import {
   enforceFunctionResponseBudget,
   minimumFunctionResponseContent,
   isBudgetShrinkablePart,
-  toolResponseTextLength,
+  budgetedFunctionResponseTextLength,
 } from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
@@ -4124,7 +4124,9 @@ export class LlmChat {
         ) {
           limitModelToolErrorNotes(
             budgetedParts,
-            () => toolOutputBudget - toolResponseTextLength(budgetedParts),
+            () =>
+              toolOutputBudget -
+              budgetedFunctionResponseTextLength(budgetedParts),
           );
         }
 
@@ -6421,8 +6423,9 @@ export class LlmChat {
       // successful response may anchor the next send.
       this.toolBudgetUsageAnchor = undefined;
       params.config?.abortSignal?.throwIfAborted();
+      const contents = withModelToolErrorNotes(requestContents);
       const groups = new Map<ToolOutputProvenance, Part[]>();
-      for (const content of requestContents)
+      for (const content of contents)
         for (const part of content.parts ?? []) {
           const provenance = getToolOutputProvenance(part);
           if (!provenance || this.injectedToolResults.has(provenance)) continue;
@@ -6476,7 +6479,6 @@ export class LlmChat {
         }),
       };
       onModelRequestDispatched?.();
-      const contents = withModelToolErrorNotes(requestContents);
       return generator.generateContentStream(
         contents === requestContents ? request : { ...request, contents },
         prompt_id,

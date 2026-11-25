@@ -35,6 +35,8 @@ import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-inte
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { withModelToolErrorNotes } from '@qwen-code/qwen-code-core/tools/tool-error.js';
+import { TaskUpdateTool } from '@qwen-code/qwen-code-core/tools/task-update.js';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
@@ -56192,6 +56194,47 @@ describe('Session', () => {
         };
       }>;
     };
+
+    it.each([false, true])(
+      'returns a private schema diagnosis only for model input (hook replacement: %s)',
+      async (replaceInput) => {
+        const tool = new TaskUpdateTool(mockConfig);
+        const invalid = { taskId: '1', metadata: '{"label":"sample",}' };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getTruncateToolOutputThreshold = vi
+          .fn()
+          .mockReturnValue(1000);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+          shouldProceed: true,
+          additionalContext: 'pre-hook context',
+          ...(replaceInput && { updatedInput: invalid }),
+        });
+
+        const { parts } = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'prompt-schema-error', [
+          {
+            id: 'invalid-metadata',
+            name: tool.name,
+            args: replaceInput ? { taskId: '1' } : invalid,
+          },
+        ]);
+
+        const stored = parts[0].functionResponse?.response?.['error'];
+        expect(stored).toContain('params/metadata must be object');
+        expect(stored).toContain('pre-hook context');
+        expect(stored).not.toContain('sample');
+        const [model] = withModelToolErrorNotes([{ role: 'user', parts }]);
+        const sent = model.parts?.[0].functionResponse?.response?.['error'];
+        if (replaceInput) {
+          expect(sent).toBe(stored);
+        } else {
+          expect(sent).toMatch(/sample.*<<HERE>>[\s\S]*pre-hook context/);
+        }
+      },
+    );
 
     it('delivers nested PreToolUse context with the exec result, not the script value', async () => {
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);

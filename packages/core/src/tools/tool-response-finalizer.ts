@@ -422,6 +422,13 @@ export function toolResponseTextLength(parts: Part[]): number {
   ).reduce((total, slot) => total + slot.text.length, 0);
 }
 
+export function budgetedFunctionResponseTextLength(parts: Part[]): number {
+  return collectTextSlots(
+    [{ callId: '', toolName: '', responseParts: parts }],
+    false,
+  ).reduce((total, slot) => total + slot.text.length, 0);
+}
+
 export function minimumFunctionResponseContent(parts: Part[]): {
   parts: Part[];
   budgetedChars: number;

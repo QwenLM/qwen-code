@@ -24,7 +24,7 @@ const Ajv2020Class = (Ajv2020Pkg as any).default || Ajv2020Pkg;
 
 const debugLogger = createDebugLogger('SchemaValidator');
 
-export type SchemaValidationReporter = (message: string, note: string) => void;
+type SchemaValidationReporter = (message: string, note: string) => void;
 
 const validationReporters = new WeakMap<object, SchemaValidationReporter>();
 
@@ -39,6 +39,30 @@ export function withSchemaValidationReporter<T>(
     return run();
   } finally {
     validationReporters.delete(data);
+  }
+}
+
+/** Report only the schema error that actually escaped the initial build. */
+export function buildWithSchemaValidationNote<T>(
+  input: object,
+  build: () => T,
+  onErrorNote?: (note: string) => void,
+): T {
+  if (!onErrorNote) return build();
+  let diagnostic: { message: string; note: string } | undefined;
+  try {
+    return withSchemaValidationReporter(
+      input,
+      (message, note) => {
+        diagnostic = { message, note };
+      },
+      build,
+    );
+  } catch (error) {
+    if (error instanceof Error && diagnostic?.message === error.message) {
+      onErrorNote(diagnostic.note);
+    }
+    throw error;
   }
 }
 
@@ -494,7 +518,7 @@ function validateWithCoercion(
       });
       const report = validationReporters.get(data);
       if (report) {
-        const note = describeBrokenJsonString(validate.errors, data);
+        const note = describeBrokenJsonString(validate.errors, data, anySchema);
         if (note) report(message, note);
       }
       return message;
@@ -513,15 +537,19 @@ function validateWithCoercion(
 function describeBrokenJsonString(
   errors: ErrorObject[],
   data: Record<string, unknown>,
+  schema: AnySchema,
 ): string {
   // Correcting a field cannot change the type of its enclosing container.
   // Other failures may mean the string is valid for a different branch.
   let instancePath: string | undefined;
   const types = new Set<string>();
+  const inactive = inactiveTaggedUnionErrors(errors, data, schema);
+  if (!inactive) return '';
   for (const error of errors) {
     if (
       error.keyword === 'anyOf' ||
-      (error.keyword === 'oneOf' && error.params['passingSchemas'] === null)
+      (error.keyword === 'oneOf' && error.params['passingSchemas'] === null) ||
+      inactive.has(error)
     ) {
       continue;
     }
@@ -547,18 +575,7 @@ function describeBrokenJsonString(
     return '';
   }
 
-  let value: unknown = data;
-  for (const part of instancePath.split('/').slice(1)) {
-    const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
-    if (
-      typeof value !== 'object' ||
-      value === null ||
-      !Object.hasOwn(value, key)
-    ) {
-      return '';
-    }
-    value = (value as Record<string, unknown>)[key];
-  }
+  const value = valueAtPointer(data, instancePath);
   if (typeof value !== 'string') return '';
   const text = value.trim();
   if (!text.startsWith('[') && !text.startsWith('{')) return '';
@@ -586,13 +603,106 @@ function describeBrokenJsonString(
             text.slice(position, position + 20),
         )}.`
       : '';
+    // JavaScriptCore can quote an entire long identifier in the parser error.
+    const summary = reason.length > 100 ? `${reason.slice(0, 100)}…` : reason;
     const fix = hasPosition ? 'Fix the text there' : 'Fix the JSON syntax';
     return (
-      `; params${instancePath} arrived as a string whose text is not valid JSON (${reason}).` +
+      `; params${instancePath} arrived as a string whose text is not valid JSON (${summary}).` +
       `${near} ${fix} and send it as a JSON ${expected}, not as a string`
     );
   }
   return '';
+}
+
+// Ajv also reports errors for the other alternatives of a tagged union. A
+// sibling's required or const failure says nothing about the selected payload.
+function inactiveTaggedUnionErrors(
+  errors: ErrorObject[],
+  data: Record<string, unknown>,
+  schema: AnySchema,
+): Set<ErrorObject> | undefined {
+  const inactive = new Set<ErrorObject>();
+  for (const error of errors) {
+    if (error.keyword !== 'anyOf' && error.keyword !== 'oneOf') continue;
+    if (!error.schemaPath.startsWith('#/')) continue;
+    const branches = valueAtPointer(
+      schema,
+      decodeURIComponent(error.schemaPath.slice(1)),
+    );
+    const input = valueAtPointer(data, error.instancePath);
+    if (!Array.isArray(branches) || typeof input !== 'object' || !input)
+      continue;
+    // Ajv attributes errors inside a local $ref to its target's schema path.
+    const paths = branches.map(
+      (branch: { $ref?: string }, index) =>
+        branch.$ref ?? `${error.schemaPath}/${index}`,
+    );
+    const properties = paths.map((path) => {
+      if (!path.startsWith('#/')) return undefined;
+      return valueAtPointer(
+        schema,
+        `${decodeURIComponent(path.slice(1))}/properties`,
+      ) as Record<string, { const?: unknown }> | undefined;
+    });
+    const fields = input as Record<string, unknown>;
+    const mismatches = properties.map(
+      (props) =>
+        Object.entries(props ?? {}).find(
+          ([key, property]) =>
+            Object.hasOwn(fields, key) &&
+            property?.const !== undefined &&
+            typeof property.const !== 'object' &&
+            property.const !== fields[key],
+        )?.[0],
+    );
+    const selected = mismatches.indexOf(undefined);
+    if (selected < 0) return undefined;
+    if (selected !== mismatches.lastIndexOf(undefined)) continue;
+    for (const [index, key] of mismatches.entries()) {
+      if (
+        key === undefined ||
+        properties[selected]?.[key]?.const !== fields[key]
+      )
+        continue;
+      // Consume just this branch's error at this object or its property. The
+      // active payload may reuse the very same definition at another path.
+      const path = paths[index];
+      const failure = errors.find((e) => {
+        if (inactive.has(e)) return false;
+        if (e.instancePath === error.instancePath) {
+          return e.schemaPath === `${path}/${e.keyword}`;
+        }
+        const prefix = `${error.instancePath}/`;
+        if (!e.instancePath.startsWith(prefix)) return false;
+        const property = encodeURIComponent(
+          e.instancePath.slice(prefix.length),
+        );
+        return e.schemaPath === `${path}/properties/${property}/${e.keyword}`;
+      });
+      // A composite may contribute several errors. Leave the original message
+      // alone unless the rejected branch's failure is unambiguous.
+      if (
+        !failure ||
+        failure.keyword === 'anyOf' ||
+        failure.keyword === 'oneOf'
+      ) {
+        return undefined;
+      }
+      inactive.add(failure);
+    }
+  }
+  return inactive;
+}
+
+function valueAtPointer(value: unknown, path: string): unknown {
+  for (const part of path.split('/').slice(1)) {
+    const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (typeof value !== 'object' || !value || !Object.hasOwn(value, key)) {
+      return undefined;
+    }
+    value = (value as Record<string, unknown>)[key];
+  }
+  return value;
 }
 
 /**
@@ -608,18 +718,7 @@ function resolveRef(
   rootSchema: Record<string, unknown>,
 ): Record<string, unknown> | null {
   if (!ref.startsWith('#/')) return null;
-  const parts = ref.slice(2).split('/');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = rootSchema;
-  for (const rawPart of parts) {
-    if (current == null || typeof current !== 'object') return null;
-    // Decode RFC 6901 JSON Pointer escape sequences: ~1 → /, ~0 → ~
-    const part = rawPart.replace(/~1/g, '/').replace(/~0/g, '~');
-    // Only traverse own properties — prevents __proto__/constructor/prototype
-    // traversal that could resolve to Object.prototype or Function.prototype.
-    if (!Object.hasOwn(current, part)) return null;
-    current = current[part];
-  }
+  const current = valueAtPointer(rootSchema, ref.slice(1));
   if (
     current != null &&
     typeof current === 'object' &&
