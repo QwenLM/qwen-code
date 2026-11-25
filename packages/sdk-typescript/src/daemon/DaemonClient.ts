@@ -884,6 +884,12 @@ export interface CreateSessionRequest {
   sessionId?: string;
   modelServiceId?: string;
   /**
+   * Standalone-only initial reasoning selection, applied with the model at
+   * startup (`POST /standalone/sessions`). Daemons without the mirror drop
+   * the field; read `reasoningEffortApplied` from the response to confirm.
+   */
+  reasoningEffort?: ReasoningSelection;
+  /**
    * Per-request session-scope override. The production daemon defaults
    * to `'single'`, which coalesces same-workspace `POST /session` calls
    * into one shared session; passing `sessionScope: 'thread'` here

@@ -5750,8 +5750,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const modelServiceId =
             overrides?.modelServiceId ??
             createSessionRequestRef.current?.modelServiceId;
+          // The reasoning selection is part of the creation contract only
+          // alongside a model: the daemon applies it at the same startup
+          // step that sets the model it belongs to.
+          const reasoningEffort = modelServiceId
+            ? (overrides?.reasoningEffort ??
+              createSessionRequestRef.current?.reasoningEffort)
+            : undefined;
           return DaemonSessionClient.createStandalone(client, {
             ...(modelServiceId !== undefined ? { modelServiceId } : {}),
+            ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           }).then((owner) =>
             turnNotifications.remember(owner, { kind: 'standalone' }),

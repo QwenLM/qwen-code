@@ -1658,6 +1658,15 @@ export interface DaemonSession {
    * instead of assuming the requested model is live.
    */
   modelApplied?: boolean;
+  /**
+   * Only present on a fresh spawn (`attached: false`) that carried
+   * `reasoningEffort`. Echoes the effort the daemon applied at startup, in
+   * the same `reasoning_effort` selection space the config option accepts.
+   * Lets create callers confirm the initial reasoning selection the way
+   * `modelApplied` confirms the model, instead of calling the post-create
+   * setter on a host that only accepts initial configuration.
+   */
+  reasoningEffortApplied?: ReasoningSelection;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
   /** Durable worktree metadata/ownership attestation from the daemon. */

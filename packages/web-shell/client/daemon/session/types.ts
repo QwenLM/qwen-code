@@ -693,6 +693,10 @@ export interface DaemonSessionActions {
    * request itself, so the daemon applies it atomically at spawn instead of
    * requiring a follow-up `setApprovalMode` call.
    * `options.modelServiceId` is a standalone-only atomic create override.
+   * `options.reasoningEffort` is a standalone-only initial reasoning selection
+   * applied in the same create request as the model, so hosts that only
+   * accept initial configuration honour the native menu value instead of a
+   * follow-up setter.
    *
    * `options.sourceType` records immutable creator attribution.
    *
@@ -708,6 +712,7 @@ export interface DaemonSessionActions {
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    reasoningEffort?: ReasoningSelection;
     startupConfig?: CreateSessionRequest['startupConfig'];
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;

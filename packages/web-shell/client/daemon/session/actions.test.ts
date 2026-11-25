@@ -8224,6 +8224,107 @@ function contextStatus(sessionId: string): DaemonSessionContextStatus {
   };
 }
 
+describe('standalone create carries the reasoning selection (#18313)', () => {
+  function standaloneSession(
+    sessionId: string,
+    applied: 'none' | 'low' | 'medium' | 'xhigh' | undefined,
+    clientId = `client-${sessionId}`,
+  ) {
+    const mock = createMockSession(sessionId, clientId);
+    mock.sessionId = sessionId;
+    mock.session = {
+      sessionId,
+      ...(applied !== undefined ? { reasoningEffortApplied: applied } : {}),
+    };
+    return mock;
+  }
+
+  it('sends reasoningEffort with the attached standalone create request', async () => {
+    const next = standaloneSession('standalone-attached', 'low');
+    const createDetachedStandaloneSession = vi.fn(
+      async () => next as unknown as DaemonSessionClient,
+    );
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'standalone' },
+      },
+      createDetachedStandaloneSession,
+    });
+
+    await actions.createSession({
+      modelServiceId: 'qwen3.8-max',
+      reasoningEffort: 'low',
+    });
+
+    expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
+      modelServiceId: 'qwen3.8-max',
+      reasoningEffort: 'low',
+    });
+  });
+
+  it('forwards reasoningEffort through the detached standalone create path', async () => {
+    const active = createMockSession('active-session');
+    const next = standaloneSession('standalone-detached', 'none');
+    const createDetachedStandaloneSession = vi.fn(
+      async () => next as unknown as DaemonSessionClient,
+    );
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'standalone' },
+        sessionId: 'active-session',
+      },
+      session: active,
+      createDetachedStandaloneSession,
+    });
+
+    await actions.createSession({ reasoningEffort: 'none' });
+
+    expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
+      reasoningEffort: 'none',
+    });
+  });
+
+  it.each([['medium'], [undefined]] as const)(
+    'rejects a standalone create that echoes %s instead of the requested effort',
+    async (applied) => {
+      const next = standaloneSession('standalone-mismatch', applied);
+      const { actions } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionContext: { kind: 'standalone' },
+        },
+        createDetachedStandaloneSession: vi.fn(
+          async () => next as unknown as DaemonSessionClient,
+        ),
+      });
+
+      await expect(
+        actions.createSession({ reasoningEffort: 'low' }),
+      ).rejects.toThrow(/did not confirm reasoning effort "low"/);
+    },
+  );
+
+  it('rejects reasoningEffort on a non-standalone create', async () => {
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+    });
+
+    await expect(
+      actions.createSession({
+        workspaceCwd: '/workspace',
+        reasoningEffort: 'low',
+      }),
+    ).rejects.toThrow(
+      /reasoningEffort is only supported for standalone session creation/,
+    );
+  });
+});
+
 describe('accepted attachment sources', () => {
   const file = {
     name: 'original.txt',

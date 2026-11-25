@@ -5,9 +5,14 @@
  */
 
 import { DaemonHttpError } from './DaemonHttpError.js';
-import { DAEMON_APPROVAL_MODES, DAEMON_ERROR_KINDS } from './types.js';
+import {
+  DAEMON_APPROVAL_MODES,
+  DAEMON_ERROR_KINDS,
+  DAEMON_REASONING_SELECTIONS,
+} from './types.js';
 import type {
   DaemonApprovalMode,
+  ReasoningSelection,
   SessionStartupConfig,
   DaemonRestoredSession,
   DaemonSession,
@@ -29,6 +34,14 @@ export interface CreateStandaloneSessionOptions {
   startupConfig?: SessionStartupConfig;
   sessionId?: string;
   modelServiceId?: string;
+  /**
+   * Initial reasoning selection, applied at startup with the model. Unlike the
+   * post-create config-option setter, this is part of the creation contract,
+   * so hosts that only accept initial configuration can honour it. Daemons
+   * without the mirror ignore it; the caller keeps the setter for them and
+   * reads `reasoningEffortApplied` to tell the two apart.
+   */
+  reasoningEffort?: ReasoningSelection;
   approvalMode?: DaemonApprovalMode;
 }
 
@@ -426,6 +439,17 @@ export function parseStandaloneSession(
     throw new DaemonStandaloneProtocolError(
       route,
       'expected modelApplied boolean',
+    );
+  }
+  if (
+    session['reasoningEffortApplied'] !== undefined &&
+    !(DAEMON_REASONING_SELECTIONS as readonly unknown[]).includes(
+      session['reasoningEffortApplied'],
+    )
+  ) {
+    throw new DaemonStandaloneProtocolError(
+      route,
+      'expected reasoningEffortApplied reasoning selection',
     );
   }
   validateStandaloneFields(session, route);

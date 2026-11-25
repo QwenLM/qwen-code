@@ -36,6 +36,7 @@ import type {
   DaemonSessionAttachmentReference,
   PermissionResponse,
   PromptContentBlock,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import {
   DaemonHttpError,
@@ -276,7 +277,10 @@ export interface CreateDaemonSessionActionsArgs {
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
-    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
+    overrides?: Pick<
+      CreateSessionRequest,
+      'approvalMode' | 'modelServiceId' | 'reasoningEffort'
+    >,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getClient?: () => DaemonClient | undefined;
@@ -523,6 +527,22 @@ export function createDaemonSessionActions({
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
+
+  // The reasoning menu owns its value from the moment it is picked, so a
+  // standalone create carries it atomically with the model and reads the
+  // effort the daemon actually applied back from the create response. The
+  // create already wrote the applied value into the connection, so this only
+  // rejects a create that did not honour it.
+  function confirmStandaloneCreateReasoning(
+    requested: ReasoningSelection | undefined,
+    applied: ReasoningSelection | undefined,
+  ): void {
+    if (requested === undefined) return;
+    if (applied !== undefined && applied === requested) return;
+    throw new Error(
+      `Daemon did not confirm reasoning effort ${JSON.stringify(requested)} at session creation`,
+    );
+  }
 
   async function refreshSessionRecovery(session: DaemonSessionClient) {
     const generation = advanceSessionRecoveryGeneration(
@@ -2752,6 +2772,7 @@ export function createDaemonSessionActions({
       getCurrentWorkspaceCwd?: () => string | undefined;
       sessionContext?: DaemonProductSessionContext;
       modelServiceId?: string;
+      reasoningEffort?: ReasoningSelection;
       startupConfig?: CreateSessionRequest['startupConfig'];
       approvalMode?: DaemonApprovalMode;
       sourceType?: string;
@@ -2829,6 +2850,25 @@ export function createDaemonSessionActions({
             'Per-call modelServiceId is only supported for standalone session creation',
           );
         }
+        if (
+          targetSessionContext?.kind !== 'standalone' &&
+          options?.reasoningEffort !== undefined
+        ) {
+          throw new Error(
+            'Per-call reasoningEffort is only supported for standalone session creation',
+          );
+        }
+        const standaloneCreateOverrides = {
+          ...(options?.modelServiceId !== undefined
+            ? { modelServiceId: options.modelServiceId }
+            : {}),
+          ...(options?.reasoningEffort !== undefined
+            ? { reasoningEffort: options.reasoningEffort }
+            : {}),
+          ...(options?.approvalMode !== undefined
+            ? { approvalMode: options.approvalMode }
+            : {}),
+        };
         // Fold the initial approval mode into the create request so the daemon
         // applies it atomically at spawn (`POST /session` →
         // `spawnOrAttach({ approvalMode })`), avoiding a follow-up
@@ -2857,16 +2897,13 @@ export function createDaemonSessionActions({
             : undefined;
         if (activeSession) {
           if (targetSessionContext?.kind === 'standalone') {
-            const nextClient = await trackCreate(
-              createDetachedStandaloneSession({
-                ...(options?.modelServiceId !== undefined
-                  ? { modelServiceId: options.modelServiceId }
-                  : {}),
-                ...(options?.approvalMode !== undefined
-                  ? { approvalMode: options.approvalMode }
-                  : {}),
-              }),
+            const nextClient: DaemonSessionClient = await trackCreate(
+              createDetachedStandaloneSession(standaloneCreateOverrides),
               (created) => created.detach(),
+            );
+            confirmStandaloneCreateReasoning(
+              options?.reasoningEffort,
+              nextClient.session.reasoningEffortApplied,
             );
             persistStableClientId(nextClient.clientId, nextClient.sessionId);
             return nextClient.session;
@@ -2896,14 +2933,7 @@ export function createDaemonSessionActions({
         publishStandaloneRecovery = targetSessionContext?.kind === 'standalone';
         const trackedCreate = trackCreate(
           targetSessionContext?.kind === 'standalone'
-            ? createDetachedStandaloneSession({
-                ...(options?.modelServiceId !== undefined
-                  ? { modelServiceId: options.modelServiceId }
-                  : {}),
-                ...(options?.approvalMode !== undefined
-                  ? { approvalMode: options.approvalMode }
-                  : {}),
-              })
+            ? createDetachedStandaloneSession(standaloneCreateOverrides)
             : createDetachedSession(
                 targetSessionContext?.kind === 'workspace'
                   ? targetSessionContext.cwd
@@ -2920,6 +2950,12 @@ export function createDaemonSessionActions({
                 'Create session timed out',
                 resolveCreateWatchdogTimeoutMs(getConnection().capabilities),
               );
+        if (targetSessionContext?.kind === 'standalone') {
+          confirmStandaloneCreateReasoning(
+            options?.reasoningEffort,
+            nextSession.session.reasoningEffortApplied,
+          );
+        }
         const userMovedAway =
           (getConnection().sessionId !== connectionSessionIdAtStart ||
             getWorkspaceSelectionKey() !== workspaceSelectionAtStart ||

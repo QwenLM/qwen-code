@@ -158,7 +158,12 @@ describe('createAndAttachSessionForPrompt', () => {
   });
 
   it('creates standalone sessions without workspace-only fields', async () => {
-    const actions = createActions();
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        sessionId: 'session-1',
+        reasoningEffortApplied: 'high' as const,
+      })),
+    });
 
     await prepareSession({
       sessionActions: actions,
@@ -175,13 +180,115 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'high',
       approvalMode: 'yolo',
       keepOnNavigation: true,
       navigationOutcome: { bound: true },
     });
     expect(actions.setModel).not.toHaveBeenCalled();
-    expect(actions.setReasoningEffort).toHaveBeenCalledWith('high', {
-      persist: false,
+    // The create already applied the effort, so the post-create setter is
+    // skipped for standalone sessions (#18313).
+    expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  describe('standalone create carries the reasoning selection (#18313)', () => {
+    const standalone = { kind: 'standalone' as const };
+
+    it.each(['none', 'low'] as const)(
+      'forwards %s at creation and skips the post-create setter',
+      async (reasoningEffort) => {
+        const actions = createActions({
+          createSession: vi.fn(async () => ({
+            sessionId: 'session-1',
+            reasoningEffortApplied: reasoningEffort,
+          })),
+        });
+
+        await prepareSession({
+          sessionActions: actions,
+          modelId: 'qwen3.8-max',
+          reasoningEffort,
+          sessionContext: standalone,
+        });
+
+        expect(actions.createSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            modelServiceId: 'qwen3.8-max',
+            reasoningEffort,
+          }),
+        );
+        expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+      },
+    );
+
+    it('sends no reasoningEffort when nothing was explicitly selected', async () => {
+      const actions = createActions();
+
+      await prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max',
+        sessionContext: standalone,
+      });
+
+      expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.not.objectContaining({ reasoningEffort: expect.anything() }),
+      );
+      expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    });
+
+    it('releases a standalone session whose create did not confirm the effort', async () => {
+      const warn = vi.fn();
+      const actions = createActions({
+        createSession: vi.fn(async () => ({ sessionId: 'session-1' })),
+      });
+
+      await expect(
+        prepareSession({
+          sessionActions: actions,
+          modelId: 'qwen3.8-max',
+          reasoningEffort: 'none',
+          sessionContext: standalone,
+          warn,
+        }),
+      ).rejects.toThrow(/did not confirm the requested reasoning effort/);
+
+      expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+      expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+      expect(actions.clearSession).toHaveBeenCalledOnce();
+    });
+
+    it('still applies a non-standalone reasoning effort after attach', async () => {
+      const actions = createActions();
+
+      await prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max',
+        reasoningEffort: 'low',
+      });
+
+      expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.not.objectContaining({ reasoningEffort: expect.anything() }),
+      );
+      expect(actions.setReasoningEffort).toHaveBeenCalledWith('low', {
+        persist: true,
+      });
+    });
+
+    it('keeps the post-create setter when standalone creation carries no model', async () => {
+      const actions = createActions();
+
+      await prepareSession({
+        sessionActions: actions,
+        reasoningEffort: 'high',
+        sessionContext: standalone,
+      });
+
+      expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.not.objectContaining({ reasoningEffort: expect.anything() }),
+      );
+      expect(actions.setReasoningEffort).toHaveBeenCalledWith('high', {
+        persist: false,
+      });
     });
   });
 
@@ -844,6 +951,51 @@ describe('createAndAttachSessionForPrompt', () => {
       );
       expect(setApprovalMode).not.toHaveBeenCalled();
       expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    });
+
+    it('carries the reasoning selection through the detached standalone create', async () => {
+      const client = {
+        ...createDetachedClient(),
+        reasoningEffortApplied: 'none' as const,
+      };
+      const actions = createUnboundActions(client);
+
+      await prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max',
+        reasoningEffort: 'none',
+        sessionContext: { kind: 'standalone' },
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(actions.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelServiceId: 'qwen3.8-max',
+          reasoningEffort: 'none',
+        }),
+      );
+      // The daemon applied it at creation; no post-create setter on the
+      // created client, which is what hosts rejecting later updates break on.
+      expect(client.setConfigOption).not.toHaveBeenCalled();
+    });
+
+    it('releases through the created client when the detached create did not confirm the effort', async () => {
+      const client = createDetachedClient();
+      const actions = createUnboundActions(client);
+
+      await expect(
+        prepareSession({
+          sessionActions: actions,
+          modelId: 'qwen3.8-max',
+          reasoningEffort: 'low',
+          sessionContext: { kind: 'standalone' },
+          getCurrentSessionId: () => 'session-2',
+          warn: vi.fn(),
+        }),
+      ).rejects.toThrow(/did not confirm the requested reasoning effort/);
+
+      expect(client.setConfigOption).not.toHaveBeenCalled();
+      expect(client.close).toHaveBeenCalledOnce();
     });
 
     it('releases through the created client when detached preparation fails', async () => {

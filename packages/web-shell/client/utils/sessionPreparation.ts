@@ -17,6 +17,8 @@ type CreatedPromptSession = {
   worktree?: { slug: string; path: string; branch: string };
   branch?: { name: string; baseBranch: string };
   modelApplied?: boolean;
+  /** The effort the session was created with, when the create applied one. */
+  reasoningEffortApplied?: ReasoningSelection;
   updateMetadata?: DaemonSessionClient['updateMetadata'];
 };
 
@@ -26,6 +28,7 @@ type PromptSessionActions = {
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    reasoningEffort?: ReasoningSelection;
     startupConfig?: SessionStartupConfig;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
@@ -136,11 +139,22 @@ export async function createAndAttachSessionForPrompt({
     sourceVersion !== undefined
       ? { sourceVersion, getCurrentSourceVersion }
       : {};
+  // The reasoning menu owns its value from the moment it is picked, so the
+  // standalone create contract carries it atomically with the model. Hosts
+  // that only accept initial configuration reject a later setter; daemons
+  // without the mirror keep the post-create setter below.
+  const createReasoningEffort =
+    sessionContext?.kind === 'standalone' && reasoningEffort && modelId
+      ? reasoningEffort
+      : undefined;
   const created = await sessionActions.createSession(
     sessionContext?.kind === 'standalone'
       ? {
           sessionContext,
           ...(modelId ? { modelServiceId: modelId } : {}),
+          ...(createReasoningEffort
+            ? { reasoningEffort: createReasoningEffort }
+            : {}),
           ...(approvalMode ? { approvalMode } : {}),
           keepOnNavigation: true,
           navigationOutcome,
@@ -165,7 +179,16 @@ export async function createAndAttachSessionForPrompt({
     worktree: worktreeInfo,
     branch: branchInfo,
     modelApplied,
+    reasoningEffortApplied,
   } = created;
+  // A create that carried the user's effort must confirm it applied: the
+  // session must not run under a different reasoning setting than the one
+  // picked, and a host that only accepts initial configuration cannot be
+  // repaired by a post-create setter. The standalone model fallback guard
+  // above already covers a failed spawn.
+  const confirmedCreateReasoning =
+    createReasoningEffort === undefined ||
+    reasoningEffortApplied === createReasoningEffort;
   onSessionAllocated?.(sessionId);
   // The unbound keepOnNavigation path always returns the created session
   // client; the declared create result type only names its data fields.
@@ -210,6 +233,12 @@ export async function createAndAttachSessionForPrompt({
           `[WebShell] standalone session is running on the agent default model: failed to apply ${modelId} at spawn.`,
         );
       }
+      if (!confirmedCreateReasoning) {
+        preparationStep = 'confirm the requested reasoning effort was applied';
+        throw new Error(
+          `The daemon did not confirm the requested reasoning effort ${JSON.stringify(createReasoningEffort)} at session creation.`,
+        );
+      }
       if (modelId && sessionContext?.kind !== 'standalone') {
         preparationStep = 'set model for new session';
         try {
@@ -236,12 +265,22 @@ export async function createAndAttachSessionForPrompt({
         }
       }
       if (reasoningEffort) {
-        preparationStep = 'set reasoning effort';
-        await detachedSession.setConfigOption(
-          'reasoning_effort',
-          reasoningEffort,
-          { persist: sessionContext?.kind !== 'standalone' },
-        );
+        if (createReasoningEffort !== undefined) {
+          if (!confirmedCreateReasoning) {
+            preparationStep =
+              'confirm the requested reasoning effort was applied';
+            throw new Error(
+              `The daemon did not confirm the requested reasoning effort ${JSON.stringify(createReasoningEffort)} at session creation.`,
+            );
+          }
+        } else {
+          preparationStep = 'set reasoning effort';
+          await detachedSession.setConfigOption(
+            'reasoning_effort',
+            reasoningEffort,
+            { persist: sessionContext?.kind !== 'standalone' },
+          );
+        }
       }
       return {
         ...(worktreeInfo ? { worktree: worktreeInfo } : {}),
@@ -327,10 +366,20 @@ export async function createAndAttachSessionForPrompt({
       }
     }
     if (reasoningEffort) {
-      preparationStep = 'set reasoning effort';
-      await sessionActions.setReasoningEffort(reasoningEffort, {
-        persist: sessionContext?.kind !== 'standalone',
-      });
+      if (createReasoningEffort !== undefined) {
+        if (!confirmedCreateReasoning) {
+          preparationStep =
+            'confirm the requested reasoning effort was applied';
+          throw new Error(
+            `The daemon did not confirm the requested reasoning effort ${JSON.stringify(createReasoningEffort)} at session creation.`,
+          );
+        }
+      } else {
+        preparationStep = 'set reasoning effort';
+        await sessionActions.setReasoningEffort(reasoningEffort, {
+          persist: sessionContext?.kind !== 'standalone',
+        });
+      }
     }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);
