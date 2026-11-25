@@ -35,7 +35,7 @@ const REPETITIVE_TOOL_CALLS_MESSAGE =
   /Repetitive tool calls detected in the conversation history/i;
 
 export const REPETITIVE_TOOL_CALLS_HINT =
-  '\nThe provider rejected the request because the conversation repeats the same tool call. The next message may be rejected for the same reason. To recover, try /compress to summarize the history. If that fails, run /clear to start over.';
+  '\nThe provider may reject the next request because this session repeats the same tool call. Run /compress to summarize this session, or use qwen --resume <session-id> -p "/compress" if your CLI run has exited. If compression fails, start a new session.';
 
 const KNOWN_GUIDANCE_SUFFIXES = [
   ...Object.values(RATE_LIMIT_MESSAGE_BY_AUTH),

@@ -239,6 +239,13 @@ describe('parseAndFormatApiError', () => {
       );
     });
 
+    it('targets the rejected session and offers a fallback for clients without /clear', () => {
+      const message = parseAndFormatApiError(rejection);
+      expect(message).toContain('qwen --resume <session-id> -p "/compress"');
+      expect(message).toContain('start a new session');
+      expect(message).not.toContain('/clear');
+    });
+
     it('returns an already-hinted message unchanged', () => {
       const formatted = parseAndFormatApiError(rejection);
       expect(parseAndFormatApiError(formatted)).toBe(formatted);
