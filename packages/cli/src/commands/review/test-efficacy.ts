@@ -1908,6 +1908,29 @@ function runProbeSuite(
           vmSession.installError = `microVM dependency install exited ${String(installRes.exitCode)}`;
         }
         handleBridgeFault(installRes, 'dependency install');
+        // A zero exit is not proof of a usable tree: `build-test` and
+        // `test-delta` both probe the installer's completeness marker inside
+        // the guest, and an efficacy probe must not spend N runs discovering
+        // the same empty install as `no-output`.
+        if (installRes.exitCode === 0) {
+          const marker =
+            installer === 'pnpm' ? '.modules.yaml' : '.package-lock.json';
+          const markerCheck = executeViaGuestBridgeSync(
+            probeVerdict.socketPath,
+            {
+              command: `test -f node_modules/${marker}`,
+              kind: 'test',
+              timeoutMs: Math.min(5_000, timeout),
+              env: guestCommandEnv('test'),
+              workspaceSessionId: vmSession.sessionId,
+              workspaceMode: 'reuse',
+            },
+          );
+          if (!markerCheck.ok || markerCheck.exitCode !== 0) {
+            vmSession.installError =
+              'microVM dependency install exited 0 without the lockfile completeness marker';
+          }
+        }
         if (vmSession.installError) {
           throw new ProbeRunFailure(vmSession.installError, 'not-run');
         }
@@ -2775,6 +2798,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // has to answer before anything is created, and `probeWorktreePath` is a
   // pure path function.
   const trustContext = trustInputFromPlan(report);
+  let closeReason: string | undefined;
   const teardownState: { status: ReviewTeardownStatus } = {
     status: 'not-applicable',
   };
@@ -3447,7 +3471,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             vmSession.socketPath,
             vmSession.sessionId,
           );
-          recordTeardown(closed ? 'clean' : 'partial');
+          recordTeardown(closed.ok ? 'clean' : 'partial');
+          if (closed.reason) closeReason = closed.reason;
         }
         // Discard the whole probe tree. There is no in-place restore to fail —
         // the shared worktree was never mutated — and a path that survives the
@@ -3616,7 +3641,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
             : 'container teardown verification failed — a timed-out probe container may still be running'
           : teardownState.status === 'partial' && verdict.kind === 'microvm'
-            ? `microVM (${verdict.backend}) timed out or faulted without QWEN_REVIEW_VM_PID_FILE — worker teardown could not be verified`
+            ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified${closeReason ? `: ${closeReason}` : ''}`
             : verdict.kind === 'container' && !mountable
               ? 'probe tree is not under a review temp dir, so probes ran directly rather than in a container'
               : undefined;

@@ -23,6 +23,8 @@ import { basename, isAbsolute, join, posix, sep } from 'node:path';
 import type { ReviewTeardownStatus } from './sandbox-trust.js';
 
 export const GUEST_EXEC_PROTOCOL = 'guest-exec-v1';
+/** Versioned cleanup handshake; command execution stays on `GUEST_EXEC_PROTOCOL`. */
+export const GUEST_EXEC_CLOSE_PROTOCOL = 'guest-exec-close-v2';
 export const FRAME_HEADER_BYTES = 5;
 export const DEFAULT_MAX_FRAME_BYTES = 256 * 1024;
 export const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -1190,20 +1192,39 @@ function executableIdentityMatches(
   return false;
 }
 
+export interface GuestSessionCloseResult {
+  ok: boolean;
+  /** Why cleanup could not be verified; surfaced in `executionBoundary.note`. */
+  reason?: string;
+}
+
 /**
- * Best-effort cleanup frame asking the guest peer to delete a persisted
- * `workspaceSessionId` directory once a review phase finishes.
+ * Closes a guest workspace session, requiring a complete session-bound ACK.
+ *
+ * The close handshake carries its own protocol token so a peer still speaking
+ * the previous bare-session-id contract fails at the handshake with an explicit
+ * skew reason, instead of silently degrading every teardown claim. Command
+ * execution keeps `guest-exec-v1`; only cleanup is versioned here.
  */
 export function closeGuestSessionSync(
   socketPath: string,
   workspaceSessionId: string,
   timeoutMs: number = 5_000,
-): boolean {
-  if (!validateWorkspaceSessionId(workspaceSessionId)) return false;
-  if (!validateBridgeSocketEndpoint(socketPath).ok) return false;
+): GuestSessionCloseResult {
+  const fail = (reason: string): GuestSessionCloseResult => ({
+    ok: false,
+    reason,
+  });
+  if (!validateWorkspaceSessionId(workspaceSessionId)) {
+    return fail(
+      `invalid workspaceSessionId: ${JSON.stringify(workspaceSessionId)}`,
+    );
+  }
+  const endpoint = validateBridgeSocketEndpoint(socketPath);
+  if (!endpoint.ok) return fail(endpoint.reason);
   const runId = `close-${randomBytes(6).toString('hex')}`;
   const wire = Buffer.concat([
-    encodeFrame('H', GUEST_EXEC_PROTOCOL),
+    encodeFrame('H', GUEST_EXEC_CLOSE_PROTOCOL),
     encodeFrame(
       'C',
       JSON.stringify({
@@ -1229,21 +1250,32 @@ export function closeGuestSessionSync(
       killSignal: 'SIGKILL',
     },
   );
-  if (r.error || r.status !== 0) return false;
+  if (r.error || r.status !== 0) {
+    return fail(
+      `guest close exchange did not complete: ${r.error?.message ?? `pump exited ${String(r.status)}`}`,
+    );
+  }
   const wireOut = Buffer.isBuffer(r.stdout)
     ? r.stdout
     : Buffer.from(String(r.stdout ?? ''), 'utf8');
   const decoder = new GuestExecFrameDecoder();
   const decoded = decoder.push(wireOut);
-  if (decoded.error || decoder.hasTrailingBytes()) return false;
+  if (decoded.error || decoder.hasTrailingBytes()) {
+    return fail(decoded.error ?? 'truncated guest close acknowledgment');
+  }
   const frames = decoded.frames;
+  const ackProtocol = frames[0]?.payload.toString('utf8');
+  if (frames[0]?.kind === 'A' && ackProtocol !== GUEST_EXEC_CLOSE_PROTOCOL) {
+    return fail(
+      `guest peer protocol skew: close requires "${GUEST_EXEC_CLOSE_PROTOCOL}", peer answered "${ackProtocol ?? ''}" — upgrade the guest collector`,
+    );
+  }
   if (
     frames.length !== 2 ||
     frames[0]?.kind !== 'A' ||
-    frames[0].payload.toString('utf8') !== GUEST_EXEC_PROTOCOL ||
     frames[1]?.kind !== 'Z'
   ) {
-    return false;
+    return fail('guest peer returned no complete session-bound close ACK');
   }
   try {
     const ack = JSON.parse(frames[1].payload.toString('utf8')) as {
@@ -1254,16 +1286,18 @@ export function closeGuestSessionSync(
       signal?: unknown;
       timedOut?: unknown;
     };
-    return (
+    const bound =
       ack.runId === runId &&
       ack.workspaceSessionId === workspaceSessionId &&
       ack.sessionSha256 === sha256Hex(workspaceSessionId) &&
       ack.exitCode === 0 &&
       ack.signal === null &&
-      ack.timedOut === false
-    );
+      ack.timedOut === false;
+    return bound
+      ? { ok: true }
+      : fail('guest close ACK is not bound to this session and run');
   } catch {
-    return false;
+    return fail('malformed guest close ACK payload');
   }
 }
 

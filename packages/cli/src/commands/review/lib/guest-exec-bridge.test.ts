@@ -89,6 +89,13 @@ const server = createServer((sock) => {
           sock.end();
           return;
         }
+        if (mode === 'close-old-peer') {
+          // A peer still speaking the pre-versioning contract answers the
+          // exec token even for the close handshake.
+          sock.write(enc('A', 'guest-exec-v1'));
+          sock.end();
+          return;
+        }
         sock.write(enc('A', payload.toString('utf8')));
       } else if (kind === 'F') {
         curFile = JSON.parse(payload.toString('utf8'));
@@ -250,7 +257,8 @@ async function startGuestAgentChild(
     | 'close-no-ack'
     | 'close-truncated'
     | 'close-pretend-delete'
-    | 'close-wrong-sender' = 'normal',
+    | 'close-wrong-sender'
+    | 'close-old-peer' = 'normal',
 ): Promise<ChildProcess> {
   const child = spawn(
     process.execPath,
@@ -621,8 +629,24 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
       ] as const) {
         const sock = join(dir, `${mode}.sock`);
         children.push(await startGuestAgentChild(sock, dir, mode));
-        expect(closeGuestSessionSync(sock, 'session-close-proof')).toBe(false);
+        expect(closeGuestSessionSync(sock, 'session-close-proof').ok).toBe(
+          false,
+        );
       }
+    },
+  );
+
+  it.skipIf(IS_WINDOWS)(
+    'reports guest peer protocol skew explicitly instead of a generic unverified cleanup',
+    async () => {
+      const dir = mkdtempSync(join('/tmp', 'qvm-close-skew-'));
+      tmpDirs.push(dir);
+      const sock = join(dir, 'old-peer.sock');
+      children.push(await startGuestAgentChild(sock, dir, 'close-old-peer'));
+      const closed = closeGuestSessionSync(sock, 'session-skew-proof');
+      expect(closed.ok).toBe(false);
+      expect(closed.reason).toContain('protocol skew');
+      expect(closed.reason).toContain('guest-exec-close-v2');
     },
   );
 
@@ -785,7 +809,7 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
       expect(step3.stdout).toContain('dep-ok');
       expect(step3.stdout).toContain('synced-mutated');
       expect(step3.stdout).toContain('DELETED_IN_GUEST');
-      expect(closeGuestSessionSync(sockOk, sid)).toBe(true);
+      expect(closeGuestSessionSync(sockOk, sid).ok).toBe(true);
       expect(readdirSync(scratch).some((d) => d === `session-${sid}`)).toBe(
         false,
       );

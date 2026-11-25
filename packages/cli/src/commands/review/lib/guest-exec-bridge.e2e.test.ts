@@ -357,6 +357,9 @@ describe.skipIf(IS_WINDOWS)(
           prTrust: 'external',
           executionClass: 'hardware-isolated',
           backend: 'firecracker',
+          // build-test's OWN aggregated close status, not just the backend:
+          // dropping the closeStatus aggregation must turn this red.
+          teardownStatus: 'clean',
         });
 
         // Host worktree remained untouched (no RW mount) and guest session was cleaned up via 'C'.
@@ -496,9 +499,152 @@ describe.skipIf(IS_WINDOWS)(
           requests.filter((r) => r.command === 'npm ci --no-audit --no-fund'),
         ).toHaveLength(1);
         expect(requests.some((r) => r.command.includes('vitest'))).toBe(false);
-        expect(closeGuestSessionSync(sockPath, 'eff-failed-install-1')).toBe(
+        expect(closeGuestSessionSync(sockPath, 'eff-failed-install-1').ok).toBe(
           true,
         );
+      } finally {
+        settingsGuard.dispose();
+      }
+    }, 30_000);
+
+    it('syncs (not overlays) the probe tree once the guest session holds installed dependencies', async () => {
+      const settingsGuard = isolateOperatorReviewSettings();
+      const dir = mkdtempSync(join('/tmp', 'qvm-eff-sync-'));
+      tmpDirs.push(dir);
+      try {
+        const scratch = join(dir, 'scratch');
+        const wt = join(dir, 'probe-wt');
+        mkdirSync(scratch, { recursive: true });
+        createOfflineInstallableFixture(wt);
+        const probeFile = 'src/index.test.ts';
+        writeFileSync(join(wt, probeFile), 'it("dummy", () => {});\n');
+        execFileSync('git', ['init', '-q'], { cwd: wt });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: wt });
+        execFileSync('git', ['config', 'user.name', 'T'], { cwd: wt });
+        execFileSync('git', ['add', '.'], { cwd: wt });
+        execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: wt });
+        const sockPath = join(dir, 'eff-sync.sock');
+        children.push(
+          await startSessionGuestAgent(sockPath, scratch, 'normal'),
+        );
+        probeOverride.current = {
+          platform: 'linux',
+          arch: 'x64',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          hasVfkit: false,
+          hasSandboxExec: false,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: sockPath,
+        };
+        vi.stubEnv('QWEN_REVIEW_FORCE_HARDWARE', '1');
+        const vmSession: Parameters<typeof runControlMutant>[7] = {
+          sessionId: 'eff-sync-1',
+          socketPath: sockPath,
+          sessionAllocated: false,
+          installAttempted: false,
+        };
+        // The probe verdict is irrelevant here: the WIRE MODE is the oracle.
+        // A `sync` -> `overlay` mutation leaves stale PR-added files in the
+        // guest, so the recorded mode must stay `sync` after install.
+        try {
+          runControlMutant(
+            wt,
+            probeFile,
+            undefined,
+            () => 1,
+            wt,
+            undefined,
+            undefined,
+            vmSession,
+          );
+        } catch {
+          // An unparseable probe result is fine; the request was still sent.
+        }
+        const requests = readFileSync(join(scratch, 'requests.ndjson'), 'utf8')
+          .trim()
+          .split('\n')
+          .map(
+            (l) => JSON.parse(l) as { command: string; workspaceMode?: string },
+          );
+        const probeRequests = requests.filter((r) =>
+          r.command.includes('vitest'),
+        );
+        expect(probeRequests.length).toBeGreaterThan(0);
+        expect(probeRequests.map((r) => r.workspaceMode).join(',')).toBe(
+          probeRequests.map(() => 'sync').join(','),
+        );
+        expect(closeGuestSessionSync(sockPath, 'eff-sync-1').ok).toBe(true);
+      } finally {
+        settingsGuard.dispose();
+      }
+    }, 30_000);
+
+    it('treats a zero-exit efficacy install without the completeness marker as not-run', async () => {
+      const settingsGuard = isolateOperatorReviewSettings();
+      const dir = mkdtempSync(join('/tmp', 'qvm-eff-nomarker-'));
+      tmpDirs.push(dir);
+      try {
+        const scratch = join(dir, 'scratch');
+        const wt = join(dir, 'probe-wt');
+        mkdirSync(scratch, { recursive: true });
+        createOfflineInstallableFixture(wt);
+        const probeFile = 'src/index.test.ts';
+        writeFileSync(join(wt, probeFile), 'it("dummy", () => {});\n');
+        execFileSync('git', ['init', '-q'], { cwd: wt });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: wt });
+        execFileSync('git', ['config', 'user.name', 'T'], { cwd: wt });
+        execFileSync('git', ['add', '.'], { cwd: wt });
+        execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: wt });
+        const sockPath = join(dir, 'eff-nomarker.sock');
+        children.push(
+          await startSessionGuestAgent(
+            sockPath,
+            scratch,
+            'fake-install-no-marker',
+          ),
+        );
+        probeOverride.current = {
+          platform: 'linux',
+          arch: 'x64',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          hasVfkit: false,
+          hasSandboxExec: false,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: sockPath,
+        };
+        vi.stubEnv('QWEN_REVIEW_FORCE_HARDWARE', '1');
+        const vmSession: Parameters<typeof runControlMutant>[7] = {
+          sessionId: 'eff-nomarker-1',
+          socketPath: sockPath,
+          sessionAllocated: false,
+          installAttempted: false,
+        };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(() =>
+            runControlMutant(
+              wt,
+              probeFile,
+              undefined,
+              () => 1,
+              wt,
+              undefined,
+              undefined,
+              vmSession,
+            ),
+          ).toThrow(/without the lockfile completeness marker/);
+        }
+        const requests = readFileSync(join(scratch, 'requests.ndjson'), 'utf8')
+          .trim()
+          .split('\n')
+          .map((l) => JSON.parse(l) as { command: string });
+        expect(requests.some((r) => r.command.includes('vitest'))).toBe(false);
+        expect(closeGuestSessionSync(sockPath, 'eff-nomarker-1').ok).toBe(true);
       } finally {
         settingsGuard.dispose();
       }

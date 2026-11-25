@@ -244,6 +244,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
         }
       : undefined;
   let closeStatus: 'clean' | 'partial' | undefined;
+  let closeReason: string | undefined;
   const exec =
     args.exec ??
     ((cmd: string, cwd: string, timeoutMs: number) =>
@@ -253,12 +254,12 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // remains the exception-path fallback.
   const closeSession = (): void => {
     if (vmSession?.initialized && closeStatus === undefined) {
-      closeStatus = closeGuestSessionSync(
+      const closed = closeGuestSessionSync(
         vmSession.socketPath,
         vmSession.sessionId,
-      )
-        ? 'clean'
-        : 'partial';
+      );
+      closeStatus = closed.ok ? 'clean' : 'partial';
+      closeReason = closed.reason;
     }
   };
   const baseline = resolve(args.baseline);
@@ -581,7 +582,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
         : ('not-applicable' as const);
   const boundaryNote =
     closeStatus === 'partial' && verdict.kind === 'microvm'
-      ? `microVM (${verdict.backend}) guest session close acknowledgment was missing or invalid — cleanup could not be verified`
+      ? `microVM (${verdict.backend}) guest session close acknowledgment was missing or invalid — cleanup could not be verified${closeReason ? `: ${closeReason}` : ''}`
       : teardownStatus === 'failed'
         ? verdict.kind === 'microvm'
           ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`

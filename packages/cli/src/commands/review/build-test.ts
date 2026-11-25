@@ -701,6 +701,8 @@ export interface MicrovmBuildSession {
   installed: boolean;
   /** Whether the session-bound close frame was acknowledged intact. */
   closeStatus?: 'clean' | 'partial' | 'failed';
+  /** Why cleanup could not be verified (e.g. guest peer protocol skew). */
+  closeReason?: string;
 }
 
 export function run(
@@ -1471,12 +1473,12 @@ function runBuildTestUnguarded(
     return { ...adapter.run(runArgs), run: runIdentity };
   } finally {
     if (vmSession?.initialized) {
-      vmSession.closeStatus = closeGuestSessionSync(
+      const closed = closeGuestSessionSync(
         vmSession.socketPath,
         vmSession.sessionId,
-      )
-        ? 'clean'
-        : 'partial';
+      );
+      vmSession.closeStatus = closed.ok ? 'clean' : 'partial';
+      vmSession.closeReason = closed.reason;
     }
   }
 }
@@ -1699,7 +1701,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
         : 'container teardown verification failed — a timed-out container may still be running'
       : teardownStatus === 'partial' && verdict.kind === 'microvm'
-        ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified`
+        ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified${vmSession?.closeReason ? `: ${vmSession.closeReason}` : ''}`
         : verdict.kind === 'container' && !mountable
           ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
           : undefined;
