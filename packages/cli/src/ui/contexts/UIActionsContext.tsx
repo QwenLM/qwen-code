@@ -154,6 +154,8 @@ export interface UIActions {
   closeFeedbackDialog: () => void;
   temporaryCloseFeedbackDialog: () => void;
   submitFeedback: (rating: number) => void;
+  // Settings corruption dialog
+  dismissSettingsCorruptionDialog: () => void;
   // Rewind selector
   openRewindSelector: () => void;
   closeRewindSelector: () => void;

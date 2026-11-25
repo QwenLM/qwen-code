@@ -93,6 +93,7 @@ describe('App', () => {
 
   const mockUIActions = {
     refreshStatic: vi.fn(),
+    dismissSettingsCorruptionDialog: vi.fn(),
   } as unknown as UIActions;
 
   const renderWithProviders = (
@@ -189,6 +190,46 @@ describe('App', () => {
       exit.mockRestore();
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('dismisses the corruption dialog through the UI actions on Continue', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'app-recovery-'));
+    const corruptedPath = path.join(root, 'settings.json.corrupted');
+    fs.writeFileSync(corruptedPath, '{broken');
+    vi.mocked(SettingsCorruptedDialog).mockClear();
+    vi.mocked(mockUIActions.dismissSettingsCorruptionDialog).mockClear();
+    const { unmount } = renderWithProviders(
+      mockUIState as UIState,
+      { ...mockSettings, corruptedPath } as LoadedSettings,
+    );
+
+    try {
+      vi.mocked(SettingsCorruptedDialog).mock.calls[0][0].onContinue();
+
+      expect(
+        mockUIActions.dismissSettingsCorruptionDialog,
+      ).toHaveBeenCalledOnce();
+      expect(fs.existsSync(corruptedPath)).toBe(false);
+    } finally {
+      unmount();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the layout once the corruption dialog is dismissed', () => {
+    const { lastFrame } = renderWithProviders(
+      {
+        ...mockUIState,
+        settingsCorruptionDialogDismissed: true,
+      } as UIState,
+      {
+        ...mockSettings,
+        corruptedPath: '/project/.qwen/settings.json.corrupted',
+      } as LoadedSettings,
+    );
+
+    expect(lastFrame()).not.toContain('Settings corrupted');
+    expect(lastFrame()).toContain('Composer');
   });
 
   it('should render main content and composer when not quitting', () => {
