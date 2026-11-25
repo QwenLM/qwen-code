@@ -269,7 +269,9 @@ describe('SchemaValidator', () => {
         'params/outer/config arrived as a string whose text is not valid JSON',
       );
       expect(note.split('arrived as a string')).toHaveLength(2);
-      expect(note).toContain('send it as a JSON object, not as a string');
+      expect(note).toContain(
+        'resend this field with the type required by its schema',
+      );
     });
 
     it.each([
@@ -590,7 +592,7 @@ describe('SchemaValidator', () => {
       valid(schema, { ...input, items: [] });
     });
 
-    it('keeps the ordinary error if deeper compositions leave the shape ambiguous', () => {
+    it('keeps syntax guidance if deeper compositions leave the shape ambiguous', () => {
       const schema = {
         anyOf: [
           obj({ items: strings(), kind: { const: 'docs' } }),
@@ -606,7 +608,12 @@ describe('SchemaValidator', () => {
         kind: 'docs',
         items: '{"x":,}',
       });
-      expect(report).not.toHaveBeenCalled();
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.stringContaining(
+          'resend this field with the type required by its schema',
+        ),
+      );
     });
 
     it('combines only the payload types of viable tagged branches', () => {
@@ -625,7 +632,7 @@ describe('SchemaValidator', () => {
       );
       expect(
         diagnose(variant({ type: 'object' })).report.mock.calls[0][1],
-      ).toContain('send it as a JSON object');
+      ).toContain('resend this field with the type required by its schema');
       expect(
         diagnose(variant({ type: 'string', pattern: '^NOTE:' })).report,
       ).not.toHaveBeenCalled();
@@ -637,13 +644,44 @@ describe('SchemaValidator', () => {
       anyOf('object', 'array'),
       { type: ['array', 'object'] },
     ])(
-      'preserves the input shape when both arrays and objects are allowed (%j)',
+      'leaves the shape open when both arrays and objects are reported (%j)',
       (schema) => {
         const { report } = validateWithNote(obj({ value: schema }), {
           value: '{"key": 1,}',
         });
         expect(report).toHaveBeenCalledOnce();
-        expect(report.mock.calls[0][1]).toContain('send it as a JSON object');
+        expect(report.mock.calls[0][1]).toContain(
+          'resend this field with the type required by its schema',
+        );
+      },
+    );
+
+    it.each([
+      ['array', ['array', 'object'], '{"a":1 "b":2}', [], {}],
+      ['object', ['array', 'object'], '[1 2]', {}, []],
+      ['null', ['array', 'null'], '[1 2]', null, []],
+    ] as const)(
+      'does not guess the shape before a later allOf constraint requires %s',
+      (type, alternatives, text, accepted, rejected) => {
+        const schema = {
+          $schema: DRAFT_2020,
+          $defs: { Value: anyOf(...alternatives) },
+          ...obj({
+            items: { allOf: [{ $ref: '#/$defs/Value' }, { type }] },
+          }),
+        };
+        const { report } = validateWithNote(schema, { items: text });
+        expect(report).toHaveBeenCalledOnce();
+        const note = report.mock.calls[0][1];
+        expect(note).toContain(
+          'params/items arrived as a string whose text is not valid JSON',
+        );
+        expect(note).toContain('<<HERE>>');
+        expect(note).toContain(
+          'resend this field with the type required by its schema',
+        );
+        valid(schema, { items: accepted });
+        invalid(schema, { items: rejected });
       },
     );
 

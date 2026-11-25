@@ -5,6 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import { getModelToolErrorNote } from '../utils/api-history-metadata.js';
 import { ToolErrorType } from '../utils/tool-error-type.js';
 import {
   getToolOutputRecovery,
@@ -12,28 +13,10 @@ import {
 } from './tool-output-recovery.js';
 
 export { ToolErrorType };
-
-// Keep the insertion offset so the note precedes any appended hook context.
-const modelToolErrorNotes = new WeakMap<
-  object,
-  { text: string; offset: number }
->();
-
-export function setModelToolErrorNote(part: Part, note: string): void {
-  const response = part.functionResponse?.response;
-  const error = response?.['error'];
-  if (response && typeof error === 'string') {
-    modelToolErrorNotes.set(response, { text: note, offset: error.length });
-  }
-}
-
-export function copyModelToolErrorNote(original: Part, updated: Part): void {
-  const source = original.functionResponse?.response;
-  const target = updated.functionResponse?.response;
-  if (!source || !target) return;
-  const note = modelToolErrorNotes.get(source);
-  if (note) modelToolErrorNotes.set(target, note);
-}
+export {
+  copyModelToolErrorNote,
+  setModelToolErrorNote,
+} from '../utils/api-history-metadata.js';
 
 export function limitModelToolErrorNotes(
   parts: Part[],
@@ -45,7 +28,7 @@ export function limitModelToolErrorNotes(
     const functionResponse = part.functionResponse;
     const response = functionResponse?.response;
     if (!response) continue;
-    const note = modelToolErrorNotes.get(response);
+    const note = getModelToolErrorNote(response);
     if (!note) continue;
     remaining ??= remainingBudget();
     if (note.text.length > remaining) {
@@ -75,7 +58,7 @@ export function withModelToolErrorNotes(contents: Content[]): Content[] {
       const response = functionResponse?.response;
       const error = response?.['error'];
       if (!response || typeof error !== 'string') continue;
-      const note = modelToolErrorNotes.get(response);
+      const note = getModelToolErrorNote(response);
       if (!note) continue;
       (updatedParts ??= [...parts])[partIndex] = {
         ...part,

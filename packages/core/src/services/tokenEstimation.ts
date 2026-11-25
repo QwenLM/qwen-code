@@ -63,11 +63,17 @@ export function estimateContentTokens(
   contents: Content[],
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
 ): number {
+  return Math.ceil(
+    contentChars(contents, imageTokenEstimate) / CHARS_PER_TOKEN,
+  );
+}
+
+function contentChars(contents: Content[], imageTokenEstimate: number): number {
   let totalChars = 0;
   for (const content of contents) {
     totalChars += estimateContentChars(content, imageTokenEstimate);
   }
-  return Math.ceil(totalChars / CHARS_PER_TOKEN);
+  return totalChars;
 }
 
 /** Includes private tool diagnostics only for contents sent to the main model. */
@@ -118,29 +124,54 @@ export function estimatePromptTokens(
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
   conservative: boolean = false,
 ): number {
+  return estimatePromptTokenCounts(
+    history,
+    userMessage,
+    lastPromptTokenCount,
+    lastOutputTokenCount,
+    imageTokenEstimate,
+    conservative,
+  ).effectiveTokens;
+}
+
+export function estimatePromptTokenCounts(
+  history: Content[],
+  userMessage: Content | Content[],
+  lastPromptTokenCount: number,
+  lastOutputTokenCount = 0,
+  imageTokenEstimate = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  conservative = false,
+): { historyTokens: number; effectiveTokens: number } {
   const newContent = Array.isArray(userMessage) ? userMessage : [userMessage];
+  const pendingChars = contentChars(
+    withModelToolErrorNotes(newContent),
+    imageTokenEstimate,
+  );
   if (lastPromptTokenCount > 0) {
-    const newContentTokens = estimateModelContentTokens(
-      newContent,
-      imageTokenEstimate,
-    );
-    return (
-      lastPromptTokenCount +
-      lastOutputTokenCount +
-      (conservative
-        ? Math.ceil(newContentTokens * CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR)
-        : newContentTokens)
-    );
+    const historyTokens = lastPromptTokenCount + lastOutputTokenCount;
+    const pendingTokens = Math.ceil(pendingChars / CHARS_PER_TOKEN);
+    return {
+      historyTokens,
+      effectiveTokens:
+        historyTokens +
+        (conservative
+          ? Math.ceil(pendingTokens * CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR)
+          : pendingTokens),
+    };
   }
   // First-send fallback (no API data yet): estimate from `history + userMessage`
   // only. This MISSES the system prompt (~8-15K), tool definitions (~5K),
   // skill content, and cache headers — typically ~15-20K of under-estimate.
   // The reactive overflow handler is the safety net if the hard-tier rescue
   // misses for that reason. See review #4168 R3.3.
-  return estimateModelContentTokens(
-    [...history, ...newContent],
+  const historyChars = contentChars(
+    withModelToolErrorNotes(history),
     imageTokenEstimate,
   );
+  return {
+    historyTokens: Math.ceil(historyChars / CHARS_PER_TOKEN),
+    effectiveTokens: Math.ceil((historyChars + pendingChars) / CHARS_PER_TOKEN),
+  };
 }
 
 export function getUsageOutputTokenCountForPromptEstimate(

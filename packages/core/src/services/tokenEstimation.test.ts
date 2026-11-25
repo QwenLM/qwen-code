@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   estimateContentTokens,
   estimateContextTextTokens,
+  estimatePromptTokenCounts,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from './tokenEstimation.js';
@@ -114,6 +115,15 @@ describe('estimatePromptTokens', () => {
     expect(estimatePromptTokens(history, imageUser, 5000, 1200, 1600)).toBe(
       5000 + 1200 + 1600,
     );
+  });
+
+  it('rounds inherited history independently while sizing the combined request', () => {
+    expect(
+      estimatePromptTokenCounts([textContent('a')], textContent('b'), 0),
+    ).toEqual({
+      historyTokens: 1,
+      effectiveTokens: 1,
+    });
   });
 
   it('falls back to full estimate when lastPromptTokenCount is 0', () => {

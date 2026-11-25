@@ -4726,10 +4726,8 @@ describe('LlmChat', async () => {
       await sendDrain('go', 'prompt-id-seed', subagentChat);
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
-      // The effective count, not the bare seed: 123,456 + char/4 of 'go' (1),
-      // lastOutputTokenCount 0. The exact value catches over- and
-      // under-counting on the send path.
-      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_457);
+      // Admission includes 'go'; the inherited history has not received it yet.
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_456);
       expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
         123_457,
       );
@@ -5009,6 +5007,62 @@ describe('LlmChat', async () => {
       // Google GenAI takes the cache-sharing request, not the cold query.
       expect(generateText).toHaveBeenCalled();
       expect(coldSpy).not.toHaveBeenCalled();
+    });
+
+    it('counts a pending validation note once across automatic cold compaction', async () => {
+      mockGeneratorConfig({ enableCacheControl: false });
+      const cold = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue(snapshotReply() as never);
+      const compress = vi.spyOn(ChatCompressionService.prototype, 'compress');
+      const baselines = [];
+      const prepared = vi.fn<LlmPreparedRequestCallback>();
+      for (const note of ['', 'x'.repeat(244)]) {
+        const target = newChat({
+          history: [
+            userText('submit documents'),
+            content('model', fnCall('structured_output', {}, 'call-1')),
+          ],
+        });
+        target.seedResumeTokenCounts(172_000, 100, false);
+        const part = fnResponse(
+          'structured_output',
+          { error: 'invalid' },
+          'call-1',
+        );
+        if (note) setModelToolErrorNote(part, note);
+        mockStream(textStream('done'));
+        const events = await collect(
+          await target.sendMessageStream(
+            'test-model',
+            { message: [part] },
+            'submit',
+            undefined,
+            { onPreparedRequest: prepared },
+          ),
+        );
+        expectCompressedEvent(events);
+        const info = infoOf(compressedEvent(events));
+        baselines.push(info.newTokenCount);
+      }
+
+      const [plain, noted] = compress.mock.calls.map(([, opts]) => opts);
+      expect(noted.precomputedEffectiveTokens).toBe(
+        plain.precomputedEffectiveTokens! + 61,
+      );
+      expect(cold.mock.calls[1][1].contents).toEqual(
+        cold.mock.calls[0][1].contents,
+      );
+      expect(baselines[1]).toBe(baselines[0]);
+      const [plainClamp, notedClamp] = prepared.mock.calls.map(
+        ([request]) => request.promptTokensForClamp,
+      );
+      const pendingBudgets = [plain, noted].map((opts) =>
+        Math.ceil((opts.precomputedEffectiveTokens! - 172_100) * 1.5),
+      );
+      expect(notedClamp - plainClamp).toBe(
+        pendingBudgets[1] - pendingBudgets[0],
+      );
     });
 
     it('routes zero-baseline compression through the cold side query end-to-end (R5-3)', async () => {
@@ -16782,7 +16836,7 @@ describe('LlmChat', async () => {
       {
         estimated: false,
         options: { precomputedEffectiveTokens: 6000 },
-        expected: 0,
+        expected: 321,
       },
       {
         estimated: false,
@@ -16817,19 +16871,16 @@ describe('LlmChat', async () => {
     it.each<
       [string, string, Parameters<LlmChat['tryCompress']>[3], number, boolean]
     >([
-      // Auto-compaction publishes the precomputed effective count (API base +
-      // estimated pending message / previous output): a projection, so it
-      // keeps the `~` marker (review probe on #9568).
       [
-        'marks the precomputed effective count as estimated even when the stored API count is authoritative',
+        'keeps the API history baseline when only the admission estimate includes the pending turn',
         'p-precomputed-effective-estimated',
         {
           precomputedEffectiveTokens: 6200,
           pendingUserMessage: userText('next'),
           trigger: 'auto',
         },
-        6200,
-        true,
+        5000,
+        false,
       ],
       // No provider count: the limit/config/default fallback is a projection.
       [
@@ -16863,6 +16914,9 @@ describe('LlmChat', async () => {
       const info = await chat.tryCompress(promptId, true, undefined, options);
 
       expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(sentCount);
+      expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+        options?.precomputedEffectiveTokens,
+      );
       expect(info.originalTokenCountIsEstimated).toBe(estimated);
     });
   });

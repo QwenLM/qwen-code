@@ -397,12 +397,9 @@ export interface CompressOptions {
    */
   consecutiveFailures: number;
   /**
-   * Most recent prompt token count for this chat. Compared against
-   * `computeThresholds(contextWindowSize).auto` for the auto-compaction
-   * gate, optionally augmented by the pending user message's estimated
-   * token count via `estimatePromptTokens` (see Task 3 / Task 6). Callers
-   * source this from the per-chat counter (main session, subagents alike) —
-   * the service does not read or write any global telemetry.
+   * Token baseline for committed history, excluding the pending user message.
+   * May be a previous provider prompt count or a caller's estimate that also
+   * accounts for the latest model output.
    */
   originalTokenCount: number;
   /** Latest model output omitted by a provider prompt-only anchor. */

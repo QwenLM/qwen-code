@@ -543,13 +543,13 @@ function describeBrokenJsonString(
   // Other failures may mean the string is valid for a different branch.
   let instancePath: string | undefined;
   const types = new Set<string>();
-  const branches = inactiveTaggedUnionErrors(errors, data, schema);
-  if (!branches) return '';
+  const inactive = inactiveTaggedUnionErrors(errors, data, schema);
+  if (!inactive) return '';
   for (const error of errors) {
     if (
       error.keyword === 'anyOf' ||
       (error.keyword === 'oneOf' && error.params['passingSchemas'] === null) ||
-      branches.inactive.has(error)
+      inactive.has(error)
     ) {
       continue;
     }
@@ -567,11 +567,11 @@ function describeBrokenJsonString(
       if (typeof type === 'string') types.add(type);
     }
   }
+  const shapes = ['array', 'object'].filter((type) => types.has(type));
   if (
     instancePath === undefined ||
     types.has('string') ||
-    (branches.uncertain && types.has('array') && types.has('object')) ||
-    (!types.has('array') && !types.has('object'))
+    shapes.length === 0
   ) {
     return '';
   }
@@ -580,10 +580,6 @@ function describeBrokenJsonString(
   if (typeof value !== 'string') return '';
   const text = value.trim();
   if (!text.startsWith('[') && !text.startsWith('{')) return '';
-  const expected =
-    types.has('object') && (text.startsWith('{') || !types.has('array'))
-      ? 'object'
-      : 'array';
   try {
     JSON.parse(text);
   } catch (error) {
@@ -607,9 +603,14 @@ function describeBrokenJsonString(
     // JavaScriptCore can quote an entire long identifier in the parser error.
     const summary = reason.length > 100 ? `${reason.slice(0, 100)}…` : reason;
     const fix = hasPosition ? 'Fix the text there' : 'Fix the JSON syntax';
+    // Errors from an early allOf member may list shapes a later member rejects.
+    const retry =
+      types.size === 1
+        ? `send it as a JSON ${shapes[0]}, not as a string`
+        : 'resend this field with the type required by its schema';
     return (
       `; params${instancePath} arrived as a string whose text is not valid JSON (${summary}).` +
-      `${near} ${fix} and send it as a JSON ${expected}, not as a string`
+      `${near} ${fix} and ${retry}`
     );
   }
   return '';
@@ -653,9 +654,8 @@ function inactiveTaggedUnionErrors(
   errors: ErrorObject[],
   data: Record<string, unknown>,
   schema: AnySchema,
-): { inactive: Set<ErrorObject>; uncertain: boolean } | undefined {
+): Set<ErrorObject> | undefined {
   const inactive = new Set<ErrorObject>();
-  let uncertain = false;
   const typeErrorPaths = new Set(
     errors.filter((e) => e.keyword === 'type').map((e) => e.instancePath),
   );
@@ -676,22 +676,17 @@ function inactiveTaggedUnionErrors(
       const conjuncts = diagnosticConjuncts(branch, root);
       if (!conjuncts) {
         hasViableBranch = true;
-        uncertain = true;
         continue;
       }
       const owners = new Map<string, Set<DiagnosticSchema>>([
         [error.instancePath, new Set(conjuncts)],
       ]);
       let excluded = false;
-      let incomplete = false;
       for (const node of conjuncts) {
         for (const [key, property] of Object.entries(node.properties ?? {})) {
           if (!Object.hasOwn(fields, key)) continue;
           const constraints = diagnosticConjuncts(property, root);
-          if (!constraints) {
-            incomplete = true;
-            continue;
-          }
+          if (!constraints) continue;
           const pointerKey = key.replaceAll('~', '~0').replaceAll('/', '~1');
           const path = `${error.instancePath}/${pointerKey}`;
           const atPath = owners.get(path) ?? new Set<DiagnosticSchema>();
@@ -724,7 +719,6 @@ function inactiveTaggedUnionErrors(
       }
       if (!excluded) {
         hasViableBranch = true;
-        uncertain ||= incomplete;
         continue;
       }
       // Ajv reports a referenced constraint at its definition. Match both
@@ -752,7 +746,7 @@ function inactiveTaggedUnionErrors(
     }
     if (!hasViableBranch) return undefined;
   }
-  return { inactive, uncertain };
+  return inactive;
 }
 
 function valueAtPointer(value: unknown, path: string): unknown {

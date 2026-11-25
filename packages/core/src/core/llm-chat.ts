@@ -161,6 +161,7 @@ import {
   CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
   estimateContentTokens,
   estimateModelContentTokens,
+  estimatePromptTokenCounts,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from '../services/tokenEstimation.js';
@@ -3267,35 +3268,20 @@ export class LlmChat {
     this.adoptTokenCountsForRoute(options?.requestRouteKey);
 
     const originalTokenCountOverride = options?.originalTokenCountOverride;
-    // Provenance follows the count source selected for THIS attempt, not
-    // which inputs merely happen to be present:
-    // - an override is authoritative only when it carries a provider-reported
-    //   count (reactive overflow `actualTokens`); limit/config/default
-    //   fallbacks stay estimated;
-    // - a caller-precomputed effective count (auto-compaction / hard-tier
-    //   rescue) always folds in locally estimated parts (pending user
-    //   message, previous output), so it stays estimated even when the
-    //   stored baseline came from the API;
-    // - otherwise the count is the stored lastPromptTokenCount and inherits
-    //   the provenance tracked for it.
+    // The pending turn belongs to admission and will be counted again when
+    // sent. Only committed history can seed the post-compression baseline.
     const originalTokenCountIsEstimated =
-      originalTokenCountOverride !== undefined
-        ? originalTokenCountOverride.isEstimated
-        : options?.precomputedEffectiveTokens !== undefined ||
-          this.promptCountIsEstimateDerived();
+      originalTokenCountOverride?.isEstimated ??
+      this.promptCountIsEstimateDerived();
     const originalTokenCount =
-      originalTokenCountOverride !== undefined
-        ? originalTokenCountOverride.count
-        : originalTokenCountIsEstimated
-          ? (options?.precomputedEffectiveTokens ??
-            estimateModelContentTokens(
-              options?.pendingUserMessage
-                ? [...this.getHistoryShallow(true), options.pendingUserMessage]
-                : this.getHistoryShallow(true),
-              resolveSlimmingConfig(this.config.getChatCompression())
-                .imageTokenEstimate,
-            ))
-          : this.lastPromptTokenCount;
+      originalTokenCountOverride?.count ??
+      (originalTokenCountIsEstimated
+        ? estimateModelContentTokens(
+            this.getHistoryShallow(true),
+            resolveSlimmingConfig(this.config.getChatCompression())
+              .imageTokenEstimate,
+          )
+        : this.lastPromptTokenCount);
     debugLogger.debug(
       `[compaction] token-count provenance: prompt_id=${promptId}, ` +
         `originalTokenCount=${originalTokenCount}, ` +
@@ -3877,7 +3863,7 @@ export class LlmChat {
         const estimatePendingPrompt = (
           pending: Content,
           conservative = false,
-        ): number => {
+        ) => {
           const catalog = this.config.getAutoMemoryContext?.() ?? '';
           const snapshot = getAutoMemorySnapshot(
             [...this.history, pending],
@@ -3903,7 +3889,7 @@ export class LlmChat {
                   ),
                 )
               : [];
-          return estimatePromptTokens(
+          return estimatePromptTokenCounts(
             this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
             visiblePendingContent,
             this.lastPromptTokenCount +
@@ -3964,7 +3950,7 @@ export class LlmChat {
                   preview.flatMap((entry) => entry.responseParts),
                   toolOutputBudget,
                 ),
-              }) >= auto
+              }).effectiveTokens >= auto
             ) {
               const aggregateBudget = batchBudget ?? Number.POSITIVE_INFINITY;
               const aggregatePreview = enforceFunctionResponseBudget(
@@ -3983,7 +3969,7 @@ export class LlmChat {
                     aggregatePreview.flatMap((entry) => entry.responseParts),
                     aggregateBudget,
                   ),
-                }) < hard
+                }).effectiveTokens < hard
               ) {
                 toolOutputBudget = aggregateBudget;
                 preview = aggregatePreview;
@@ -4172,7 +4158,8 @@ export class LlmChat {
         // failures fall through to reactive overflow after a few strikes.
         // Thresholds gate on the full window: the output clamp guarantees the
         // response fits, so nothing needs to be pre-reserved for it.
-        const effectiveTokens = estimatePendingPrompt(userContent);
+        const { historyTokens, effectiveTokens } =
+          estimatePendingPrompt(userContent);
         const isHardTier = effectiveTokens >= hard;
         const shouldForceFromHard =
           !exactRoute &&
@@ -4243,6 +4230,10 @@ export class LlmChat {
             params.config?.abortSignal,
             {
               pendingUserMessage: userContent,
+              originalTokenCountOverride: {
+                count: historyTokens,
+                isEstimated: true,
+              },
               precomputedEffectiveTokens: effectiveTokens,
               requestGenerationConfig: params.config,
               requestRouteKey,
@@ -4274,7 +4265,7 @@ export class LlmChat {
           ];
         }
         const localPromptTokensAfterCompression = shouldForceFromHard
-          ? estimatePendingPrompt(userContent)
+          ? estimatePendingPrompt(userContent).effectiveTokens
           : 0;
         if (
           shouldStopAfterHardRescue(
@@ -4394,7 +4385,7 @@ export class LlmChat {
           this.lastPromptTokenCount === 0 &&
           manualPlanExitNoticeVersion === undefined
             ? effectiveTokens
-            : estimatePendingPrompt(userContent, true);
+            : estimatePendingPrompt(userContent, true).effectiveTokens;
 
         // Publish the acceptance snapshot for a caller-side settlement
         // carrier (see `userContentPushSnapshotKey`) immediately before the
