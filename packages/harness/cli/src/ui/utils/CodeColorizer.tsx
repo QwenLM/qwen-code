@@ -1,0 +1,358 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React from 'react';
+import { Text, Box } from 'ink';
+import { common, createLowlight } from 'lowlight';
+import type {
+  Root,
+  Element,
+  Text as HastText,
+  ElementContent,
+  RootContent,
+} from 'hast';
+import stripAnsi from 'strip-ansi';
+import { themeManager } from '../themes/theme-manager.js';
+import type { Theme } from '../themes/theme.js';
+import {
+  MaxSizedBox,
+  MINIMUM_MAX_HEIGHT,
+} from '../components/shared/MaxSizedBox.js';
+import { runLogger } from '@qwen-code/core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { Link } from '../components/shared/Link.js';
+import { findCodeBlockLinks, type CodeBlockLink } from './codeBlockLinks.js';
+
+interface LinkState {
+  links: CodeBlockLink[];
+  offset: number;
+}
+
+function renderLinkedText(
+  text: string,
+  color: string | undefined,
+  state?: LinkState,
+): React.ReactNode {
+  if (!state) return <Text color={color}>{text}</Text>;
+
+  const start = state.offset;
+  const end = start + text.length;
+  state.offset = end;
+  const parts: React.ReactNode[] = [];
+  let offset = start;
+  for (const link of state.links) {
+    if (link.end <= start) continue;
+    if (link.start >= end) break;
+    const linkStart = Math.max(start, link.start);
+    const linkEnd = Math.min(end, link.end);
+    if (offset < linkStart) {
+      parts.push(
+        <Text key={offset} color={color}>
+          {text.slice(offset - start, linkStart - start)}
+        </Text>,
+      );
+    }
+    parts.push(
+      <Link key={linkStart} href={link.href}>
+        <Text color={color}>
+          {text.slice(linkStart - start, linkEnd - start)}
+        </Text>
+      </Link>,
+    );
+    offset = linkEnd;
+  }
+  if (offset < end) {
+    parts.push(
+      <Text key={offset} color={color}>
+        {text.slice(offset - start)}
+      </Text>,
+    );
+  }
+  return parts;
+}
+
+function renderPlainLine(line: string, linkUrls: boolean): React.ReactNode {
+  return linkUrls
+    ? renderLinkedText(line, undefined, {
+        links: findCodeBlockLinks(line),
+        offset: 0,
+      })
+    : line;
+}
+
+// Configure theming and parsing utilities.
+const lowlight = createLowlight(common);
+
+function renderHastNode(
+  node: Root | Element | HastText | RootContent,
+  theme: Theme,
+  inheritedColor: string | undefined,
+  linkState?: LinkState,
+): React.ReactNode {
+  if (node.type === 'text') {
+    // Use the color passed down from parent element, or the theme's default.
+    const color = inheritedColor ?? theme.defaultColor;
+    return renderLinkedText(node.value, color, linkState);
+  }
+
+  // Handle Element Nodes: Determine color and pass it down, don't wrap
+  if (node.type === 'element') {
+    const nodeClasses: string[] =
+      (node.properties?.['className'] as string[]) || [];
+    let elementColor: string | undefined = undefined;
+
+    // Find color defined specifically for this element's class
+    for (let i = nodeClasses.length - 1; i >= 0; i--) {
+      const color = theme.getInkColor(nodeClasses[i]);
+      if (color !== undefined) {
+        elementColor = color;
+        break;
+      }
+    }
+
+    // Determine the color to pass down: Use this element's specific color
+    // if found; otherwise, continue passing down the already inherited color.
+    const colorToPassDown = elementColor ?? inheritedColor;
+
+    // Recursively render children, passing the determined color down
+    // Ensure child type matches expected HAST structure (ElementContent is common)
+    const children = node.children?.map(
+      (child: ElementContent, index: number) => (
+        <React.Fragment key={index}>
+          {renderHastNode(child, theme, colorToPassDown, linkState)}
+        </React.Fragment>
+      ),
+    );
+
+    // Element nodes now only group children; color is applied by Text nodes.
+    // Use a React Fragment to avoid adding unnecessary elements.
+    return <React.Fragment>{children}</React.Fragment>;
+  }
+
+  // Handle Root Node: Start recursion with initially inherited color
+  if (node.type === 'root') {
+    // Check if children array is empty - this happens when lowlight can't detect language – fall back to plain text
+    if (!node.children || node.children.length === 0) {
+      return null;
+    }
+
+    // Pass down the initial inheritedColor (likely undefined from the top call)
+    // Ensure child type matches expected HAST structure (RootContent is common)
+    return node.children?.map((child: RootContent, index: number) => (
+      <React.Fragment key={index}>
+        {renderHastNode(child, theme, inheritedColor, linkState)}
+      </React.Fragment>
+    ));
+  }
+
+  // Handle unknown or unsupported node types
+  return null;
+}
+
+function highlightAndRenderLine(
+  line: string,
+  language: string | null,
+  theme: Theme,
+  linkUrls: boolean,
+): React.ReactNode {
+  const strippedLine = stripAnsi(line);
+  try {
+    const getHighlightedLine = () =>
+      !language || !lowlight.registered(language)
+        ? lowlight.highlightAuto(strippedLine)
+        : lowlight.highlight(language, strippedLine);
+
+    const renderedNode = renderHastNode(
+      getHighlightedLine(),
+      theme,
+      undefined,
+      linkUrls
+        ? { links: findCodeBlockLinks(strippedLine), offset: 0 }
+        : undefined,
+    );
+
+    return renderedNode !== null
+      ? renderedNode
+      : renderPlainLine(strippedLine, linkUrls);
+  } catch {
+    return renderPlainLine(strippedLine, linkUrls);
+  }
+}
+
+export interface ColorizeCodeOptions {
+  code: string;
+  language?: string | null;
+  availableHeight?: number;
+  maxWidth: number;
+  theme?: Theme | null;
+  settings: LoadedSettings;
+  hideLineNumbers?: boolean;
+  disableColor?: boolean;
+  returnLines?: boolean;
+  paddingX?: number;
+  linkUrls?: boolean;
+}
+
+/**
+ * Renders syntax-highlighted code for Ink applications using a selected theme.
+ *
+ * @param options The options for colorizing the code.
+ * @returns A React.ReactNode containing Ink <Text> elements for the highlighted code.
+ */
+export function colorizeCode(
+  options: ColorizeCodeOptions & { returnLines: true },
+): React.ReactNode[];
+export function colorizeCode(
+  options: ColorizeCodeOptions & { returnLines?: false },
+): React.ReactNode;
+export function colorizeCode({
+  code,
+  language = null,
+  availableHeight,
+  maxWidth,
+  theme = null,
+  settings,
+  hideLineNumbers = false,
+  disableColor = false,
+  returnLines = false,
+  paddingX = 0,
+  linkUrls = false,
+}: ColorizeCodeOptions): React.ReactNode | React.ReactNode[] {
+  const codeToHighlight = code.replace(/\n$/, '');
+  const activeTheme = theme || themeManager.getActiveTheme();
+  const showLineNumbers = hideLineNumbers
+    ? false
+    : settings.merged.ui.showLineNumbers;
+
+  // We force MaxSizedBox if availableHeight is provided, even if alternate buffer is enabled,
+  // because this might be rendered in a constrained UI box (like tool confirmation).
+  const useMaxSizedBox =
+    (!settings.merged.ui.useAlternateBuffer || availableHeight !== undefined) &&
+    !returnLines;
+
+  let hiddenLinesCount = 0;
+  let finalLines = codeToHighlight.split(/\r?\n/);
+
+  try {
+    // Optimization to avoid highlighting lines that cannot possibly be displayed.
+    if (availableHeight !== undefined && useMaxSizedBox) {
+      availableHeight = Math.max(availableHeight, MINIMUM_MAX_HEIGHT);
+      if (finalLines.length > availableHeight) {
+        const sliceIndex = finalLines.length - availableHeight;
+        hiddenLinesCount = sliceIndex;
+        finalLines = finalLines.slice(sliceIndex);
+      }
+    }
+
+    const padWidth = String(finalLines.length + hiddenLinesCount).length;
+
+    const renderedLines = finalLines.map((line, index) => {
+      const contentToRender = disableColor
+        ? renderPlainLine(line, linkUrls)
+        : highlightAndRenderLine(line, language, activeTheme, linkUrls);
+
+      return (
+        <Box key={index} minHeight={1}>
+          {showLineNumbers && (
+            <Box
+              minWidth={padWidth + 1}
+              flexShrink={0}
+              paddingRight={1}
+              alignItems="flex-start"
+              justifyContent="flex-end"
+            >
+              <Text color={disableColor ? undefined : activeTheme.colors.Gray}>
+                {`${index + 1 + hiddenLinesCount}`}
+              </Text>
+            </Box>
+          )}
+          <Text
+            color={disableColor ? undefined : activeTheme.defaultColor}
+            wrap="wrap"
+          >
+            {contentToRender}
+          </Text>
+        </Box>
+      );
+    });
+
+    if (returnLines) {
+      return renderedLines;
+    }
+
+    if (useMaxSizedBox) {
+      return (
+        <MaxSizedBox
+          paddingX={paddingX}
+          maxHeight={availableHeight}
+          maxWidth={maxWidth}
+          additionalHiddenLinesCount={hiddenLinesCount}
+          overflowDirection="top"
+        >
+          {renderedLines}
+        </MaxSizedBox>
+      );
+    }
+
+    return (
+      <Box flexDirection="column" width={maxWidth}>
+        {renderedLines}
+      </Box>
+    );
+  } catch (error) {
+    runLogger.warn(
+      `[colorizeCode] Error highlighting code for language "${language}":`,
+      error,
+    );
+    // Fall back to plain text with default color on error
+    const padWidth = String(finalLines.length + hiddenLinesCount).length;
+    const fallbackLines = finalLines.map((line, index) => (
+      <Box key={index} minHeight={1}>
+        {showLineNumbers && (
+          <Box
+            minWidth={padWidth + 1}
+            flexShrink={0}
+            paddingRight={1}
+            alignItems="flex-start"
+            justifyContent="flex-end"
+          >
+            <Text color={disableColor ? undefined : activeTheme.defaultColor}>
+              {`${index + 1 + hiddenLinesCount}`}
+            </Text>
+          </Box>
+        )}
+        <Text color={disableColor ? undefined : activeTheme.colors.Gray}>
+          {renderPlainLine(stripAnsi(line), linkUrls)}
+        </Text>
+      </Box>
+    ));
+
+    if (returnLines) {
+      return fallbackLines;
+    }
+
+    if (useMaxSizedBox) {
+      return (
+        <MaxSizedBox
+          paddingX={paddingX}
+          maxHeight={availableHeight}
+          maxWidth={maxWidth}
+          additionalHiddenLinesCount={hiddenLinesCount}
+          overflowDirection="top"
+        >
+          {fallbackLines}
+        </MaxSizedBox>
+      );
+    }
+
+    return (
+      <Box flexDirection="column" width={maxWidth}>
+        {fallbackLines}
+      </Box>
+    );
+  }
+}
