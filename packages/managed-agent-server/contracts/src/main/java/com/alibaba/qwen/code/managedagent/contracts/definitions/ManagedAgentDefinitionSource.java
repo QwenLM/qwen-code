@@ -66,6 +66,9 @@ public interface ManagedAgentDefinitionSource {
     record ToolPolicy(String profile, String approvalMode) {
         public ToolPolicy {
             SourceModelChecks.requireText("profile", profile);
+            if (approvalMode != null) {
+                SourceModelChecks.requireText("approvalMode", approvalMode);
+            }
         }
     }
 
