@@ -365,19 +365,17 @@ describe('WorkflowRunner', () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     await Promise.all(
-      storageRoots
-        .splice(0)
-        .map((root) =>
-          fs.rm(root, {
-            recursive: true,
-            force: true,
-            // The launch record is appended fire-and-forget, so a run that
-            // settled just before this hook can still be flushing its journal.
-            // The recursive rm then races that write and fails with ENOTEMPTY.
-            maxRetries: 10,
-            retryDelay: 100,
-          }),
-        ),
+      storageRoots.splice(0).map((root) =>
+        fs.rm(root, {
+          recursive: true,
+          force: true,
+          // The launch record is appended fire-and-forget, so a run that
+          // settled just before this hook can still be flushing its journal.
+          // The recursive rm then races that write and fails with ENOTEMPTY.
+          maxRetries: 10,
+          retryDelay: 100,
+        }),
+      ),
     );
   });
 
