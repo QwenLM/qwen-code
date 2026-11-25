@@ -118,7 +118,9 @@ final class LocalStorageOwners {
                 + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", identity.hostId());
         for (var owner : owners) {
             String root = (String) owner.get("mount_root");
-            if (!key.equals(owner.get("physical_key")) && root != null
+            byte[] stored = (byte[]) owner.get("physical_id");
+            if ((stored == null || !java.util.Arrays.equals(stored, key.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                    && root != null
                     && (contains(root, identity.root()) || contains(identity.root(), root))) {
                 throw new RuntimeBrokerException(409, "storage_overlapping_roots",
                         "Workspace directory overlaps an existing physical owner.", false);

@@ -2124,8 +2124,10 @@ public final class CsiNativeActivationProof {
     }
 
     private static String boundedCommandId(String value) {
-        return value.length() <= 128 ? value
-                : value.substring(0, 56) + ":sha256:" + sha256(utf8(value));
+        int end = value.codePointAt(Math.min(55, value.length() - 1)) > 0xffff ? 55 : 56;
+        String prefix = value.substring(0, end);
+        return prefix.equals(value) ? value
+                : prefix + ":sha256:" + sha256(utf8(value));
     }
 
     private static void require(boolean condition) {

@@ -17,5 +17,15 @@ describe('managedCommandId', () => {
     expect(bounded).toMatch(/^harness:await_runtime:.*:sha256:[0-9a-f]{64}$/);
     expect(managedCommandId(long)).toBe(bounded);
     expect(managedCommandId(`${long}x`)).not.toBe(bounded);
+
+    const surrogateBoundary = `assistant-delta:${'z'.repeat(39)}😀${'q'.repeat(90)}:0`;
+    const surrogateBounded = managedCommandId(surrogateBoundary);
+    expect(surrogateBounded).toHaveLength(127);
+    expect(Buffer.from(surrogateBounded, 'utf8').toString('utf8')).toBe(
+      surrogateBounded,
+    );
+
+    const longAscii = `${'z'.repeat(39)}😀${'q'.repeat(39)}`;
+    expect(managedCommandId(`wake-recovery:${longAscii}`)).toHaveLength(128);
   });
 });

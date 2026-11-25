@@ -7,7 +7,10 @@
 import { createHash } from 'node:crypto';
 
 export function managedCommandId(value: string): string {
-  return value.length <= 128
-    ? value
-    : `${value.slice(0, 56)}:sha256:${createHash('sha256').update(value).digest('hex')}`;
+  if (value.length <= 128) return value;
+  let prefix = value.slice(0, 56);
+  while (Buffer.from(prefix, 'utf8').toString('utf8') !== prefix) {
+    prefix = prefix.slice(0, -1);
+  }
+  return `${prefix}:sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
