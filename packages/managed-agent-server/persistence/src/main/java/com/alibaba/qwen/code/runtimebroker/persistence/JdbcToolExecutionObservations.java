@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 
 import javax.sql.DataSource;
@@ -14,12 +15,11 @@ final class JdbcToolExecutionObservations {
     private JdbcToolExecutionObservations() { }
 
     static ToolExecutionRecord attachMeasurements(
-            DataSource dataSource, ToolExecutionRecord expected, Map<String, Object> metadata) {
+            DataSource dataSource, ToolExecutionRecord expected,
+            RuntimeToolMeasurements.Metadata metadata) {
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
                     ToolExecutionRecord current =
                             selectByExecutionId(connection, expected.getExecutionCallId(), true);
                     if (current == null
@@ -46,8 +46,6 @@ final class JdbcToolExecutionObservations {
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
                     ToolExecutionRecord current =
                             selectByExecutionId(connection, expected.getExecutionCallId(), true);
                     if (current == null

@@ -48,7 +48,10 @@ describe('Hosted Harness private contract', () => {
       bootId: BOOT_ID,
       capabilityDigest: DIGEST,
       lifecycleProtocolVersion: 1,
-      lifecycleV2Profiles: ['hosted-workspace-shell/1'],
+      lifecycleV2Profiles: [
+        'hosted-workspace-files/1',
+        'hosted-workspace-shell/1',
+      ],
       titleProtocolVersion: 1,
       features: [
         'hosted_approval_resume_v1',
@@ -71,6 +74,7 @@ describe('Hosted Harness private contract', () => {
         'session-skills/2',
         'workspace-shell-mcp/1',
         'session-mcp-management/1',
+        'client-files/1',
         'session-extension-packages/1',
         'managed-package-preparation/1',
         'managed-runtime-skill-import/1',
@@ -78,6 +82,8 @@ describe('Hosted Harness private contract', () => {
         'targeted-cancel/1',
         'event-keepalive/1',
         'web-fetch/1',
+        'hosted-workspace-external-files/1',
+        'hosted-workspace-external-shell/1',
       ],
     });
     expect(Object.isFrozen(contract)).toBe(true);
@@ -91,6 +97,17 @@ describe('Hosted Harness private contract', () => {
       createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/1'])
         .lifecycleV2Profiles,
     ).toEqual(['hosted-workspace-shell/1']);
+    // shell/3 (the self-paced loop revision) is a supported lifecycle-v2
+    // profile; the retired shell/2 below must stay refused.
+    expect(
+      createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/3'])
+        .lifecycleV2Profiles,
+    ).toEqual(['hosted-workspace-shell/3']);
+    // D3: ordinary files/1 joins the lifecycle-v2 profiles.
+    expect(
+      createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-files/1'])
+        .lifecycleV2Profiles,
+    ).toEqual(['hosted-workspace-files/1']);
     expect(() =>
       createHostedHarnessContract(DIGEST, BOOT_ID, [
         'hosted-workspace-shell/2',

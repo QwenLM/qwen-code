@@ -283,6 +283,42 @@ describe('operator container requirement across environment reload', () => {
     },
   );
 
+  it.each([
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'qwen_code_enable_event_bus_agent_loop',
+  ])(
+    'warns when settings.env tries to set a loop-rollout switch as %s',
+    (spelling) => {
+      // The merged settings.env map cannot tell an operator entry from a
+      // workspace one, so the switch is dropped at every settings scope; the
+      // diagnostic must name the spelling actually written (the gate folds
+      // case) and the channel that works.
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const settingsFile = path.join(os.homedir(), '.qwen', 'settings.json');
+      fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ env: { [spelling]: '1' } }),
+      );
+      const settings = testSettings(
+        JSON.parse(fs.readFileSync(settingsFile, 'utf8')),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        loadEnvironment(settings, workspace);
+        expect(process.env[spelling.toUpperCase()]).toBeUndefined();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `cannot set ${spelling}; ignored. Export it in the launch environment instead.`,
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    },
+  );
+
   it.each(
     ['.env', '.qwen/.env', 'settings.env'].flatMap((source) =>
       ['', 'docker', 'podman'].map((value) => ({ source, value })),
@@ -778,6 +814,45 @@ describe('daemon registration capacity environment', () => {
       );
     },
   );
+});
+
+describe('PR watch operator-only environment overrides', () => {
+  it.each([
+    'QWEN_SESSION_PR_WATCH_EVENTS',
+    'QWEN_SESSION_PR_WATCH_WAKE_DORMANT',
+  ])('refuses %s from a project .env and .qwen/.env', (key) => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(workspace, '.env'), `${key}=from-project\n`);
+    fs.mkdirSync(path.join(workspace, SETTINGS_DIRECTORY_NAME), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(workspace, SETTINGS_DIRECTORY_NAME, '.env'),
+      `${key}=from-qwen-dir\n`,
+    );
+    delete process.env[key];
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env[key]).toBeUndefined();
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env[key]).toBeUndefined();
+  });
+
+  it('still applies the override from a home .env', () => {
+    const homeEnv = path.join(os.homedir(), '.env');
+    const previous = fs.existsSync(homeEnv)
+      ? fs.readFileSync(homeEnv, 'utf-8')
+      : undefined;
+    try {
+      fs.writeFileSync(homeEnv, 'QWEN_SESSION_PR_WATCH_EVENTS=head_change\n');
+      delete process.env['QWEN_SESSION_PR_WATCH_EVENTS'];
+      loadEnvironment(testSettings({}), makeWorkspace());
+      expect(process.env['QWEN_SESSION_PR_WATCH_EVENTS']).toBe('head_change');
+    } finally {
+      if (previous === undefined) fs.rmSync(homeEnv, { force: true });
+      else fs.writeFileSync(homeEnv, previous);
+      delete process.env['QWEN_SESSION_PR_WATCH_EVENTS'];
+    }
+  });
 });
 
 describe('Conversations root environment', () => {

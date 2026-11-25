@@ -18,7 +18,6 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ssh.SshConnectionManager;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ssh.SshRuntimeProvisioner;
-import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import com.alibaba.qwen.code.runtimebroker.spi.SshConnections;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import org.h2.jdbcx.JdbcDataSource;
@@ -32,14 +31,11 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URI;
-import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.Collections;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,32 +56,44 @@ class SshRuntimeWiringTest {
     Path temporary;
 
     @Test
-    void missingFactoriesAreRequiredOnlyWhenSshIsSelected() {
-        var settings = settings();
-        settings.getToolPublication().setServiceBaseUrl("not a URI");
-        Thread thread = Thread.currentThread();
-        ClassLoader previous = thread.getContextClassLoader();
-        thread.setContextClassLoader(new ClassLoader(previous) {
-            @Override
-            public Enumeration<URL> getResources(String name) throws IOException {
-                return name.equals("META-INF/services/" + RuntimeProviderFactory.class.getName())
-                        ? Collections.emptyEnumeration() : super.getResources(name);
-            }
-        });
-        try {
-            settings.getRuntimeBroker().setEnabled(false);
-            var configuration = new ManagedAgentConfiguration(settings);
-            assertThat(configuration.managedSshConnections(settings)).isNull();
-            settings.getRuntimeBroker().setEnabled(true);
-            assertThatThrownBy(() -> new ManagedAgentConfiguration(settings))
-                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("not installed: ssh-process");
-            assertThatThrownBy(() -> configuration.managedSshConnections(settings))
-                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("not installed: ssh-process");
-            settings.getRuntimeBroker().setProvisioner("local-process");
-            settings.getRuntimeBroker().getSsh().setNodes(List.of());
-            assertThat(configuration.managedSshConnections(settings)).isNull();
-        } finally {
-            thread.setContextClassLoader(previous);
+    void missingFactoriesAreRequiredOnlyWhenSshIsSelected() throws Exception {
+        try (var loader = RuntimeProviderLoaders.withoutFactoryServices()) {
+            RuntimeProviderLoaders.withContextLoader(loader, () -> {
+                var settings = loader.loadClass(ManagedAgentProperties.class.getName()).getConstructor().newInstance();
+                var publication = settings.getClass().getMethod("getToolPublication").invoke(settings);
+                publication.getClass().getMethod("setServiceBaseUrl", String.class).invoke(publication, "not a URI");
+                var broker = settings.getClass().getMethod("getRuntimeBroker").invoke(settings);
+                var setEnabled = broker.getClass().getMethod("setEnabled", boolean.class);
+                var setProvisioner = broker.getClass().getMethod("setProvisioner", String.class);
+                var configurationClass = loader.loadClass(ManagedAgentConfiguration.class.getName());
+                var constructor = configurationClass.getConstructor(settings.getClass());
+                var sshConnections = configurationClass.getMethod("managedSshConnections", settings.getClass());
+                setEnabled.invoke(broker, false);
+                var configuration = constructor.newInstance(settings);
+                assertThat(sshConnections.invoke(configuration, settings)).isNull();
+                var ssh = broker.getClass().getMethod("getSsh").invoke(broker);
+                var accessClass = loader.loadClass(SshRuntimeSettings.Access.class.getName());
+                var node = loader.loadClass(SshRuntimeSettings.Node.class.getName())
+                        .getConstructor(String.class, String.class, String.class, String.class, String.class,
+                                String.class, List.class, int.class, String.class, List.class)
+                        .newInstance("worker", "Worker", "remote-host", "/remote/node", "/remote/cli.js",
+                                "/remote/state", List.of("/remote/workspace"), 41270, "0.26.4",
+                                List.of(accessClass.getConstructor(String.class, String.class)
+                                        .newInstance("tenant", "actor")));
+                var setNodes = ssh.getClass().getMethod("setNodes", List.class);
+                setNodes.invoke(ssh, List.of(node));
+                setProvisioner.invoke(broker, "ssh-process");
+                setEnabled.invoke(broker, true);
+                assertThatThrownBy(() -> constructor.newInstance(settings))
+                        .isInstanceOf(InvocationTargetException.class)
+                        .rootCause().hasMessageContaining("not installed: ssh-process");
+                assertThatThrownBy(() -> sshConnections.invoke(configuration, settings))
+                        .isInstanceOf(InvocationTargetException.class)
+                        .rootCause().hasMessageContaining("not installed: ssh-process");
+                setProvisioner.invoke(broker, "local-process");
+                setNodes.invoke(ssh, List.of());
+                assertThat(sshConnections.invoke(configuration, settings)).isNull();
+            });
         }
     }
 
@@ -198,7 +206,7 @@ class SshRuntimeWiringTest {
             assertThat(ReflectionTestUtils.getField(assembled, "delegate")).isSameAs(primary);
             assertThat(assembled.supportsKind("ssh-process")).isTrue();
             assertThat(assembled.supportsKind("local-process")).isFalse();
-            assertThat(broker.supportsWorkspaceClose(null)).isFalse();
+            assertThat(broker.supportsWorkspaceClose((ContextBinding) null)).isFalse();
             assertThat(broker.supportsWorkspaceClose(local)).isFalse();
             assertThat(broker.supportsWorkspaceClose(remote)).isTrue();
             assertThat(broker.supportsWorkspaceContextChange(local)).isFalse();

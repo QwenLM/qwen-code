@@ -5,8 +5,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRec
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -119,15 +120,16 @@ final class JournalCheckpointValidation {
 
     Long priorCheckpointResourceRevision(String tenant, String workspace, String session,
             String resourceId, long maximum) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x JOIN ma_session_journal_tx t"
+        // Repeated checkpoint references otherwise favor a Session-wide owner-index scan in H2.
+        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x USE INDEX (idx_ma_ref_resource) JOIN ma_session_journal_tx t"
                         + " ON t.tenant_id = x.tenant_id AND t.workspace_id = x.workspace_id AND t.session_id = x.session_id"
-                        + " AND t.journal_revision = x.owner_revision WHERE x.resource_key = ? AND x.session_scope_key = ?"
-                        + " AND x.tenant_id = ? AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"
-                        + " AND x.owner_kind = 'JOURNAL' AND x.owner_key = ? AND x.owner_revision = x.journal_revision"
+                        + " AND t.journal_revision = x.owner_revision WHERE x.tenant_id = ?"
+                        + " AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"
+                        + " AND x.owner_kind = 'JOURNAL' AND x.owner_ref = ? AND x.owner_revision = x.journal_revision"
                         + " AND x.owner_revision <= ? ORDER BY x.owner_revision LIMIT 1",
-                (row, index) -> row.getLong(1), ManagedSessionStore.resourceKey(scope, resourceId), scope, tenant, workspace, session,
-                resourceId, scope, maximum);
+                (row, index) -> row.getLong(1), tenant, workspace, session,
+                resourceId, ManagedSchemaKeys.identity(
+                        ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session)), maximum);
         return origins.isEmpty() ? null : origins.getFirst();
     }
 }

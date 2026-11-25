@@ -20,6 +20,7 @@ interface MarkdownNode {
   alt?: string;
   identifier?: string;
   lang?: string | null;
+  meta?: string | null;
   children?: MarkdownNode[];
   position?: { start: MarkdownPoint; end: MarkdownPoint };
 }
@@ -65,7 +66,7 @@ function mayContainFencedCode(value: string): boolean {
   return value.includes('```') || value.includes('~~~');
 }
 
-function parseMarkdown(value: string): MarkdownNode | undefined {
+export function parseMarkdown(value: string): MarkdownNode | undefined {
   if (!isMarkdownSourceWithinBudget(value)) return undefined;
   try {
     const root = markdownParser.parse(value) as unknown as MarkdownNode;
@@ -182,7 +183,7 @@ function startsConservativeHtmlBlock(line: string): boolean {
   );
 }
 
-function walkMarkdown(
+export function walkMarkdown(
   node: MarkdownNode,
   visit: (node: MarkdownNode) => boolean | void,
 ): void {

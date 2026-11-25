@@ -665,8 +665,11 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
         QWEN_CODE_SERVE: '1',
         QWEN_CODE_DESKTOP: '1',
+        QWEN_CODE_MANAGED_RUNTIME: '1',
         QWEN_CODE_ENABLE_WORKFLOWS: '1',
         QWEN_CODE_DISABLE_WORKFLOWS: '1',
+        QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
+        QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: '0',
       }),
     ).toEqual([
       '--env',
@@ -686,9 +689,15 @@ describe('getSandboxPassthroughEnvArgs', () => {
       '--env',
       'QWEN_CODE_DESKTOP=1',
       '--env',
+      'QWEN_CODE_MANAGED_RUNTIME=1',
+      '--env',
       'QWEN_CODE_ENABLE_WORKFLOWS=1',
       '--env',
       'QWEN_CODE_DISABLE_WORKFLOWS=1',
+      '--env',
+      'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=0',
+      '--env',
+      'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0',
     ]);
   });
 });

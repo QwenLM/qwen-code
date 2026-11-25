@@ -2,7 +2,11 @@
 
 [English](2026-11-10-managed-loop-schedule.md) | [简体中文](2026-11-10-managed-loop-schedule.zh-CN.md)
 
-Status: proposal, not implemented. This is the fixed-interval arm of
+Status: in implementation. The self-paced wakeup sibling landed first
+with `hosted-workspace-shell/3`, so this slice takes the next revisions
+(`hosted-workspace-files/4`, `hosted-workspace-shell/4`,
+`hosted-workspace-team-lead/2`) per the landing-order note in decision 8.
+This is the fixed-interval arm of
 `/loop` support for Managed Sessions, the sibling of the
 [self-paced wakeup design](2026-11-10-managed-loop-wakeup.md). It creates
 [H6 automation definitions](2026-10-04-managed-automation.md) from inside
@@ -221,20 +225,23 @@ The facts below are from this repository at `488845a4a81`.
    apply as they do for a public-API definition. The skill's immediate
    first run is the current turn; no mechanism is added for it.
 8. **The tool surface ships on the next profile revisions.**
-   `hosted-workspace-files/4`, `hosted-workspace-shell/3`, and
+   `hosted-workspace-files/4`, `hosted-workspace-shell/4`, and
    `hosted-workspace-team-lead/2` declare the cron trio, following the
-   `files/3` precedent; the numbering assumes this slice lands first,
-   and the two families swap if the sibling lands first. `shell/2` is
+   `files/3` precedent. The wakeup sibling landed first and took
+   `hosted-workspace-shell/3` (declaring `loop_wakeup` plus
+   `cron_list`/`cron_delete`), so this slice's Shell revision is the next
+   one, `shell/4`, which inherits `loop_wakeup` and adds `cron_create`;
+   `files/4` and `team-lead/2` declare the cron trio without
+   `loop_wakeup`. `shell/2` is
    deliberately skipped: it is a retired identifier, withdrawn by the
    [2026-10-23 Shell profile design](2026-10-23-managed-shell-profile.md)
    and pinned dead by regression tests, and re-minting it would invert
    them. Admission requires `qwen.managed-agent.automation.enabled` for
    `cron_create`; `cron_list` and `cron_delete` stay declared and usable
    with the gate off (decision 2). The read profile never declares them.
-   The sibling slice adds `loop_wakeup` on the revisions after these and
-   extends `cron_list`/`cron_delete` to the union of decision 6 — tool
-   names are the persisted vocabulary, behavior may grow; whichever
-   slice lands first declares `cron_list`/`cron_delete`. The managed
+   Tool names are the persisted vocabulary, behavior may grow: this
+   slice extends the already-declared `cron_list`/`cron_delete` to the
+   union of decision 6 (definitions plus the pending wakeup). The managed
    loop skill variant ships as a skill asset through the existing
    Session Skills publication with the same `allowedTools` as the
    bundled skill; its visibility is gated with the tools, mirroring the
@@ -268,9 +275,17 @@ The facts below are from this repository at `488845a4a81`.
 ## Contract touchpoints
 
 - A new internal controller (the `ManagedMemorySessionController` shape)
-  for the three verbs, with `SurfaceRegistry` entries, the OpenAPI
-  internal surface, `ManagedAgentApiContractTest`,
-  `SurfaceRegistryGateTest`, and the `managed-surface.txt` fixture.
+  for the three verbs, authenticated by the writer binding
+  (`X-Qwen-Managed-Writer-Token` + `workspaceId`/`writerId`/
+  `writerGeneration` via `authorizeOrdinary`), with `SurfaceRegistry`
+  entries (`Surface.INTERNAL`, `RuleClass.INTERNAL_WRITER`, new
+  capabilities), the regenerated `managed-surface.txt` fixture, and
+  `SurfaceRegistryGateTest`'s exact handler↔registry bijection. There is
+  no internal OpenAPI file: the public contract walk
+  (`ManagedAgentApiContractTest`) skips `/internal/`, so the registry +
+  fixture + gate tests are the internal surface's contract pins. The
+  internal routes have no user principal (`TenantContext.actorId` is
+  null); the creator actor is derived from `ma_session.creator_actor_key`.
 - `ManagedAutomationService`: the controller derives the creator actor
   and delegates; the internal routes' list/retire become Session-scoped
   inside the service/ledger (filter before the page limit, correct `next`
@@ -285,7 +300,7 @@ The facts below are from this repository at `488845a4a81`.
   binding). Shell identity is not centralised: the profile predicates
   (`isHostedWorkspaceShellProfile` and friends), the admission paths that
   compare the literal `hosted-workspace-shell/1`, and the control plane's
-  canonical Shell admission must all recognise `shell/3`, or a `shell/3`
+  canonical Shell admission must all recognise `shell/4`, or a `shell/4`
   Session loses the shell lane, child-agent and foreground-only
   admission. The unknown-profile fixtures that list `files/4` flip in the
   same change.
@@ -324,7 +339,7 @@ The facts below are from this repository at `488845a4a81`.
   definitions, `cron_list` returns every id and `/loop clear` leaves zero
   live definitions.
 - Profile admission: the retired `hosted-workspace-shell/2` stays
-  refused; a `hosted-workspace-shell/3` Session keeps the shell lane,
+  refused; a `hosted-workspace-shell/4` Session keeps the shell lane,
   child-agent and foreground-only admission; the unknown-profile fixtures
   that list `files/4` flip in the same change that admits it.
 - Failure split: a 503 re-drives with the same key; a pre-commit refusal
@@ -349,6 +364,41 @@ The facts below are from this repository at `488845a4a81`.
 - One Session's writer cannot list or retire another Session's
   definitions, even under the same creator.
 - No new journal event kind or payload field; no second scheduler.
+
+## Companion follow-ups (same PR)
+
+Two small wakeup-slice follow-ups land with this slice rather than as a
+separate change:
+
+1. **notBefore-aware wake-recovery exemption.** The control plane's
+   `WakeRecovery.scan` attaches the Harness (`recoverForWake`) for any
+   Session whose journal proves a pending wake input.
+   `JdbcWakeRecoveryStore.hasPendingInput` counts every unsettled
+   `input.accepted` whose source is in `SOURCES` (which already includes
+   `loop`), regardless of `notBefore`. A Session whose only pending input
+   is a not-yet-due loop wakeup is therefore re-attached prematurely on
+   every recovery scan. The fix: when the only unsettled wake inputs are
+   `loop` `input.accepted` entries carrying a future `notBefore`, answer
+   `Optional.empty()` (they are deferred, not parked; an empty answer
+   keeps the durable hint, where `false` would clear it and drop the
+   armed wakeup); a due or immediate loop input still answers `true`.
+   The proof's progress stays cached — refusing the answer, not the
+   pages read — so a wake input committed past the 32-revision proof
+   window is still reached. A cached deferred proof that certifies
+   nothing expires at the earliest deferred fire time; one that also
+   carries a due pending input answers `true` from the complete
+   shortcut and stays memoized at that revision until the journal
+   advances. A settlement drops the input from the deferred latch.
+   The exemption needs a clock reference in the
+   store and a `WakeRecoveryStoreTest` pair (future-only loop input →
+   `isEmpty()`, no attach; due loop input → `contains(true)`, attach).
+2. **Fire-time sentinel Java fixture replay parity.** The journal-replay
+   proof in `JdbcWakeRecoveryStore` must recognize the loop sentinel
+   inputs the wakeup slice writes, with a fixture test replaying a
+   journal that carries a sentinel loop input (and its `notBefore`) so
+   the Java projection stays in parity with the Harness's fire-time
+   expansion. This is the same `hasPendingInput`/`isWakeInput` domain as
+   follow-up 1 and is pinned alongside it.
 
 ## Open questions
 

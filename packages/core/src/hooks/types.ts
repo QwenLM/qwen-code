@@ -747,7 +747,7 @@ export interface PermissionDeniedInput extends HookInput {
 export interface PermissionRequestDecision {
   behavior: 'allow' | 'deny';
   updatedInput?: Record<string, unknown>;
-  updatedPermissions?: PermissionSuggestion[];
+  updatedPermissions?: unknown[];
   message?: string;
   interrupt?: boolean;
 }
@@ -808,9 +808,9 @@ export class PermissionRequestHookOutput extends DefaultHookOutput {
   /**
    * Get updated permissions if permission was allowed with permission updates
    */
-  getUpdatedPermissions(): PermissionSuggestion[] | undefined {
-    const decision = this.getPermissionDecision();
-    return decision?.updatedPermissions;
+  getUpdatedPermissions(): unknown[] | undefined {
+    const updates = this.getPermissionDecision()?.updatedPermissions;
+    return Array.isArray(updates) ? updates : undefined;
   }
 }
 
@@ -1432,6 +1432,7 @@ export interface HookExecutionResult {
 export interface HookExecutionPlan {
   eventName: HookEventName;
   hookConfigs: HookConfig[];
+  hookSources?: HooksConfigSource[];
   sequential: boolean;
 }
 

@@ -41,11 +41,9 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -92,14 +90,16 @@ class SessionRecoveryInitialStateTest {
 
     @Test
     void aPersistedEmptySessionRenameRemainsSendableAfterHarnessCacheLoss() throws Exception {
-        when(harness.createOrLoad(TENANT, sessionId, false, true)).thenAnswer(call -> {
-            genesis();
-            return new HarnessConnector.Attachment("boot", null, 0L, "epoch");
-        });
-        doAnswer(call -> {
-            rename();
-            return null;
-        }).when(harness).rename(eq(TENANT), eq(sessionId), eq("Renamed"), anyLong());
+        // The synchronous rename settles the title in one local SQL transaction
+        // and no longer establishes a Harness boot attachment, so it does not
+        // seed the journal through createOrLoad. Seed the pristine initial
+        // journal (genesis + rename) directly as the Harness state this recovery
+        // case pins; the best-effort title notification is a no-op here and must
+        // not append another commit. The guarantee under test is unchanged: an
+        // empty Session with a proven initial journal stays sendable after the
+        // Harness cache is lost, without re-attaching.
+        genesis();
+        rename();
         sessions.renameSession(TENANT, "actor", "rename", sessionId, "Renamed");
         assertThat(store.requireSession(TENANT, sessionId).title()).isEqualTo("Renamed");
         assertThat(store.findLatestTurns(TENANT, List.of(sessionId))).isEmpty();

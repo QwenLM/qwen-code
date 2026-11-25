@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
 import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
@@ -39,6 +38,7 @@ import static org.mockito.Mockito.when;
 
 class ToolPublicationStorageConfigurationTest {
     private static final String PREFIX = "qwen.managed-agent.tool-publication.";
+    private static final String STORAGE_ENABLED = "qwen.managed-agent.object-storage.enabled";
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(AliyunToolPublicationStorageAutoConfiguration.class))
@@ -47,7 +47,6 @@ class ToolPublicationStorageConfigurationTest {
             .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> mock(PlatformTransactionManager.class))
             .withBean(JdbcManagedSessionStore.class, () -> mock(JdbcManagedSessionStore.class))
             .withBean(HarnessRules.class, SdkHarnessRules::new)
-            .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
             .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
             .withBean(ToolExecutionRepository.class, () -> mock(ToolExecutionRepository.class))
             .withBean(RuntimeBindingRepository.class, () -> mock(RuntimeBindingRepository.class))
@@ -66,25 +65,35 @@ class ToolPublicationStorageConfigurationTest {
     }
 
     @Test
-    void disabledPublicationDoesNotCreateStorage() {
+    void disabledStorageDoesNotCreateStorage() {
         runner.run(context -> assertThat(context).hasNotFailed().doesNotHaveBean(OSS.class)
                 .doesNotHaveBean(ToolPublicationObjectStore.class).doesNotHaveBean(ToolPublicationDataStore.class));
     }
 
     @Test
-    void maintenanceContextsDoNotInitializePublicationStorage() {
+    void genericStorageDoesNotRequirePublicationConfiguration() {
+        var client = mock(OSS.class);
+        var managedClient = new AliyunObjectStoreClient(client);
+        var acl = new AccessControlList();
+        acl.setCannedACL(CannedAccessControlList.Private);
+        when(client.getBucketAcl("private-test-bucket")).thenReturn(acl);
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(AliyunToolPublicationStorageAutoConfiguration.class))
                 .withUserConfiguration(PropertiesConfiguration.class)
-                .withPropertyValues(PREFIX + "enabled=true")
-                .run(context -> assertThat(context).hasNotFailed().doesNotHaveBean(OSS.class)
-                        .doesNotHaveBean(ToolPublicationObjectStore.class));
+                .withPropertyValues(STORAGE_ENABLED + "=true", PREFIX + "oss-bucket=private-test-bucket")
+                .withBean(BeanFactoryPostProcessor.class, () -> beanFactory ->
+                        ((AbstractBeanDefinition) beanFactory.getBeanDefinition("toolPublicationOss"))
+                                .setInstanceSupplier(() -> managedClient))
+                .run(context -> assertThat(context).hasNotFailed()
+                        .hasSingleBean(ToolPublicationObjectStore.class)
+                        .doesNotHaveBean(ToolPublicationDataStore.class));
+        verify(client).shutdown();
     }
 
     @Test
     void anApplicationStoreReplacesOssWithoutAnyOssSettings() {
         runner.withUserConfiguration(CustomStorageConfiguration.class)
-                .withPropertyValues(PREFIX + "enabled=true")
+                .withPropertyValues(STORAGE_ENABLED + "=true", PREFIX + "enabled=true")
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(ToolPublicationObjectStore.class)
                             .doesNotHaveBean(OSS.class).doesNotHaveBean(AliyunToolPublicationStorageAutoConfiguration.class);
@@ -107,7 +116,7 @@ class ToolPublicationStorageConfigurationTest {
 
     @Test
     void theDefaultAdapterStillRequiresOssConfiguration() {
-        runner.withPropertyValues(PREFIX + "enabled=true")
+        runner.withPropertyValues(STORAGE_ENABLED + "=true", PREFIX + "enabled=true")
                 .run(context -> assertThat(context).hasFailed()
                         .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
                         .hasStackTraceContaining("OSS endpoint"));
@@ -120,7 +129,8 @@ class ToolPublicationStorageConfigurationTest {
         var acl = new AccessControlList();
         acl.setCannedACL(CannedAccessControlList.Private);
         when(client.getBucketAcl("private-test-bucket")).thenReturn(acl);
-        runner.withPropertyValues(PREFIX + "enabled=true", PREFIX + "oss-bucket=private-test-bucket")
+        runner.withPropertyValues(STORAGE_ENABLED + "=true", PREFIX + "enabled=true",
+                        PREFIX + "oss-bucket=private-test-bucket")
                 .withBean("unrelatedOss", OSS.class, () -> mock(OSS.class))
                 .withBean(BeanFactoryPostProcessor.class, () -> beanFactory ->
                         ((AbstractBeanDefinition) beanFactory.getBeanDefinition("toolPublicationOss"))

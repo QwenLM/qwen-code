@@ -31,6 +31,7 @@ export type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import type {
+  AnyToolInvocation,
   AutoModeFallbackConfirmation,
   ToolCallConfirmationDetails,
 } from '../tools/tools.js';
@@ -55,6 +56,7 @@ import {
 import {
   isDestructiveCommand,
   extractLastUserPrompt,
+  amendNeedsApproval,
 } from './destructive-commands.js';
 import type { PermissionCheckContext } from './types.js';
 
@@ -323,6 +325,7 @@ export function shouldForceAutoModeReviewForAllow(
       : ctx.command;
   const cwd = ctx.cwd ?? cwdFallback;
 
+  if (amendNeedsApproval(command)) return true;
   if (hasRawProtectedRedirect(command, cwd)) return true;
   if (hasRawProtectedWriteCommand(command, cwd)) return true;
 
@@ -338,6 +341,40 @@ export function shouldForceAutoModeReviewForAllow(
     }
     return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
   });
+}
+
+export function shouldRequireAutoModeReviewForAllow(
+  invocation: Pick<AnyToolInvocation, 'requiresAutoReviewOnAllow'>,
+  ctx: PermissionCheckContext,
+  toolName: string,
+  config: Config,
+): boolean {
+  return (
+    invocation.requiresAutoReviewOnAllow?.() === true ||
+    shouldForceAutoModeReviewForAllow(ctx, config.getCwd()) ||
+    shouldClassifyAllShellForAutoMode(toolName, config)
+  );
+}
+
+export async function confirmAutomaticReviewOnAllow(
+  config: Config,
+  invocation: AnyToolInvocation,
+  signal: AbortSignal,
+): Promise<'confirmed' | 'cancelled' | 'mode-changed' | 'requires-human'> {
+  if (invocation.requiresAutoReviewOnAllow?.() !== true) return 'confirmed';
+  const mode = config.getApprovalMode();
+  if (mode !== ApprovalMode.AUTO && mode !== ApprovalMode.YOLO) {
+    return 'mode-changed';
+  }
+  const confirmation = await invocation.getConfirmationDetails(signal);
+  if (signal.aborted) return 'cancelled';
+  const liveMode = config.getApprovalMode();
+  if (liveMode !== ApprovalMode.AUTO && liveMode !== ApprovalMode.YOLO) {
+    return 'mode-changed';
+  }
+  if (invocation.requiresUserInteraction?.()) return 'requires-human';
+  await confirmation.onAutoConfirm?.(liveMode);
+  return signal.aborted ? 'cancelled' : 'confirmed';
 }
 
 function hasRawProtectedRedirect(command: string, cwd: string): boolean {
@@ -379,7 +416,8 @@ function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
         '',
       );
       for (const candidate of rawProtectedWriteTargets(target, line)) {
-        if (/\$[{(A-Za-z_]/.test(candidate)) return true;
+        // URLs can encode write targets. Review them without probing UNC paths.
+        if (/\$[{(A-Za-z_]|\bhttps?:\/\//i.test(candidate)) return true;
         if (containsProtectedPathFragment(candidate, cwd)) return true;
       }
     }
@@ -508,10 +546,23 @@ export type AutoModeDecision =
       shouldBlock: boolean;
       reason: string;
       unavailable: boolean;
-      stage: 'fast' | 'thinking';
+      stage: ClassifierResult['stage'];
       durationMs: number;
     }
-  | { via: 'fallback'; reason: FallbackToAskReason };
+  | {
+      via: 'fallback';
+      reason: FallbackToAskReason;
+      /**
+       * A deterministic floor only a human can confirm; a `PermissionRequest`
+       * hook answering `allow` must not waive it.
+       */
+      requiresHumanDecision?: boolean;
+      /**
+       * The approval-dialog explanation. The scheduler records an
+       * `autoModeFallback` (and hides "always allow") only when one is present.
+       */
+      message?: string;
+    };
 
 /**
  * Reasons AUTO mode itself is unavailable before a per-call decision can run.
@@ -673,7 +724,7 @@ export function applyAutoModeDecision(
         recordAllow(denialState, actionFingerprint),
       );
       return { kind: 'approved' };
-    case 'fallback':
+    case 'fallback': {
       if (
         actionFingerprint !== undefined &&
         denialState.pendingManualRetryFingerprint === actionFingerprint
@@ -696,13 +747,20 @@ export function applyAutoModeDecision(
             'Commands outside the workspace require manual approval in AUTO mode.',
         };
       }
+      const message =
+        decision.message ??
+        (isDenialFallbackReason(decision.reason)
+          ? formatDenialFallbackMessage(decision.reason)
+          : undefined);
       return {
         kind: 'fallback',
         reason: decision.reason,
-        ...(isDenialFallbackReason(decision.reason)
-          ? { message: formatDenialFallbackMessage(decision.reason) }
+        ...(decision.requiresHumanDecision
+          ? { requiresHumanDecision: true }
           : {}),
+        ...(message ? { message } : {}),
       };
+    }
     default: {
       const _exhaustive: never = decision;
       // Make unexpected JS/interop values visible at runtime.
@@ -883,22 +941,21 @@ export async function evaluateAutoMode(
         ? normalizeMonitorCommand(input.ctx.command).safetyCommand
         : input.ctx.command;
     const userPrompt = extractLastUserPrompt(input.messages) ?? '';
-    // `ctx.cwd` is only set when the call passes `directory`; otherwise the
-    // shell runs in the session's target dir, which is also where
-    // `ShellToolInvocation` registers session commits. Passing `undefined`
-    // through lands on `process.cwd()` inside `isAmendOfSessionCommit`'s
-    // `git rev-parse` — in a process hosting several sessions (ACP, daemon)
-    // or several worktrees that is a different repo, so one repo's registry
-    // could exempt an amend happening in another.
-    const destructiveResult = isDestructiveCommand(
-      command,
-      userPrompt,
-      input.ctx.cwd ?? input.config.getTargetDir?.(),
-    );
+    const destructiveResult = isDestructiveCommand(command, userPrompt);
     if (destructiveResult?.blocked) {
       return {
         via: 'blocked:destructive-command',
         reason: destructiveResult.reason,
+      };
+    }
+    // Ask instead of hard-blocking (#13570). The `message` is what makes the
+    // scheduler record the fallback and hide "always allow".
+    if (amendNeedsApproval(command)) {
+      return {
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+        message: 'Rewriting a commit requires manual approval in AUTO mode.',
       };
     }
   }

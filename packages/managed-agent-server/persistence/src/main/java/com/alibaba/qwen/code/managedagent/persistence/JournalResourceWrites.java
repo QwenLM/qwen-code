@@ -7,7 +7,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.PublishToolResultRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -41,7 +42,6 @@ final class JournalResourceWrites {
     ToolResultResourceRef publishAgentInstructions(String tenantId,
             String workspaceId, String sessionId, String instructions) {
         JournalStoreRows.validateScope(tenantId, workspaceId, sessionId);
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         byte[] bytes = instructions.getBytes(StandardCharsets.UTF_8);
         if (bytes.length > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES) {
             throw JournalStoreRows.payloadTooLarge("Agent instructions exceed 64 KiB.");
@@ -53,7 +53,6 @@ final class JournalResourceWrites {
     ToolResultResourceRef publishAgentSkills(String tenantId,
             String workspaceId, String sessionId, List<java.util.Map<String, Object>> skills) {
         JournalStoreRows.validateScope(tenantId, workspaceId, sessionId);
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         return publishAgentResource(tenantId, workspaceId, sessionId,
                 "managed-agent-skills", "agent-skills-", AgentDefinitionExtensions.skillsBytes(skills));
     }
@@ -63,8 +62,7 @@ final class JournalResourceWrites {
         if (ManagedNativeJournalSnapshots.isSnapshotId(source.resourceId())) {
             throw JournalStoreRows.invalid("Native snapshot resources require fenced snapshot publication.");
         }
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
-        if (!Set.of("managed-extension-config-bundle", "managed-extension-contributions", "managed-extension-contributions-part").contains(source.kind())
+        if (!ManagedSessionStoreModels.INHERITED_EXTENSION_KINDS.contains(source.kind())
                 || source.schemaVersion() != 1 || source.byteLength() > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
                 || source.bytes().length != source.byteLength() || !JournalStoreRows.sha256(source.bytes()).equals(source.digest())) {
             throw JournalStoreRows.invalid("Invalid inherited extension resource");
@@ -80,18 +78,15 @@ final class JournalResourceWrites {
     ToolResultResourceRef publishAgentResource(String tenantId, String workspaceId, String sessionId,
             String kind, byte[] bytes, String resourceId) {
         String digest = JournalStoreRows.sha256(bytes);
-        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         Timestamp now = storeRows.databaseNow();
-        JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, resourceId);
+        JournalStoreRows.ResourceRow existing = storeRows.findResource(tenantId, sessionId, resourceId);
         if (existing == null) {
             jdbc.update(
-                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                    "INSERT INTO ma_resource (tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?,"
                         + " ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                    ManagedSessionStore.resourceKey(scopeKey, resourceId),
-                    scopeKey,
                     tenantId,
                     workspaceId,
                     sessionId,
@@ -124,9 +119,9 @@ final class JournalResourceWrites {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        JournalStoreRows.validateStableId(request.writerId(), "writerId");
+        JournalStoreRows.validateStableId(request.writerId(), "writerId", 128);
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
-        JournalStoreRows.validateStableId(request.resourceId(), "resourceId");
+        JournalStoreRows.validateStableId(request.resourceId(), "resourceId", 256);
         if (ManagedNativeJournalSnapshots.isSnapshotId(request.resourceId())) {
             throw JournalStoreRows.invalid("Native snapshot resources require fenced snapshot publication.");
         }
@@ -144,46 +139,34 @@ final class JournalResourceWrites {
             throw JournalStoreRows.invalid("Tool result bytes do not match their length or digest.");
         }
         // Ordinary inline publication queues on its Session, like commit;
-        // lifecycle authority and CSI continuation retain their tenant guards.
-        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
+        // lifecycle authority retains its tenant guards.
+        fencing.lockSessionFirst(tenantId, sessionId);
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
-        var csiOriginal = continuation == null ? null : continuation.original();
-        if (csiOriginal != null) {
-            csiOriginal.requireContinuation();
-        }
-        if (authority == null && csiOriginal == null) {
+        if (authority == null) {
             fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
         } else {
             fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }
-        JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterRootLock(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even
         // for the claiming lifecycle authority: tool results are never
         // published against a Session claimed under lifecycle protocol v2.
         fencing.requireNoLifecycleClaim(tenantId, sessionId);
-        JournalFencing.requireCsiWriter(csiOriginal, head);
         Timestamp now = storeRows.databaseNow();
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
-        fencing.requireInstalledCsiWriter(csiOriginal);
-        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, request.resourceId(), false);
+        JournalStoreRows.ResourceRow existing = storeRows.findResource(tenantId, sessionId, request.resourceId(), false);
         if (existing != null) {
-            existing = storeRows.findResource(scopeKey, request.resourceId());
+            existing = storeRows.findResource(tenantId, sessionId, request.resourceId());
         }
-        fencing.requireCsiWriterCurrent(
-                continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         if (existing == null) {
             try {
                 jdbc.update(
-                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                        "INSERT INTO ma_resource (tenant_id,"
                             + " workspace_id, session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?,"
                             + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                        ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
-                        scopeKey,
                         tenantId,
                         request.workspaceId(),
                         sessionId,
@@ -197,7 +180,7 @@ final class JournalResourceWrites {
                         now.getTime(),
                         now.getTime());
             } catch (DuplicateKeyException race) {
-                existing = storeRows.findResource(scopeKey, request.resourceId());
+                existing = storeRows.findResource(tenantId, sessionId, request.resourceId());
                 if (existing == null) {
                     throw JournalStoreRows.conflict("managed_session_resource_conflict",
                             "A resourceId was reused with different content metadata.");
@@ -214,16 +197,15 @@ final class JournalResourceWrites {
                         "A resourceId was reused with different content metadata.");
             }
         }
-        fencing.requireCsiCurrentTime(continuation);
         return new ToolResultResourceRef(request.resourceId(), request.kind(), request.schemaVersion(),
                 request.byteLength(), request.digest());
     }
 
-    void commitResources(String scopeKey, String tenantId,
+    void commitResources(String tenantId,
             String sessionId, CommitTransactionRequest request,
             long revision, Timestamp now,
-            List<ValidatedResource> resources,
-            Runnable writeFence) {
+            List<ValidatedResource> resources) {
+        String ownerRef = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenantId, sessionId);
         Set<String> resourceIds = new HashSet<>();
         for (ValidatedResource input : resources) {
             CommitResource resource = input.resource();
@@ -235,13 +217,12 @@ final class JournalResourceWrites {
             // that two Sessions inserting into one gap deadlock. Probe first;
             // lock only a row that exists (a record lock), and let the unique
             // key decide a racing insert.
-            JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey,
+            JournalStoreRows.ResourceRow existing = storeRows.findResource(tenantId, sessionId,
                     resource.resourceId(), false);
             if (existing != null || input.bytes() == null) {
                 // A miss without bytes fails below and inserts nothing.
-                existing = storeRows.findResource(scopeKey, resource.resourceId());
+                existing = storeRows.findResource(tenantId, sessionId, resource.resourceId());
             }
-            writeFence.run();
             if (existing == null) {
                 if (input.bytes() == null) {
                     // An over-cap body can only land through the OSS allocation path;
@@ -261,7 +242,7 @@ final class JournalResourceWrites {
                             "A referenced Managed Session resource is"
                                     + " missing.");
                 }
-                existing = insertResource(scopeKey, tenantId, sessionId, request, now, input);
+                existing = insertResource(tenantId, sessionId, request, now, input);
             }
             if (existing != null) {
                 JournalStoreRows.requireResourceScope(existing, tenantId,
@@ -279,14 +260,12 @@ final class JournalResourceWrites {
                 }
             }
             jdbc.update(
-                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " journal_revision, resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, ?)",
-                    scopeKey,
-                    scopeKey,
+                    "INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
+                        + " owner_revision, tenant_id, workspace_id, session_id,"
+                        + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL', ?, ?,"
+                        + " ?, ?, ?, ?, ?, ?)",
+                    ManagedSchemaKeys.identity(ownerRef),
                     revision,
-                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()),
                     tenantId,
                     request.workspaceId(),
                     sessionId,
@@ -299,27 +278,27 @@ final class JournalResourceWrites {
     // Inserts a new resource and answers null, or, when another writer
     // committed the same key first, the winner's row under a lock for the
     // caller to verify like any existing resource.
-    private JournalStoreRows.ResourceRow insertResource(String scopeKey, String tenantId,
+    private JournalStoreRows.ResourceRow insertResource(String tenantId,
             String sessionId, CommitTransactionRequest request, Timestamp now,
             ValidatedResource input) {
         CommitResource resource = input.resource();
         try {
             jdbc.update("INSERT INTO ma_resource"
-                            + " (resource_key, session_scope_key, tenant_id,"
+                            + " (tenant_id,"
                             + " workspace_id, session_id, resource_id,"
                             + " kind, schema_version, byte_length, sha256,"
                             + " storage_kind, inline_bytes,"
                             + " publish_command_id, state, gmt_create,"
-                            + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                            + " last_verified_at) VALUES (?, ?, ?, ?,"
                             + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
                             + " 'REFERENCED', ?, ?)",
-                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
+                    tenantId, request.workspaceId(), sessionId,
                     resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), input.bytes(), request.commandId(),
                     now.getTime(), now.getTime());
         } catch (DuplicateKeyException race) {
-            JournalStoreRows.ResourceRow winner = storeRows.findResource(scopeKey, resource.resourceId());
+            JournalStoreRows.ResourceRow winner = storeRows.findResource(tenantId, sessionId, resource.resourceId());
             if (winner == null) {
                 throw JournalStoreRows.conflict("managed_session_resource_conflict",
                         "A resourceId was reused with different content metadata.");

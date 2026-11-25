@@ -17,7 +17,7 @@
  * through recoverHostedRuntimeTurn, and the settle/fill/resume helpers
  * shared by every settle path fold what the checkpoint still owes. The
  * routes themselves are driven end-to-end — including one wedge minted
- * by the production admission — in hosted-harness-session.test.ts
+ * by the production admission — in hosted-harness-session.takeover-child-waits.test.ts
  * (R1-8); the wedge here is minted by direct harness commits, which the
  * route cases prove reaches the same stored shape.
  */

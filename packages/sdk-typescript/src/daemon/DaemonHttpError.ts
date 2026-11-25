@@ -16,11 +16,19 @@
 export class DaemonHttpError extends Error {
   readonly status: number;
   readonly body: unknown;
-  constructor(status: number, body: unknown, message: string) {
+  /** Raw Retry-After header, in seconds or HTTP-date form when provided. */
+  readonly retryAfter?: string;
+  constructor(
+    status: number,
+    body: unknown,
+    message: string,
+    retryAfter?: string,
+  ) {
     super(message);
     this.name = 'DaemonHttpError';
     this.status = status;
     this.body = body;
+    this.retryAfter = retryAfter;
   }
 }
 

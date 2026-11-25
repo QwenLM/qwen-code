@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,9 +20,11 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * C1 regression: once {@code compactOnce()} publishes a pack and
@@ -39,6 +43,7 @@ class JournalPackDeletionRegressionTest {
     private static final String TENANT = "tenant";
     private static final String WORKSPACE = "workspace";
     private static final String SESSION = "session";
+    private static final long EXPIRES_AT = 4_102_444_800_000L;
 
     private JdbcTemplate jdbc;
     private JdbcJournalPacks packs;
@@ -55,21 +60,23 @@ class JournalPackDeletionRegressionTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         objects = new PublicationProbeWiring.InMemoryObjectStore();
-        ManagedAgentSettings settings = (ManagedAgentSettings) Proxy.newProxyInstance(
+        packs = new JdbcJournalPacks(jdbc, objects, settings());
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create,"
+                + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT, SESSION);
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id,"
+                        + " session_id, harness_session_id, head_kind, state, journal_revision,"
+                        + " committed_sequence, compacted_through_revision, packed_through_revision,"
+                        + " writer_generation, activation_epoch, writer_lease_until,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'MANAGED_SESSION',"
+                        + " 'ACTIVE', 0, 0, 0, 0, 1, 0, 1, 1, 1)", TENANT, WORKSPACE,
+                SESSION, SESSION);
+    }
+
+    private ManagedAgentSettings settings() {
+        return (ManagedAgentSettings) Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[] {ManagedAgentSettings.class},
                 (proxy, method, args) -> method.getName().equals("getSessionResources")
                         ? sessionResources() : null);
-        packs = new JdbcJournalPacks(jdbc, objects, settings);
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create,"
-                + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT, SESSION);
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
-                        + " session_id, harness_session_id, head_kind, state, journal_revision,"
-                        + " committed_sequence, compacted_through_revision, packed_through_revision,"
-                        + " writer_generation, activation_epoch, storage_version, writer_lease_until,"
-                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION',"
-                        + " 'ACTIVE', 0, 0, 0, 0, 1, 0, 1, 1, 1, 1)",
-                ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(SESSION), TENANT, WORKSPACE,
-                SESSION, SESSION);
     }
 
     private ManagedAgentSettings.SessionResources sessionResources() {
@@ -111,13 +118,13 @@ class JournalPackDeletionRegressionTest {
         revision++;
         String commitDigest = DigestUtils.sha256Hex(("commit-" + revision).getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash, transaction_id, operation, command_id,"
+                        + " journal_revision, command_ref, transaction_id, operation, command_id,"
                         + " content_digest, first_sequence, last_sequence, event_count,"
                         + " previous_commit_digest, commit_digest, writer_generation, writer_id,"
                         + " writer_token_hash, activation_epoch, record_encoding, record_bytes,"
                         + " byte_length, record_digest, gmt_create) VALUES (?, ?, ?, ?, ?, ?, 'fixture',"
                         + " ?, ?, ?, ?, ?, ?, ?, 1, 'writer', ?, 0, 'identity', ?, ?, ?, 1)",
-                TENANT, WORKSPACE, SESSION, revision, DigestUtils.sha256Hex("key-" + revision),
+                TENANT, WORKSPACE, SESSION, revision, ManagedIdentityRefs.commandRef("fixture", "command-" + revision),
                 "tx-" + revision, "command-" + revision, "a".repeat(64), firstSequence, sequence,
                 events.length, previousDigest, commitDigest, "b".repeat(64), bytes, bytes.length,
                 DigestUtils.sha256Hex(bytes));
@@ -204,11 +211,99 @@ class JournalPackDeletionRegressionTest {
         AgentStoreRows storeRows = new AgentStoreRows(null, jdbc, JSON);
         AgentExecutionOperations operations = new AgentExecutionOperations(
                 null, null, null, null, storeRows, null, jdbc, null, null, false, packs);
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
-        operations.backfillCompactionProjection(TENANT, SESSION, scope, "compaction-key");
+        operations.backfillCompactionProjection(TENANT, SESSION);
         // With no context.compacted event the backfill still walks the deleted prefix and
         // lands the empty compaction-state resource instead of failing on null bytes.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE resource_id LIKE"
                 + " 'compaction-state:%'", Long.class)).isEqualTo(1);
+    }
+
+    @Test
+    void activationLeaseRowResolvesDeletedBlobFromThePack() {
+        appendActivation();
+        compactAndDelete();
+        JournalStoreRows rows = new JournalStoreRows(jdbc, objects);
+        JournalStoreRows.ActivationLeaseRow lease = rows.activationLeaseRow(activationHead());
+        assertThat(lease.revision()).isEqualTo(1);
+        assertThat(lease.workerId()).isEqualTo("worker");
+        assertThat(lease.lease().activationId()).isEqualTo("current");
+        assertThat(lease.lease().epoch()).isEqualTo(2);
+        assertThat(lease.lease().renewalSeq()).isEqualTo(1);
+        assertThat(lease.lease().expiresAt()).isEqualTo(EXPIRES_AT);
+    }
+
+    @Test
+    void activationLeaseRowFailsClosedWithoutAnObjectStore() {
+        appendActivation();
+        compactAndDelete();
+        JournalStoreRows rows = new JournalStoreRows(jdbc, null);
+        assertThatThrownBy(() -> rows.activationLeaseRow(activationHead()))
+                .isInstanceOf(ManagedAgentException.class);
+    }
+
+    @Test
+    void sealedHeadEvictedGenesisStillClosesThroughThePackFallback() throws Exception {
+        var fixture = new WorkspaceLifecycleStoreTest.Fixture();
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
+        var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        // A real genesis header with a durable definitionRef and no hookCatalog: the
+        // receipt synthesizes from the header alone, with no hook effects to settle.
+        byte[] definition = "{\"toolProfile\":\"hosted-workspace-files/1\"}".getBytes(StandardCharsets.UTF_8);
+        String digest = DigestUtils.sha256Hex(definition);
+        var header = fixture.json.createObjectNode().put("subtype", "managed_session_header_v1");
+        header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
+                .put("kind", "managed-session-definition").put("schemaVersion", 1).put("byteLength", definition.length).put("digest", digest);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n" + header + "\n").getBytes(StandardCharsets.UTF_8);
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
+                0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
+                Base64.getEncoder().encodeToString(bytes), DigestUtils.sha256Hex(bytes),
+                List.of(new ManagedSessionStoreModels.CommitResource("definition", "managed-session-definition", 1,
+                        definition.length, digest, Base64.getEncoder().encodeToString(definition))));
+        fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
+        var operation = fixture.admit(OperationKind.CLOSE);
+        var fixtureObjects = new PublicationProbeWiring.InMemoryObjectStore();
+        JdbcJournalPacks fixturePacks = new JdbcJournalPacks(fixture.jdbc, fixtureObjects, settings());
+        fixture.lifecycle.setJournalPacks(fixturePacks);
+        assertThat(fixturePacks.compactOnce("tenant", "workspace", fixture.session)).isTrue();
+        fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
+        // The first pack covers the genesis; eviction nulls its SQL bytes while the
+        // head rests SEALED between writer leases.
+        assertThat(fixturePacks.deleteCoveredBlobs()).isGreaterThan(0);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
+                + " WHERE record_bytes IS NULL", Long.class)).isEqualTo(1L);
+        // CLOSE recovery must synthesize the receipt from the pack-resolved header;
+        // before the fallback this threw NPE on the null genesis bytes.
+        var receipt = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
+        assertThat(receipt).isNotNull();
+        assertThat(receipt.path("storeSynthesized").asBoolean()).isTrue();
+        assertThat(receipt.path("definitionRef").path("resourceId").asText()).isEqualTo("definition");
+        fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.verifyCompletion(operation));
+    }
+
+    // A single renewActivation record whose first line is the activation.changed event the lease
+    // lookup parses; is_activation_record is a generated column keyed on the operation name.
+    private void appendActivation() {
+        String event = "{\"managedSession\":{\"kind\":\"activation.changed\",\"payload\":{\"phase\":\"active\","
+                + "\"activationId\":\"current\",\"epoch\":2,\"renewalSeq\":1,\"expiresAt\":" + EXPIRES_AT
+                + ",\"workerId\":\"worker\"}}}";
+        byte[] bytes = (event + "\n").getBytes(StandardCharsets.UTF_8);
+        revision = 1;
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+                        + " command_ref, transaction_id, operation, command_id, content_digest, first_sequence,"
+                        + " last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch,"
+                        + " record_encoding, record_bytes, byte_length, record_digest, gmt_create)"
+                        + " VALUES (?, ?, ?, 1, ?, 'tx-1', 'renewActivation', 'command-1', ?, 0, 0, 0, 1, 'worker', ?,"
+                        + " 2, 'identity', ?, ?, ?, 1)",
+                TENANT, WORKSPACE, SESSION, ManagedIdentityRefs.commandRef("renewActivation", "command-1"), "a".repeat(64), "b".repeat(64),
+                bytes, bytes.length, DigestUtils.sha256Hex(bytes));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 0,"
+                + " activation_epoch = 2, activation_id = 'current', activation_phase = 'active',"
+                + " activation_event_epoch = 2, activation_expires_at = ?, activation_head_revision = 1", EXPIRES_AT);
+    }
+
+    private JournalStoreRows.HeadRow activationHead() {
+        return new JournalStoreRows.HeadRow(TENANT, WORKSPACE, SESSION, "ACTIVE", false, 1, "worker", null, null,
+                1, 0, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L, EXPIRES_AT, 1L);
     }
 }

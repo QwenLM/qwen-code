@@ -1,9 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -56,7 +54,7 @@ class ManagedRuntimeRetentionRaceTest {
 
     enum Reference {
         PUBLICATION("ma_output_capture"), HOLDER("ma_runtime_session"),
-        OPERATOR("ma_operation"), CSI_RETIREMENT("ma_operation");
+        OPERATOR("ma_operation");
         final String table;
         Reference(String table) { this.table = table; }
     }
@@ -81,7 +79,7 @@ class ManagedRuntimeRetentionRaceTest {
                                     assertThat(connection.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
                                     // Establish a real table-read snapshot before the writer commits.
                                     try (var query = connection.prepareStatement("SELECT COUNT(*) FROM " + reference.table
-                                            + (reference == Reference.HOLDER ? " WHERE execution_storage_key IS NOT NULL" : ""));
+                                            + (reference == Reference.HOLDER ? " WHERE execution_storage_id IS NOT NULL" : ""));
                                             var rows = query.executeQuery()) {
                                         assertThat(rows.next()).isTrue();
                                         assertThat(rows.getInt(1)).isZero();
@@ -112,10 +110,6 @@ class ManagedRuntimeRetentionRaceTest {
             assertThat(result.bindingsDeleted() + result.sessionsDeleted() + result.executionsDeleted()).isZero();
             assertThat(fixture.bindings.findById(fixture.binding.getBindingId())).isNotNull();
             assertThat(fixture.count(reference.table)).isEqualTo(1);
-            if (reference == Reference.CSI_RETIREMENT) {
-                // Retirement already pins the original family before any worker ACK can be created.
-                assertThat(fixture.count("ma_operation_work")).isZero();
-            }
         }
     }
 
@@ -124,9 +118,9 @@ class ManagedRuntimeRetentionRaceTest {
     void writersCannotCreateDanglingReferencesAfterTheSweepLocksTheRetiredBinding(Reference reference) throws Exception {
         var fixture = new Fixture(dataSource(), reference);
         fixture.retire();
-        fixture.jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
+        fixture.jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL, binding_id = NULL,"
                 + " runtime_generation = NULL, runtime_session_id = NULL");
-        fixture.jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE");
+        fixture.jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL, is_rewind_pending = FALSE");
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var first = new AtomicBoolean(true);
@@ -169,7 +163,6 @@ class ManagedRuntimeRetentionRaceTest {
                 case PUBLICATION -> "Original Runtime binding is missing";
                 case HOLDER -> "Workspace execution authority is unavailable.";
                 case OPERATOR -> "Exact Hosted Shell operator recovery is unavailable.";
-                case CSI_RETIREMENT -> "Workspace CSI admission is unavailable.";
             };
             assertThat(writer.get(5, TimeUnit.SECONDS)).hasMessage(expectedMessage);
             assertThat(fixture.bindings.findById(fixture.binding.getBindingId())).isNull();
@@ -215,16 +208,11 @@ class ManagedRuntimeRetentionRaceTest {
             jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
             WorkspaceTestStorage.register(jdbc, "tenant", "storage");
             var manager = new DataSourceTransactionManager(source);
-            if (reference == Reference.PUBLICATION || reference == Reference.CSI_RETIREMENT) {
-                var registration = reference == Reference.CSI_RETIREMENT
-                        ? new WorkspaceCsiRegistration("tenant-1", "storage", "cluster", "namespace", "claim", "pvc",
-                                "volume", "pv", "driver", "handle", "backend", "serial", "/workspace", 1) : null;
-                var publication = PublicationJournalFixture.create(source, registration);
+            if (reference == Reference.PUBLICATION) {
+                var publication = PublicationJournalFixture.create(source);
                 bindings = publication.bindings;
                 binding = bindings.findById("binding-1");
-                write = registration == null ? publication::reserve : () ->
-                        new WorkspaceCsiReservationStore(jdbc, manager, JSON).beginRetirement(
-                                registration, bindings, binding, publication.csiReservation, UUID.randomUUID().toString());
+                write = publication::reserve;
                 return;
             }
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
@@ -278,20 +266,18 @@ class ManagedRuntimeRetentionRaceTest {
             jdbc.update("UPDATE ma_runtime_session SET session_state = 'RELEASED', last_active_at = ?", Timestamp.from(OLD));
             jdbc.update("UPDATE ma_tool_execution SET settled_at = ?,"
                     + " dispatch_owner = NULL, dispatch_lease_until = NULL", Timestamp.from(OLD));
-            if (reference == Reference.OPERATOR || reference == Reference.CSI_RETIREMENT) {
-                jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
+            if (reference == Reference.OPERATOR) {
+                jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL, binding_id = NULL,"
                         + " runtime_generation = NULL, runtime_session_id = NULL");
-                jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE");
+                jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL, is_rewind_pending = FALSE");
             }
         }
 
         long count(String table) {
             String where = switch (table) {
                 case "ma_storage_owner" -> " WHERE binding_id IS NOT NULL";
-                case "ma_runtime_session" -> " WHERE execution_storage_key IS NOT NULL";
-                case "ma_operation" -> " WHERE operation_kind = '" + (reference == Reference.OPERATOR
-                        ? "WORKSPACE_OPERATOR_RECOVERY" : "CSI_RETIREMENT") + "'";
-                case "ma_operation_work" -> " WHERE work_kind = 'CSI_WORKER_ACK'";
+                case "ma_runtime_session" -> " WHERE execution_storage_id IS NOT NULL";
+                case "ma_operation" -> " WHERE operation_kind = 'WORKSPACE_OPERATOR_RECOVERY'";
                 default -> "";
             };
             return jdbc.queryForObject("SELECT COUNT(*) FROM " + table + where, Long.class);

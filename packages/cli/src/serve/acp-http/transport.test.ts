@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -38,6 +39,7 @@ import {
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -70,8 +72,13 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import { type AcpHttpHandle, mountAcpHttp } from './index.js';
+import {
+  type AcpHttpHandle,
+  type MountAcpHttpOptions,
+  mountAcpHttp,
+} from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
+import { isManagedTerminalUpgradePath } from '../managed-local-web.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
@@ -214,6 +221,8 @@ class FakeBridge {
   honorRequestedSessionId = true;
   spawnAttached = false;
   spawnClientId: string | undefined = 'client-1';
+  suspendClientWorkflowApprovals =
+    vi.fn<HttpAcpBridge['suspendClientWorkflowApprovals']>();
   loadRequests: Array<{
     sessionId: string;
     historyReplay?: string;
@@ -2049,6 +2058,47 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('maps load admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new SystemOverloadedError('event_loop_lag', 0.4, 1500);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          httpStatus: number;
+          retryable: boolean;
+          reason: string;
+          loadRatio: number;
+          eventLoopLagP99Ms: number;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'system_overloaded',
+      httpStatus: 503,
+      retryable: true,
+      reason: 'event_loop_lag',
+      loadRatio: 0.4,
+      eventLoopLagP99Ms: 1500,
+    });
+  });
+
   it.each(['full', 'summary'] as const)(
     'accepts the daemon eventDetailMode extension over ACP: %s',
     async (eventDetailMode) => {
@@ -2651,6 +2701,252 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     } finally {
       reader.close();
+    }
+  });
+
+  it('suspends the designated workflow voter after remote grace while its prompt runs', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const conn = acpHandle!.registry.get(connId)!;
+    conn.preserveRunningPromptsOnDisconnect = true;
+    const originalStream = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length === 1);
+    const binding = conn.sessions.get('sess-1')!;
+    const resume = vi.fn();
+    bridge.suspendClientWorkflowApprovals.mockReturnValue(resume);
+    let finishPrompt!: () => void;
+    const promptFinished = new Promise<void>((resolve) => {
+      finishPrompt = resolve;
+    });
+    bridge.promptBehavior = async () => {
+      await promptFinished;
+      return { stopReason: 'end_turn' };
+    };
+    try {
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'Follow-up' }],
+        },
+      });
+      await waitUntil(() => binding.promptAbort !== undefined);
+      conn.detachSessionStream('sess-1', binding.stream!, 1);
+      await originalStream.body?.cancel().catch(() => {});
+      await waitUntil(
+        () => bridge.suspendClientWorkflowApprovals.mock.calls.length > 0,
+      );
+      expect(
+        bridge.suspendClientWorkflowApprovals,
+      ).toHaveBeenCalledExactlyOnceWith('sess-1', 'client-1');
+      expect(binding.promptAbort?.signal.aborted).toBe(false);
+      expect(conn.ownsSession('sess-1')).toBe(true);
+      expect(conn.pending.size).toBe(0);
+      const resumed = await openStream(connId, 'sess-1');
+      expect(resume).toHaveBeenCalledTimes(1);
+      await resumed.body?.cancel().catch(() => {});
+    } finally {
+      finishPrompt();
+      await originalStream.body?.cancel().catch(() => {});
+    }
+  });
+
+  it.each([
+    'disconnect',
+    'observer RPC error',
+    'forbidden vote',
+    'cross-connection vote',
+    'originator RPC error',
+  ] as const)(
+    'handles workflow approval copies independently through %s',
+    async (failure) => {
+      const vote = vi
+        .spyOn(bridge, 'respondToSessionPermission')
+        .mockReturnValue(true);
+      const ownerId = await initialize();
+      await newSession(ownerId);
+      const owner = acpHandle!.registry.get(ownerId)!;
+      const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      const ownerQueue = bridge.queues.get('sess-1')!;
+      const originatorClientId = owner.sessions.get('sess-1')!.clientId;
+      expect(originatorClientId).toBe('client-1');
+      const observerId = await initialize();
+      bridge.spawnClientId = 'observer-client';
+      await newSession(observerId);
+      const observer = acpHandle!.registry.get(observerId)!;
+      const observerReader = frameReader(
+        await openStream(observerId, 'sess-1'),
+      );
+      try {
+        await waitUntil(() => bridge.queues.get('sess-1') !== ownerQueue);
+        const observerQueue = bridge.queues.get('sess-1')!;
+        const permission = {
+          type: 'permission_request',
+          originatorClientId,
+          data: {
+            requestId: 'workflow-approval',
+            sessionId: 'sess-1',
+            toolCall: {
+              toolCallId: 'workflow-tool',
+              title: 'Edit fixture',
+              _meta: {
+                workflowApproval: true,
+                backgroundWorkflowApproval: true,
+              },
+            },
+            options: [{ optionId: 'allow', name: 'Allow' }],
+          },
+        } as const;
+        ownerQueue.push(permission);
+        observerQueue.push(permission);
+        const ownerFrame = (await ownerReader.next()) as { id: string };
+        // Outbound request ids are minted per connection: each copy has
+        // its own.
+        const observerFrame = (await observerReader.next()) as { id: string };
+        expect(observerFrame.id).not.toBe(ownerFrame.id);
+        expect(owner.pending.size).toBe(1);
+        expect(observer.pending.size).toBe(1);
+        const selected = {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        };
+        if (failure === 'disconnect') {
+          await fetch(`${base}/acp`, {
+            method: 'DELETE',
+            headers: { 'acp-connection-id': observerId },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        } else {
+          if (failure === 'forbidden vote') {
+            vote.mockImplementationOnce(() => {
+              throw new PermissionForbiddenError(
+                'workflow-approval',
+                'sess-1',
+                'designated_mismatch',
+              );
+            });
+          }
+          const votes =
+            failure === 'forbidden vote' || failure === 'cross-connection vote';
+          await post(
+            failure === 'originator RPC error' ? ownerId : observerId,
+            {
+              jsonrpc: '2.0',
+              // A real observer answers its own copy; a co-owner may also
+              // answer the owner's copy by its id.
+              id:
+                failure === 'observer RPC error'
+                  ? observerFrame.id
+                  : ownerFrame.id,
+              ...(votes
+                ? { result: selected }
+                : { error: { code: -32603, message: 'Client failure' } }),
+            },
+          );
+          if (votes) {
+            await waitUntil(() => vote.mock.calls.length > 0);
+          }
+        }
+        if (failure === 'cross-connection vote') {
+          // The vote resolves the approval and drops only the voter's own
+          // copy; the owner's copy stays until the bridge reports it
+          // resolved.
+          expect(vote).toHaveBeenCalledExactlyOnceWith(
+            'sess-1',
+            'workflow-approval',
+            selected,
+            expect.any(Object),
+          );
+          expect(observer.pending.size).toBe(0);
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          ownerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => owner.pending.size === 0);
+          return;
+        }
+        if (failure !== 'originator RPC error') {
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          expect(vote).toHaveBeenCalledTimes(
+            failure === 'forbidden vote' ? 1 : 0,
+          );
+          await post(ownerId, {
+            jsonrpc: '2.0',
+            id: ownerFrame.id,
+            result: selected,
+          });
+        }
+        await waitUntil(() => owner.pending.size === 0);
+        expect(vote).toHaveBeenCalledTimes(
+          failure === 'forbidden vote' ? 2 : 1,
+        );
+        expect(vote.mock.calls.at(-1)).toEqual([
+          'sess-1',
+          'workflow-approval',
+          failure === 'originator RPC error'
+            ? { outcome: { outcome: 'cancelled' } }
+            : selected,
+          expect.any(Object),
+        ]);
+        if (failure !== 'disconnect') {
+          expect(observer.pending.size).toBe(1);
+          observerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        }
+      } finally {
+        ownerReader.close();
+        observerReader.close();
+      }
+    },
+  );
+
+  it('ends an origin-less background workflow approval on the holding connection RPC error', async () => {
+    // A cron or runtime-goal turn has no originator, so its run's approval
+    // carries none: the holder's error must still settle it.
+    const vote = vi
+      .spyOn(bridge, 'respondToSessionPermission')
+      .mockReturnValue(true);
+    const ownerId = await initialize();
+    await newSession(ownerId);
+    const owner = acpHandle!.registry.get(ownerId)!;
+    const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+    try {
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      bridge.queues.get('sess-1')!.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'workflow-approval',
+          sessionId: 'sess-1',
+          toolCall: {
+            toolCallId: 'workflow-tool',
+            title: 'Edit fixture',
+            _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+          },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      const frame = (await ownerReader.next()) as { id: string };
+      expect(owner.pending.size).toBe(1);
+      await post(ownerId, {
+        jsonrpc: '2.0',
+        id: frame.id,
+        error: { code: -32603, message: 'Client failure' },
+      });
+      await waitUntil(() => owner.pending.size === 0);
+      expect(vote).toHaveBeenCalledExactlyOnceWith(
+        'sess-1',
+        'workflow-approval',
+        { outcome: { outcome: 'cancelled' } },
+        expect.any(Object),
+      );
+    } finally {
+      ownerReader.close();
     }
   });
 
@@ -4165,6 +4461,62 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       hasActivePrompt: false,
       isArchived: false,
     });
+  });
+
+  it('session/list carries the artifact count and the pending-restore marker', async () => {
+    bridge.workspaceSessions = [
+      {
+        sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: TEST_WORKSPACE,
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:01:00.000Z',
+        displayName: 'Counted Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+        artifactCount: 3,
+      },
+      {
+        sessionId: '22222222-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: TEST_WORKSPACE,
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:02:00.000Z',
+        displayName: 'Restoring Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+        artifactCountPending: true,
+      },
+    ];
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'session/list',
+      params: { workspaceCwd: TEST_WORKSPACE },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { sessions: Array<Record<string, unknown>> };
+    }>;
+    expect(frame.id).toBe(13);
+    const counted = frame.result.sessions.find(
+      (session) =>
+        session['sessionId'] === '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
+    expect(counted).toMatchObject({ artifactCount: 3 });
+    expect(counted).not.toHaveProperty('artifactCountPending');
+    const restoring = frame.result.sessions.find(
+      (session) =>
+        session['sessionId'] === '22222222-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
+    expect(restoring).toMatchObject({ artifactCountPending: true });
+    expect(restoring).not.toHaveProperty('artifactCount');
   });
 
   it('cancels session/list without buffering an error when the connection is destroyed', async () => {
@@ -6342,7 +6694,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ) as
         | {
             result?: {
-              prs?: Array<{ number: number; url: string; state?: string }>;
+              prs?: Array<{
+                number: number;
+                url: string;
+                state?: string;
+                source?: string;
+              }>;
             };
           }
         | undefined;
@@ -6354,6 +6711,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           number: 9101,
           url: 'https://github.com/o/r/pull/9101',
           state: 'merged',
+          source: 'create',
         },
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
@@ -12550,6 +12908,8 @@ describe('ACP WebSocket transport security', () => {
       webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
+      reportedRemoteAddress?: string;
+      managedTerminalUpgrade?: MountAcpHttpOptions['managedTerminalUpgrade'];
       desktopRelaySessionId?: string;
     } = {},
   ) {
@@ -12605,6 +12965,7 @@ describe('ACP WebSocket transport security', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
         clientMcpOverWs: opts.desktopRelaySessionId !== undefined,
+        managedTerminalUpgrade: opts.managedTerminalUpgrade,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -12619,6 +12980,14 @@ describe('ACP WebSocket transport security', () => {
             Object.defineProperty(socket, 'localPort', {
               configurable: true,
               value: opts.reportedLocalPort,
+            });
+          });
+        }
+        if (opts.reportedRemoteAddress !== undefined) {
+          listeningServer.prependListener('upgrade', (_request, socket) => {
+            Object.defineProperty(socket, 'remoteAddress', {
+              configurable: true,
+              value: opts.reportedRemoteAddress,
             });
           });
         }
@@ -12679,11 +13048,12 @@ describe('ACP WebSocket transport security', () => {
     host: string,
     origin?: string,
     extraHeaders: Record<string, string> = {},
+    requestPath = '/acp',
   ): Promise<{ code: number }> {
     return new Promise((resolve) => {
       const headers: Record<string, string> = { ...extraHeaders };
       if (origin) headers['Origin'] = origin;
-      const ws = new WebSocket(`ws://${host}:${port}/acp`, {
+      const ws = new WebSocket(`ws://${host}:${port}${requestPath}`, {
         headers,
         handshakeTimeout: 2000,
       });
@@ -12698,13 +13068,57 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
+  // Raw bytes keep dot-only selectors intact instead of normalizing them away
+  // during URL parsing. This is a fixture, not an HTTP client URL factory.
+  async function rawTerminalUpgrade(
+    requestPath: string,
+    authority = `127.0.0.1:${port}`,
+  ): Promise<{ statusLine: string; clientError?: string }> {
+    return await new Promise((resolve, reject) => {
+      let data = '';
+      let clientError: string | undefined;
+      const socket = connect({ port, host: '127.0.0.1' }, () => {
+        socket.write(
+          [
+            `GET ${requestPath} HTTP/1.1`,
+            `Host: ${authority}`,
+            'Connection: Upgrade',
+            'Upgrade: websocket',
+            'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version: 13',
+            'Sec-WebSocket-Protocol: qwen-ws',
+            `Origin: http://127.0.0.1:${port}`,
+            '',
+            '',
+          ].join('\r\n'),
+        );
+      });
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        reject(new Error('Raw terminal upgrade timed out'));
+      }, 3000);
+      socket.setEncoding('latin1');
+      socket.on('data', (chunk: string) => {
+        data += chunk;
+      });
+      socket.once('error', (error) => {
+        clientError = error.message;
+      });
+      socket.once('close', () => {
+        clearTimeout(timeout);
+        resolve({ statusLine: data.split('\r\n')[0] ?? '', clientError });
+      });
+    });
+  }
+
   function wsConnectLocalControl(
     token: string,
     headers: Record<string, string> = {},
+    requestPath = '/acp',
   ): Promise<{ code: number; socket?: WebSocket }> {
     return new Promise((resolve) => {
       const ws = new WebSocket(
-        `ws://127.0.0.1:${lanPort}/acp`,
+        `ws://127.0.0.1:${lanPort}${requestPath}`,
         ['qwen-ws', bearerProto(token)],
         {
           headers: {
@@ -13002,6 +13416,131 @@ describe('ACP WebSocket transport security', () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
     expect(result.code).toBe(403);
+  });
+
+  it('refuses Managed terminal upgrades on a non-primary listener', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    const forward = vi.fn();
+    await startServer({
+      localControlToken: 'pairing',
+      managedTerminalUpgrade: { matches: () => true, forward },
+    });
+    const result = await wsConnectLocalControl(
+      'pairing',
+      {},
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(result.code).toBe(403);
+    expect(forward).not.toHaveBeenCalled();
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('managed-terminal-primary-loopback-required'),
+    );
+  });
+
+  it('refuses Managed terminal upgrades on a non-loopback primary socket', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    const forward = vi.fn();
+    await startServer({
+      hostname: '0.0.0.0',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+      reportedRemoteAddress: '203.0.113.10',
+      managedTerminalUpgrade: { matches: () => true, forward },
+    });
+    const result = await wsConnectRaw(
+      '127.0.0.1',
+      'http://qwen.test:4170',
+      {
+        Host: 'qwen.test:4170',
+        Authorization: 'Bearer device-token',
+      },
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(result.code).toBe(403);
+    expect(forward).not.toHaveBeenCalled();
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('managed-terminal-primary-loopback-required'),
+    );
+  });
+
+  it('leaves ordinary ACP and near-miss terminal paths outside the Managed relay', async () => {
+    const forward = vi.fn();
+    await startServer({
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward,
+      },
+    });
+    const acp = await wsConnectRaw('127.0.0.1', undefined);
+    expect(acp.code).toBe(101);
+    expect(forward).not.toHaveBeenCalled();
+    const nearMiss = await wsConnectRaw(
+      '127.0.0.1',
+      undefined,
+      {},
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal/',
+    );
+    expect(nearMiss.code).not.toBe(101);
+    expect(forward).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Managed terminal Host allowlist on an authenticated non-loopback bind', async () => {
+    const forwarded: string[] = [];
+    await startServer({
+      hostname: '0.0.0.0',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward: (request, socket) => {
+          forwarded.push(request.url ?? '');
+          socket.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+        },
+      },
+    });
+    const rejected = await rawTerminalUpgrade(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      'attacker.invalid',
+    );
+    expect(rejected.statusLine).toBe('HTTP/1.1 403 Forbidden');
+    expect(forwarded).toEqual([]);
+    const accepted = await rawTerminalUpgrade(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(accepted.statusLine).toBe('HTTP/1.1 101 Switching Protocols');
+    expect(forwarded).toEqual([
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    ]);
+  });
+
+  it('rejects dot-only Managed terminal selectors while preserving ordinary dotted selectors', async () => {
+    const forwarded: string[] = [];
+    await startServer({
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward: (request, socket) => {
+          forwarded.push(request.url ?? '');
+          socket.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+        },
+      },
+    });
+    for (const session of ['sess-1', 'tenant.v1']) {
+      const result = await rawTerminalUpgrade(
+        `/api/agent/web-shell/v1/sessions/${session}/terminal?terminalId=t1&replay=1`,
+      );
+      expect(result.statusLine).toBe('HTTP/1.1 101 Switching Protocols');
+      expect(result.clientError).toBeUndefined();
+    }
+    for (const selector of ['.', '..']) {
+      const result = await rawTerminalUpgrade(
+        `/api/agent/web-shell/v1/sessions/${selector}/terminal?terminalId=t1&replay=1`,
+      );
+      expect(result.statusLine).not.toContain('101');
+    }
+    expect(forwarded).toEqual([
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      '/api/agent/web-shell/v1/sessions/tenant.v1/terminal?terminalId=t1&replay=1',
+    ]);
   });
 
   it("rejects cross-origin WS upgrade even when allow-origin '*' is configured", async () => {

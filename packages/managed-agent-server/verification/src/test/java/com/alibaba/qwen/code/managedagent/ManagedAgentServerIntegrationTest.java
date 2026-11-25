@@ -168,7 +168,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void allowsRepeatingLifecycleOperationsWithNewCommandKeys() {
-        String tenant = "tenant-repeat-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "create", "digest-create", "qwen-code", null,
                 null, List.of(), null).sessionId();
@@ -204,7 +204,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void retriesReplayTheRevisionTheyWereAdmittedWith() {
-        String tenant = "tenant-revision-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         CommandAdmission first = applicationContext
                 .getBean(ManagedAgentService.class).createSession(tenant,
                         "revision-create", "qwen-code", "1", null, null,
@@ -432,7 +432,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void managesThePublicSessionLifecycle() throws Exception {
-        String tenant = "tenant-lifecycle-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "lifecycle-create")
@@ -444,7 +444,7 @@ class ManagedAgentServerIntegrationTest {
 
         int renames = harness.renameCount();
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant + "-other")
+                        .header(TenantContextFilter.HEADER, tenant.substring(0, 30) + "-other")
                         .header("Idempotency-Key", "lifecycle-other-tenant")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"not allowed\"}"))
@@ -465,8 +465,6 @@ class ManagedAgentServerIntegrationTest {
                         .value("managed title"));
         assertThat(harness.renameCount()).isEqualTo(renames + 1);
         assertThat(harness.title(sessionId)).isEqualTo("managed title");
-        assertThat(store.requireSession(tenant, sessionId).harnessBootId())
-                .isNotNull();
 
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
@@ -523,8 +521,11 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_active"));
         JsonNode closed = awaitOperation(tenant, sessionId, closeId);
+        // The synchronous rename no longer attaches the Harness, so this
+        // empty-input Session was never held: the Harness is asked to close
+        // anyway, but its answer confirms nothing.
         assertThat(closed.get("admission_stage").asText())
-                .isEqualTo("harness_confirmed");
+                .isEqualTo("java_durable");
         assertThat(closed.get("delivery_state").asText())
                 .isEqualTo("confirmed");
         assertThat(closed.get("receipt_id").asText()).startsWith("rcpt_");
@@ -629,7 +630,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void rejectsCloseUntilTheActiveTurnSettles() throws Exception {
-        String tenant = "tenant-close-active-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "close-active-create")
@@ -676,7 +677,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void deletesAClosedSessionWhileTheHarnessIsUnavailable()
             throws Exception {
-        String tenant = "tenant-closed-delete-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "closed-delete-create")
@@ -719,8 +720,8 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
-        String tenant = "tenant-rename-retry-" + UUID.randomUUID();
+    void aFailedTitleNotificationStillCompletesTheRenameAndReplays() throws Exception {
+        String tenant = UUID.randomUUID().toString();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry-create")
@@ -729,36 +730,44 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
+        int sends = harness.renameCount();
         harness.failNextRename();
 
+        // The lost journal notification never fails the request: the SQL
+        // title is already durable, so the rename answers 200.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"retry title\"}"))
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.error.code")
-                        .value("hosted_harness_unavailable"));
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"))
+                .andExpect(jsonPath("$.metadata.title").value("retry title"));
+        assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("retry title");
+        assertThat(harness.renameCount()).isEqualTo(sends + 1);
 
-        // The answered failure retired its command row, so a different key
-        // is admitted instead of wedging on session_operation_active.
+        // The completed command never wedges a later rename on a fresh key.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "another-rename")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"blocked\"}"))
-                .andExpect(status().isOk());
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("blocked"));
 
-        // An already submitted, superseded identity cannot become a new title revision.
+        // The same-key retry replays the recorded outcome — the current
+        // persisted title — and sends no further notification.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"retry title\"}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code").value("session_mutation_superseded"));
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
+                .andExpect(jsonPath("$.metadata.title").value("blocked"));
+        assertThat(harness.renameCount()).isEqualTo(sends + 2);
         JsonNode events = objectMapper.readTree(events(tenant, sessionId).getResponse().getContentAsString()).get("data");
-        assertThat(events).filteredOn(event -> "session.updated".equals(event.get("type").asText())).hasSize(1);
+        assertThat(events).filteredOn(event -> "session.updated".equals(event.get("type").asText())).hasSize(2);
     }
 
     @Test
@@ -999,7 +1008,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void commitsHarnessEventsAsOneReplayableBatch() throws Exception {
-        String tenant = "tenant-batch-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "batch-create",
                 "sha256:" + "a".repeat(64), "qwen-code", null, null,
@@ -1080,7 +1089,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void preservesTextOrderAcrossToolsAndReasoningInMessages() {
-        String tenant = "tenant-order-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "order-create", "digest-create",
                 "qwen-code", null, null, List.of(), null);
@@ -1117,7 +1126,7 @@ class ManagedAgentServerIntegrationTest {
         // `workflow_launch` block with no text key; the projected user
         // message names its pin exactly as the daemon journal does
         // (`workflowLaunchSummaryText`), never an empty parts list.
-        String tenant = "tenant-workflow-input-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "workflow-input-create", "digest-create",
                 "qwen-code", null, null, List.of(), null);
@@ -1155,7 +1164,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void eventsNameTheProjectedItemsAndPartsTheyChange() {
-        String tenant = "tenant-identity-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "identity-create",
                 "sha256:" + "d".repeat(64), "qwen-code", null, null,
@@ -1214,7 +1223,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void singleAppendsContinueTheTextPartBeforeThem() {
-        String tenant = "tenant-single-identity-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "single-identity-create", "digest-create",
                 "qwen-code", null, null, List.of(), null).sessionId();
@@ -1244,7 +1253,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void retractionRenamesTheDeltaThatContinuedTheRetractedOne() {
         pauseRecoveryScanning();
-        String tenant = "tenant-retract-identity-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-identity-create",
                 "sha256:" + "7".repeat(64), "qwen-code", null, null,
@@ -1342,7 +1351,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void ignoresLateEnvironmentResultFromAnOlderTurn() {
         pauseRecoveryScanning();
-        String tenant = "tenant-environment-order-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "environment-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
@@ -1381,7 +1390,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void persistsRetryBackoffAcrossClaims() {
         pauseRecoveryScanning();
-        String tenant = "tenant-retry-backoff-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retry-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
@@ -1414,6 +1423,39 @@ class ManagedAgentServerIntegrationTest {
                 .contains(target);
     }
 
+    // An Action park is dispatch bookkeeping: public and Web Shell reads
+    // still see the running Turn without an error code.
+    @Test
+    void hidesTheActionParkMarkFromTurnReads() throws Exception {
+        pauseRecoveryScanning();
+        String tenant = UUID.randomUUID().toString();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "parked-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "parked-turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "3".repeat(64));
+        jdbc.update("UPDATE ma_turn SET error_code = ? WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ?",
+                com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.HARNESS_ACTION_PARKED,
+                tenant, session.sessionId(), turn.turnId());
+
+        mvc.perform(get("/v1/agents/sessions/{id}", session.sessionId())
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.active_turn.id").value(turn.turnId()))
+                .andExpect(jsonPath("$.active_turn.error_code").doesNotExist());
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session.sessionId() + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.activeTurn.turnId").value(turn.turnId()))
+                .andExpect(jsonPath("$.activeTurn.errorCode").doesNotExist());
+    }
+
     // #14387: the recovery-blocked mark is durable on the still-active
     // row — the status the claim saw stands, no retry counter moves, the
     // lease releases — and a stale owner never re-marks.
@@ -1421,7 +1463,7 @@ class ManagedAgentServerIntegrationTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"hosted_workflow_recovery_blocked", "hosted_harness_recovery_blocked"})
     void marksATurnRecoveryBlockedWithoutSettlingIt(String recoveryCode) throws Exception {
         pauseRecoveryScanning();
-        String tenant = "tenant-turn-blocked-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "blocked-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
@@ -1521,7 +1563,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void aHarnessParkSettlesOnlyFromItsOriginalLeasedJournal() {
         pauseRecoveryScanning();
-        String tenant = "tenant-harness-recheck-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null, List.of(), null);
         Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
@@ -1562,7 +1604,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void journaledProgressRestartsTheRetryBudget() {
         pauseRecoveryScanning();
-        String tenant = "tenant-retry-reset-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "reset-create", "sha256:" + "4".repeat(64),
                 "qwen-code", null, null, List.of(), null);
@@ -1664,7 +1706,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void exemptWaitsDoNotConsumeTheTurnRetryBudget() {
         pauseRecoveryScanning();
-        String tenant = "tenant-exempt-budget-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "exempt-create", "sha256:" + "7".repeat(64),
                 "qwen-code", null, null, List.of(), null);
@@ -1746,7 +1788,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void transfersHarnessGenerationOnlyBeforeAdmissionUnderDispatchLease() {
         pauseRecoveryScanning();
-        String tenant = "tenant-harness-takeover-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "takeover-create",
                 "sha256:" + "d".repeat(64), "qwen-code", null, null,
@@ -1784,7 +1826,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void bindsTheSessionHarnessOnlyWhileTheColumnIsEmpty() {
         pauseRecoveryScanning();
-        String tenant = "tenant-harness-session-bind-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "session-bind-create",
                 "sha256:" + "3".repeat(64), "qwen-code", null, null,
@@ -1804,7 +1846,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void recoversAdmittedHarnessGenerationAndEventEpochUnderDispatchLease() {
         pauseRecoveryScanning();
-        String tenant = "tenant-harness-recovery-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "recovery-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
@@ -1878,7 +1920,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void aFormerOwnerCannotRebindAfterItsClaimLapsed() {
         pauseRecoveryScanning();
-        String tenant = "tenant-harness-stale-owner-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "stale-owner-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
@@ -1969,7 +2011,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void adoptsRecoveryAdmissionOntoANullTurnEpoch() {
         pauseRecoveryScanning();
-        String tenant = "tenant-harness-null-epoch-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "null-epoch-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
@@ -2025,7 +2067,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void retractsOnlyTheIncompleteContinuationEpoch() {
         pauseRecoveryScanning();
-        String tenant = "tenant-retract-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
@@ -2108,7 +2150,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void retractsInBandRetryOutputFromItsFirstDelta() {
         pauseRecoveryScanning();
-        String tenant = "tenant-inband-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "inband-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
@@ -2220,7 +2262,7 @@ class ManagedAgentServerIntegrationTest {
 
     private void assertBoundedRetractionAcrossAttachment(int consumedThrough, String caseName) {
         pauseRecoveryScanning();
-        String tenant = "tenant-bounded-" + caseName + "-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "bounded-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null, List.of(), null);
         Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "bounded-turn",
@@ -2300,7 +2342,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void doesNotPublishRolledBackEvents() throws Exception {
-        String tenant = "tenant-rollback-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "rollback-create",
                 "sha256:" + "d".repeat(64), "qwen-code", null, null,
@@ -2396,7 +2438,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void keepsPagingSessionsAcrossRowsWhoseUpdatedAtMoved()
             throws Exception {
-        String tenant = "tenant-paging-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         List<String> ids = new ArrayList<>();
         for (String name : List.of("page-a", "page-b", "page-c")) {
             ids.add(objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
@@ -2456,7 +2498,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void replaysASubmittedTurnWhileTheHarnessIsUnavailable()
             throws Exception {
-        String tenant = "tenant-unavailable-submit-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -2544,7 +2586,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void replaysACreationWithInputWhileTheHarnessIsUnavailable()
             throws Exception {
-        String tenant = "tenant-unavailable-create-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String create = """
                 {"idempotencyKey":"unavailable-create-in",
                  "agentId":"qwen-code",
@@ -2575,7 +2617,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void replaysACompletedRenameAfterTheSessionWasDeleted() throws Exception {
-        String tenant = "tenant-rename-replay-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
@@ -2650,7 +2692,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void replaysACompletedUnarchiveAfterTheSessionWasDeleted()
             throws Exception {
-        String tenant = "tenant-unarchive-replay-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
@@ -2698,7 +2740,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void aCreateReplayAfterTheSessionWasDeletedAnswers404()
             throws Exception {
-        String tenant = "tenant-create-replay-delete-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
@@ -2732,7 +2774,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void aWebShellCreateReplayAfterTheSessionWasDeletedAnswersTheRecordedAdmission()
             throws Exception {
-        String tenant = "tenant-ws-create-replay-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String create = """
                 {"idempotencyKey":"ws-replay-create",
                  "agentId":"qwen-code",
@@ -2769,7 +2811,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void theTitleBoundIsEnforcedInUtf16CodeUnits() throws Exception {
-        String tenant = "tenant-title-units-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
@@ -2831,7 +2873,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void enforcesOneTitlePolicyAcrossCreateAndRename() throws Exception {
-        String tenant = "tenant-title-policy-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         // 256 — the Harness client's own cap, so every accepted title stays
         // writable through every path end to end.
         String fullTitle = "t".repeat(256);
@@ -2909,7 +2951,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void foldsTurnStatusesAndConflictMessagesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
-        String tenant = "tenant-locale-turn-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
@@ -2955,7 +2997,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void foldsSessionStatusesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
-        String tenant = "tenant-locale-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
@@ -2987,7 +3029,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void rejectsInputBeyondTheAggregateCharacterBudget() throws Exception {
-        String tenant = "tenant-input-budget-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -3035,7 +3077,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void acceptsWebShellMetadataWithoutAClientIdOnlyContract()
             throws Exception {
-        String tenant = "tenant-metadata-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         // The WebShell handlers forward no metadata at all (the controller
         // passes null), so anything a client sends here is accepted and
         // ignored — neither validated and dropped, nor persisted: a
@@ -3088,7 +3130,7 @@ class ManagedAgentServerIntegrationTest {
         // Hosted Harness's 64 KiB durable-record limit is accepted and
         // persisted, then fails the Turn when the Harness refuses it
         // (413 -> hosted_harness_rejected).
-        String tenant = "tenant-oversized-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         // Prompt arm: the serialized prompt itself is over the limit.
         assertHarnessRejectsOversizedCommand(tenant, "prompt",
                 "x".repeat(100_000));
@@ -3190,6 +3232,7 @@ class ManagedAgentServerIntegrationTest {
         private final AtomicInteger renameFailures = new AtomicInteger();
         private final AtomicInteger closeFailures = new AtomicInteger();
         private final Map<String, String> titles = new ConcurrentHashMap<>();
+        private final Map<String, Long> renameRevisions = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> gates =
                 new ConcurrentHashMap<>();
         private final Set<String> cancelled =
@@ -3402,11 +3445,15 @@ class ManagedAgentServerIntegrationTest {
 
         @Override
         public boolean supportsFencedTitles() {
-            return true;
+            // An unavailable Harness cannot fence titles, exactly like the
+            // real UnavailableHarnessConnector: the synchronous rename still
+            // succeeds, but its best-effort journal notification is skipped.
+            return available;
         }
 
         @Override
         public void rename(String tenantId, String sessionId, String title, long revision) {
+            renameRevisions.put(sessionId, revision);
             rename(tenantId, sessionId, title);
         }
 
@@ -3457,6 +3504,10 @@ class ManagedAgentServerIntegrationTest {
 
         String title(String sessionId) {
             return titles.get(sessionId);
+        }
+
+        long renameRevision(String sessionId) {
+            return renameRevisions.getOrDefault(sessionId, 0L);
         }
 
         void failNextRename() {
@@ -3512,7 +3563,7 @@ class ManagedAgentServerIntegrationTest {
     }
     @Test
     void preAcquireCleanupUsesCurrentLifecycleAuthorityAndDoesNotAcquire() {
-        String tenant = "tenant-cleanup-authority-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String harnessSession = "harness-" + UUID.randomUUID();
         String operation = "operation-" + UUID.randomUUID();
         var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope(tenant, "workspace", "1", "/workspace", "capability", "session");

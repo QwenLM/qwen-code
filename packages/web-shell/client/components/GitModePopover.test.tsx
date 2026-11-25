@@ -7,6 +7,7 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import {
@@ -32,12 +33,18 @@ describe('GitModePopover worktree selection', () => {
     container.remove();
   });
 
-  async function render(intent: SessionGitIntent) {
+  async function render(
+    intent: SessionGitIntent,
+    status?: DaemonWorkspaceGitStatus,
+    compact = false,
+  ) {
     await act(async () => {
       root.render(
         <I18nProvider language="en">
           <GitModePopover
             branch="main"
+            status={status}
+            compact={compact}
             intent={intent}
             onIntentChange={onIntentChange}
           />
@@ -84,13 +91,38 @@ describe('GitModePopover worktree selection', () => {
     expect(worktreeOption().textContent).toContain('✓');
     expect(
       document.querySelector('[data-slot="popover-content"]')?.textContent,
-    ).toContain('$ git worktree add .qwen/worktrees/<slug>');
+    ).toContain('$ git worktree add --detach .qwen/worktrees/<slug>');
     expect(
       document.querySelector('[data-testid="git-mode-confirm-worktree"]'),
     ).toBeNull();
     expect(onIntentChange).toHaveBeenCalledExactlyOnceWith({
       mode: 'worktree',
     });
+  });
+
+  it('keeps compact status visible without changing intent actions', async () => {
+    await render(
+      { mode: 'current' },
+      {
+        v: 2,
+        workspaceCwd: '/tmp/test-project',
+        branch: 'main',
+        conflicted: 1,
+      },
+      true,
+    );
+    const chip = container.querySelector('[data-testid="git-mode-chip"]');
+    expect(chip?.getAttribute('aria-label')).toMatch(/^Git mode: main — /);
+    expect(container.querySelector('[data-tone="error"]')).not.toBeNull();
+    await openPopover();
+    await act(async () => worktreeOption().click());
+    expect(onIntentChange).toHaveBeenCalledExactlyOnceWith({
+      mode: 'worktree',
+    });
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+
+    await render({ mode: 'current' });
+    expect(container.querySelector('[data-tone]')).toBeNull();
   });
 });
 

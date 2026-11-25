@@ -1678,12 +1678,13 @@ export function EnhancedTable({
   const copyButtonRef = useRef<HTMLButtonElement | null>(null);
   const densityButtonRef = useRef<HTMLButtonElement | null>(null);
   const inlineHeightRef = useRef(0);
-  const scrollPositionRef = useRef({ top: 0, left: 0 });
+  const scrollPositionRef = useRef<{ top: number; left: number } | null>(null);
   const attachScroller = useCallback((node: HTMLDivElement | null) => {
     containerRef.current = node;
-    if (node) {
-      node.scrollTop = scrollPositionRef.current.top;
-      node.scrollLeft = scrollPositionRef.current.left;
+    const position = scrollPositionRef.current;
+    if (node && position) {
+      node.scrollTop = position.top;
+      node.scrollLeft = position.left;
     }
   }, []);
   const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);
@@ -2981,58 +2982,55 @@ export function EnhancedTable({
                   {t('markdownTable.copyTsvHint')}
                 </TooltipContent>
               </Tooltip>
-              {selectionStatistics.numericCount > 0 && (
-                <>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.sum')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.sum,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.average')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.average,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.min')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.min,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.max')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.max,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                </>
-              )}
+            </div>
+          )}
+          {selectionStatistics && selectionStatistics.numericCount > 0 && (
+            <div
+              className={styles.selectionStatsSecondary}
+              role="group"
+              aria-label={t('markdownTable.selection.statistics')}
+              tabIndex={0}
+            >
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.sum')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.sum,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.average')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.average,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.min')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.min,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.max')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.max,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
             </div>
           )}
           <span className={styles.toolbarSpacer} />

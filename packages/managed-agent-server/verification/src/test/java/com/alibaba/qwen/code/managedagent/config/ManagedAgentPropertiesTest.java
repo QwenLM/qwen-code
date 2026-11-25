@@ -36,6 +36,20 @@ public class ManagedAgentPropertiesTest {
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
 
     @Test
+    void actionParkingRequiresWakeDispatchAtStartup() {
+        var environment = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("qwen.managed-agent.action-parking.enabled", "true");
+        var properties = new ManagedAgentProperties();
+        properties.setEnvironment(environment);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wake-dispatch.enabled");
+
+        environment.setProperty("qwen.managed-agent.wake-dispatch.enabled", "true");
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
     void generatedAccessorsKeepNestedBindingAndInternalStatePrivate() {
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -107,6 +121,59 @@ public class ManagedAgentPropertiesTest {
         assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(false);
         assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void clientFilesEnabledWithoutADerivableRelayUrlFailsTheBoot() {
+        var properties = new ManagedAgentProperties();
+        properties.getClientFiles().setEnabled(true);
+        // No relay-url and no environment to derive one from: the boot must
+        // refuse rather than answer 503 on every registration silently.
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("client-files.relay-url");
+        properties.getClientFiles().setRelayUrl("http://127.0.0.1:4170");
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
+    void clientFilesRelayUrlDerivesFromTheInternalListener() {
+        var properties = new ManagedAgentProperties();
+        properties.setEnvironment(new org.springframework.mock.env.MockEnvironment());
+        properties.getInternalServer().setPort(4170);
+        properties.getClientFiles().setEnabled(true);
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        assertThat(properties.getClientFiles().getRelayUrl()).isEqualTo("http://127.0.0.1:4170");
+    }
+
+    @Test
+    void clientFilesNumericSettingsAreRangeCheckedAtBoot() {
+        var properties = new ManagedAgentProperties();
+        properties.getClientFiles().setEnabled(true);
+        properties.getClientFiles().setRelayUrl("http://127.0.0.1:4170");
+        // A zero queue-depth would refuse every admission and silently disable
+        // the feature; the boot must refuse it instead.
+        properties.getClientFiles().setQueueDepth(0);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("queue-depth");
+        properties.getClientFiles().setQueueDepth(32);
+        properties.getClientFiles().setMaxPayloadBytes(0);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("max-payload-bytes");
+        properties.getClientFiles().setMaxPayloadBytes(61440);
+        properties.getClientFiles().setRequestTtl(java.time.Duration.ZERO);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("request-ttl");
+        properties.getClientFiles().setRequestTtl(java.time.Duration.ofSeconds(25));
+        properties.getClientFiles().setBindingTtl(java.time.Duration.ofSeconds(-1));
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("binding-ttl");
+        properties.getClientFiles().setBindingTtl(java.time.Duration.ofHours(8));
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
     }
 
     @Test
@@ -248,6 +315,8 @@ public class ManagedAgentPropertiesTest {
                     "Events.materializeInterval",
                     "RuntimeBroker.childWorkspaceGitTimeout",
                     "Retention.scanDelay",
+                    "McpParking.idleDuration",
+                    "McpParking.scanDelay",
                     "Automation.scanDelay",
                     "Automation.lease",
                     "Automation.lateTolerance",
@@ -297,10 +366,10 @@ public class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 37 is the current field
+        // exceptions would go unchecked. 41 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(37);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(41);
     }
 
     @Test
@@ -640,6 +709,7 @@ public class ManagedAgentPropertiesTest {
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
+                "runtime-broker.mcp-parking.scan-delay",
                 "runtime-broker.retention.scan-delay",
                 "session-resources.scan-delay",
                 "session-worktree.scan-delay",
@@ -960,59 +1030,6 @@ public class ManagedAgentPropertiesTest {
     }
 
     @Test
-    public void springBindsResidentMappingsAndRequiresTheExplicitResidentDeploymentShape() {
-        String prefix = "qwen.managed-agent.runtime-broker.";
-        String entry = prefix + "resident-workspaces[0].";
-        var values = new java.util.ArrayList<String>(List.of(
-                "qwen.managed-agent.harness.enabled=true", "qwen.managed-agent.harness.workspace-files-enabled=true",
-                "qwen.managed-agent.session-store.enabled=true", prefix + "enabled=true",
-                prefix + "provisioner=kubernetes-workspace", prefix + "isolation-class=workspace",
-                TRUSTED_KEY + "=false", prefix + "resident-kubernetes-api-url=https://cluster.example",
-                prefix + "resident-kubernetes-token-file=/reviewed/token", prefix + "resident-kubernetes-ca-file=/reviewed/ca",
-                entry + "workspace-id=workspace", entry + "workspace-generation=1",
-                entry + "image=worker@sha256:" + "a".repeat(64), entry + "command[0]=node", entry + "command[1]=/worker/cli.js"));
-        var registration = java.util.Map.ofEntries(java.util.Map.entry("tenant-id", "tenant"),
-                java.util.Map.entry("storage-id", "storage"), java.util.Map.entry("cluster-domain", "cluster"),
-                java.util.Map.entry("namespace", "resident"), java.util.Map.entry("pvc-name", "claim"),
-                java.util.Map.entry("pvc-uid", "pvc-uid"), java.util.Map.entry("pv-name", "volume"),
-                java.util.Map.entry("pv-uid", "pv-uid"), java.util.Map.entry("driver", "diskplugin.csi.alibabacloud.com"),
-                java.util.Map.entry("volume-handle", "handle"), java.util.Map.entry("backend-domain", "backend"),
-                java.util.Map.entry("disk-serial", "serial"), java.util.Map.entry("mount-root", "/workspace"),
-                java.util.Map.entry("revision", "1"));
-        registration.forEach((key, value) -> values.add(entry + "registration." + key + "=" + value));
-        java.util.Map.of("namespace-uid", "namespace", "policy-name", "policy", "policy-uid", "policy-uid",
-                "policy-generation", "1", "binding-name", "binding", "binding-uid", "binding-uid", "binding-generation", "1")
-                .forEach((key, value) -> values.add(entry + "protection." + key + "=" + value));
-        // Empty lists bind from YAML; a constructor receiving no artifacts must do the same.
-        values.add(entry + "artifacts=");
-        var context = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
-                .withPropertyValues(values.toArray(String[]::new));
-        context.run(started -> {
-            assertThat(started).hasNotFailed();
-            var selected = started.getBean(ManagedAgentProperties.class).getRuntimeBroker().getResidentWorkspaces().getFirst();
-            assertThat(selected.workspaceId()).isEqualTo("workspace");
-            assertThat(selected.registration().storageId()).isEqualTo("storage");
-            assertThat(selected.command()).containsExactly("node", "/worker/cli.js");
-        });
-        context.withPropertyValues(TRUSTED_KEY + "=true").run(started -> assertThat(started).hasFailed());
-        context.withPropertyValues(prefix + "workspace-creation-root=/local-workspaces")
-                .run(started -> assertThat(started).hasFailed());
-        context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
-                .run(started -> assertThat(started).hasFailed());
-        context.withPropertyValues(prefix + "ssh.nodes[0].node-id=remote",
-                        prefix + "ssh.nodes[0].display-name=Remote",
-                        prefix + "ssh.nodes[0].ssh-host=remote",
-                        prefix + "ssh.nodes[0].node-executable=/node",
-                        prefix + "ssh.nodes[0].qwen-entry=/cli.js",
-                        prefix + "ssh.nodes[0].state-directory=/state",
-                        prefix + "ssh.nodes[0].allowed-roots[0]=/work",
-                        prefix + "ssh.nodes[0].publication-port=41270",
-                        prefix + "ssh.nodes[0].qwen-version=0.25.1")
-                .run(started -> assertThat(started).hasFailed().getFailure()
-                        .hasRootCauseMessage("Resident Workspaces require exclusive CSI/files configuration"));
-    }
-
-    @Test
     public void publicChildrenDefaultOnWithoutEnablingUnsupportedRuntimeProfiles() {
         var properties = new ManagedAgentProperties();
         assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
@@ -1029,7 +1046,33 @@ public class ManagedAgentPropertiesTest {
         properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
         assertThat(properties.admitsPublicChildAgents()).isFalse();
         properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
-        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
+        properties.getRuntimeBroker().setProvisioner("static");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+    }
+
+    @Test
+    public void publicChildrenAdmitAnSshBrokerWithNodesAndSessionIsolation() {
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getRuntimeBroker().setProvisioner("ssh-process");
+        // D5′: the SSH arm mirrors the sshFiles capability expression — a
+        // configured node and session isolation on both classes.
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node(
+                "remote", "Remote", "remote-host", "/node", "/cli.js", "/state",
+                List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        // durable-local-process belongs to the local arm only.
+        properties.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setProvisioner("external-scratch");
         assertThat(properties.admitsPublicChildAgents()).isFalse();
     }
 
@@ -1089,7 +1132,7 @@ public class ManagedAgentPropertiesTest {
         }
         for (String invalid : List.of("harness.workspace-files-enabled=false", "harness.enabled=false",
                 "session-store.enabled=false", "runtime-broker.enabled=false",
-                "runtime-broker.isolation-class=workspace", "runtime-broker.provisioner=kubernetes")) {
+                "runtime-broker.isolation-class=workspace", "runtime-broker.provisioner=static")) {
             supported.withPropertyValues("qwen.managed-agent." + invalid)
                     .run(started -> assertThat(started).hasFailed());
         }
@@ -1220,7 +1263,7 @@ public class ManagedAgentPropertiesTest {
                 p -> p.getHarness().setEnabled(false),
                 p -> p.getSessionStore().setEnabled(false),
                 p -> p.getRuntimeBroker().setEnabled(false),
-                p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
+                p -> p.getRuntimeBroker().setProvisioner("static"),
                 p -> p.getRuntimeBroker().setIsolationClass("workspace"),
                 p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()),
                 p -> p.getHarness().setApprovalMode("plan"),
@@ -1369,7 +1412,7 @@ public class ManagedAgentPropertiesTest {
                 .isEqualTo(java.time.Duration.ofMinutes(2));
         List<Consumer<ManagedAgentProperties>> invalid = List.of(
                 p -> p.getRuntimeBroker().setEnabled(false),
-                p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
+                p -> p.getRuntimeBroker().setProvisioner("static"),
                 p -> p.getRuntimeBroker().setIsolationClass("workspace"),
                 // A merge waits for the child's close, which only a durable Broker runs.
                 p -> p.getRuntimeBroker().setDurableLocalProcess(false),

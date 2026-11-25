@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import { getWorkflowJob } from './workflow-helpers.js';
 import {
@@ -52,6 +53,24 @@ const fixedRulingShape =
 // than a code line) read it here.
 const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+// The built-tree handoff steps by name from ci.yml: the signature admits exactly
+// one of them, so a rename there has to move the cases below with it rather
+// than leave a hand-typed copy asserting a name no run reports.
+const handoffStepNames = [
+  ...new Set(
+    Object.values(parse(ciWorkflow).jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter(
+        (step) =>
+          /download-artifact/i.test(String(step.uses ?? '')) &&
+          /built tree/i.test(String(step.name ?? '')),
+      )
+      .map((step) => step.name),
+  ),
+];
+const firstDownloadStep = handoffStepNames.find(
+  (name) => !/^Retry\b/i.test(name),
+);
 const releaseStepScript = readFileSync(
   '.github/scripts/run-release-step.sh',
   'utf8',
@@ -288,6 +307,18 @@ const hasBashMapfile =
 // verbatim phase of the staging witness, never its text pins.
 const hasSha256sum =
   spawnSync('bash', ['-c', 'command -v sha256sum > /dev/null 2>&1'], {
+    stdio: 'ignore',
+  }).status === 0;
+
+// The staleness-cutoff derivation executes `date -u -d "N minutes ago"`,
+// GNU date syntax: BSD date (macOS without the GNU toolchain fronting PATH)
+// rejects the relative string and prints nothing, so the executed witness
+// reads NaN while the workflow itself only ever runs on Linux runners.
+// Probe the host like hasBashMapfile does — a Mac with GNU coreutils
+// fronting PATH keeps the coverage; the pin gates only the executed
+// derivation, never its text pins.
+const hasGnuDate =
+  spawnSync('bash', ['-c', 'date -u -d "1 minute ago" +%s > /dev/null 2>&1'], {
     stdio: 'ignore',
   }).status === 0;
 
@@ -668,31 +699,37 @@ describe('qwen-autofix workflow', () => {
       /PENDING_CUTOFF="\$\(date[^\n]*\n\s*PENDING_LONG_CUTOFF="\$\(date[^\n]*\n/,
     )?.[0];
     expect(derivLines, 'staleness cutoff derivation lines').toBeTruthy();
-    const staleMinConst = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
-    const longMinConst = reviewScanJob.match(
-      /PENDING_LONG_STALE_MIN=(\d+)/,
-    )?.[1];
-    const derivOut = execFileSync(
-      'bash',
-      [
-        '-c',
-        `${derivLines}\nprintf '%s %s' "$PENDING_CUTOFF" "$PENDING_LONG_CUTOFF"`,
-      ],
-      {
-        env: {
-          ...process.env,
-          PENDING_STALE_MIN: staleMinConst,
-          PENDING_LONG_STALE_MIN: longMinConst,
+    // Execute the derivations only where GNU date parses the relative
+    // string (see hasGnuDate): on a BSD-date host the spawn yields empty
+    // timestamps and the gap reads NaN — a host artifact the Linux runner
+    // can never hit. The text pins above still hold on every host.
+    if (hasGnuDate) {
+      const staleMinConst = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
+      const longMinConst = reviewScanJob.match(
+        /PENDING_LONG_STALE_MIN=(\d+)/,
+      )?.[1];
+      const derivOut = execFileSync(
+        'bash',
+        [
+          '-c',
+          `${derivLines}\nprintf '%s %s' "$PENDING_CUTOFF" "$PENDING_LONG_CUTOFF"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PENDING_STALE_MIN: staleMinConst,
+            PENDING_LONG_STALE_MIN: longMinConst,
+          },
+          encoding: 'utf8',
         },
-        encoding: 'utf8',
-      },
-    )
-      .trim()
-      .split(' ');
-    const derivGapMin =
-      (new Date(derivOut[0]).getTime() - new Date(derivOut[1]).getTime()) /
-      60000;
-    expect(derivGapMin).toBe(Number(longMinConst) - Number(staleMinConst));
+      )
+        .trim()
+        .split(' ');
+      const derivGapMin =
+        (new Date(derivOut[0]).getTime() - new Date(derivOut[1]).getTime()) /
+        60000;
+      expect(derivGapMin).toBe(Number(longMinConst) - Number(staleMinConst));
+    }
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than its row's cutoff. Asserting `> $rowcut`
     // too means a flipped comparison (which would age out live checks →
@@ -1336,12 +1373,33 @@ describe('qwen-autofix workflow', () => {
 
     // Single-source the signature list from the workflow rather than re-typing
     // it here, so the production value and this test can never drift out of
-    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). The
-    // toContain guard fails loudly if the env is renamed or the regex breaks —
-    // otherwise an empty pattern would match every line and silently pass.
-    const INFRA_SIGNATURES =
-      workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). Read
+    // it through the YAML parser, not a quote-shaped regex: the handoff
+    // signature contains apostrophes, so Prettier renders this scalar
+    // double-quoted, and a single-quote-only pattern extracts '' from it. The
+    // toContain guards then fail loudly instead of driving the block below
+    // with an empty pattern, which matches every annotation and would pass
+    // every "this reruns" case while asserting nothing.
+    const workflowEnv = parse(workflow).env ?? {};
+    const INFRA_SIGNATURES = workflowEnv.INFRA_FAILURE_SIGNATURES ?? '';
     expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+    // The retry only: the first download's timeout is continue-on-error, so
+    // its annotation can survive on a check run the retry already recovered.
+    expect(INFRA_SIGNATURES).toContain(
+      "The action 'Retry downloading the built tree' has timed out",
+    );
+    expect(firstDownloadStep, 'no first-download step in ci.yml').toBeTruthy();
+    expect(INFRA_SIGNATURES).not.toContain(
+      `The action '${firstDownloadStep}' has timed out`,
+    );
+    // The deterministic configuration class is a separate list: its members
+    // must be absent from the rerun class, and an empty extraction would make
+    // the skip branch match every annotation, so guard it here too.
+    const CONFIG_SIGNATURES = workflowEnv.CONFIG_FAILURE_SIGNATURES ?? '';
+    expect(CONFIG_SIGNATURES).toContain('HOST_LOAD_MAX_RATIO');
+    for (const token of CONFIG_SIGNATURES.split('|')) {
+      expect(INFRA_SIGNATURES).not.toContain(token);
+    }
 
     const run = ({
       checks,
@@ -1400,6 +1458,7 @@ describe('qwen-autofix workflow', () => {
             REVIEW_PR_LIVE: reviewLive ? 'true' : 'false',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
+            CONFIG_FAILURE_SIGNATURES: CONFIG_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -1433,6 +1492,53 @@ describe('qwen-autofix workflow', () => {
         annotations: 'sdk-java host lock not acquired within 40 minutes',
       }),
     ).toEqual({ reran: true, continued: true });
+    // A malformed repository variable is deterministic: a re-run fails
+    // identically, so the scan must not rerun it — and must not spend an agent
+    // round on a typo no branch can fix either. It skips the PR for a human
+    // while the gate's own refusal, which a re-run can move off the host,
+    // stays in the rerun class (#16987 R1-1).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '0'",
+      }),
+    ).toEqual({ reran: false, continued: true });
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // The disk floor gate is the same class, and was missing while its
+    // sibling was here. Measured 2026-11-12: /tmp on the host behind
+    // ecs-qwen-hz3-10/hz3-12 was at 10,3xx free inodes against the 100,000
+    // floor, failing `web-shell E2E Smoke` at the gate on #17022 and #17011
+    // with every later step skipped. The inode arm is the one that reads as
+    // code: 105 GiB still free at 15% used, so no ENOSPC text appears at all
+    // and only the gate's own phrase identifies it. An agent cannot fix
+    // another host's inode count; a re-run can land elsewhere.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          '::error::Disk floor breached on ecs-qwen-hz3-12: /tmp has 10300 free inodes, below the 100000 floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom.',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // …but its OWN malformed floor is deterministic, like the host load
+    // gate's: the variable cannot change between attempts, so this is a
+    // human's configuration fix and never a rerun.
+    for (const annotation of [
+      '::error::DISK_FLOOR_MIN_FREE_KB must be a non-negative integer of at most 18 digits',
+      '::error::DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer of at most 18 digits',
+      '::error::DISK_FLOOR_MAX_USED_PCT must be a percentage between 1 and 100',
+    ]) {
+      expect(run({ checks: [FAIL], annotations: annotation })).toEqual({
+        reran: false,
+        continued: true,
+      });
+    }
     // A REAL failure (no infra signature in the annotation) → never rerun; the
     // agent/human handles it. This is the gate that stops masking real bugs.
     expect(
@@ -1516,6 +1622,47 @@ describe('qwen-autofix workflow', () => {
         annotations: 'The job has exceeded the maximum execution time of 20m0s',
       }),
     ).toEqual({ reran: false, continued: false });
+    // #16927: the built-tree handoff is the ONE step timeout admitted, and by
+    // name. The artifact fetch can expire at its 15-minute cap with zero tests
+    // run, and what makes the transfer stall is OPEN — #16927's 09:26:51Z
+    // measurements retract the earlier proxy theory, so this classifies the
+    // failure without diagnosing it (see af-076). The scan must rerun it rather
+    // than hand a transport fault to an agent.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          "The action 'Retry downloading the built tree' has timed out after 15 minutes.",
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // …but ONLY the retry. The first download carries
+    // `continue-on-error: true`, so its timeout cannot end the job and its
+    // annotation stays on the check run after the retry recovers — a blob of
+    // that stale line beside a real failure must not read as infrastructure,
+    // or the loop reruns a genuine regression and never addresses it.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: [
+          `The action '${firstDownloadStep}' has timed out after 15 minutes.`,
+          "The action 'Run tests and generate reports' has timed out after 15 minutes.",
+        ].join('\n'),
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // …and the name anchor is what keeps the rule above intact: every OTHER
+    // step timeout still falls through to the agent. Widening the signature to
+    // the bare phrase would rerun a genuinely hung suite into silence.
+    for (const msg of [
+      "The action 'Run tests and generate reports' has timed out after 45 minutes.",
+      "The action 'Run required no-AK integration gate' has timed out after 20 minutes.",
+      "The action 'Run web-shell browser smoke' has timed out after 30 minutes.",
+      "The action 'Install Dependencies' has timed out after 30 minutes.",
+    ]) {
+      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
+        reran: false,
+        continued: false,
+      });
+    }
     // Self-trigger guard: a "Qwen Autofix" workflow's own failed check must NOT
     // be rerun (prevents the autofix from re-triggering itself), UNLESS the
     // check is a review-address job (the exception carved out in the jq filter).
@@ -1857,7 +2004,7 @@ describe('qwen-autofix workflow', () => {
               WINDOW: effWindow,
               CHECKED_OUT_HEAD: head,
               AUTOFIX_BOT: 'qwen-code-dev-bot',
-              REVIEW_BOT: 'qwen-code-ci-bot',
+              REVIEW_BOT: 'qwen-code-review-bot',
               TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
             },
             encoding: 'utf8',
@@ -2448,7 +2595,7 @@ describe('qwen-autofix workflow', () => {
       'contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'), github.event.review.author_association)',
     );
     expect(routeJob).toContain(
-      "github.event.review.user.login == 'qwen-code-ci-bot'",
+      "github.event.review.user.login == 'qwen-code-review-bot'",
     );
     // The load-bearing STRUCTURE, not just substrings: the trust || is
     // parenthesized and the whole clause gates the per-PR format. Without
@@ -2456,12 +2603,12 @@ describe('qwen-autofix workflow', () => {
     // OWNER/MEMBER/COLLABORATOR review the run-unique group and the
     // review-bot the per-PR group unconditionally.
     expect(routeJob).toContain(
-      "(github.event_name == 'pull_request_review' && (contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number))",
+      "(github.event_name == 'pull_request_review' && (contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-review-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number))",
     );
     expect(workflow).toContain(
       'TRUSTED_ASSOC: \'["OWNER", "MEMBER", "COLLABORATOR"]\'',
     );
-    expect(workflow).toContain("REVIEW_BOT: 'qwen-code-ci-bot'");
+    expect(workflow).toContain("REVIEW_BOT: 'qwen-code-review-bot'");
     expect(workflow).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
@@ -3327,7 +3474,7 @@ describe('qwen-autofix workflow', () => {
         '',
         '--arg',
         'rb',
-        'qwen-code-ci-bot',
+        'qwen-code-review-bot',
         '--arg',
         'ab',
         'bot',
@@ -7678,7 +7825,7 @@ exit 1
             EVENT_NAME: 'pull_request_review',
             REPO: 'QwenLM/qwen-code',
             AUTOFIX_BOT: 'qwen-code-dev-bot',
-            REVIEW_BOT: 'qwen-code-ci-bot',
+            REVIEW_BOT: 'qwen-code-review-bot',
             TAKEOVER_LABEL: 'autofix/takeover',
             PR_NUMBER_EVENT: '7259',
             PR_HEAD_REPO: headRepo,
@@ -8449,21 +8596,21 @@ exit 1
       {
         id: 10,
         created_at: '2025-12-31T00:00:00Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: '**[Critical]** stale owner routes writes to the wrong runtime',
       },
       {
         id: 11,
         created_at: '2026-01-02T00:00:00Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: '**[Critical]** wrong workspace is mutated',
       },
       {
         id: 12,
         created_at: '2026-01-02T00:00:01Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: '**[Suggestion]** add an aria-label',
       },
@@ -8493,7 +8640,7 @@ exit 1
       {
         id: 16,
         created_at: '2026-01-02T00:00:05Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: quotedCriticalWitness('Witness:'),
       },
@@ -8501,7 +8648,7 @@ exit 1
         id: 17,
         in_reply_to_id: 16,
         created_at: '2026-01-02T00:00:06Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: 'The assertion should cover the fallback path too.',
       },
@@ -8523,7 +8670,7 @@ exit 1
             '2026-01-01T00:00:00Z',
             '--arg',
             'rb',
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '--arg',
             'ab',
             'qwen-code-dev-bot',
@@ -8584,7 +8731,7 @@ exit 1
         id: 21,
         state: 'COMMENTED',
         submitted_at: '2026-01-02T00:00:01Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: [
           '<!-- hidden from readers',
@@ -8595,7 +8742,7 @@ exit 1
         id: 22,
         state: 'COMMENTED',
         submitted_at: '2026-01-02T00:00:02Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: [
           '<!-- rendered metadata -->',
@@ -8620,7 +8767,7 @@ exit 1
         id: 24,
         state: 'COMMENTED',
         submitted_at: '2026-01-02T00:00:04Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: quotedCriticalWitness(),
       },
@@ -8635,7 +8782,7 @@ exit 1
             '2026-01-01T00:00:00Z',
             '--arg',
             'rb',
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '--arg',
             'ab',
             'qwen-code-dev-bot',
@@ -8678,7 +8825,7 @@ exit 1
       {
         id: 31,
         created_at: '2026-01-02T00:00:01Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: '**[Critical]** data loss on concurrent writes',
       },
@@ -8692,7 +8839,7 @@ exit 1
       {
         id: 34,
         created_at: '2026-01-02T00:00:03Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: quotedCriticalWitness(),
       },
@@ -8707,7 +8854,7 @@ exit 1
             '2026-01-01T00:00:00Z',
             '--arg',
             'rb',
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '--arg',
             'ab',
             'qwen-code-dev-bot',
@@ -8747,7 +8894,7 @@ exit 1
         id: 21,
         state: 'COMMENTED',
         submitted_at: '2026-01-02T00:00:00Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: 'Looks good overall',
         html_url: 'https://github.com/test/pull/1#review-21',
@@ -8756,7 +8903,7 @@ exit 1
         id: 22,
         state: 'COMMENTED',
         submitted_at: '2026-01-02T00:00:01Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: '**[Critical]** memory leak in the owner route',
         html_url: 'https://github.com/test/pull/1#review-22',
@@ -8774,7 +8921,7 @@ exit 1
         id: 24,
         state: 'COMMENTED',
         submitted_at: '2026-01-02T00:00:03Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: quotedCriticalWitness(),
         html_url: 'https://github.com/test/pull/1#review-24',
@@ -8790,7 +8937,7 @@ exit 1
             '2026-01-01T00:00:00Z',
             '--arg',
             'rb',
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '--arg',
             'ab',
             'qwen-code-dev-bot',
@@ -8824,7 +8971,7 @@ exit 1
             '2026-01-01T00:00:00Z',
             '--arg',
             'rb',
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '--arg',
             'ab',
             'qwen-code-dev-bot',
@@ -8870,7 +9017,7 @@ exit 1
       {
         id: 31,
         created_at: '2026-01-02T00:00:01Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: '**[Critical]** data loss on concurrent writes',
         html_url: 'https://github.com/test/pull/1#issuecomment-31',
@@ -8886,7 +9033,7 @@ exit 1
       {
         id: 33,
         created_at: '2026-01-02T00:00:03Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: '**[Suggestion]** consider caching this lookup',
         html_url: 'https://github.com/test/pull/1#issuecomment-33',
@@ -8894,7 +9041,7 @@ exit 1
       {
         id: 34,
         created_at: '2026-01-02T00:00:04Z',
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         author_association: 'NONE',
         body: quotedCriticalWitness(),
         html_url: 'https://github.com/test/pull/1#issuecomment-34',
@@ -8910,7 +9057,7 @@ exit 1
             '2026-01-01T00:00:00Z',
             '--arg',
             'rb',
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '--arg',
             'ab',
             'qwen-code-dev-bot',
@@ -9059,13 +9206,13 @@ exit 1
           // Review bot, even carrying a trusted association, is excluded by
           // login (its budget is zero). Dropping `.login != $rb` surfaces it.
           humanC(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '2026-07-02T18:00:00Z',
             'MEMBER',
             'bot suggestion',
           ),
           humanC(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             '2026-07-03T18:00:00Z',
             'MEMBER',
             'bot suggestion 2',
@@ -9234,7 +9381,7 @@ exit 1
             `WORKDIR='${budgetDir}'`,
             `LIVE_REARM_KEY='${WKEY}'`,
             "AUTOFIX_BOT='qwen-code-dev-bot'",
-            "REVIEW_BOT='qwen-code-ci-bot'",
+            "REVIEW_BOT='qwen-code-review-bot'",
             `TRUSTED_ASSOC='["OWNER","MEMBER","COLLABORATOR"]'`,
             'CRITICAL_ONLY_AFTER_ROUND=5',
             'CRITICAL_ONLY_HUMAN_BATCHES=2',
@@ -9246,7 +9393,7 @@ exit 1
       );
       // The four fenced-marker authors are regular feedback in every input
       // shape, including a reply to a fenced-marker root. The protected
-      // authors (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/
+      // authors (crit/cr/appr/replyguy/crinline/qwen-code-review-bot/
       // sentinelvictim) still stay absent.
       expect(JSON.parse(overOut)).toEqual([
         'looper',
@@ -10035,7 +10182,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nREVIEW_BOT=qwen-code-ci-bot\n` +
+          `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nREVIEW_BOT=qwen-code-review-bot\n` +
             `LIVE_REARM_KEY=W1\nWORKDIR=${dir}\nSTALE=${stale}\n` +
             `LOOP_OWNED_LANES=${JSON.stringify(loopOwnedLanesJson)}\n` +
             `BASE_UPD_AT='${baseUpdAt}'\n` +
@@ -10085,7 +10232,7 @@ exit 1
       park({
         rv: [
           {
-            user: { login: 'qwen-code-ci-bot' },
+            user: { login: 'qwen-code-review-bot' },
             author_association: 'NONE',
             state: 'CHANGES_REQUESTED',
             submitted_at: '2026-01-02T00:00:00Z',
@@ -11297,7 +11444,7 @@ exit 1
           '2026-09-01T00:00:00Z',
           '--arg',
           'rb',
-          'qwen-code-ci-bot',
+          'qwen-code-review-bot',
           '--arg',
           'ab',
           'qwen-code-dev-bot',
@@ -11313,7 +11460,7 @@ exit 1
       ).trim();
     const after = { created_at: '2026-09-02T00:00:00Z' };
     const bot = {
-      user: { login: 'qwen-code-ci-bot' },
+      user: { login: 'qwen-code-review-bot' },
       author_association: 'NONE',
     };
     const marker = '<!-- qwen-review-fixed-ruling -->';
@@ -11494,7 +11641,7 @@ exit 1
     const jqProgram = cmd.slice(cmd.indexOf("'") + 1, cmd.lastIndexOf("'"));
     expect(jqProgram).toContain('| length');
     const note = {
-      user: { login: 'qwen-code-ci-bot' },
+      user: { login: 'qwen-code-review-bot' },
       author_association: 'NONE',
       created_at: '2026-08-02T00:00:00Z',
       body:
@@ -11516,7 +11663,7 @@ exit 1
           '2026-08-01T00:00:00Z',
           '--arg',
           'rb',
-          'qwen-code-ci-bot',
+          'qwen-code-review-bot',
           '--arg',
           'ab',
           'qwen-code-dev-bot',
@@ -13370,9 +13517,31 @@ exit 1
     // loud before the first record. Probed on all five cases: restoring the
     // unguarded export makes each record a gh call and drop the ::error
     // abort — the command steps get as far as the PAT identity check.
-    const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
-      encoding: 'utf8',
-    }).stdout.trim();
+    const startupDir = mkdtempSync(join(tmpdir(), 'autofix-startup-env-'));
+    const startupFile = join(startupDir, 'startup.sh');
+    writeFileSync(startupFile, "printf 'runner-startup-noise\\n'\n");
+    const previousBashEnv = process.env.BASH_ENV;
+    let realMktempProbe;
+    let realMktemp;
+    try {
+      process.env.BASH_ENV = startupFile;
+      // Keep startup-file environment out of the command lookup.
+      realMktempProbe = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-c', 'command -v mktemp'],
+        { env: { PATH: process.env.PATH }, encoding: 'utf8' },
+      );
+      expect(realMktempProbe.status).toBe(0);
+      realMktemp = realMktempProbe.stdout.trim();
+      expect(realMktemp).not.toContain('\n');
+    } finally {
+      if (previousBashEnv === undefined) {
+        delete process.env.BASH_ENV;
+      } else {
+        process.env.BASH_ENV = previousBashEnv;
+      }
+      rmSync(startupDir, { recursive: true, force: true });
+    }
     const cases = [
       {
         name: 'route',
@@ -13386,7 +13555,7 @@ exit 1
           PR_HEAD_REPO: 'QwenLM/qwen-code',
           PR_AUTHOR: 'qwen-code-dev-bot',
           AUTOFIX_BOT: 'qwen-code-dev-bot',
-          REVIEW_BOT: 'qwen-code-ci-bot',
+          REVIEW_BOT: 'qwen-code-review-bot',
           SENDER_LOGIN: 'qqqys',
         },
       },
@@ -13421,48 +13590,34 @@ exit 1
       expect(block, name).toBeTruthy();
       const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-'));
       try {
-        const bin = join(dir, 'bin');
-        mkdirSync(bin);
-        writeFileSync(
-          join(bin, 'mktemp'),
-          [
-            '#!/bin/bash',
-            'for a in "$@"; do',
-            '  case "$a" in *autofix-gh-config*) echo "mktemp: simulated failure: $a" >&2; exit 1 ;; esac',
-            'done',
-            `exec '${realMktemp}' "$@"`,
-            '',
-          ].join('\n'),
-        );
         const callsFile = join(dir, 'gh-calls');
-        writeFileSync(
-          join(bin, 'gh'),
-          `#!/bin/bash\nprintf '%s\\n' "$*" >> '${callsFile}'\nexit 0\n`,
-        );
-        chmodSync(join(bin, 'mktemp'), 0o755);
-        chmodSync(join(bin, 'gh'), 0o755);
-        const proc = spawnSync(
-          'bash',
-          [
-            '-e',
-            '-o',
-            'pipefail',
-            '-c',
-            // The scan's forced-PR retry loop sleeps between attempts on the
-            // mutant path; keep the probe fast without touching the block.
-            `sleep() { :; }\n${block.replace(/^ {10}/gm, '')}`,
-          ],
-          {
-            env: {
-              PATH: `${bin}:${process.env.PATH}`,
-              RUNNER_TEMP: dir,
-              WORKDIR: join(dir, 'workdir'),
-              GITHUB_OUTPUT: join(dir, 'github-output'),
-              ...env,
-            },
-            encoding: 'utf8',
+        // Install the command overrides in this shell, so PATH resolution
+        // cannot select a real mktemp or gh before these fixtures.
+        const script = [
+          'mktemp() {',
+          '  for arg in "$@"; do',
+          '    case "${arg}" in *autofix-gh-config*) echo "mktemp: simulated failure: ${arg}" >&2; return 1 ;; esac',
+          '  done',
+          `  command '${realMktemp}' "$@"`,
+          '}',
+          'gh() {',
+          `  printf '%s\\n' "$*" >> '${callsFile}'`,
+          '}',
+          // The scan's forced-PR retry loop sleeps between attempts on the
+          // mutant path; keep the probe fast without touching the block.
+          'sleep() { :; }',
+          block.replace(/^ {10}/gm, ''),
+        ].join('\n');
+        const proc = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
+          env: {
+            PATH: process.env.PATH,
+            RUNNER_TEMP: dir,
+            WORKDIR: join(dir, 'workdir'),
+            GITHUB_OUTPUT: join(dir, 'github-output'),
+            ...env,
           },
-        );
+          encoding: 'utf8',
+        });
         expect(proc.stdout, name).toContain(
           '::error::could not create gh config dir',
         );
@@ -25020,7 +25175,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
               AUTOFIX_BOT: 'qwen-code-dev-bot',
-              REVIEW_BOT: 'qwen-code-ci-bot',
+              REVIEW_BOT: 'qwen-code-review-bot',
               REARM_KEY: 'W1',
               WORKDIR: dir,
               REPO: 'o/r',
@@ -25120,7 +25275,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           ...(rec === undefined ? {} : { rec }),
         })} -->`;
       const botReview = (at, round, rec) => ({
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         submitted_at: at,
         state: 'CHANGES_REQUESTED',
         body: `findings… ${led(round, rec)}`,
@@ -25134,7 +25289,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           [
             '-c',
             `set -e\nWORKDIR='${dir}'\nREARM_KEY='${rearmKey}'\n` +
-              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `REVIEW_BOT=qwen-code-review-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='not-a-number'\n` +
               `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
@@ -25197,7 +25352,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           rv: [
             botReview(T(1), 3, ['batch-fixes']),
             {
-              user: { login: 'qwen-code-ci-bot' },
+              user: { login: 'qwen-code-review-bot' },
               submitted_at: T(2),
               state: 'COMMENTED',
               body: 'fallback — no marker',
@@ -25228,7 +25383,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           rv: threeSignals,
           ic: [
             {
-              user: { login: 'qwen-code-ci-bot' },
+              user: { login: 'qwen-code-review-bot' },
               author_association: 'NONE',
               created_at: T(2),
               body: 'suggestion digest',
@@ -25264,7 +25419,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           rv: [
             botReview(T(1), 3, ['batch-fixes']),
             {
-              user: { login: 'qwen-code-ci-bot' },
+              user: { login: 'qwen-code-review-bot' },
               submitted_at: T(2),
               state: 'CHANGES_REQUESTED',
               body: '<!-- qwen-review-ledger 42 -->',
@@ -25366,7 +25521,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
             botReview(T(1), 3, ['batch-fixes']),
             botReview(T(2), 4, ['batch-fixes']),
             {
-              user: { login: 'qwen-code-ci-bot' },
+              user: { login: 'qwen-code-review-bot' },
               submitted_at: T(3),
               state: 'CHANGES_REQUESTED',
               body: `findings… ${led(5, ['batch-fixes'])} amended after re-check ${led(5, [])}`,
@@ -25499,7 +25654,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               `DRY_RUN='${dryRun}'\nSKIP_LABEL='autofix/skip'\n` +
               `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
               `HAS_TAKEOVER='${takeover}'\n` +
-              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `REVIEW_BOT=qwen-code-review-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='3'\n` +
               `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
@@ -25707,7 +25862,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-base-'));
     try {
       const botReview = (at, round) => ({
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         submitted_at: at,
         state: 'CHANGES_REQUESTED',
         body: `<!-- qwen-review-ledger ${JSON.stringify({
@@ -25729,7 +25884,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           [
             '-c',
             `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
-              `DRY_RUN='false'\nREVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `DRY_RUN='false'\nREVIEW_BOT=qwen-code-review-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='3'\n` +
               `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
@@ -25789,7 +25944,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           botReview(T(1), 3),
           botReview(T(2), 4),
           {
-            user: { login: 'qwen-code-ci-bot' },
+            user: { login: 'qwen-code-review-bot' },
             submitted_at: T(3),
             state: 'COMMENTED',
             body: `<!-- qwen-review-ledger ${JSON.stringify({
@@ -25836,7 +25991,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-report-'));
     try {
       const botReview = (at, round, rec = ['root-cause-triage']) => ({
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         submitted_at: at,
         state: 'CHANGES_REQUESTED',
         body: `<!-- qwen-review-ledger ${JSON.stringify({
@@ -25866,7 +26021,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
             `${shellOpts}\nWORKDIR='${dir}'\nREPO='example-owner/example-repo'\nPR=1\n` +
               `FETCH_FAIL='${fetchFail}'\n` +
               `DEFAULT_BRANCH='main'\nAUDIT_VERDICT='${verdict}'\nREPORT_HEAD='reportheadsha'\n` +
-              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `REVIEW_BOT=qwen-code-review-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='3'\n` +
               `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
@@ -26001,7 +26156,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-idle-'));
     try {
       const botReview = (at, round) => ({
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         submitted_at: at,
         state: 'CHANGES_REQUESTED',
         body: `<!-- qwen-review-ledger ${JSON.stringify({
@@ -26026,7 +26181,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               `HAS_TAKEOVER='false'\nROUND='1'\nEFF_MAX_ROUNDS='6'\n` +
               `EFF_WM='2026-01-01T08:00:00Z'\nCHECKS_JSON='[]'\n` +
               `PR_META='{"headRefOid":"h1"}'\nRED_HEAD='h1'\n` +
-              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `REVIEW_BOT=qwen-code-review-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='3'\n` +
               `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
@@ -26102,7 +26257,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-mirror-'));
     try {
       const botReview = (at, round) => ({
-        user: { login: 'qwen-code-ci-bot' },
+        user: { login: 'qwen-code-review-bot' },
         submitted_at: at,
         state: 'CHANGES_REQUESTED',
         body: `<!-- qwen-review-ledger ${JSON.stringify({
@@ -26128,7 +26283,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           [
             '-c',
             `set -e\nWORKDIR='${dir}'\nLIVE_REARM_KEY='${rearmKey}'\nSTALE='${stale}'\n` +
-              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `REVIEW_BOT=qwen-code-review-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='${rounds}'\n` +
               `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
@@ -26200,7 +26355,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
             botReview(T(1), 3),
             botReview(T(2), 4),
             {
-              user: { login: 'qwen-code-ci-bot' },
+              user: { login: 'qwen-code-review-bot' },
               submitted_at: T(3),
               state: 'COMMENTED',
               body: `<!-- qwen-review-ledger ${JSON.stringify({

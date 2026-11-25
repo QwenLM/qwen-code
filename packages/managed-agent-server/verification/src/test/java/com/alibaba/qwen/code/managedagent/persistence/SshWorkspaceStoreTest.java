@@ -23,7 +23,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -217,6 +216,19 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?", Integer.class, "tenant", remote.sessionId())).isZero();
     }
 
+    @Test
+    void sshLaneAdmitsTheLoopShellRevisionExactlyLikeShell1() {
+        // D3: shell/3 is a public shell whose journal-based loop_wakeup/cron
+        // union is runtime-agnostic, so the SSH lane admits it like shell/1.
+        AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.FILES);
+        AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.SHELL);
+        AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.SHELL_V3);
+        assertThatThrownBy(() -> AgentSessionPolicies.requireSshToolProfile(WorkspaceToolProfiles.MCP))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> AgentSessionPolicies.requireSshToolProfile("hosted-workspace-shell/2"))
+                .isInstanceOf(ManagedAgentException.class);
+    }
+
     private static ManagedAgentProperties sshProperties(boolean shell) {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
@@ -246,8 +258,8 @@ class SshWorkspaceStoreTest {
         assertThatThrownBy(() -> store.complete(intent, "old")).isInstanceOf(ManagedAgentException.class);
         store.reserve(retry, "new", registration(intent));
         store.complete(retry, "new");
-        jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?", "fence",
-                RuntimeAdmissionFences.storageAliasKey("tenant", intent.storageId()));
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_id = ? AND storage_id = ?", "fence",
+                "tenant", intent.storageId());
         assertThatThrownBy(() -> store.verify(binding(intent))).isInstanceOf(RuntimeException.class);
     }
 
@@ -284,9 +296,9 @@ class SshWorkspaceStoreTest {
         two.claim(binding, second);
         one.release(binding, first);
         two.assertHeld(binding, second);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE execution_storage_key IS NOT NULL", Integer.class))
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE execution_storage_id IS NOT NULL", Integer.class))
                 .isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_key IS NOT NULL", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_id IS NOT NULL", Integer.class)).isZero();
     }
 
     private RuntimeSessionRecord runtimeSession(JdbcSshWorkspaceStore.Intent intent, String id) {
@@ -392,7 +404,7 @@ class SshWorkspaceStoreTest {
         } else if ("registration".equals(mismatch)) {
             jdbc.update("UPDATE ma_storage_owner SET mount_registration_id = ?", UUID.randomUUID().toString());
         } else {
-            jdbc.update("UPDATE ma_storage_owner SET storage_key = 'replacement', physical_key = 'replacement'");
+            jdbc.update("UPDATE ma_storage_owner SET physical_id = 'replacement'");
         }
         assertThatThrownBy(() -> store.completeParked("tenant", intent.operationId()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));

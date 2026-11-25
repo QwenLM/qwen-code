@@ -45,8 +45,6 @@ class ManagedSchemaConfigurationTest {
         assertThat(sessionListColumns(source)).containsExactly("tenant_id", "gmt_create", "session_id");
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session"))
                 .isEqualTo(session)
-                .containsEntry("is_csi_guard", false)
-                .containsEntry("runtime_request_key", null)
                 .containsEntry("model_id", null)
                 .containsEntry("model_revision", 0L)
                 .containsEntry("selected_approval_mode", null)

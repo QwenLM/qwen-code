@@ -66,64 +66,93 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
-describe('outbound-only channel editing', () => {
-  const descriptor: DaemonChannelTypeDescriptor = {
-    type: 'dingtalk-webhook',
-    displayName: 'DingTalk Webhook',
-    manageable: true,
-    outboundOnly: true,
-    fields: [
-      {
-        key: 'webhookUrl',
-        label: 'Webhook URL',
-        kind: 'secret',
-        required: true,
-      },
-      { key: 'signingSecret', label: 'Signing secret', kind: 'secret' },
-    ],
-  };
-
-  it('validates and saves without inventing a receive policy', () => {
-    const draft = createChannelEditorDraft(descriptor);
-    draft.name = 'notices';
-    draft.secrets.webhookUrl = {
-      operation: 'replace',
-      value: '$DINGTALK_WEBHOOK_URL',
+describe.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
+  '%s outbound-only channel editing',
+  (type) => {
+    const signed = type !== 'wecom-webhook';
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type,
+      displayName: type,
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Webhook URL',
+          kind: 'secret',
+          required: true,
+        },
+        ...(signed
+          ? [
+              {
+                key: 'signingSecret',
+                label: 'Signing secret',
+                kind: 'secret' as const,
+              },
+            ]
+          : []),
+      ],
     };
-    expect(draft.privatePolicy).toBe('');
-    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
-    expect(buildChannelUpsertRequest(descriptor, draft, '1')).toEqual({
-      expectedRevision: '1',
-      config: { type: 'dingtalk-webhook' },
-      secrets: {
-        webhookUrl: { operation: 'replace', value: '$DINGTALK_WEBHOOK_URL' },
-        signingSecret: { operation: 'clear' },
-      },
+
+    it('validates and saves without inventing a receive policy', () => {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'notices';
+      draft.secrets.webhookUrl = {
+        operation: 'replace',
+        value: '$GROUP_WEBHOOK_URL',
+      };
+      expect(draft.privatePolicy).toBe('');
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+      expect(buildChannelUpsertRequest(descriptor, draft, '1')).toEqual({
+        expectedRevision: '1',
+        config: { type },
+        secrets: {
+          webhookUrl: { operation: 'replace', value: '$GROUP_WEBHOOK_URL' },
+          ...(signed ? { signingSecret: { operation: 'clear' } } : {}),
+        },
+      });
     });
-  });
 
-  it('preserves required saved secrets but rejects clearing the endpoint', () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'notices',
-      config: { type: 'dingtalk-webhook' },
-      secrets: { webhookUrl: { present: true, source: 'environment' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    const draft = createChannelEditorDraft(descriptor, instance);
-    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
-      {},
-    );
-    expect(
-      buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
-        ?.webhookUrl,
-    ).toEqual({ operation: 'preserve' });
-    draft.secrets.webhookUrl = { operation: 'clear' };
-    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
-      { webhookUrl: 'required' },
-    );
-  });
-});
+    it('preserves required saved secrets but rejects clearing the endpoint', () => {
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'notices',
+        config: { type },
+        secrets: {
+          webhookUrl: { present: true, source: 'environment' },
+          ...(signed
+            ? { signingSecret: { present: true, source: 'literal' as const } }
+            : {}),
+        },
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = createChannelEditorDraft(descriptor, instance);
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({});
+      expect(
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets,
+      ).toEqual({
+        webhookUrl: { operation: 'preserve' },
+        ...(signed ? { signingSecret: { operation: 'preserve' } } : {}),
+      });
+      if (signed) {
+        draft.secrets.signingSecret = { operation: 'clear' };
+        expect(
+          validateChannelEditorDraft(descriptor, draft, [], instance),
+        ).toEqual({});
+        expect(
+          buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+            ?.signingSecret,
+        ).toEqual({ operation: 'clear' });
+      }
+      draft.secrets.webhookUrl = { operation: 'clear' };
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({ webhookUrl: 'required' });
+    });
+  },
+);
 
 const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
@@ -1220,10 +1249,10 @@ describe('GitHub watch events require bound delivery', () => {
     return draft;
   }
 
-  it('refuses a watch selection while bound delivery is off', () => {
+  it('accepts the deprecated watch selection while bound delivery is off', () => {
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('ci_failure'), []),
-    ).toEqual({ prWatchEvents: 'requiresBoundDelivery' });
+    ).toEqual({});
   });
 
   it('allows the selection once bound delivery is on', () => {
@@ -1238,10 +1267,12 @@ describe('GitHub watch events require bound delivery', () => {
     );
   });
 
-  it('reports invalidOption before the delivery dependency', () => {
+  it('accepts an unknown deprecated watch value', () => {
+    // The daemon accepts the deprecated key and warns at connect; blocking the
+    // save here would leave the editor stricter than the authority it mirrors.
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('typo_event'), []),
-    ).toEqual({ prWatchEvents: 'invalidOption' });
+    ).toEqual({});
   });
 });
 

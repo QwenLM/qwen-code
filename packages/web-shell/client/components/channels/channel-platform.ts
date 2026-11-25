@@ -6,14 +6,33 @@
 
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 
+const DINGTALK_PLATFORM = { type: 'dingtalk', displayName: 'DingTalk' };
+const FEISHU_PLATFORM = { type: 'feishu', displayName: 'Feishu' };
+const WECOM_PLATFORM = { type: 'wecom', displayName: 'WeCom' };
+
+export const CHANNEL_METHOD_PLATFORMS: Record<
+  string,
+  { type: string; displayName: string } | undefined
+> = {
+  dingtalk: DINGTALK_PLATFORM,
+  'dingtalk-webhook': DINGTALK_PLATFORM,
+  feishu: FEISHU_PLATFORM,
+  'feishu-webhook': FEISHU_PLATFORM,
+  wecom: WECOM_PLATFORM,
+  'wecom-webhook': WECOM_PLATFORM,
+};
+
 export const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
   'dingtalk-webhook': 'D',
   dws: 'DWS',
   weixin: 'WX',
   wecom: 'W',
+  'wecom-webhook': 'W',
   'wecom-callback': 'WC',
   feishu: 'F',
+  'feishu-webhook': 'F',
+  'generic-webhook': 'WH',
   github: 'GH',
   gitlab: 'GL',
   email: 'E',
@@ -26,8 +45,11 @@ const SUPPORTED_CHANNEL_TYPES = new Set([
   'dws',
   'weixin',
   'wecom',
+  'wecom-webhook',
   'wecom-callback',
   'feishu',
+  'feishu-webhook',
+  'generic-webhook',
   'github',
   'gitlab',
   'email',
@@ -42,8 +64,11 @@ export function isSupportedChannelType(
   | 'dws'
   | 'weixin'
   | 'wecom'
+  | 'wecom-webhook'
   | 'wecom-callback'
   | 'feishu'
+  | 'feishu-webhook'
+  | 'generic-webhook'
   | 'github'
   | 'gitlab'
   | 'email'

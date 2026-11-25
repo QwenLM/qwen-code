@@ -60,6 +60,14 @@ final class RuntimeProvisionFailureHandler {
     RuntimeException failure(RuntimeBindingRecord original,
             RuntimeBindingRecord current, Throwable cause, boolean localCapacityRefused) {
         boolean retryable = !(cause instanceof RuntimeBrokerException failure) || failure.isRetryable();
+        // A retryable external-workspace failure keeps the binding recoverable
+        // instead of blocking it: the provider may answer on retry.
+        if (original.getRequest().isManagedContext()
+                && RuntimeBrokerSupport.retryableExternalWorkspaceProvision(original.getRequest(), cause)) {
+            return cause instanceof RuntimeBrokerException brokerFailure
+                    ? new CompletionException(brokerFailure)
+                    : unavailable("runtime_provision_failed", "Runtime provisioning failed", cause);
+        }
         if (current != null) {
             if (localCapacityRefused && retainLocalCapacityRetry(original, current)) {
                 return new CompletionException(cause);

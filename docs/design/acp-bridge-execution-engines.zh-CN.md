@@ -91,8 +91,9 @@ ACP 恢复成功后发生的校验失败，仍按原通道清理。对外超时�
 
 Prompt、取消、审批、模型变更和关闭使用 entry 绑定的 connection。入站 Session
 查找、恢复回放、后台准入与 generation 事件也必须匹配发送的 channel/connection。
-活跃会话的 transcript、turn-index 读取和 flush 同样走 owner；仅不存在活跃 entry
-的持久历史读取使用 Legacy 工作区回退。
+活跃会话的 transcript flush 走该 owner；transcript 与 turn-index 的读取本身现由
+serve 路由以 daemon-local 方式服务（见 `untrusted-persisted-transcript.zh-CN.md`），
+仅在 live-flush 屏障处跨过 bridge，因此读取本身不再经由 owner 进程路由。
 
 工作区 MCP、配置/状态控制与预热使用 Legacy。整体存活与活动状态检查两个引擎；
 空闲回收按实际 candidate ID 找到通道。预热 keepalive 只延长 Legacy 的空闲期限；

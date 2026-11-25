@@ -25,6 +25,7 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -42,7 +43,7 @@ public class ManagedActionService {
     private static final Pattern UPPERCASE_LETTER = Pattern.compile("([A-Z])");
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-                    "todo_write", "context_search", "context_remember", "context_get", "context_forget",
+                    "todo_write", "loop_wakeup", "cron_create", "cron_list", "cron_delete", "context_search", "context_remember", "context_get", "context_forget",
                     "agent", "send_message", "team_create", "task_create",
                     "task_update", "workflow", "request_shutdown", "exit_plan_mode",
                     "team_plan_approval");
@@ -143,8 +144,12 @@ public class ManagedActionService {
             }
         }
         var rows = actions.listWithChildren(tenant, session, before, beforeSession, beforeId, limit + 1);
+        Set<String> checkedSessions = new HashSet<>();
+        checkedSessions.add(session);
         for (var row : rows) {
-            sessions.requireReadableSession(tenant, actor, row.sessionId());
+            if (checkedSessions.add(row.sessionId())) {
+                sessions.requireReadableSession(tenant, actor, row.sessionId());
+            }
         }
         return rows;
     }
@@ -380,7 +385,7 @@ public class ManagedActionService {
         JsonNode options = action.options();
         String tool = options.path("toolName").asText();
         if (!"requested".equals(action.state())
-                || !List.of(2L, 3L).contains(options.path("v").asLong())
+                || options.path("v").asLong() != 3
                 || !PREVIEW_TOOLS.contains(tool)) {
             return null;
         }

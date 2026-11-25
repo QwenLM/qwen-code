@@ -207,7 +207,12 @@ export type HostedRecoveryDeclineReason =
   /** The checkpoint's durable bytes fail the parse/identity verdict. */
   | 'checkpoint_blocked'
   /** The recovered state still does not authorize this Turn. */
-  | 'unresolved_after_settle';
+  | 'unresolved_after_settle'
+  /** #17260: the Turn's saved public-child recovery profile belongs to a
+   * topology this Harness cannot open at all (a shell-era child profile
+   * after the move off the shell topology). No retry re-opens it, so the
+   * coordinator abandons the recovery on the first drive. */
+  | 'public_child_recovery_unsupported';
 
 export type HostedRuntimeRecoveryOutcome =
   | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
@@ -281,6 +286,19 @@ function isUnprovableExecutionAnswer(cause: unknown): boolean {
     cause.status === 503 &&
     (cause.code === 'runtime_reconciliation_required' ||
       cause.code === 'runtime_execution_reconcile_failed')
+  );
+}
+
+/** The Broker's refusal to adopt a terminally lost generation whose writers
+ * are not proven stopped (#17542): it provisions no replacement under the
+ * original identity, yet the generation's executions remain readable from the
+ * durable ledger. A passive load may still settle a park whose every execution
+ * is terminally abandoned; anything else keeps this refusal. */
+function isRuntimeLostRefusal(cause: unknown): boolean {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 503 &&
+    cause.code === 'runtime_broker_runtime_lost'
   );
 }
 
@@ -2882,6 +2900,7 @@ export async function recoverHostedRuntimeTurn(input: {
     { state: HostedRuntimeRecoveryExecutionState } | undefined
   >();
   let acquiredRuntime = false;
+  let runtimeLostRefusal: unknown;
   if (passive && items.length > 0) {
     // A replacement Broker answers status, cancel and release only for a
     // Runtime Session it has adopted, so the cancellation path re-attaches
@@ -2897,13 +2916,43 @@ export async function recoverHostedRuntimeTurn(input: {
     // The continuation takeover keeps its #13083 handback discipline for
     // now — whether the same wedge reasoning applies there is a recorded
     // follow-up, not settled by this change.
-    await broker.acquire();
-    acquiredRuntime = true;
-    input.onPassiveRuntimeAcquired?.(broker.runtimeSessionId);
+    try {
+      await broker.acquire();
+      acquiredRuntime = true;
+      input.onPassiveRuntimeAcquired?.(broker.runtimeSessionId);
+    } catch (cause) {
+      if (!isRuntimeLostRefusal(cause)) throw cause;
+      // #17542: an out-of-band termination left the generation LOST with loss
+      // evidence but no writer-stop proof, so the Broker provisions no
+      // replacement and refuses the adopt. Its executions may still be
+      // terminally abandoned, and the status route answers those from the
+      // durable ledger without a live Session. Defer to the per-execution read
+      // below: only an all-abandoned park may settle over this refusal.
+      runtimeLostRefusal = cause;
+    }
+  }
+  // The lost tolerance exists only to read an all-abandoned pending park. With
+  // no in-progress execution there is no abandoned fence to prove, so the
+  // refusal stands and the load parks exactly as it did before the tolerance.
+  if (runtimeLostRefusal !== undefined && pending.length === 0) {
+    throw runtimeLostRefusal;
   }
   if (pending.length > 0) {
     if (passive) {
       for (const item of pending) {
+        if (runtimeLostRefusal !== undefined) {
+          // No live Session may be adopted: read the durable record alone,
+          // without asking the dead Runtime. Only a terminal abandoned fence
+          // proves the execution stopped without a witness; any other state
+          // (or a read that cannot answer) keeps the lost refusal so the load
+          // parks rather than settling over a writer that may still be live.
+          const status = await broker
+            .status(item.executionCallId)
+            .catch(() => undefined);
+          if (status?.state !== 'abandoned') throw runtimeLostRefusal;
+          states.set(item.executionCallId, { state: 'abandoned' });
+          continue;
+        }
         // The record may be UNKNOWN only because the dead owner never
         // reported: ask the original Runtime once instead of reading a state
         // nobody refreshes. A settled answer becomes observable, a terminal

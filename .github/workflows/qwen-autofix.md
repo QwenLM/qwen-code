@@ -2405,6 +2405,77 @@ infra problem cannot loop. Deliberately conservative — only unambiguous
 machine/transport failures, never a bare test-level timeout, which could be
 a real regression (a co-present timeout does not block a match — one
 matching line classifies the run). Case-insensitive, vs the annotations.
+
+The built-tree handoff is the one step timeout in the list, and it is
+admitted by NAME, not by the phrase: `The action 'Retry downloading the
+built tree' has timed out`. Only the RETRY, never the first download. Two
+facts decide that split.
+
+The first `Download the built tree` runs with `continue-on-error: true`, so
+its timeout cannot end the job, and its annotation STAYS on the check run
+after the retry recovers. Check run `131031419699` is the case in point: both
+handoff steps report `success`, and its nine annotations are six
+`AssertionError`s, one `Process completed with exit code 1.`, one warning (a
+502 while creating the deflake issue), and one stale
+`The action 'Download the built tree' has timed out after 15 minutes.` — that
+last line is the residue, and admitted it would read a recovered run as
+infrastructure and swallow the real failure.
+
+What the base list would have done with that same run is a statement about
+classification, not about a filing: the base carried no handoff branch at
+all, so this blob matched none of its signatures and was never infrastructure
+there. On that event the lane did not run either — the run is a pull request
+(43170847047, `fix/16675-exec-code-render`), and this workflow's `analyze` job
+covers only a main push or schedule, an SDK Java dispatch, and the Managed
+Agent gate's PR runs, so nothing was filed and there is no filing verdict to
+call right. Adding the first download to the class would have been the
+regression; retry-only keeps the classification that run had and still covers
+the case below. (An earlier revision of this paragraph claimed the two-name
+form had already misclassified that run. It had not, and the claim is
+dropped.)
+
+The retry is armed on `steps.download_tree.outcome == 'failure'`, so it runs
+whenever the first attempt failed, and a timeout there kills the job having
+executed nothing — the shape #16927 documents, where both 15-minute attempts
+expire and the required check is red with zero test signal. What causes it is
+OPEN, and this change does not fix it: #16927's 09:26:51Z measurements
+retract the earlier proxy theory — the download redirects to
+`productionresultssa<N>.blob.core.windows.net`, not to
+`artifactcache.actions.githubusercontent.com`; direct and proxied transfers
+both swung between ~2.3 MB/s and near-stall; the proxy produced the single
+worst sample at 60 s for 2.9 of 8 MiB; and `hk5`, which has no proxy at all,
+also fell to 451 KB/s. What the measurements support is narrower: transfer
+from these Aliyun hosts to Azure blob degrades intermittently on a
+seconds-scale, and which hop is responsible is not established. The
+classification is a classification, not a diagnosis, and a real fix belongs
+to its own change.
+
+The name anchor keeps the "never a bare test-level timeout" rule above
+intact — `Run tests and generate reports`, the no-AK gate, the browser smoke
+and `Install Dependencies` all still file when they time out. A regression
+test pins both halves: the retry annotation matches, and the
+recovered-download blob above does not.
+
+Separate from that class, `CONFIG_FAILURE_SIGNATURES` holds the gate's
+deterministic configuration errors (`HOST_LOAD_MAX_RATIO` /
+`HOST_LOAD_MAX_WAIT_TRIES` / `HOST_LOAD_WAIT_SECONDS` "must be a positive …",
+and `DISK_FLOOR_MIN_FREE_KB` / `DISK_FLOOR_MIN_FREE_INODES` /
+`DISK_FLOOR_MAX_USED_PCT`). A repository variable cannot change between
+attempts, so a re-run fails identically; the scan skips the PR instead of
+re-paying install, artifact download and tooling provisioning, and does not
+hand the typo to an agent that cannot edit a repository variable. The labels
+are kept even for the knobs no workflow sets today, because the scripts
+declare every knob env-overridable: wiring one later must not make its typo
+read as the PR's code. `main-ci-failure-issue.yml` deliberately does not carry
+these — with no rerun to suppress, it files the failure record so a human fixes
+the variable.
+
+Two host-level refusals stay in the infrastructure class, because a re-run can
+land elsewhere: `Host load gate breached` (a contended host cannot run the
+suites) and `Disk floor breached` (the host is out of space or inodes). The
+disk floor's *configuration* errors are the opposite case and sit in the list
+above: `DISK_FLOOR_*` names a threshold a human typed into a repository
+variable, so the same host refuses again and a re-run only spends the wait.
 ```
 
 <a id="af-077"></a>
@@ -4973,12 +5044,38 @@ render no excerpt at all. So: pass the flag; fall back to the bare
 call ONLY when stderr says `unknown flag` (older gh has neither the
 check nor the flag); and stripVTControlCharacters the result, because
 raw ANSI would otherwise reach feedback.md and step stdout, where the
-existing defang handles only `::` and `##[`. The behavioral suite's
-fake gh reproduces the refusal, so a missing flag turns it red. The
-same fix lands on the patrol's own GhClient.jobLog, which was equally
-log-blind on current gh. The excerpt fence is sized past any backtick
-run inside it, so a log line carrying backticks cannot close the fence
-early and spill the rest into feedback.md as markdown.
+existing defang handles only `::` and `##[`. Bare CR, the other
+terminal controls and the Bidi overrides are stripped downstream by
+skillLog, BETWEEN two redaction passes: stripVTControlCharacters
+leaves a `\r` that a fork-controlled log line could use to visually
+overwrite a line's start in a terminal (`\b` and the rest of C0/C1
+repaint it, the Bidi set reorders it). The first pass is the unchanged
+redactLog and runs before the strip, so the anchored secret patterns
+keep the word boundary a bare `\r` supplies and the CR-bounded
+Cookie:/Authorization: rules stop at the header's own line. Line
+SELECTION also runs before the strip, because the selectors need the
+whitespace a leading \r supplies and a weld must not eat the failure
+line before it can be chosen. The second pass, redactWeldedTokens,
+runs after the strip per CONTIGUOUS run of selected lines — joining
+non-adjacent windows would let the private-key rule pair a BEGIN in
+one with an END in another and delete the failure between them — and
+drops the \b anchors: a control byte inside a credential defeats
+every anchor until the strip welds the fragments back into a token,
+and the same strip can weld a word character onto its front. A value
+is a TEMPERED token: it runs to the next whitespace but never across
+the ##[error] marker, so a credential legitimately containing # [ ]
+(a password, a PEM body, a log-supplied [redacted] prefix) is fully
+redacted while the marker still survives. The Bearer separator is
+zero-or-more horizontal whitespace so a deleted space still redacts;
+the URL scheme is length-bounded (not lookbehind-bounded, which would
+refuse a welded digit-prefixed start) and the userinfo is one-or-more
+@-segments. The header rules stay out of that pass. The behavioral
+suite's fake gh reproduces
+the refusal, so a missing flag turns it red. The same fix lands on
+the patrol's own GhClient.jobLog, which was equally log-blind on
+current gh. The excerpt fence is sized past any backtick run inside
+it, so a log line carrying backticks cannot close the fence early and
+spill the rest into feedback.md as markdown.
 
 PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
 switches the working tree to the PR branch, so the collector AND the

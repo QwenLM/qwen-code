@@ -29,6 +29,7 @@ import {
 } from './hosted-tool-approval.js';
 import {
   findHostedApprovalContinuation,
+  HostedPublicChildRecoveryProfileChanged,
   readHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
@@ -38,6 +39,7 @@ import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { hostedDurableMcpOwnerId } from './hosted-mcp-session.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -46,7 +48,12 @@ afterEach(() => vi.restoreAllMocks());
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
 const TEST_TIMEOUT_MS = slowHostBudgetMs(20_000, 75_000);
 
-function nativeContinuationFixture(toolNames = ['ask_user_question']) {
+function nativeContinuationFixture(
+  toolNames = ['ask_user_question'],
+  definition: Record<string, unknown> = {
+    toolProfile: 'hosted-workspace-files/1',
+  },
+) {
   const bytesById = new Map<string, Buffer>();
   const publish = (kind: string, value: unknown): ManagedSessionDurableRef => {
     const bytes = Buffer.from(JSON.stringify(value));
@@ -80,9 +87,7 @@ function nativeContinuationFixture(toolNames = ['ask_user_question']) {
   const parts = toolNames.map((name, index) => ({
     functionCall: { id: `call-${index}`, name, args: input },
   }));
-  const definitionRef = publish('managed-definition', {
-    toolProfile: 'hosted-workspace-files/1',
-  });
+  const definitionRef = publish('managed-definition', definition);
   const rootSnapshotRef = publish('managed-root', {});
   const assistantRef = publish('managed-message', {
     daemonPromptId: 'prompt',
@@ -221,6 +226,56 @@ it.each(['commandStep', 'publicChildModel'])(
     );
   },
 );
+
+// #17260: a continuation captured under the shell topology whose saved
+// definition no longer runs a public-shell profile is a durable verdict —
+// the typed error the load route maps to the terminal decline instead of
+// the retriable refusal that looped the coordinator's recovery forever.
+it.each([
+  'hosted-workspace-external-files/1',
+  'hosted-workspace-files/1',
+  'hosted-workspace-mcp/1',
+])(
+  'declares a stale public-child profile terminally unrecoverable (%s)',
+  async (toolProfile) => {
+    const fixture = nativeContinuationFixture(['run_shell_command'], {
+      toolProfile,
+      publicChildAgentsVersion: 1,
+    });
+    fixture.plan['publicChildModel'] = {
+      modelId: 'model-pin',
+      route: {
+        authType: 'openai',
+        endpointDigest: 'a'.repeat(64),
+        providerPin: 'b'.repeat(64),
+      },
+    };
+    await expect(fixture.read()).rejects.toBeInstanceOf(
+      HostedPublicChildRecoveryProfileChanged,
+    );
+    await expect(fixture.read()).rejects.toThrow(
+      'Public child recovery profile changed.',
+    );
+  },
+);
+
+it('keeps accepting a public-child continuation on its own shell topology', async () => {
+  const fixture = nativeContinuationFixture(['run_shell_command'], {
+    toolProfile: 'hosted-workspace-shell/1',
+    publicChildAgentsVersion: 1,
+  });
+  fixture.plan['publicChildModel'] = {
+    modelId: 'model-pin',
+    route: {
+      authType: 'openai',
+      endpointDigest: 'a'.repeat(64),
+      providerPin: 'b'.repeat(64),
+    },
+  };
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { publicChildModel: { modelId: 'model-pin' } },
+  });
+});
 
 it.each(['ssh-process', 'external-workspace', 'static', '', null, true])(
   'rejects an unsupported question provider pin (%s)',
@@ -802,22 +857,43 @@ it.each([
     owner: 'hooks',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: false,
     verdict: 'refuse',
   },
   {
-    owner: 'mcp',
+    owner: 'mcp with a plan saved on the Turn owner',
     hooks: false,
-    mcp: true,
+    mcp: 'durable',
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: false,
     verdict: 'refuse',
+  },
+  {
+    owner: 'mcp on an activation-scoped owner',
+    hooks: false,
+    mcp: 'activation',
+    planOwner: 'mcp',
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'refuse',
+  },
+  {
+    owner: 'mcp with a plan saved on its durable owner',
+    hooks: false,
+    mcp: 'durable',
+    planOwner: 'mcp',
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'pass',
   },
   {
     owner: 'hooks with a stale commandStep revision',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'stale',
     extensionConfig: true,
     verdict: 'refuse',
@@ -826,6 +902,7 @@ it.each([
     owner: 'hooks with a matching commandStep revision',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'matching',
     extensionConfig: true,
     verdict: 'pass',
@@ -834,13 +911,14 @@ it.each([
     owner: 'hooks with extensions and no commandStep',
     hooks: true,
     mcp: false,
+    planOwner: 'turn',
     commandStep: 'none',
     extensionConfig: true,
     verdict: 'refuse',
   },
 ])(
   'the saved-batch owner gate: $owner ($verdict)',
-  async ({ hooks, mcp, commandStep, extensionConfig, verdict }) => {
+  async ({ hooks, mcp, planOwner, commandStep, extensionConfig, verdict }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-a6-owner-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -879,6 +957,11 @@ it.each([
     });
     try {
       const promptId = randomUUID();
+      // S6b: an MCP Session resumes a plan saved on its own durable owner.
+      const mcpOwner =
+        mcp === 'activation'
+          ? 'hooks-activation-a6'
+          : hostedDurableMcpOwnerId(sessionKey, undefined);
       const turn = new HostedWorkspaceToolTurn(
         { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
         session,
@@ -903,6 +986,14 @@ it.each([
           ...(mcp
             ? {
                 mcp: {
+                  broker: new HostedWorkspaceBroker(
+                    {
+                      baseUrl: 'http://127.0.0.1:1',
+                      token: 'fixture-no-traffic',
+                    },
+                    sessionKey,
+                    mcpOwner,
+                  ),
                   ensureReady: async () => undefined,
                 } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
               }
@@ -928,7 +1019,10 @@ it.each([
             bindingId: 'binding-1',
             generation: '1',
             workspaceGeneration: '1',
-            runtimeSessionId: hostedRuntimeSessionId(promptId),
+            runtimeSessionId:
+              mcp && planOwner === 'mcp'
+                ? mcpOwner
+                : hostedRuntimeSessionId(promptId),
           },
         },
         parts: [],

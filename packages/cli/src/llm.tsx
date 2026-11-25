@@ -220,6 +220,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
+import { modsWanted } from './services/display-translation-mod.js';
 import {
   handleUncaughtException,
   isExpectedPtyRaceError,
@@ -699,10 +700,6 @@ export async function main() {
     const npmBunHandoff = selectNpmBunHandoff({
       interactive:
         isInteractiveInvocation(argv) && Boolean(process.stdout.isTTY),
-      screenReader:
-        argv.screenReader ??
-        settings.merged.ui?.accessibility?.screenReader ??
-        false,
       protocolMode: Boolean(
         isAcpMode ||
           argv.inputFormat === InputFormat.STREAM_JSON ||
@@ -1183,6 +1180,7 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
+      isAcpMode ||
       isBareMode(argv.bare) ||
       config.isSafeMode() ||
       config.getShellExecutionSandbox?.()
@@ -1487,7 +1485,7 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
-      if (settings.merged.experimental?.mods) {
+      if (modsWanted(settings)) {
         const { createInteractiveModSession } = await import(
           './services/interactive-mod-session.js'
         );
@@ -1503,11 +1501,9 @@ export async function main() {
       const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      const selection = selectTuiRenderer(
-        undefined,
-        undefined,
-        process.env,
-        config.getScreenReader(),
+      const selection = selectTuiRenderer(undefined, undefined, process.env);
+      const { setTuiRendererOfRecord } = await import(
+        './ui/tui-renderer-of-record.js'
       );
       if (selection.renderer === 'opentui') {
         try {
@@ -1526,6 +1522,7 @@ export async function main() {
             },
           );
           if (started) {
+            setTuiRendererOfRecord('opentui');
             clearCorruptionEnvVars();
             return;
           }
@@ -1549,6 +1546,9 @@ export async function main() {
       } else {
         debugLogger.debug(`TUI renderer: ${selection.reason}`);
       }
+      // Reached for the default ink renderer and for every non-strict OpenTUI
+      // boot fallback, so the diagnostic records the renderer actually serving.
+      setTuiRendererOfRecord('ink');
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,

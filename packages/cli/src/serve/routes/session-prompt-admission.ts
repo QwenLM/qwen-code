@@ -9,10 +9,15 @@ import { inspect } from 'node:util';
 import { extractErrorCode, extractErrorMessage } from '@qwen-code/acp-bridge';
 import {
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  parseChannelWorkflowOrigin,
+  type ChannelWorkflowOrigin,
+} from '@qwen-code/channel-base';
 import type { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   InvalidClientIdError,
@@ -53,32 +58,56 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 export const PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH = 200;
 const PROMPT_IDEMPOTENCY_KEYS_PER_SESSION = 128;
 const PROMPT_IDEMPOTENCY_MAX_SESSIONS = 1024;
-const promptIdempotencyBySession = new Map<string, Map<string, string>>();
+interface PromptReceipt {
+  promptId: string;
+  skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
+  skillPromptHash?: string;
+  extensionGeneration?: number;
+  replayCursor?: { lastEventId: number; eventEpoch: string };
+}
+const promptIdempotencyBySession = new Map<
+  string,
+  Map<string, PromptReceipt>
+>();
+
+export function findPromptReceipt(
+  sessionId: string,
+  key?: string,
+): PromptReceipt | undefined {
+  return key === undefined
+    ? undefined
+    : promptIdempotencyBySession.get(sessionId)?.get(key);
+}
 
 function rememberPromptIdempotencyKey(
   sessionId: string,
   key: string,
-  promptId: string,
+  receipt: PromptReceipt,
 ): void {
   let keys = promptIdempotencyBySession.get(sessionId);
   if (!keys) {
-    keys = new Map<string, string>();
+    keys = new Map<string, PromptReceipt>();
     promptIdempotencyBySession.set(sessionId, keys);
     if (promptIdempotencyBySession.size > PROMPT_IDEMPOTENCY_MAX_SESSIONS) {
       const oldest = promptIdempotencyBySession.keys().next().value;
       if (oldest !== undefined) promptIdempotencyBySession.delete(oldest);
     }
   }
-  keys.set(key, promptId);
+  keys.set(key, receipt);
   if (keys.size > PROMPT_IDEMPOTENCY_KEYS_PER_SESSION) {
     const oldest = keys.keys().next().value;
     if (oldest !== undefined) keys.delete(oldest);
   }
 }
 
-function forgetPromptIdempotencyKey(sessionId: string, key: string): void {
+function forgetPromptIdempotencyKey(
+  sessionId: string,
+  key: string,
+  promptId: string,
+): void {
   const keys = promptIdempotencyBySession.get(sessionId);
-  if (!keys) return;
+  if (keys?.get(key)?.promptId !== promptId) return;
   keys.delete(key);
   if (keys.size === 0) promptIdempotencyBySession.delete(sessionId);
 }
@@ -115,6 +144,7 @@ export interface SessionPromptClassification {
    * The bridge turns it into the session's channel classification.
    */
   channelPrompt: boolean;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   /** The display projection, accepted only from an authorized channel worker. */
   promptDisplayText?: string;
   /** The submitted prompt source, accepted only from a plain client. */
@@ -157,6 +187,7 @@ export function classifyPromptRequest(
   const promptDisplayText =
     forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
   const channelPrompt = forwardedMeta?.[CHANNEL_PROMPT_META_KEY];
+  const workflowOrigin = forwardedMeta?.[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
   const boundRelay = forwardedMeta?.[CHANNEL_BOUND_RELAY_META_KEY];
   if (forwardedMeta) {
     delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
@@ -164,6 +195,7 @@ export function classifyPromptRequest(
     delete forwardedMeta[SUBMITTED_PROMPT_META_KEY];
     delete forwardedMeta[DAEMON_SUBMITTED_PROMPT_META_KEY];
     delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
+    delete forwardedMeta[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
     delete forwardedMeta[CHANNEL_BOUND_RELAY_META_KEY];
     if (Object.keys(forwardedMeta).length > 0) {
       forwardedBody['_meta'] = forwardedMeta;
@@ -188,6 +220,11 @@ export function classifyPromptRequest(
     (boundRelay === true &&
       isChannelWorkerPromptToken(promptAuthorization) &&
       (runtime.primary || runtime.trusted));
+  const authenticatedChannelPrompt =
+    channelWorkerAuthorized && channelPrompt === true;
+  const channelWorkflowOrigin = authenticatedChannelPrompt
+    ? parseChannelWorkflowOrigin(workflowOrigin)
+    : undefined;
   // Channel classification opts the turn out of loop-detected rejection,
   // so it rides the same worker authorization as the display projection;
   // a forged key from any other caller is dropped here and again at the
@@ -195,7 +232,8 @@ export function classifyPromptRequest(
   return {
     forwardedBody,
     classification: {
-      channelPrompt: channelWorkerAuthorized && channelPrompt === true,
+      channelPrompt: authenticatedChannelPrompt,
+      ...(channelWorkflowOrigin ? { channelWorkflowOrigin } : {}),
       ...(typeof promptDisplayText === 'string' && channelWorkerAuthorized
         ? { promptDisplayText }
         : {}),
@@ -244,10 +282,19 @@ export interface SessionPromptAdmissionInput {
    * and the session's cursor reads, just before the enqueue.
    */
   onPromptId?: (promptId: string) => void;
+  turnSkillLease?: string;
+  skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
+  skillPromptHash?: string;
+  extensionGeneration?: number;
   onPromptAdmitted?: () => void;
 }
 
-export type SessionPromptAdmission =
+export type SessionPromptAdmission = {
+  skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
+  extensionGeneration?: number;
+} & (
   | {
       deduplicated: true;
       promptId: string;
@@ -261,7 +308,8 @@ export type SessionPromptAdmission =
       eventEpoch: ReturnType<AcpSessionBridge['getSessionEventEpoch']>;
       /** Settles, never rejecting, once the turn has finished either way. */
       settled: Promise<void>;
-    };
+    }
+);
 
 /**
  * Admit a prompt into a live session: deduplicate a repeated idempotency
@@ -296,21 +344,24 @@ export function admitSessionPrompt(
   }
   const promptId = crypto.randomUUID();
   if (idempotencyKey !== undefined) {
-    const admittedPromptId = promptIdempotencyBySession
-      .get(sessionId)
-      ?.get(idempotencyKey);
-    if (admittedPromptId !== undefined) {
+    const receipt = findPromptReceipt(sessionId, idempotencyKey);
+    if (receipt !== undefined) {
       // A retry of an already-admitted event (lost acceptance mark or
       // lost 202 on the caller side): return the original admission
       // without enqueueing a second turn — and before any delivery
       // authorization is minted for the unused new promptId. The
-      // cursor/epoch are fresh so the caller can still seed SSE
-      // resume from this response.
+      // pinned receipt preserves its pre-enqueue cursor so terminal events
+      // remain replayable after a lost response.
       return {
         deduplicated: true,
-        promptId: admittedPromptId,
-        lastEventId: ownerBridge.getSessionLastEventId(sessionId),
-        eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
+        promptId: receipt.promptId,
+        skillDigest: receipt.skillDigest,
+        sessionSkillEffectsChecked: receipt.sessionSkillEffectsChecked,
+        extensionGeneration: receipt.extensionGeneration,
+        ...(receipt.replayCursor ?? {
+          lastEventId: ownerBridge.getSessionLastEventId(sessionId),
+          eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
+        }),
       };
     }
   }
@@ -364,6 +415,9 @@ export function admitSessionPrompt(
       {
         ...(clientId !== undefined ? { clientId } : {}),
         promptId,
+        ...(input.turnSkillLease
+          ? { turnSkillLease: input.turnSkillLease }
+          : {}),
         ...(effectiveDeadlineMs !== undefined
           ? { deadlineMs: effectiveDeadlineMs }
           : {}),
@@ -374,6 +428,9 @@ export function admitSessionPrompt(
           ? { submittedPrompt: classification.submittedPrompt }
           : {}),
         ...(classification.channelPrompt ? { channelPrompt: true } : {}),
+        ...(classification.channelWorkflowOrigin
+          ? { channelWorkflowOrigin: classification.channelWorkflowOrigin }
+          : {}),
         ...(delivery !== undefined
           ? {
               channelDelivery: {
@@ -418,7 +475,16 @@ export function admitSessionPrompt(
     // slip past the check above (the whole check-admit-remember
     // sequence is synchronous). A deferred pre-admission rejection
     // forgets it again in the failure handler below.
-    rememberPromptIdempotencyKey(sessionId, idempotencyKey, promptId);
+    rememberPromptIdempotencyKey(sessionId, idempotencyKey, {
+      promptId,
+      skillDigest: input.skillDigest,
+      sessionSkillEffectsChecked: input.sessionSkillEffectsChecked,
+      extensionGeneration: input.extensionGeneration,
+      skillPromptHash: input.skillPromptHash,
+      ...(input.skillDigest
+        ? { replayCursor: { lastEventId, eventEpoch } }
+        : {}),
+    });
   }
 
   // A `/review` or `/verify-pr` prompt binds the PR to this session as
@@ -505,7 +571,7 @@ export function admitSessionPrompt(
         // already consumed by the caller and only subsequent retries
         // can be protected.
         if (idempotencyKey !== undefined && !promptAdmitted) {
-          forgetPromptIdempotencyKey(sessionId, idempotencyKey);
+          forgetPromptIdempotencyKey(sessionId, idempotencyKey, promptId);
         }
         if (daemonLog) {
           daemonLog.warn(
@@ -532,5 +598,14 @@ export function admitSessionPrompt(
   if (daemonLog) {
     daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
   }
-  return { deduplicated: false, promptId, lastEventId, eventEpoch, settled };
+  return {
+    deduplicated: false,
+    promptId,
+    skillDigest: input.skillDigest,
+    sessionSkillEffectsChecked: input.sessionSkillEffectsChecked,
+    extensionGeneration: input.extensionGeneration,
+    lastEventId,
+    eventEpoch,
+    settled,
+  };
 }

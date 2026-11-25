@@ -48,7 +48,7 @@ class ManagedSessionGuardMappingTest {
 
     @Test
     void rootWaitsNameOnlyTheirDeadlockVictim() {
-        // The root side of a pinned CSI Session's cycle (#13800 R1-1), in
+        // The root side of a root-wait deadlock cycle (#13800 R1-1), in
         // both translators' shapes.
         for (DataAccessException failure : List.of(
                 new CannotAcquireLockException("injected 1213", DEADLOCK),

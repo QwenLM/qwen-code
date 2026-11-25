@@ -291,7 +291,10 @@ export class ManagedExtensionRuntime {
             sessionId,
             base.packageManifests?.[pkg.pin.extensionId],
           );
-          validateExtensionToolProfile(contributions, base.toolProfile);
+          validateExtensionToolProfile(
+            this.admissionContributions(contributions),
+            base.toolProfile,
+          );
           if (
             JSON.stringify(contributions) !== JSON.stringify(pkg.contributions)
           )
@@ -354,7 +357,10 @@ export class ManagedExtensionRuntime {
             sessionId,
             base.packageManifests?.[pin.extensionId],
           );
-          validateExtensionToolProfile(contributions, base.toolProfile);
+          validateExtensionToolProfile(
+            this.admissionContributions(contributions),
+            base.toolProfile,
+          );
           packages[packages.length - 1] = { pin, assetRoot, contributions };
         }
       } catch (error) {
@@ -372,15 +378,6 @@ export class ManagedExtensionRuntime {
       const catalogs = this.dependencies.stage
         ? await this.dependencies.stage(sessionId, command, packages, base)
         : { mcpServers: [], hookCatalog: null };
-      if (
-        !this.dependencies.stage &&
-        packages.some(
-          (entry) =>
-            Object.keys(entry.contributions.mcpServers).length ||
-            Object.keys(entry.contributions.hooks).length,
-        )
-      )
-        throw new Error('Extension process components are unsupported.');
       const prepared: Prepared = {
         ownerJournalId: this.dependencies.ownerJournalId ?? 'in-memory',
         command,
@@ -705,6 +702,16 @@ export class ManagedExtensionRuntime {
     return filename;
   }
 
+  // Content-only runtimes never activate MCP or hooks, so the profile gate
+  // must judge the content that will actually be served, not the inert
+  // process components (#17714). Staged runtimes keep the full gate.
+  private admissionContributions(
+    contributions: ManagedPackageContributions,
+  ): ManagedPackageContributions {
+    if (this.dependencies.stage) return contributions;
+    return { ...contributions, mcpServers: {}, hooks: {} };
+  }
+
   private preparedView(value: Prepared): ManagedExtensionPrepareResult {
     const result: ManagedExtensionPrepareResult = {
       operationId: value.command.operationId,
@@ -712,7 +719,18 @@ export class ManagedExtensionRuntime {
       expectedRevision: value.command.expectedRevision,
       revision: value.command.expectedRevision + 1,
       executionMode: this.dependencies.executionMode,
-      packages: value.packages,
+      packages: value.packages.map((pkg) => {
+        if (this.dependencies.stage) return pkg;
+        const degradedComponents = (['mcp', 'hooks'] as const).filter(
+          (component) =>
+            Object.keys(
+              component === 'mcp'
+                ? pkg.contributions.mcpServers
+                : pkg.contributions.hooks,
+            ).length > 0,
+        );
+        return degradedComponents.length ? { ...pkg, degradedComponents } : pkg;
+      }),
       mcpServers: value.mcpServers,
       hookCatalog: value.hookCatalog,
     };
@@ -1018,7 +1036,10 @@ function validateExtensionToolProfile(
   if (profile === undefined) return;
   const shell =
     profile === 'hosted-workspace-shell/1' ||
-    profile === 'hosted-workspace-team-lead/1';
+    profile === 'hosted-workspace-shell/3' ||
+    profile === 'hosted-workspace-shell/4' ||
+    profile === 'hosted-workspace-team-lead/1' ||
+    profile === 'hosted-workspace-team-lead/2';
   const mcp = shell || profile === 'hosted-workspace-mcp/1';
   if (!mcp && Object.keys(value.mcpServers).length)
     throw new Error('Session profile does not admit extension MCP.');

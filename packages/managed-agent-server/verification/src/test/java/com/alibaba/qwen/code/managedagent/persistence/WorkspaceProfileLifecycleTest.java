@@ -12,13 +12,13 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -44,8 +44,22 @@ class WorkspaceProfileLifecycleTest {
         return f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, id, "server-1", Duration.ofSeconds(30)).orElseThrow());
     }
 
+    @Test
+    void loopShellRevisionsArePublicShellOnLifecycleV2() {
+        assertThat(WorkspaceToolProfiles.isPublicShell(WorkspaceToolProfiles.SHELL_V3)).isTrue();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol(WorkspaceToolProfiles.SHELL_V3)).isEqualTo(2);
+        assertThat(WorkspaceToolProfiles.isPublicShell(WorkspaceToolProfiles.SHELL_V4)).isTrue();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol(WorkspaceToolProfiles.SHELL_V4)).isEqualTo(2);
+        // The retired shell/2 stays refused by the canonical vocabulary.
+        assertThat(WorkspaceToolProfiles.isPublicShell("hosted-workspace-shell/2")).isFalse();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol("hosted-workspace-shell/2")).isEqualTo(0);
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
+    // D3: FILES joins the v2 settlement witnesses — its verifyResources branch
+    // settles like MCP (no Shell capture/publication/monitor).
+    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3,
+            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.FILES})
     void closesWithoutResourcesAndDeletesAtomicallyWithPrivateRetirement(String profile) {
         var f = fixture();
         var op = admit(f, profile, OperationKind.DELETE);
@@ -128,7 +142,8 @@ class WorkspaceProfileLifecycleTest {
         f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "expired", 60_000L)));
         f.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
-        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", protocol == 2 ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES);
+        // D3: ordinary files is v2 now; external-files keeps the v1 witness.
+        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", protocol == 2 ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.EXTERNAL_FILES);
         f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session, OperationKind.CLOSE,
                 "owner", "a".repeat(64), "close", "digest", true, protocol));
         assertThat(f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class)).isZero();
@@ -191,8 +206,11 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @Test
-    void filesV1DrainingStillRejectsAnExpiredWriter() {
+    void externalFilesV1DrainingStillRejectsAnExpiredWriter() {
         var f = fixture();
+        // D3: ordinary files moved to v2; external-files keeps the v1 draining
+        // path, so the expired-writer witness rides external-files now.
+        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.EXTERNAL_FILES);
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
@@ -465,7 +483,7 @@ class WorkspaceProfileLifecycleTest {
         }
         ToolPublicationContract.parseToolResult("manifest", f.json.writeValueAsBytes(manifest), 64 * 1024);
         var manifestRef = f.resource("manifest", "managed-tool-result-manifest", manifest);
-        f.jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED' WHERE resource_id <> X'6f7574636f6d65'");
+        f.jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED' WHERE resource_id <> 'outcome'");
         boolean committed = !captureFailed && !"open".equals(mode);
         var outcome = f.json.createObjectNode().put("version", 1).put("decision", committed ? "committed" : "blocked");
         var identity = outcome.putObject("identity");
@@ -489,8 +507,8 @@ class WorkspaceProfileLifecycleTest {
         payload.set("resultRef", !committed || "receipt".equals(mode) ? f.json.nullNode() : manifestRef);
         payload.putArray("resources").add(manifestRef);
         byte[] bytes = f.json.writeValueAsBytes(f.json.createObjectNode().put("subtype", "managed_session_event_v1").set("managedSession", event));
-        f.jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant', 'workspace', ?, 1, ?, 'receipt', 'recordToolResult', 'call-1', ?, 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                f.session, "c".repeat(64), "c".repeat(64), "c".repeat(64), bytes, bytes.length, ToolPublicationContract.sha256(bytes));
+        f.jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_ref, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant', 'workspace', ?, 1, ?, 'receipt', 'recordToolResult', 'call-1', ?, 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                f.session, ManagedIdentityRefs.commandRef("recordToolResult", "call-1"), "c".repeat(64), "c".repeat(64), bytes, bytes.length, ToolPublicationContract.sha256(bytes));
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         var results = new JdbcManagedToolResultStore(f.jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(f.jdbc.getDataSource()), f.store);
         results.captureEvents("tenant", "workspace", f.session, 1, java.util.List.of(event));
@@ -500,15 +518,15 @@ class WorkspaceProfileLifecycleTest {
         var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
         Runnable verify = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation, java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
         if (publication) {
-            f.jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id, execution_key,"
+            f.jdbc.update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id, session_id, publication_id, execution_call_id,"
                     + " capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
-                    + " admission_resource_id, receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?,"
+                    + " admission_resource_id, receipt_sequence, receipt_revision) VALUES (?, 'tenant', 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?,"
                     + " 'READY', 1024, 1024, 1024, 'REFERENCED', 'outcome', 1, 1)",
-                    "s".repeat(64), "t".repeat(64), f.session, "e".repeat(64), "b".repeat(64), "h".repeat(64));
-            f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = X'6f7574636f6d65'");
+                    ManagedIdentityRefs.publicationScopeRef("tenant", "workspace", f.session), f.session, "call-1", "b".repeat(64), "h".repeat(64));
+            f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = 'outcome'");
             assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ManagedAgentException.class);
             verify.run();
-            f.jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
+            f.jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = 'pub-1'");
             assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
             return;
         }
@@ -521,11 +539,11 @@ class WorkspaceProfileLifecycleTest {
             return;
         }
         verify.run();
-        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = X'6d616e6966657374'", "0".repeat(64));
+        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = 'manifest'", "0".repeat(64));
         assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
-        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = X'6d616e6966657374'", manifestRef.path("digest").asText());
+        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = 'manifest'", manifestRef.path("digest").asText());
         verify.run();
-        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'6d616e6966657374'");
+        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = 'manifest'");
         assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
     }
 
@@ -599,17 +617,16 @@ class WorkspaceProfileLifecycleTest {
                 .putObject("runtime").put("runtimeBindingId", binding.getBindingId()).put("generation", "1");
         ManagedExtensionRecords.requireChildRun(shell);
         var ref = f.resource("background-record", "managed-child_run", shell);
-        f.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id,"
-                + " domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create)"
-                + " VALUES (?, ?, 'tenant', 'workspace', ?, 'child_run', 'shell-1', ?, 1, ?, 'background_shell', 'settled', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", f.session), "r".repeat(64), f.session, "o".repeat(64), ref.path("resourceId").asText());
+        f.jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id,"
+                + " domain, record_id, operation_id, revision, record_resource_id, task_kind, task_state, gmt_create)"
+                + " VALUES ('tenant', 'workspace', ?, 'child_run', 'shell-1', ?, 1, ?, 'background_shell', 'settled', 1)", f.session, "o".repeat(64), ref.path("resourceId").asText());
         var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
                 beans.getBeanProvider(JdbcManagedToolResultStore.class));
         verifier.verifyPublications(operation);
         f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation, java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
-        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'6d616e6966657374'");
+        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = 'manifest'");
         assertThatThrownBy(() -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation,
                 java.util.List.of(binding), WorkspaceToolProfiles.SHELL))).isInstanceOf(ManagedAgentException.class);
         if ("publication".equals(mode)) {

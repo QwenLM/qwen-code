@@ -4,13 +4,13 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.spi.KubernetesRuntimeSupport;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeSupport;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
 
@@ -19,26 +19,39 @@ public final class RuntimeProviderRegistry {
     private final Map<String, RuntimeProviderFactory> factories = new LinkedHashMap<>();
 
     public RuntimeProviderRegistry() {
-        this(ServiceLoader.load(RuntimeProviderFactory.class));
+        this(discover());
+    }
+
+    // Broker callbacks can run on threads whose context loader cannot see the host's provider
+    // JARs, while hosts may supply extra providers only through a child context loader.
+    private static Iterable<RuntimeProviderFactory> discover() {
+        ClassLoader application = RuntimeProviderRegistry.class.getClassLoader();
+        ClassLoader context = Thread.currentThread().getContextClassLoader();
+        if (context == null || context == application) {
+            return ServiceLoader.load(RuntimeProviderFactory.class, application);
+        }
+        // The child loader also sees the parent's built-ins; keep one factory per class so the
+        // duplicate-kind guard only rejects genuinely distinct providers.
+        Map<Class<?>, RuntimeProviderFactory> byClass = new LinkedHashMap<>();
+        for (ClassLoader loader : List.of(application, context)) {
+            ServiceLoader.load(RuntimeProviderFactory.class, loader)
+                    .forEach(factory -> byClass.putIfAbsent(factory.getClass(), factory));
+        }
+        return byClass.values();
     }
 
     RuntimeProviderRegistry(Iterable<RuntimeProviderFactory> providers) {
         for (RuntimeProviderFactory factory : providers) {
             for (String kind : factory.kinds()) {
                 BrokerValues.requireId(kind, "Runtime provider kind");
-                if ("kubernetes".equals(kind)
-                        || factories.putIfAbsent(kind, factory) != null) {
-                    throw new IllegalStateException("Duplicate or reserved Runtime provider kind: " + kind);
+                if (factories.putIfAbsent(kind, factory) != null) {
+                    throw new IllegalStateException("Duplicate Runtime provider kind: " + kind);
                 }
             }
         }
     }
 
     public RuntimeProviderFactory require(String kind) {
-        if ("kubernetes".equals(kind)) {
-            throw new IllegalStateException("Kubernetes Runtime provisioner is not supported; use static"
-                    + " or an installed provider: " + factories.keySet());
-        }
         RuntimeProviderFactory factory = factories.get(kind);
         if (factory == null) {
             throw new IllegalStateException("Runtime provider is not installed: " + kind
@@ -75,12 +88,5 @@ public final class RuntimeProviderRegistry {
             return support;
         }
         throw new IllegalStateException("Installed SSH Runtime provider does not support shared connections");
-    }
-
-    public KubernetesRuntimeSupport kubernetes() {
-        if (require("kubernetes-workspace") instanceof KubernetesRuntimeSupport support) {
-            return support;
-        }
-        throw new IllegalStateException("Installed Kubernetes Runtime provider does not support maintenance");
     }
 }

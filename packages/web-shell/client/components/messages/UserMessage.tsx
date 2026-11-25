@@ -9,7 +9,13 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
-import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarClockIcon } from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../ui/tooltip';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { FileAttachmentContent } from '../FileAttachmentContent';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
@@ -24,7 +30,15 @@ import {
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import {
+  isAutomaticTriggerSource,
+  isDetailFreeAutomaticEcho,
+} from '../../utils/automatic-trigger';
+import type {
+  DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
+  SessionMessageTarget,
+} from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
@@ -41,8 +55,12 @@ import type {
 import { AuthorAvatar } from './AuthorAvatar';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
+import { workspaceBasename } from '../../utils/workspace';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -62,11 +80,13 @@ interface UserMessageFile {
 
 interface UserMessageProps {
   content: string;
+  source?: string;
   images?: UserMessageImage[];
   files?: UserMessageFile[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
+  sendFailedStatus?: 'failed' | 'uncertain';
   onRetrySend?: () => void;
   /** Render the message as an in-place editor instead of rendered content. */
   editing?: boolean;
@@ -80,6 +100,10 @@ interface UserMessageProps {
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   /** Set when a workspace agent, not the user, posted this message. */
   author?: DaemonMessageAuthor;
+  /** Set when another session sent this message here. */
+  sentFrom?: DaemonInputSourceAnnotation;
+  /** Set when the user sent this message to another session with `/send`. */
+  sentTo?: SessionMessageTarget;
 }
 
 interface ScheduledTaskRunContent {
@@ -179,6 +203,72 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
   );
 }
 
+function AutomaticTriggerMessage({
+  source,
+  summary,
+  hasDetails,
+  expanded,
+  onToggle,
+  children,
+}: {
+  source: 'cron' | 'loop';
+  summary: string;
+  hasDetails: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
+  return (
+    <div
+      className={styles.scheduledTaskRun}
+      data-web-shell-automatic-trigger-message
+      data-source={source}
+    >
+      <div
+        className={`${styles.scheduledTaskHeader} ${styles.automaticTriggerHeader}`}
+      >
+        <span className={styles.scheduledTaskIcon} aria-hidden="true">
+          <CalendarClockIcon />
+        </span>
+        <span className={styles.scheduledTaskHeading}>
+          <span className={styles.scheduledTaskEyebrow}>
+            {t('userMessage.automatic.title')}
+          </span>
+          <span
+            className={`${styles.scheduledTaskName}${
+              hasDetails ? '' : ` ${styles.automaticEchoSummary}`
+            }`}
+            data-web-shell-automatic-trigger-summary
+            title={summary}
+          >
+            {summary}
+          </span>
+        </span>
+        {!documentMode && hasDetails && (
+          <button
+            type="button"
+            className={`${styles.toggleButton} ${styles.automaticTriggerToggle}`}
+            aria-expanded={expanded}
+            onClick={onToggle}
+          >
+            {t(expanded ? 'userMessage.showLess' : 'userMessage.showMore')}
+          </button>
+        )}
+      </div>
+      {expanded && hasDetails && (
+        <div
+          className={styles.scheduledTaskPrompt}
+          data-web-shell-automatic-trigger-instructions
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderUserMessageText(text: string, isContinuation?: boolean) {
   // Preserve captured line breaks separately from the slash tokens.
   return text.split(/(^|\r\n?|\n)(\/[^ \r\n]*)/g).map((part, index) => {
@@ -251,11 +341,13 @@ function DefaultUserMessageContent({
 
 export const UserMessage = memo(function UserMessage({
   content,
+  source,
   images,
   files,
   inputAnnotations,
   isLocateFlashing = false,
   sendFailed = false,
+  sendFailedStatus = 'failed',
   onRetrySend,
   editing = false,
   submittingEdit = false,
@@ -264,9 +356,12 @@ export const UserMessage = memo(function UserMessage({
   onImagePreview,
   onAttachmentPreview,
   author,
+  sentFrom,
+  sentTo,
 }: UserMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -327,10 +422,61 @@ export const UserMessage = memo(function UserMessage({
     () => parseScheduledTaskRunContent(content),
     [content],
   );
+  const automaticTriggerSource =
+    !scheduledTaskRun &&
+    // A host-provided renderer owns the complete body, including any redaction.
+    !renderUserMessageContent &&
+    !parseUserMessageContent &&
+    !renderComposerTag &&
+    !renderComposerTagTooltip &&
+    isAutomaticTriggerSource(source)
+      ? source
+      : undefined;
+  const automaticPresentation = useMemo(() => {
+    if (!automaticTriggerSource) return undefined;
+    return {
+      summary: content.replace(/\s+/g, ' ').trim(),
+      // These runtime echoes contain only a label, not the full modelText.
+      hasDetails: !isDetailFreeAutomaticEcho(content),
+    };
+  }, [automaticTriggerSource, content]);
+  const expansionGeneration = {
+    // Replay aliases do not change the automatic variant or hide its details.
+    automatic: automaticTriggerSource !== undefined,
+    content,
+    imageCount: images?.length ?? 0,
+    fileCount: files?.length ?? 0,
+    editing,
+  };
+  const [detailsGeneration, setDetailsGeneration] =
+    useState(expansionGeneration);
+  if (
+    detailsGeneration.automatic !== expansionGeneration.automatic ||
+    detailsGeneration.content !== content ||
+    detailsGeneration.imageCount !== expansionGeneration.imageCount ||
+    detailsGeneration.fileCount !== expansionGeneration.fileCount ||
+    detailsGeneration.editing !== editing
+  ) {
+    // React compares this render against committed state, so an abandoned render cannot leak its generation into the current presentation.
+    setDetailsGeneration(expansionGeneration);
+    setExpanded(false);
+  }
+  const interactiveDetailsExpanded =
+    detailsGeneration.automatic === expansionGeneration.automatic &&
+    detailsGeneration.content === content &&
+    detailsGeneration.imageCount === expansionGeneration.imageCount &&
+    detailsGeneration.fileCount === expansionGeneration.fileCount &&
+    detailsGeneration.editing === editing &&
+    expanded;
+  const automaticInstructionsExpanded =
+    !automaticTriggerSource ||
+    (automaticPresentation?.hasDetails &&
+      (documentMode ? documentExpanded : interactiveDetailsExpanded));
   const renderedContent = useMemo(() => {
     if (scheduledTaskRun) {
       return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
     }
+    if (!automaticInstructionsExpanded) return null;
     const explicit = renderUserMessageContent?.({
       content,
       images,
@@ -403,7 +549,22 @@ export const UserMessage = memo(function UserMessage({
     renderComposerTagTooltip,
     renderUserMessageContent,
     scheduledTaskRun,
+    automaticInstructionsExpanded,
   ]);
+  const bodyContent =
+    automaticTriggerSource && automaticPresentation ? (
+      <AutomaticTriggerMessage
+        source={automaticTriggerSource}
+        summary={automaticPresentation.summary}
+        hasDetails={automaticPresentation.hasDetails}
+        expanded={documentMode ? documentExpanded : interactiveDetailsExpanded}
+        onToggle={() => setExpanded((value) => !value)}
+      >
+        {renderedContent}
+      </AutomaticTriggerMessage>
+    ) : (
+      renderedContent
+    );
 
   const measureOverflow = useCallback(() => {
     const el = contentRef.current;
@@ -411,209 +572,298 @@ export const UserMessage = memo(function UserMessage({
     setHeightOverflowing(el.scrollHeight > 400);
   }, []);
 
+  // The generation above handles variant changes without resetting aliases.
   useLayoutEffect(() => {
-    setExpanded(false);
-    measureOverflow();
+    if (!automaticTriggerSource) {
+      setExpanded(false);
+      measureOverflow();
+    }
     // `editing` is a dep so leaving the editor re-measures the re-shown
     // content: it is `hidden` while editing, which reads as zero height.
-  }, [content, images?.length, editing, measureOverflow]);
+  }, [
+    content,
+    images?.length,
+    files?.length,
+    editing,
+    automaticTriggerSource,
+    measureOverflow,
+  ]);
 
   useEffect(() => {
     const el = contentRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
+    if (
+      !el ||
+      automaticTriggerSource ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return;
+    }
     const observer = new ResizeObserver(measureOverflow);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [measureOverflow]);
+  }, [
+    content,
+    files?.length,
+    editing,
+    automaticTriggerSource,
+    measureOverflow,
+  ]);
+
+  const retryLabel =
+    sendFailedStatus === 'uncertain'
+      ? t('userMessage.retryUncertain')
+      : t('userMessage.retrySend');
 
   return (
     <div className={styles.chatMessageRow} data-web-shell-user-row>
-      <div
-        className={`${styles.chatMessageColumn}${
-          isLocateFlashing && content.trim().length === 0
-            ? ` ${flashStyles.flash}`
-            : ''
-        }`}
-      >
+      <div className={styles.chatMessageColumn}>
+        {sentFrom && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-from=""
+            title={sentFrom.workspaceCwd}
+          >
+            {t('user.sentFrom', {
+              session: sentFrom.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentFrom.workspaceCwd),
+            })}
+          </div>
+        )}
+        {sentTo && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-to=""
+            title={sentTo.workspaceCwd}
+          >
+            {t('user.sentTo', {
+              session: sentTo.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentTo.workspaceCwd),
+            })}
+          </div>
+        )}
         {author && (
           <div className={styles.author}>
             <AuthorAvatar name={author.name} color={author.color} />
             <span className={styles.authorName}>{author.name}</span>
           </div>
         )}
-        {images && images.length > 0 && (
-          <div className={styles.chatImages} data-web-shell-user-images>
-            {images.map((img, index) => {
-              const src = img.data.startsWith('data:')
-                ? img.data
-                : `data:${img.mimeType};base64,${img.data}`;
-              if (!isSafeImageSrc(src)) return null;
-              return (
-                <img
-                  key={index}
-                  src={src}
-                  alt={t('user.uploadedImage', { index: index + 1 })}
-                  className={`${styles.chatImageThumb}${
-                    onImagePreview ? ` ${styles.chatImageThumbInteractive}` : ''
-                  }`}
-                  onClick={
-                    onImagePreview
-                      ? () =>
-                          onImagePreview(
-                            src,
-                            t('user.uploadedImage', { index: index + 1 }),
-                            img.attachmentId
-                              ? {
-                                  kind: 'attachment',
-                                  attachmentId: img.attachmentId,
-                                }
-                              : undefined,
-                          )
-                      : undefined
-                  }
-                />
-              );
-            })}
-          </div>
-        )}
-        {files && files.length > 0 && (
-          <div className={styles.chatFiles} data-web-shell-user-files>
-            {files.map((file, index) => {
-              const previewable = Boolean(
-                onAttachmentPreview &&
-                  (file.data !== undefined ||
-                    file.text !== undefined ||
-                    file.attachmentId),
-              );
-              return (
-                <span
-                  key={`${file.name}-${index}`}
-                  className={`${styles.chatFileChip}${
-                    previewable ? ` ${styles.chatFileChipPreviewable}` : ''
-                  }`}
-                  role={previewable ? 'button' : undefined}
-                  tabIndex={previewable ? 0 : undefined}
-                  onClick={
-                    previewable ? () => onAttachmentPreview?.(file) : undefined
-                  }
-                  onKeyDown={(event) => {
-                    if (
-                      previewable &&
-                      (event.key === 'Enter' || event.key === ' ')
-                    ) {
-                      event.preventDefault();
-                      onAttachmentPreview?.(file);
-                    }
-                  }}
-                >
-                  <FileAttachmentContent
-                    name={file.name}
-                    mimeType={file.mimeType}
-                  />
-                </span>
-              );
-            })}
-          </div>
-        )}
-        {(content.trim().length > 0 || editing) && (
+        <div className={styles.chatMessageBodyRow}>
+          {sendFailed && onRetrySend && (
+            <TooltipProvider delayDuration={200} disableHoverableContent>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={styles.sendFailureIndicator}
+                    onClick={onRetrySend}
+                    aria-label={retryLabel}
+                    data-send-failed-status={sendFailedStatus}
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      aria-hidden="true"
+                      width="12"
+                      height="12"
+                    >
+                      <path
+                        d="M8 3.25v5.5"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
+                      <circle cx="8" cy="12" r="1.15" fill="currentColor" />
+                    </svg>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" variant="black">
+                  {retryLabel}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
           <div
-            className={`${styles.chatBubble}${
-              scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
-            }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
-            data-web-shell-user-bubble
+            className={`${styles.chatMessageContentColumn}${
+              isLocateFlashing && content.trim().length === 0
+                ? ` ${flashStyles.flash}`
+                : ''
+            }`}
           >
-            <div
-              ref={contentRef}
-              className={`${styles.chatContent} ${
-                heightOverflowing && !documentMode && !expanded
-                  ? styles.chatContentCollapsed
-                  : ''
-              }`}
-              hidden={editing}
-            >
-              {renderedContent}
-            </div>
-            {editing && (
-              <div className={styles.editArea}>
-                <textarea
-                  className={styles.editInput}
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={handleEditKeyDown}
-                  aria-label={t('userMessage.edit')}
-                  readOnly={submittingEdit}
-                  autoFocus
-                />
-                <div className={styles.editActions}>
-                  <button
-                    type="button"
-                    className={styles.editCancel}
-                    onClick={onEditCancel}
-                    disabled={submittingEdit}
-                  >
-                    {t('common.cancel')}
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.editSubmit}
-                    onClick={submitEdit}
-                    disabled={
-                      submittingEdit ||
-                      (!draft.trim() && !images?.length && !files?.length)
-                    }
-                  >
-                    {submittingEdit
-                      ? t('userMessage.editSending')
-                      : t('userMessage.editSubmit')}
-                  </button>
-                </div>
+            {images && images.length > 0 && (
+              <div className={styles.chatImages} data-web-shell-user-images>
+                {images.map((img, index) => {
+                  const src = img.data.startsWith('data:')
+                    ? img.data
+                    : `data:${img.mimeType};base64,${img.data}`;
+                  if (!isSafeImageSrc(src)) return null;
+                  return (
+                    <img
+                      key={index}
+                      src={src}
+                      alt={t('user.uploadedImage', { index: index + 1 })}
+                      className={`${styles.chatImageThumb}${
+                        onImagePreview
+                          ? ` ${styles.chatImageThumbInteractive}`
+                          : ''
+                      }`}
+                      onClick={
+                        onImagePreview
+                          ? () =>
+                              onImagePreview(
+                                src,
+                                t('user.uploadedImage', { index: index + 1 }),
+                                img.attachmentId
+                                  ? {
+                                      kind: 'attachment',
+                                      attachmentId: img.attachmentId,
+                                    }
+                                  : undefined,
+                              )
+                          : undefined
+                      }
+                    />
+                  );
+                })}
               </div>
             )}
-            {heightOverflowing && !documentMode && !editing && (
-              <button
-                type="button"
-                className={styles.toggleButton}
-                onClick={() => setExpanded((value) => !value)}
+            {files && files.length > 0 && (
+              <div className={styles.chatFiles} data-web-shell-user-files>
+                {files.map((file, index) => {
+                  const previewable = Boolean(
+                    onAttachmentPreview &&
+                      (file.data !== undefined ||
+                        file.text !== undefined ||
+                        file.attachmentId),
+                  );
+                  return (
+                    <span
+                      key={`${file.name}-${index}`}
+                      className={`${styles.chatFileChip}${
+                        previewable ? ` ${styles.chatFileChipPreviewable}` : ''
+                      }`}
+                      role={previewable ? 'button' : undefined}
+                      tabIndex={previewable ? 0 : undefined}
+                      onClick={
+                        previewable
+                          ? () => onAttachmentPreview?.(file)
+                          : undefined
+                      }
+                      onKeyDown={(event) => {
+                        if (
+                          previewable &&
+                          (event.key === 'Enter' || event.key === ' ')
+                        ) {
+                          event.preventDefault();
+                          onAttachmentPreview?.(file);
+                        }
+                      }}
+                    >
+                      <FileAttachmentContent
+                        name={file.name}
+                        mimeType={file.mimeType}
+                      />
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            {(content.trim().length > 0 || editing) && (
+              <div
+                className={`${styles.chatBubble}${
+                  scheduledTaskRun || automaticTriggerSource
+                    ? ` ${styles.scheduledTaskBubble}`
+                    : ''
+                }${
+                  automaticTriggerSource
+                    ? ` ${styles.automaticTriggerBubble}`
+                    : ''
+                }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
+                data-web-shell-user-bubble
               >
-                <span>
-                  {expanded
-                    ? t('userMessage.showLess')
-                    : t('userMessage.showMore')}
-                </span>
-                <svg
-                  className={`${styles.toggleIcon} ${
-                    expanded ? styles.toggleIconExpanded : ''
+                <div
+                  ref={contentRef}
+                  className={`${styles.chatContent} ${
+                    heightOverflowing &&
+                    !documentMode &&
+                    !expanded &&
+                    !automaticTriggerSource
+                      ? styles.chatContentCollapsed
+                      : ''
                   }`}
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
+                  hidden={editing}
                 >
-                  <path
-                    d="m4 6 4 4 4-4"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
+                  {bodyContent}
+                </div>
+                {editing && (
+                  <div className={styles.editArea}>
+                    <textarea
+                      className={styles.editInput}
+                      value={draft}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onKeyDown={handleEditKeyDown}
+                      aria-label={t('userMessage.edit')}
+                      readOnly={submittingEdit}
+                      autoFocus
+                    />
+                    <div className={styles.editActions}>
+                      <button
+                        type="button"
+                        className={styles.editCancel}
+                        onClick={onEditCancel}
+                        disabled={submittingEdit}
+                      >
+                        {t('common.cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.editSubmit}
+                        onClick={submitEdit}
+                        disabled={
+                          submittingEdit ||
+                          (!draft.trim() && !images?.length && !files?.length)
+                        }
+                      >
+                        {submittingEdit
+                          ? t('userMessage.editSending')
+                          : t('userMessage.editSubmit')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {heightOverflowing &&
+                  !documentMode &&
+                  !editing &&
+                  !automaticTriggerSource && (
+                    <button
+                      type="button"
+                      className={styles.toggleButton}
+                      onClick={() => setExpanded((value) => !value)}
+                    >
+                      <span>
+                        {expanded
+                          ? t('userMessage.showLess')
+                          : t('userMessage.showMore')}
+                      </span>
+                      <svg
+                        className={`${styles.toggleIcon} ${
+                          expanded ? styles.toggleIconExpanded : ''
+                        }`}
+                        viewBox="0 0 16 16"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="m4 6 4 4 4-4"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  )}
+              </div>
             )}
           </div>
-        )}
-        {sendFailed && onRetrySend && (
-          <div className={styles.sendFailure}>
-            <span>{t('userMessage.sendFailed')}</span>
-            <button
-              type="button"
-              className={styles.retryButton}
-              onClick={onRetrySend}
-              aria-label={t('userMessage.retrySend')}
-              title={t('userMessage.retrySend')}
-            >
-              <RefreshCwIcon aria-hidden="true" />
-              <span>{t('common.retry')}</span>
-            </button>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );

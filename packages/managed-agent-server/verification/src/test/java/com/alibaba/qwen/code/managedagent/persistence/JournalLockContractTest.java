@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,7 +47,7 @@ class JournalLockContractTest {
                 null, null, null, null, null, bytes -> {
                     assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.COMMIT);
                     notifications++;
-                }, com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                }, com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
         proxy = AgentLockContractTest.transactional(raw, trace);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(trace));
         proxy.acquireWriter(TENANT, SESSION, TOKEN, new AcquireWriterRequest("workspace", "writer", 60_000L));
@@ -101,14 +100,12 @@ class JournalLockContractTest {
     void ordinaryJournalAndPublicationCheckStorageWithoutLocking(String route) {
         var jdbc = new ManagedSchemaJdbcTemplate(trace);
         String physical = "d".repeat(64);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
                         + " storage_kind, registration_state, registration_revision, registration_json)"
-                        + " VALUES (?, ?, ?, ?, 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey("storage"), TENANT, physical);
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'READY')", physical, physical);
+                        + " VALUES (?, 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
+                TENANT, physical);
+        jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, mount_state)"
+                + " VALUES (?, 'LOCAL', 'READY')", physical);
         jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = ?", TENANT);
         trace.clear();
         boolean placement = "placement-publication".equals(route);
@@ -194,7 +191,11 @@ class JournalLockContractTest {
         var external = new TransactionTemplate(new DataSourceTransactionManager(business));
         external.executeWithoutResult(status -> raw.sealWriter(TENANT, SESSION, TOKEN,
                 new SealWriterRequest("workspace", "writer", 1)));
-        assertThat(roots()).isEqualTo(2);
+        // The unrelated transaction is not on this DataSource, so the standalone
+        // path still takes its own root lock on the autocommit connection ahead
+        // of the head row; it must not skip that lock just because a transaction
+        // is active elsewhere.
+        assertThat(roots()).isEqualTo(1);
         assertThat(heads()).isEqualTo(1);
         assertThat(trace.successful(TENANT, SESSION)).allMatch(StoreLockTrace.Event::autoCommit);
     }
@@ -219,7 +220,7 @@ class JournalLockContractTest {
     }
 
     private long roots() {
-        return trace.successful(TENANT, SESSION).stream().filter(event -> event.sql().startsWith("select tenant_id, session_id, is_csi_guard from ma_session ")).count();
+        return trace.successful(TENANT, SESSION).stream().filter(event -> event.sql().startsWith("select tenant_id, session_id from ma_session ")).count();
     }
 
     private long heads() {

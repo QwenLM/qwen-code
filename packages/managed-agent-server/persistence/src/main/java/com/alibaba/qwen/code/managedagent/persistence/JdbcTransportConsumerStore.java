@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.repository.TransportConsumerStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 
@@ -44,12 +43,14 @@ public class JdbcTransportConsumerStore
 
     public Optional<WakeFence> wakeFence(String tenantId, String sessionId) {
         record Row(String status, String workspaceId, String state,
-                long committedSequence, Timestamp leaseUntil) {
+                long committedSequence, Timestamp leaseUntil, boolean stamped,
+                boolean wakePending, long wakeRetryAt) {
         }
         List<Row> rows = jdbc.query(
                         "SELECT s.status, h.workspace_id, h.state, h.committed_sequence,"
-                            + " h.writer_lease_until FROM ma_session s JOIN ma_session_head h ON"
-                            + " h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id ="
+                            + " h.writer_lease_until, h.journal_revision, h.wake_seal_revision,"
+                            + " h.is_wake_pending, h.wake_retry_at FROM ma_session s JOIN ma_session_head h ON"
+                            + " h.tenant_id ="
                             + " s.tenant_id AND h.session_id = s.session_id AND h.head_kind ="
                             + " 'MANAGED_SESSION' WHERE s.tenant_id = ? AND s.session_id = ? AND"
                             + " s.session_kind = 'PUBLIC' AND s.retired_at IS NULL",
@@ -57,8 +58,12 @@ public class JdbcTransportConsumerStore
                         result.getString("workspace_id"),
                         result.getString("state"),
                         result.getLong("committed_sequence"),
-                        ManagedSchemaTime.timestamp(result, "writer_lease_until")),
-                ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(sessionId), tenantId, sessionId);
+                        ManagedSchemaTime.timestamp(result, "writer_lease_until"),
+                        Long.valueOf(result.getLong("journal_revision"))
+                                .equals(result.getObject("wake_seal_revision", Long.class)),
+                        result.getInt("is_wake_pending") != 0,
+                        result.getLong("wake_retry_at")),
+                tenantId, sessionId);
         if (rows.isEmpty()) {
             return Optional.empty();
         }
@@ -66,11 +71,14 @@ public class JdbcTransportConsumerStore
         // Live exactly as hasLiveWriter decides it: an ACTIVE journal under a
         // lease unexpired by database time. Sealing keeps the lease column, and
         // a SEALED journal is re-acquirable at once, so it holds no writer.
+        Timestamp now = databaseNow();
         boolean live = "ACTIVE".equals(row.state())
                 && row.leaseUntil() != null
-                && row.leaseUntil().after(databaseNow());
+                && row.leaseUntil().after(now);
+        boolean backstopOwned = row.stamped()
+                && (!row.wakePending() || row.wakeRetryAt() > now.getTime());
         return Optional.of(new WakeFence(row.status(), row.workspaceId(),
-                row.state(), row.committedSequence(), live));
+                row.state(), row.committedSequence(), live, backstopOwned));
     }
 
     /**
@@ -85,19 +93,14 @@ public class JdbcTransportConsumerStore
             List<String> chunk = sessionIds.subList(from,
                     Math.min(sessionIds.size(), from + HELD_CHUNK));
             List<Object> args = new ArrayList<>();
-            args.add(ManagedSchemaKeys.key(tenantId));
             args.add(tenantId);
             args.add(writerId);
-            chunk.stream().map(ManagedSchemaKeys::key).forEach(args::add);
             args.addAll(chunk);
             jdbc.query(
-                    "SELECT session_id, writer_lease_until FROM ma_session_head WHERE tenant_key ="
-                            + " ? AND tenant_id = ? AND head_kind = 'MANAGED_SESSION' AND state ="
-                            + " 'ACTIVE' AND writer_id = ? AND harness_key IN ("
+                    "SELECT session_id, writer_lease_until FROM ma_session_head WHERE"
+                            + " tenant_id = ? AND head_kind = 'MANAGED_SESSION' AND state ="
+                            + " 'ACTIVE' AND writer_id = ? AND harness_session_id IN ("
                             + String.join(", ", Collections.nCopies(chunk.size(), "?"))
-                            + ") AND session_id IN ("
-                            + String.join(", ",
-                                    Collections.nCopies(chunk.size(), "?"))
                             + ")",
                     (RowCallbackHandler) result -> {
                         Timestamp lease = ManagedSchemaTime.timestamp(result, "writer_lease_until");
@@ -116,10 +119,9 @@ public class JdbcTransportConsumerStore
      */
     public boolean claimWake(String tenantId, String sessionId,
             long sequence) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         return jdbc.update(
                         "UPDATE ma_event_stream SET wake_covered_sequence = ? WHERE tenant_id = ?"
-                            + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                            + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                             + " AND (wake_covered_sequence IS NULL OR wake_covered_sequence < ?)",
                 sequence, tenantId, sessionId, sequence) == 1;
     }
@@ -134,7 +136,7 @@ public class JdbcTransportConsumerStore
                         "SELECT e.covered_sequence FROM ma_event_stream e JOIN ma_session s ON"
                             + " s.tenant_id = e.tenant_id AND s.session_id = e.session_id WHERE"
                             + " e.tenant_id = ? AND e.session_id = ? AND e.stream_kind = 'SESSION'"
-                            + " AND e.stream_id = X'' AND s.session_kind = 'PUBLIC' AND"
+                            + " AND e.stream_id = '' AND s.session_kind = 'PUBLIC' AND"
                             + " s.retired_at IS NULL",
                 (result, index) -> result.getLong(1), tenantId, sessionId);
         return covered.isEmpty() ? OptionalLong.empty()
@@ -151,13 +153,13 @@ public class JdbcTransportConsumerStore
     public Optional<String> workspaceOf(String tenantId, String sessionId) {
         List<Optional<String>> workspace = jdbc.query(
                         "SELECT COALESCE(s.workspace_id, h.workspace_id) FROM ma_session s LEFT"
-                            + " JOIN ma_session_head h ON h.tenant_key = ? AND h.harness_key = ?"
-                            + " AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND"
+                            + " JOIN ma_session_head h ON"
+                            + " h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND"
                             + " h.head_kind = 'MANAGED_SESSION' WHERE s.tenant_id = ? AND"
                             + " s.session_id = ? AND s.session_kind = 'PUBLIC' AND s.retired_at IS"
                             + " NULL",
                 (result, index) -> Optional.ofNullable(result.getString(1)),
-                ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(sessionId), tenantId, sessionId);
+                tenantId, sessionId);
         return workspace.isEmpty() ? Optional.empty() : workspace.getFirst();
     }
 

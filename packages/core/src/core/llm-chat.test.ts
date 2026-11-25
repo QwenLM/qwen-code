@@ -14,6 +14,10 @@ import {
   getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import { HookSystem } from '../hooks/hookSystem.js';
 import { HookEventName, HookType } from '../hooks/types.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
@@ -29,7 +33,14 @@ import type {
   Tool,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import {
+  AuthType,
+  type ContentGenerator,
+  type ContentGeneratorConfig,
+} from './contentGenerator.js';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { DefaultOpenAICompatibleProvider } from './openaiContentGenerator/provider/default.js';
 import { FinishReason } from './genai-compat.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
@@ -49,6 +60,7 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './llm-chat.js';
+import { ModelAvailabilityService } from './model-availability-service.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { WorkflowModeContext } from './workflow-mode.js';
 import {
@@ -66,6 +78,8 @@ import {
   getApiHistoryPromptId,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { buildCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
+import { postProcessSummary } from '../services/postCompactAttachments.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
@@ -92,6 +106,8 @@ import {
   TOOL_LOOP_SKIPPED_METADATA,
   type ChatCompressionInfo,
 } from './turn.js';
+import { turnModelRound } from './agent-loop.js';
+import { SendMessageType } from './client.js';
 import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
@@ -101,7 +117,11 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { clampOutputTokensToWindow } from './tokenLimits.js';
-import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import {
+  EMPTY_AUTO_MEMORY_CATALOG,
+  findLatestAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import {
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
@@ -323,6 +343,33 @@ describe('LlmChat', async () => {
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
 
+  it('omits an inherited transcript hint in a chat without its recorder', () => {
+    const hint = buildCompactionTranscriptHint('/parent/session.jsonl');
+    const summary = postProcessSummary('Earlier summary', hint);
+    const parentHistory: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'Startup prelude' }, { text: summary }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: `This literal example should survive: ${hint}` }],
+      },
+    ];
+    const child = new LlmChat(mockConfig, {}, parentHistory);
+
+    expect(child.getHistory()[0].parts).toEqual([
+      { text: 'Startup prelude' },
+      { text: postProcessSummary('Earlier summary') },
+    ]);
+    expect(child.getHistory()[2]).toEqual(parentHistory[2]);
+    expect(parentHistory[0].parts?.[1].text).toBe(summary);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockAcquireSleepInhibitor.mockReturnValue({
@@ -360,6 +407,8 @@ describe('LlmChat', async () => {
       getEffectiveInputModalities: vi.fn().mockReturnValue({ image: true }),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getModelFallbacks: vi.fn().mockReturnValue([]),
+      isModelAvailabilityTrackingEnabled: vi.fn().mockReturnValue(false),
+      getModelAvailabilityService: vi.fn(),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getClearContextOnIdle: vi.fn().mockReturnValue({
         toolResultsThresholdMinutes: 30,
@@ -424,6 +473,29 @@ describe('LlmChat', async () => {
     promptId: string,
     target: LlmChat = chat,
   ) => collect(await send(message, promptId, target));
+
+  /**
+   * A session-turn send (`isSessionTurn`), then collect. The availability
+   * ledger participates only for these; background sends use `sendCollect`
+   * (no flag) so the ledger excludes them.
+   */
+  const sendSessionCollect = async (
+    message: string | Part[],
+    promptId: string,
+    isExplicitRetry = false,
+  ) =>
+    collect(
+      await chat.sendMessageStream(
+        'test-model',
+        { message },
+        promptId,
+        undefined,
+        {
+          isSessionTurn: true,
+          ...(isExplicitRetry ? { isExplicitRetry: true } : {}),
+        },
+      ),
+    );
 
   /** `send`, then drain the stream. */
   const sendDrain = async (
@@ -919,6 +991,213 @@ describe('LlmChat', async () => {
     });
   });
 
+  describe('request system instructions', () => {
+    const sentRequests = () =>
+      vi.mocked(mockContentGenerator.generateContentStream).mock.calls;
+    const send = async (model: string, instruction?: string) => {
+      const stream = await chat.sendMessageStream(
+        model,
+        {
+          message: 'hello',
+          ...(instruction !== undefined && {
+            config: { systemInstruction: instruction },
+          }),
+        },
+        'request-prompt',
+      );
+      await drain(stream);
+    };
+
+    beforeEach(() => {
+      chat = newChat({ chatConfig: {} });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => textStream(),
+      );
+      vi.mocked(mockConfig.getModel).mockReturnValue('model-a');
+      chat.setSystemInstruction('startup');
+    });
+
+    it('resolves A, B, A per send while keeping the canonical snapshot on A', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      for (const model of ['model-a', 'model-b', 'model-a']) await send(model);
+      expect(
+        sentRequests().map(([request]) => [
+          request.model,
+          request.config?.systemInstruction,
+        ]),
+      ).toEqual([
+        ['model-a', 'prompt for model-a'],
+        ['model-b', 'prompt for model-b'],
+        ['model-a', 'prompt for model-a'],
+      ]);
+      expect(chat.getGenerationConfig().systemInstruction).toBe(
+        'prompt for model-a',
+      );
+      expect(chat['generationConfig'].systemInstruction).toBe('startup');
+    });
+
+    it('keeps dispatched parent context separate from canonical snapshots', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      chat.setSessionStartContext('hook context');
+      await send('model-b');
+      const dispatched = chat.getDispatchedGenerationConfig();
+      expect(dispatched.systemInstruction).toContain('prompt for model-b');
+      expect(
+        String(dispatched.systemInstruction).match(/hook context/g),
+      ).toHaveLength(1);
+      expect(chat.getGenerationConfig().systemInstruction).toContain(
+        'prompt for model-a',
+      );
+      expect(structuredClone(dispatched)).toEqual(dispatched);
+      dispatched.systemInstruction = 'modified copy';
+      expect(chat.getDispatchedGenerationConfig().systemInstruction).toContain(
+        'model-b',
+      );
+      expect(chat.getDispatchedRequest()).toMatchObject({
+        model: 'model-b',
+        runtimeView: { contentGenerator: mockContentGenerator },
+      });
+    });
+
+    it('preserves explicit instructions and does not resolve fixed chats', async () => {
+      await send('model-b');
+      expect(sentRequests()[0][0].config?.systemInstruction).toBe('startup');
+      const resolver = vi.fn((model: string) => `prompt for ${model}`);
+      chat.setSystemInstructionResolver(resolver);
+      await send('model-b', 'explicit task');
+      expect(sentRequests()[1][0].config?.systemInstruction).toBe(
+        'explicit task',
+      );
+      expect(resolver).not.toHaveBeenCalled();
+    });
+
+    it('records the adapter-selected model with the dispatched parent runtime', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'configured',
+        extra_body: { model: 'wire-model' },
+      });
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      await send('requested');
+      expect(chat.getDispatchedRequest()).toMatchObject({
+        model: 'wire-model',
+        generationConfig: { systemInstruction: 'prompt for wire-model' },
+        runtimeView: {
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: { model: 'wire-model' },
+        },
+      });
+      expect(mockConfig.getContentGeneratorConfig().model).toBe('configured');
+    });
+
+    it('passes the resolved prompt to initial compression before dispatch', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      const compress = vi.spyOn(chat, 'tryCompress');
+      await send('model-b');
+      expect(
+        compress.mock.calls[0][3]?.requestGenerationConfig?.systemInstruction,
+      ).toBe('prompt for model-b');
+    });
+
+    it('pins the instruction across HTTP attempts despite changed prompt inputs', async () => {
+      let revision = 'before';
+      const resolver = vi.fn((model: string) => `${model}: ${revision}`);
+      chat.setSystemInstructionResolver(resolver);
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(new Error('retry'));
+      mockRetryWithBackoff.mockImplementationOnce(async (apiCall) => {
+        try {
+          return await apiCall();
+        } catch {
+          revision = 'after';
+          return apiCall();
+        }
+      });
+      await send('model-a');
+      expect(
+        sentRequests().map(([request]) => request.config?.systemInstruction),
+      ).toEqual(['model-a: before', 'model-a: before']);
+      expect(resolver).toHaveBeenCalledTimes(1);
+    });
+
+    it('replays saved instructions instead of evaluating the live resolver', async () => {
+      let saved: LlmPreparedRequest | undefined;
+      chat.setSystemInstructionResolver((model) => `original ${model}`);
+      const initial = await chat.sendMessageStream(
+        'model-a',
+        { message: 'hello' },
+        'prepare-prompt',
+        undefined,
+        {
+          onPreparedRequest: async (request) => {
+            saved = request;
+          },
+        },
+      );
+      await drain(initial);
+      const resolver = vi.fn(() => 'changed prompt');
+      chat.setSystemInstructionResolver(resolver);
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: mockConfig.getContentGeneratorConfig(),
+          model: 'model-a',
+          retryAuthType: AuthType.USE_GEMINI,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved!,
+          'replay-prompt',
+          new AbortController().signal,
+        ),
+      );
+      expect(sentRequests().at(-1)?.[0].config?.systemInstruction).toBe(
+        'original model-a',
+      );
+      expect(resolver).not.toHaveBeenCalled();
+    });
+
+    it('does not publish a prepared request that fails before dispatch', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      await send('model-a');
+      await expect(
+        chat
+          .sendMessageStream(
+            'model-b',
+            { message: 'hello' },
+            'blocked-prepare',
+            undefined,
+            {
+              onPreparedRequest: async () => {
+                throw new Error('snapshot unavailable');
+              },
+            },
+          )
+          .then(drain),
+      ).rejects.toBeInstanceOf(LlmRequestPreparationError);
+      expect(chat.getDispatchedGenerationConfig().systemInstruction).toBe(
+        'prompt for model-a',
+      );
+    });
+
+    it('releases the send lock after a resolver fails before dispatch', async () => {
+      chat.setSystemInstructionResolver(() => {
+        throw new Error('render failed');
+      });
+      await expect(send('model-a')).rejects.toBeInstanceOf(
+        LlmRequestPreparationError,
+      );
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      await send('model-a');
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+  });
+
   describe('setTools', () => {
     const toolNamed = (name: string): Tool => ({
       functionDeclarations: [{ name, description: `${name} description` }],
@@ -1204,6 +1483,57 @@ describe('LlmChat', async () => {
       expect(chat.getHistory().at(-1)?.parts).toContainEqual({
         text: 'recovered',
       });
+    });
+
+    it('a prepared resume binds the ledger turn boundary (isSessionTurn)', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const service = new ModelAvailabilityService();
+      const beginTurn = vi.spyOn(service, 'beginTurn');
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: {},
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'recovered' }])),
+      );
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved,
+          'prepared-prompt',
+          new AbortController().signal,
+          vi.fn(),
+        ),
+      );
+      // The prepared resume hardcodes isSessionTurn, so it must bind the ledger
+      // turn boundary like the interactive path (R7-5).
+      expect(beginTurn).toHaveBeenCalledWith('prepared-prompt');
     });
 
     it('refuses a saved request whose model no longer matches the route', async () => {
@@ -3144,6 +3474,34 @@ describe('LlmChat', async () => {
       expect(snapshots(requestAt(5).contents as Content[])).toHaveLength(1);
     });
 
+    it('omits the fresh empty catalog and updates restored sessions when entries change', async () => {
+      let catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const send = async (id: string) => {
+        mockStream(textStream('done'));
+        await sendDrain(id, id);
+        const calls = vi.mocked(mockContentGenerator.generateContentStream).mock
+          .calls;
+        return findLatestAutoMemorySnapshot(
+          calls.at(-1)?.[0].contents as Content[],
+        );
+      };
+
+      expect(await send('fresh')).toBeUndefined();
+      const entry = '- [Fresh entry](topic.md)';
+      catalog = entry;
+      expect((await send('one-entry'))?.text).toContain(entry);
+
+      catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      const empty = await send('deleted-last-entry');
+      expect(empty?.text).toContain(EMPTY_AUTO_MEMORY_CATALOG);
+      chat.setHistory(structuredClone(chat.getHistory()));
+      expect(await send('resume-while-empty')).toEqual(empty);
+
+      catalog = entry;
+      expect((await send('restored-entry'))?.text).toContain(entry);
+    });
+
     it('records a snapshot only after successful assembly and deduplicates later sends', async () => {
       mockConfig.getAutoMemoryContext = () => 'catalog';
       const recordMemoryCatalogSnapshot = vi.fn();
@@ -3527,10 +3885,16 @@ describe('LlmChat', async () => {
     it('does not deep-clone the full curated history when building request contents', async () => {
       chat.setHistory([userText('prior question'), modelText('prior answer')]);
       mockStream(textStream('response'));
+      const clone = globalThis.structuredClone;
       const structuredCloneSpy = vi
         .spyOn(globalThis, 'structuredClone')
-        .mockImplementation(() => {
-          throw new Error('structuredClone should not build request contents');
+        .mockImplementation((value, options) => {
+          if (Array.isArray(value)) {
+            throw new Error(
+              'structuredClone should not build request contents',
+            );
+          }
+          return clone(value, options);
         });
 
       try {
@@ -4720,6 +5084,42 @@ describe('LlmChat', async () => {
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
     });
 
+    it('reactively compresses and retries once after a Kimi longer-than-context-length error', async () => {
+      const compressedHistory = [
+        userText('summary'),
+        modelText('ack'),
+        userText('latest'),
+      ];
+      const expectedRequestContents = structuredClone(compressedHistory);
+      const compressSpy = reactiveCompaction(1_347_344, compressedHistory);
+      mockRequests(
+        new Error(
+          "400 The input (1347344 tokens) is longer than the model's context length (1048576 tokens).",
+        ),
+        textStream('answer after compact'),
+      );
+
+      const events = await sendCollect(
+        'latest',
+        'prompt-id-reactive-compact-kimi',
+      );
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      const reactiveOpts = compressSpy.mock.calls[1][1];
+      expect(reactiveOpts.force).toBe(true);
+      expect(reactiveOpts.trigger).toBe('auto');
+      expect(reactiveOpts.originalTokenCount).toBe(1_347_344);
+      expect(reactiveOpts.precomputedEffectiveTokens).toBe(1_347_344);
+      expect(reactiveOpts.observedServerCeiling).toBe(1_048_576);
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      expectStreamCalls(2);
+      expect(requestAt(1).contents).toEqual(expectedRequestContents);
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(infoOf(events[0]).originalTokenCountIsEstimated).toBe(false);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
+      expect(hasChunkText(events, 'answer after compact')).toBe(true);
+    });
+
     it('suppresses retained catalogs in advisor and non-cache follow-up inputs without changing raw history', async () => {
       const { AdvisorTool } = await import('../tools/advisor.js');
       const { runWithAgentChat } = await import(
@@ -5314,6 +5714,45 @@ describe('LlmChat', async () => {
         ...summaryAck(),
         { role: 'user', parts: [{ text: userMessage }] },
       ]);
+    });
+
+    it('records only the synthetic prefix after hard rescue preserves an operation', async () => {
+      const { target, recordChatCompression } = recordingChat();
+      const retained = modelText('latest original response');
+      const compressed = compressResult(
+        CompressionStatus.COMPRESSED,
+        [
+          userText('summary'),
+          modelText('Understood.'),
+          userText('Recent operation follows.'),
+          retained,
+        ],
+        176_000,
+        40_000,
+        true,
+      );
+      compressed.info.summaryPrefixLength = 3;
+      mockCompressOnce(compressed);
+      mockStream(textStream('after rescue'));
+      target.setLastPromptTokenCount(176_999);
+
+      await sendDrain(
+        'continue with the next change',
+        'retained-hard-rescue',
+        target,
+      );
+
+      expect(recordChatCompression).toHaveBeenCalledTimes(1);
+      expect(recordChatCompression.mock.calls[0][0]).toMatchObject({
+        summaryPrefixLength: 3,
+        compressedHistory: [
+          userText('summary'),
+          modelText('Understood.'),
+          userText('Recent operation follows.'),
+          retained,
+          userText('continue with the next change'),
+        ],
+      });
     });
 
     it('rejects before request serialization when oversized resumed history cannot be compressed', async () => {
@@ -7242,6 +7681,14 @@ describe('LlmChat', async () => {
           parts: [nestedPart],
         },
       };
+      const topRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/top.output'],
+      };
+      const responseRecovery = {
+        persistedOutputFiles: ['/tmp/tool-results/response.output'],
+      };
+      setToolOutputRecovery(topLevelPart, topRecovery);
+      setToolOutputRecovery(functionResponsePart, responseRecovery);
       const entry = content('user', topLevelPart, functionResponsePart);
       chat.addHistory(entry);
       const structuredCloneSpy = forbidDeepClone();
@@ -7250,12 +7697,17 @@ describe('LlmChat', async () => {
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
       expect(history).toEqual([entry]);
+      expect(JSON.stringify(history)).not.toContain('/tmp/tool-results/');
       expect(history[0]).not.toBe(entry);
       expect(history[0]!.parts).not.toBe(entry.parts);
       expect(history[0]!.parts![0]).not.toBe(topLevelPart);
       expect(history[0]!.parts![0]!.inlineData).toBe(topInlineData);
+      expect(getToolOutputRecovery(history[0]!.parts![0]!)).toBe(topRecovery);
       const copiedFunctionResponsePart = history[0]!.parts![1]!;
       expect(copiedFunctionResponsePart).not.toBe(functionResponsePart);
+      expect(getToolOutputRecovery(copiedFunctionResponsePart)).toBe(
+        responseRecovery,
+      );
       expect(copiedFunctionResponsePart.functionResponse).not.toBe(
         functionResponsePart.functionResponse,
       );
@@ -7437,6 +7889,17 @@ describe('LlmChat', async () => {
     ) {
       mockGeneratorConfig({ maxRetries: 0, ...generatorConfig });
       vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(fallbacks);
+      // The ledger keys fallbacks by resolved route identity; give each model
+      // a distinct identity so the fallback tests discriminate routes (the
+      // constant default would collapse every fallback onto one key). Include
+      // the route's authType when a fallback config carries one, so the helper
+      // can also express same-model different-route health (R15).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        (model?: string, config?: { authType?: string }) =>
+          model
+            ? `${model}@${config?.authType ?? 'test0001'}`
+            : 'gemini-pro@test0001',
+      );
       return mockResolver(resolveForModel);
     }
 
@@ -7506,6 +7969,47 @@ describe('LlmChat', async () => {
     ) => ({
       type: StreamEventType.MODEL_FALLBACK,
       info: { fromModel, toModel, statusCode: 429, fallbackIndex },
+    });
+
+    it('resolves a fallback prompt without inheriting the generated primary prompt', async () => {
+      const fallback = vi
+        .fn()
+        .mockImplementation(async () => textStream('fallback answer'));
+      wireFallbacks(
+        ['fallback-model'],
+        vi.fn().mockResolvedValue(
+          fallbackRoute('fallback-model', fallback, {
+            authType: AuthType.USE_GEMINI,
+            model: 'fallback-model',
+          }),
+        ),
+      );
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      streamMock().mockRejectedValueOnce(tpmCapacityError());
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'fallback-prompt',
+      );
+      await drain(stream);
+      expect(streamMock().mock.calls[0][0].config?.systemInstruction).toBe(
+        'prompt for test-model',
+      );
+      expect(fallback.mock.calls[0][0].config?.systemInstruction).toBe(
+        'prompt for fallback-model',
+      );
+      expect(
+        streamMock().mock.calls[0][0].config?.maxOutputTokens,
+      ).toBeGreaterThan(0);
+      expect(fallback.mock.calls[0][0].config?.maxOutputTokens).toBe(
+        streamMock().mock.calls[0][0].config?.maxOutputTokens,
+      );
+      expect(chat.getDispatchedGenerationConfig().systemInstruction).toBe(
+        'prompt for fallback-model',
+      );
+      expect(chat.getGenerationConfig().systemInstruction).toBe(
+        'prompt for gemini-pro',
+      );
     });
 
     /** The primary fails with `error`; the fallback chain stays untouched. */
@@ -8223,6 +8727,901 @@ describe('LlmChat', async () => {
       expect(fallbackEvents(events)).toHaveLength(1);
       expect(fallbackB).toHaveBeenCalledTimes(1);
       expect(hasChunkText(events, 'fallback-b ok')).toBe(true);
+    });
+
+    it('skips a fallback exhausted earlier in the same turn when tracking is on', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary exhausts, fallback-a exhausts, fallback-b serves.
+      const events1 = await sendSessionCollect('test', 'prompt-availability');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+
+      // Request 2, same turn: fallback-a is skipped, fallback-b serves again.
+      const events2 = await sendSessionCollect('test', 'prompt-availability');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+
+      // Request 3, new turn: fallback-a is re-probed once (and exhausts again).
+      const events3 = await sendSessionCollect(
+        'test',
+        'prompt-availability-turn-2',
+      );
+      expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(3);
+    });
+
+    it('still attempts the primary each request even when the ledger marks it unavailable (R8-F9)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      // The ledger gates only fallback selection. The primary is still attempted
+      // each request (it may have recovered), even when the ledger marks it
+      // unavailable; a mutant gating the primary on the ledger would skip it.
+      // fallback-a is marked unavailable so request 2 also exercises the skip read.
+      // Marks use the resolved route key the ledger keys on (wireFallbacks mock).
+      service.markTerminal('test-model@test0001', 'quota');
+      service.markTerminal('fallback-a@test0001', 'quota');
+
+      // Request 1: the primary serves despite being marked unavailable.
+      streamMock().mockImplementationOnce(async () => textStream('primary ok'));
+      const events1 = await sendSessionCollect(
+        'test',
+        'prompt-primary-unavailable',
+      );
+      expect(hasChunkText(events1, 'primary ok')).toBe(true);
+      expect(fallbackEvents(events1)).toHaveLength(0);
+
+      // Request 2, same turn: the primary is attempted again (now fails), the
+      // ledger skips fallback-a, and fallback-b serves.
+      streamMock().mockRejectedValueOnce(tpmCapacityError());
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+      const events2 = await sendSessionCollect(
+        'test',
+        'prompt-primary-unavailable',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).not.toHaveBeenCalled();
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+      // The primary was attempted on both requests despite the terminal mark.
+      expectStreamCalls(2);
+    });
+
+    it('counts only attempted fallbacks in the MODEL_FALLBACK ordinal across a ledger skip (R8-F10)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary exhausts, fallback-a exhausts (ordinal 1), fallback-b
+      // serves (ordinal 2).
+      const events1 = await sendSessionCollect('test', 'prompt-ordinal');
+      expect(fallbackEvents(events1)).toEqual([
+        fallbackEvent('test-model', 'fallback-a', 1),
+        fallbackEvent('fallback-a', 'fallback-b', 2),
+      ]);
+
+      // Request 2, same turn: fallback-a is skipped by the ledger BEFORE the
+      // ordinal increments, so fallback-b's ordinal is 1, not 2. A mutant moving
+      // the skip below fallbackIndex++ would report 2 here.
+      const events2 = await sendSessionCollect('test', 'prompt-ordinal');
+      expect(fallbackEvents(events2)).toEqual([
+        fallbackEvent('test-model', 'fallback-b', 1),
+      ]);
+    });
+
+    it('an explicit Retry re-probes fallbacks consumed earlier in the turn', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a exhausts and is marked unavailable for the turn.
+      const events1 = await sendSessionCollect('test', 'prompt-retry');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+
+      // Request 2 reuses the prompt id but is an explicit Retry: it is a turn
+      // boundary, so fallback-a is re-probed instead of staying skipped.
+      const events2 = await sendSessionCollect('test', 'prompt-retry', true);
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+    });
+
+    it('a subagent send does not wipe the live turn consumed fallback state', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Live turn 1: fallback-a exhausts and is consumed for this turn.
+      await sendSessionCollect('test', 'turn-1');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A subagent send shares the Config (deriveConfig) but is not a session
+      // turn and uses an id no prompt-id blacklist would match. It must not
+      // rotate the live turn's key (which would un-consume fallback-a); it keeps
+      // the gate-off behaviour and tries fallback-a itself.
+      await sendCollect('test', 'session-1#agent-1#0');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+
+      // Back on live turn 1: fallback-a is still consumed, so it stays skipped.
+      const events3 = await sendSessionCollect('test', 'turn-1');
+      expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(3);
+    });
+
+    it('a shared-loop background round does not wipe the live turn ledger', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary: 429 on live request 1, serves the background round, 429 on
+      // live request 2.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('background ok'))
+        .mockRejectedValueOnce(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Live turn 1 consumes fallback-a.
+      await sendSessionCollect('test', 'turn-1');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A background round driven through turnModelRound (the subagent shared
+      // loop / unified-loop speculation shape) shares the Config but is not a
+      // session turn; it must not rotate the live turn's key.
+      const background = turnModelRound(chat, 'test-model');
+      const iterator = background.sendRound(
+        {
+          parts: [{ text: 'bg' }],
+          promptId: 'speculation',
+          options: { type: SendMessageType.UserQuery },
+        },
+        new AbortController().signal,
+      );
+      let step = await iterator.next();
+      while (!step.done) {
+        step = await iterator.next();
+      }
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Live turn 1's next request still skips fallback-a.
+      const events2 = await sendSessionCollect('test', 'turn-1');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+    });
+
+    it('two consecutive forked sends re-probe a transiently exhausted fallback', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      wireFallbacks(
+        ['fallback-a'],
+        vi
+          .fn()
+          .mockImplementation(async () =>
+            fallbackRoute('fallback-a', fallbackA),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a 429s once, then recovers.
+      fallbackA
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('fallback-a ok'));
+
+      // First forked send: fallback-a exhausts; the request fails. The internal
+      // send must not mark fallback-a consumed in the shared ledger.
+      await expect(sendCollect('test', 'forked_query')).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Second forked send: fallback-a has recovered and must be tried again,
+      // not skipped because a prior forked send consumed it.
+      const events2 = await sendCollect('test', 'forked_query');
+      expect(hasChunkText(events2, 'fallback-a ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+    });
+
+    it('a background send leaves the live turn’s consumed fallback mark untouched', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      wireFallbacks(
+        ['fallback-a'],
+        vi
+          .fn()
+          .mockImplementation(async () =>
+            fallbackRoute('fallback-a', fallbackA),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary 429s on the live turn, then recovers for the background send.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('primary ok'));
+      fallbackA.mockRejectedValue(capacityError);
+
+      // Live turn: fallback-a exhausts and is consumed for the turn.
+      await expect(
+        sendSessionCollect('test', 'prompt-live-mark'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'retry_once_per_turn',
+      });
+
+      // A background send (no isSessionTurn) served by the recovered primary
+      // must not rotate the turn key or clear the live turn's consumed mark —
+      // not merely be skipped itself. Observe the write half directly: the
+      // background send issues no ledger write or turn-boundary call at all.
+      const ledgerWrites = [
+        vi.spyOn(service, 'markRetryOncePerTurn'),
+        vi.spyOn(service, 'consumeStickyAttempt'),
+        vi.spyOn(service, 'markHealthy'),
+        vi.spyOn(service, 'markTerminal'),
+        vi.spyOn(service, 'resetTurn'),
+        vi.spyOn(service, 'beginTurn'),
+      ];
+      const events = await sendCollect('test', 'forked_query');
+      expect(hasChunkText(events, 'primary ok')).toBe(true);
+      for (const write of ledgerWrites) {
+        expect(write).not.toHaveBeenCalled();
+      }
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'retry_once_per_turn',
+      });
+    });
+
+    it('an explicit Retry served by the primary still re-probes consumed fallbacks', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary: 429 on request 1, recovered on the Retry, 429 again on request 3.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('primary ok'))
+        .mockRejectedValueOnce(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a exhausts and is consumed for the turn.
+      await sendSessionCollect('test', 'prompt-retry-primary');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 2 is an explicit Retry that the recovered primary serves. The
+      // turn boundary must still reset the ledger even though no fallback runs.
+      const retryEvents = await sendSessionCollect(
+        'test',
+        'prompt-retry-primary',
+        true,
+      );
+      expect(hasChunkText(retryEvents, 'primary ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 3 (a continuation, not a Retry) hits a capacity error again:
+      // fallback-a was re-probed by the Retry's reset, so it is attempted.
+      await sendSessionCollect('test', 'prompt-retry-primary');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+    });
+
+    it('the gate off keeps the fallback chain stateless even with a service present', async () => {
+      const service = new ModelAvailabilityService();
+      // Gate OFF, but a real service is injected: the gate must short-circuit
+      // before the getter, and the chain must not skip exhausted fallbacks.
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        false,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      await sendSessionCollect('test', 'prompt-gate-off');
+      await sendSessionCollect('test', 'prompt-gate-off');
+
+      // With the gate off the exhausted fallback-a is retried on request 2.
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+      expect(mockConfig.getModelAvailabilityService).not.toHaveBeenCalled();
+    });
+
+    it('skips a fallback that failed after emitting output earlier in the turn', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a emits a chunk, then exhausts its budget on a capacity error.
+      fallbackA.mockResolvedValue(
+        streamThenThrow([textChunk('fallback-a partial')], capacityError),
+      );
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a emits output then fails; the chain stops (no
+      // fallback-b) but the ledger must still record fallback-a as consumed.
+      await expect(
+        sendSessionCollect('test', 'prompt-output-then-fail'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).not.toHaveBeenCalled();
+
+      // Request 2, same turn: fallback-a is skipped, so fallback-b serves.
+      const events2 = await sendSessionCollect(
+        'test',
+        'prompt-output-then-fail',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not record a fallback that failed after output on a non-eligible error', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      const authError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"401","message":"Unauthorized"}}',
+        ),
+        { status: 401 },
+      );
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a emits a chunk, then fails on a non-eligible auth error. A
+      // fresh generator per call (mockImplementation, not mockResolvedValue) so
+      // request 2 genuinely replays the post-output 401 rather than reading an
+      // already-drained stream.
+      fallbackA.mockImplementation(async () =>
+        streamThenThrow([textChunk('fallback-a partial')], authError),
+      );
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a emits output then fails on auth; the chain stops
+      // and the ledger must NOT record fallback-a (auth is not capacity).
+      await expect(
+        sendSessionCollect('test', 'prompt-output-auth'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 2, same turn: fallback-a was not recorded, so it is attempted
+      // again rather than skipped. Capture the stream to pin that the fresh
+      // generator genuinely replays the post-output chunk — a shared,
+      // already-drained stream (mockResolvedValue) would emit nothing here.
+      const stream2 = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-output-auth',
+        undefined,
+        { isSessionTurn: true },
+      );
+      const events2: StreamEvent[] = [];
+      await expect(
+        (async () => {
+          for await (const event of stream2) events2.push(event);
+        })(),
+      ).rejects.toThrow();
+      expect(hasChunkText(events2, 'fallback-a partial')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).not.toHaveBeenCalled();
+    });
+
+    it('real HTTP: the ledger skips an exhausted fallback on the next same-turn request', async () => {
+      // Real-scenario witness: a real local OpenAI-compatible server answers
+      // 429 capacity for the primary and fallback-a and streams a completion
+      // for fallback-b. The real OpenAI SDK + fetch path drives the real
+      // fallback chain and the real ModelAvailabilityService over real sockets.
+      const { preloadRuntimeFetchModule } = await import(
+        '../utils/runtimeFetchOptions.js'
+      );
+      await preloadRuntimeFetchModule();
+      const requests: string[] = [];
+      const server: Server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const model = (
+            JSON.parse(Buffer.concat(chunks).toString()) as { model: string }
+          ).model;
+          requests.push(model);
+          if (model === 'fallback-b') {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: 'assistant', content: 'real-ok' },
+                    finish_reason: null,
+                  },
+                ],
+              })}\n\n`,
+            );
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              })}\n\n`,
+            );
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: { message: 'Throttling: TPM(1/1)', code: '429' },
+            }),
+          );
+        });
+      });
+      await new Promise<void>((resolve) => {
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const { port } = server.address() as AddressInfo;
+      const baseUrl = `http://127.0.0.1:${port}/v1`;
+      const generatorCliConfig = {
+        getCliVersion: () => '0.0.0-test',
+        getProxy: () => undefined,
+        getSessionId: () => 'test-session-id',
+      } as unknown as Config;
+      const realGenerator = (model: string): OpenAIContentGenerator => {
+        const contentGeneratorConfig: ContentGeneratorConfig = {
+          model,
+          apiKey: 'test-key',
+          baseUrl,
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 0,
+        };
+        return new OpenAIContentGenerator(
+          contentGeneratorConfig,
+          generatorCliConfig,
+          new DefaultOpenAICompatibleProvider(
+            contentGeneratorConfig,
+            generatorCliConfig,
+          ),
+        );
+      };
+      try {
+        const service = new ModelAvailabilityService();
+        vi.mocked(
+          mockConfig.isModelAvailabilityTrackingEnabled,
+        ).mockReturnValue(true);
+        vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+          service,
+        );
+        // Distinct route identity per fallback model so the ledger discriminates
+        // them (the constant default would collapse both onto one key).
+        vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+          (model?: string) => (model ? `${model}@real` : 'gemini-pro@test0001'),
+        );
+        vi.mocked(mockConfig.getContentGenerator).mockReturnValue(
+          realGenerator('test-model'),
+        );
+        mockGeneratorConfig({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'test-key',
+          baseUrl,
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+          'fallback-a',
+          'fallback-b',
+        ]);
+        mockResolver(
+          vi.fn().mockImplementation(async (modelId: string) => ({
+            contentGenerator: realGenerator(modelId),
+            contentGeneratorConfig: {
+              model: modelId,
+              authType: AuthType.USE_OPENAI,
+              apiKey: 'test-key',
+              baseUrl,
+              maxRetries: 0,
+            },
+            retryAuthType: AuthType.USE_OPENAI,
+            model: modelId,
+          })),
+        );
+
+        // Request 1: primary 429 -> fallback-a 429 (recorded) -> fallback-b serves.
+        const events1 = await sendSessionCollect(
+          'test',
+          'real-http-ledger-turn',
+        );
+        expect(hasChunkText(events1, 'real-ok')).toBe(true);
+        expect(requests).toContain('fallback-a');
+
+        // Request 2, same turn: the ledger skips the exhausted fallback-a.
+        requests.length = 0;
+        const events2 = await sendSessionCollect(
+          'test',
+          'real-http-ledger-turn',
+        );
+        expect(hasChunkText(events2, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-b');
+        expect(requests).not.toContain('fallback-a');
+
+        // Request 3, a fresh ledger turn key (the headless runtime Goal run's
+        // boundary, R10-4): same base prompt id, but the new ledgerTurnKey
+        // resets the consumed mark, so the exhausted fallback-a is re-probed
+        // over the real socket instead of staying skipped.
+        requests.length = 0;
+        const events3 = await collect(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'real-http-ledger-turn',
+            undefined,
+            {
+              isSessionTurn: true,
+              ledgerTurnKey: 'real-http-ledger-turn/goal/goal-runtime:g1',
+            },
+          ),
+        );
+        expect(hasChunkText(events3, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-a');
+        expect(requests).toContain('fallback-b');
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    });
+
+    it('skips by the resolved model id when resolution rewrites the entry', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      // Two configured entries alias the SAME resolved model; a third is
+      // healthy. Keying the ledger by the configured id would let the second
+      // alias re-probe the exhausted resolved model on the next request, while
+      // resolved-id keying skips both aliases. (Within request 1 the second
+      // alias is caught by the same-model guard, so the discrimination is the
+      // second request, where it is reached with the primary still current.)
+      const aliasA = vi.fn();
+      const aliasB = vi.fn();
+      const healthy = vi.fn();
+      wireFallbacks(
+        ['alias-a', 'alias-b', 'fallback-c'],
+        vi.fn().mockImplementation(async (modelId: string) => {
+          if (modelId === 'alias-a') return fallbackRoute('model-x', aliasA);
+          if (modelId === 'alias-b') return fallbackRoute('model-x', aliasB);
+          return fallbackRoute('fallback-c', healthy);
+        }),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      aliasA.mockRejectedValue(capacityError);
+      aliasB.mockRejectedValue(capacityError);
+      healthy.mockImplementation(async () => textStream('fallback-c ok'));
+
+      // Request 1: alias-a exhausts model-x; alias-b is the same resolved model
+      // (same-model guard); fallback-c serves.
+      const events1 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events1, 'fallback-c ok')).toBe(true);
+      expect(aliasA).toHaveBeenCalledTimes(1);
+      expect(aliasB).toHaveBeenCalledTimes(0);
+
+      // Request 2, same turn: model-x is consumed under its RESOLVED id, so
+      // both aliases skip it. Configured-id keying would re-probe via alias-b.
+      const events2 = await sendSessionCollect('test', 'prompt-resolved-id');
+      expect(hasChunkText(events2, 'fallback-c ok')).toBe(true);
+      expect(aliasA).toHaveBeenCalledTimes(1);
+      expect(aliasB).toHaveBeenCalledTimes(0);
+      expect(healthy).toHaveBeenCalledTimes(2);
+    });
+
+    it('keys the ledger by resolved route so same-model different-route fallbacks keep separate health (P2)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const openaiShared = vi.fn();
+      const bridge = vi.fn();
+      const anthropicShared = vi.fn();
+      wireFallbacks(
+        ['openai-shared', 'bridge', 'anthropic-shared'],
+        vi.fn().mockImplementation(async (modelId: string) => {
+          if (modelId === 'openai-shared') {
+            return fallbackRoute('shared', openaiShared, {
+              authType: 'openai',
+            });
+          }
+          if (modelId === 'bridge') {
+            return fallbackRoute('bridge', bridge, { authType: 'openai' });
+          }
+          return fallbackRoute('shared', anthropicShared, {
+            authType: 'anthropic',
+          });
+        }),
+      );
+      // wireFallbacks keys route identity by model + authType, so the two
+      // routes resolving to the same model id ('shared') keep separate health.
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      openaiShared.mockRejectedValue(capacityError);
+      bridge.mockRejectedValue(capacityError);
+      anthropicShared.mockImplementation(async () =>
+        textStream('anthropic ok'),
+      );
+
+      // primary 429 -> openai:shared 429 (recorded) -> bridge 429 (intervening
+      // model resets the same-model guard) -> anthropic:shared resolves to the
+      // SAME model id 'shared' but a different route. It must be re-probed and
+      // serve, not skipped by the openai route's consumed mark.
+      const events = await sendSessionCollect('test', 'prompt-route-key');
+      expect(hasChunkText(events, 'anthropic ok')).toBe(true);
+      expect(openaiShared).toHaveBeenCalledTimes(1);
+      expect(bridge).toHaveBeenCalledTimes(1);
+      expect(anthropicShared).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the ledger turn key stable across a continuation prompt-id rewrite', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1 under the turn's base prompt id consumes fallback-a.
+      await sendSessionCollect('test', 'turn-base');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // A mid-turn continuation rewrites the prompt id but passes the base
+      // ledger key, so it must not reset the turn's consumed marks. Without
+      // ledgerTurnKey the suffixed id would rotate the key and re-probe.
+      const events2 = await collect(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'turn-base_todo_stop_guard_1',
+          undefined,
+          { isSessionTurn: true, ledgerTurnKey: 'turn-base' },
+        ),
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
     });
 
     it('does not try the next fallback after a fallback emits output', async () => {
@@ -10716,6 +12115,179 @@ describe('LlmChat', async () => {
           ),
         ).toHaveLength(0);
         expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+      });
+
+      it('replays a cut after thought and functionCall when retractToolCallsOnRetry is set', async () => {
+        vi.useFakeTimers();
+        const { record, target } = recording();
+        mockStreamsOnce(
+          cutAfter([
+            modelChunk([{ text: 'Choosing a tool…', thought: true }]),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+          streamOf(
+            modelChunk(
+              [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2')],
+              'STOP',
+            ),
+          ),
+        );
+        const stream = await target.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-replay',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        const retries = eventsOfType(events, StreamEventType.RETRY);
+        expect(retries).toEqual([
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+        ]);
+        expectStreamCalls(2);
+        // Only the recovered tool call survives in history and durable recording.
+        const modelTurns = target
+          .getHistory()
+          .filter((entry) => entry.role === 'model');
+        expect(modelTurns).toHaveLength(1);
+        expect(modelTurns[0].parts).toEqual([
+          fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2'),
+        ]);
+        expect(record).toHaveBeenCalledTimes(1);
+        expect(record.mock.calls[0][0].message).toEqual([
+          fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2'),
+        ]);
+        expectWarned('Transport stream retry scheduled', {
+          retryDecision: 'retry',
+        });
+      });
+
+      it('does not replay a cut with visible text plus functionCall under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        mockStream(
+          cutAfter([
+            textChunk('Let me check that file. '),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-visible-text',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        await expect(drain(stream)).rejects.toThrow('terminated');
+        expectStreamCalls(1);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'skipped_after_content',
+        });
+      });
+
+      it('exhausts replay budget and persists final partial tool call under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        const { record, target } = recording();
+        let seq = 0;
+        streamMock().mockImplementation(() =>
+          Promise.resolve(
+            cutAfter([
+              modelChunk([{ text: 'Thinking…', thought: true }]),
+              modelChunk([
+                fnCall('read_file', { path: '/tmp/a.ts' }, `call_${++seq}`),
+              ]),
+            ]),
+          ),
+        );
+        const stream = await target.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-exhausted',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeInstanceOf(Error);
+        expect((caughtError as Error).message).toContain('terminated');
+        expectStreamCalls(3);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'exhausted',
+        });
+        expect(record).toHaveBeenCalledTimes(1);
+        expect(
+          target
+            .getHistory()
+            .at(-1)
+            ?.parts?.some((part) => part.functionCall?.id === 'call_3'),
+        ).toBe(true);
+      });
+
+      it('replays a cut after an unsigned thoughtSignature-only part and functionCall under retractToolCallsOnRetry', async () => {
+        vi.useFakeTimers();
+        mockStreamsOnce(
+          cutAfter([
+            modelChunk([{ text: 'Thinking…', thought: true }]),
+            modelChunk([{ thoughtSignature: 'sig-opaque-1' } as Part]),
+            modelChunk([fnCall('read_file', { path: '/tmp/a.ts' }, 'call_1')]),
+          ]),
+          streamOf(
+            modelChunk(
+              [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_2')],
+              'STOP',
+            ),
+          ),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-thought-signature-only',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(1);
+        expectStreamCalls(2);
+      });
+
+      it('logs exhausted when retractToolCallsOnRetry spends its replay budget on terminal-finish tool-call cuts', async () => {
+        vi.useFakeTimers();
+        streamMock().mockImplementation(() =>
+          Promise.resolve(
+            cutAfter([
+              modelChunk(
+                [fnCall('read_file', { path: '/tmp/a.ts' }, 'call_stop')],
+                'STOP',
+              ),
+            ]),
+          ),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-toolcall-stop-exhausted',
+          undefined,
+          { retractToolCallsOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeInstanceOf(Error);
+        expectStreamCalls(3);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+        expectWarned('Transport stream retry not taken', {
+          retryDecision: 'exhausted',
+        });
       });
     });
 
@@ -13493,6 +15065,10 @@ describe('LlmChat', async () => {
       expect(eventsOfType(events, StreamEventType.RETRY)).toEqual([
         { type: StreamEventType.RETRY, maxOutputTokensEscalated: 64_000 },
       ]);
+      // #16417 M5: the per-response limit the Turn reads must track the
+      // escalation — a MAX_TOKENS cut during the escalated round names the
+      // escalated limit, not the initial grant.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(64_000);
       expect(mockLogContentRetry).not.toHaveBeenCalledWith(
         mockConfig,
         expect.objectContaining({ error_type: 'NO_RESPONSE_TEXT' }),
@@ -13501,6 +15077,24 @@ describe('LlmChat', async () => {
         userText('complete the tool call'),
         modelText('Completed after escalation.'),
       ]);
+    });
+
+    it('records the initial clamp as the request maxOutputTokens (#16417 M4)', async () => {
+      // M4: deleting the initial-clamp assignment leaves this getter
+      // undefined on the ordinary first-send path, so a MAX_TOKENS cut in
+      // that round cannot name the limit — the assignment is load-bearing
+      // even when no escalation or recovery follows.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      serveStreams(streamOf(textChunk('hello', 'STOP')));
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-initial-clamp'),
+      );
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(0).config?.maxOutputTokens,
+      );
     });
 
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
@@ -13535,6 +15129,12 @@ describe('LlmChat', async () => {
       expect(requestAt(0).config?.maxOutputTokens).toBe(49_721);
       // Recovery: the prompt grew to ~121K → the 4,000 floor, not 49,721.
       expect(requestAt(1).config?.maxOutputTokens).toBe(4_000);
+      // #16417 P2: the per-response limit the Turn reads must track the
+      // recovery re-clamp, not the initial grant — otherwise a MAX_TOKENS
+      // cut in the recovery round would name a stale, oversized limit.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(1).config?.maxOutputTokens,
+      );
     });
 
     it('re-clamps recovery sends even when an intermediate response omits usage metadata', async () => {
@@ -14720,6 +16320,48 @@ describe('LlmChat', async () => {
       ]);
     });
 
+    it('passes the retained-operation boundary and prompt ownership to the checkpoint', async () => {
+      const retained = modelText('latest original response');
+      markApiHistoryPrompt(retained, 'original-prompt');
+      const compressed = compressResult(
+        CompressionStatus.COMPRESSED,
+        [
+          userText('summary'),
+          modelText('Understood.'),
+          userText('Recent operation follows.'),
+          retained,
+        ],
+        1000,
+        200,
+        true,
+      );
+      compressed.info.summaryPrefixLength = 3;
+      mockCompress(compressed);
+      const observer = vi.fn();
+      chat.setCompressionObserver(observer);
+      const pending = userText('next question');
+      markApiHistoryPrompt(pending, 'next-prompt');
+
+      await chat.tryCompress('next-prompt', true, undefined, {
+        pendingUserMessage: pending,
+      });
+
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          summaryPrefixLength: 3,
+          compressedHistory: [
+            userText('summary'),
+            modelText('Understood.'),
+            userText('Recent operation follows.'),
+            retained,
+            pending,
+          ],
+          promptIds: [null, null, null, 'original-prompt', 'next-prompt'],
+        }),
+      );
+      expect(chat.getHistoryShallow()[3]).toEqual(retained);
+    });
+
     it('keeps live history unchanged when the Managed compression checkpoint is refused', async () => {
       mockCompressionService('compressed');
       const before = [userText('old question'), modelText('old answer')];
@@ -14851,6 +16493,36 @@ describe('LlmChat', async () => {
       ).toBeUndefined();
     });
 
+    it.each([false, true])(
+      'records the full-compaction prefix during fast compression (attachment: %s)',
+      async (attachment) => {
+        pinFastCompressionIdleClear();
+        const compacted = await composePostCompactHistory([], 'Summary.', {
+          maxFiles: 0,
+          planModeActive: attachment,
+        });
+        const recordChatCompression = vi.fn();
+        const fastChat = newChat({
+          history: [...compacted, ...thoughtHistory()],
+          recorder: { recordChatCompression },
+        });
+        const result = fastChat.compressFast();
+        expect(result.info.compressionStatus).toBe(
+          CompressionStatus.COMPRESSED,
+        );
+        expect(recordChatCompression).toHaveBeenCalledOnce();
+        expect(recordChatCompression.mock.calls[0][0].summaryPrefixLength).toBe(
+          attachment ? 3 : 2,
+        );
+        expect(
+          recordChatCompression.mock.calls[0][0].compressedHistory.slice(
+            0,
+            compacted.length,
+          ),
+        ).toEqual(compacted);
+      },
+    );
+
     // Issue #9309: /compress-fast then /compress banners use two scales (API
     // count incl. system prompt + tools vs a history-only re-estimate), so
     // each exposes its estimated side instead of implying lost context.
@@ -14889,6 +16561,34 @@ describe('LlmChat', async () => {
       );
       expect(info.originalTokenCountIsEstimated).toBe(true);
     });
+
+    it.each([
+      { estimated: false, options: undefined, expected: 321 },
+      { estimated: true, options: undefined, expected: 0 },
+      {
+        estimated: false,
+        options: { precomputedEffectiveTokens: 6000 },
+        expected: 0,
+      },
+      {
+        estimated: false,
+        options: {
+          originalTokenCountOverride: { count: 6000, isEstimated: false },
+        },
+        expected: 0,
+      },
+    ])(
+      'only forwards unaccounted output for a prompt-only API baseline: %j',
+      async ({ estimated, options, expected }) => {
+        const compressSpy = mockCompressionService('compressed');
+        chat.setHistory([userText('a'), modelText('b')]);
+        chat.seedResumeTokenCounts(5000, 321, estimated);
+        await chat.tryCompress('output-accounting', true, undefined, options);
+        expect(compressSpy.mock.calls[0][1].unaccountedOutputTokens).toBe(
+          expected,
+        );
+      },
+    );
 
     it('reports an authoritative original count when the API count is fresh', async () => {
       mockCompressionService('compressed');
@@ -15060,6 +16760,13 @@ describe('LlmChat', async () => {
     });
 
     const fixedInputSetters = [
+      [
+        'resolved system instruction',
+        (changed: boolean) =>
+          chat.setSystemInstructionResolver(() =>
+            changed ? 'x'.repeat(20_000) : 'base',
+          ),
+      ],
       [
         'system instruction',
         (changed: boolean) =>
@@ -16200,6 +17907,8 @@ describe('LlmChat', async () => {
       vi.mocked(promptMirror()).mockClear();
       vi.mocked(cachedMirror()).mockClear();
       catalog = 'catalog';
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
       expect(chat.getLastCachedContentTokenCount()).toBe(0);
@@ -16251,12 +17960,16 @@ describe('LlmChat', async () => {
     it('restores retained counts when the route switches back (#9506)', () => {
       chat.seedResumeTokenCounts(321, 45, true);
       switchRoute('anthropic-model@beef1234');
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
 
       // Back on the original route: the exact retained prompt, output and
       // provenance, not the zero a foreign touch used to leave behind.
       switchRoute('gemini-pro@test0001');
+      vi.mocked(promptMirror()).mockClear();
+      expect(chat.peekLastPromptTokenCount()).toBe(321);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(321);
       expect(chat.getLastOutputTokenCount()).toBe(45);
       expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
@@ -17142,20 +18855,35 @@ describe('LlmChat', async () => {
         expect(compressSpy).toHaveBeenCalledTimes(2);
       });
 
-      it('surfaces an actionable error when compaction cannot recover the 413', async () => {
-        const compressSpy = noopThen(
-          failed(CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY, 90_000),
-        );
-        failThen([sdkStyle413()]);
-
-        const stream = await send(
-          'next prompt',
+      // Only an API failure is transient and keeps the original 413 (the
+      // propagation cases below). Any other failure status earns the
+      // new-session advice. A history too large for any compression request
+      // belongs here: a later send only adds to it (#9455).
+      it.each([
+        [
+          'compaction cannot recover the 413',
+          CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
           'prompt-id-413-compression-failed',
-        );
-        await expect(collect(stream)).rejects.toThrow(/start a new session/i);
-        expect(compressSpy).toHaveBeenCalledTimes(2);
-        expectStreamCalls(1);
-      });
+        ],
+        [
+          'the history is too large to compress',
+          CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          'prompt-id-413-input-too-large',
+        ],
+      ])(
+        'surfaces an actionable error when %s',
+        async (_label, status, promptId) => {
+          const compressSpy = noopThen(failed(status, 90_000));
+          failThen([sdkStyle413()]);
+
+          const caught = await sendCaught(promptId);
+
+          expect(caught?.message).toMatch(/start a new session/i);
+          expect(caught?.status).toBe(413);
+          expect(compressSpy).toHaveBeenCalledTimes(2);
+          expectStreamCalls(1);
+        },
+      );
 
       it('keeps token-wording overflow on the original reactive path', async () => {
         // Regression guard: the 413 classification must not change how

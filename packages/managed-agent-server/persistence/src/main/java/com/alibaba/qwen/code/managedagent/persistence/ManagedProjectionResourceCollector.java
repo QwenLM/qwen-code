@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -22,85 +22,83 @@ final class ManagedProjectionResourceCollector {
         transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
     }
 
-    static void release(JdbcTemplate jdbc, String scope, String kind, String owner) {
+    static void release(JdbcTemplate jdbc, String tenant, String session, String kind, String owner) {
         // Readers can still hold this body's old read view; collection waits for their leases.
         jdbc.update(
-                "UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW + " WHERE session_scope_key = ? AND kind IN ("
+                "UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND kind IN ("
                         + KINDS
-                        + ") AND state = 'REFERENCED' AND publication_id IS NULL AND resource_key"
-                        + " IN (SELECT f.resource_key FROM ma_resource_ref f WHERE"
-                        + " f.session_scope_key = ? AND f.owner_kind = ? AND f.owner_key = ?)",
-                scope,
-                scope,
+                        + ") AND state = 'REFERENCED' AND publication_id IS NULL AND resource_id"
+                        + " IN (SELECT f.resource_id FROM ma_resource_ref f WHERE"
+                        + " f.tenant_id = ? AND f.session_id = ? AND f.owner_kind = ? AND f.owner_ref = ?)",
+                tenant,
+                session,
+                tenant,
+                session,
                 kind,
-                owner);
+                ManagedSchemaKeys.identity(owner));
     }
 
     boolean runOnce() {
         boolean changed = false;
         var candidates = jdbc.queryForList(
-                        "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.is_csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
+                        "SELECT resource_id, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " ORDER BY retention_until, tenant_id, session_id, resource_id LIMIT "
                                 + BATCH);
         for (var candidate : candidates) {
             changed |= Boolean.TRUE.equals(JdbcManagedSessionStore.skipContended(transactions,
                     status -> collect((String) candidate.get("tenant_id"),
                             (String) candidate.get("session_id"),
-                            (String) candidate.get("resource_key"))));
+                            (String) candidate.get("resource_id"))));
         }
         return changed;
     }
 
-    private boolean collect(String tenant, String session, String key) {
+    private boolean collect(String tenant, String session, String resourceId) {
         JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                 jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-            return false;
-        }
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         var rows =
                 jdbc.queryForList(
-                        "SELECT resource_key FROM ma_resource WHERE resource_key = ? AND"
-                            + " session_scope_key = ? AND tenant_id = ? AND session_id = ? AND kind"
+                        "SELECT resource_id FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND kind"
                             + " IN ("
                                 + KINDS
-                                + ") AND retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND publication_id IS NULL AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL AND deletion_operation_key IS NULL FOR UPDATE",
-                        key,
-                        scope,
+                                + ") AND retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND publication_id IS NULL AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL AND deletion_operation_ref IS NULL FOR UPDATE",
                         tenant,
-                        session);
+                        session,
+                        resourceId);
         if (rows.isEmpty()) {
             return false;
         }
         var refs = jdbc.queryForList(
-                        "SELECT resource_key FROM ma_resource_ref WHERE resource_key = ? LIMIT 1"
-                                + " FOR UPDATE", key);
+                        "SELECT resource_id FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND resource_id = ? LIMIT 1"
+                                + " FOR UPDATE", tenant, session, resourceId);
         if (!refs.isEmpty()) {
             // Whichever owner still references it will mark it again when that reference is
             // released.
             jdbc.update(
-                    "UPDATE ma_resource SET retention_until = NULL WHERE resource_key = ?", key);
+                    "UPDATE ma_resource SET retention_until = NULL WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                    tenant, session, resourceId);
             return false;
         }
         long now = ToolPublicationRetentionStore.now(jdbc);
         boolean protectedBody = !jdbc.queryForList(
-                                "SELECT tenant_id FROM ma_session_head WHERE tenant_key = ? AND"
-                                    + " harness_key = ? AND tenant_id = ? AND session_id = ? AND"
+                                "SELECT tenant_id FROM ma_session_head WHERE tenant_id = ? AND"
+                                    + " harness_session_id = ? AND session_id = ? AND"
                                     + " head_kind = 'MANAGED_SESSION' AND recovery_status <>"
                                     + " 'READY'",
-                ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session), tenant, session).isEmpty();
+                tenant, session, session).isEmpty();
         protectedBody |= !jdbc.queryForList(
                                 "SELECT session_id FROM ma_session WHERE tenant_id = ? AND"
                                         + " session_id = ? AND is_recovery_protected = TRUE",
                 tenant, session).isEmpty();
         protectedBody |= !jdbc.queryForList(
-                                "SELECT lease_id FROM ma_read_lease WHERE tenant_key = ? AND"
-                                        + " session_key = ? AND expires_at > ? LIMIT 1",
-                ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session), now).isEmpty();
+                                "SELECT lease_id FROM ma_read_lease WHERE tenant_id = ? AND"
+                                        + " session_id = ? AND expires_at > ? LIMIT 1",
+                tenant, session, now).isEmpty();
         protectedBody |=
                 !jdbc.queryForList(
-                                "SELECT w.operation_key FROM ma_operation_work w JOIN ma_operation"
-                                    + " o ON o.operation_key = w.operation_key WHERE w.tenant_id ="
+                                "SELECT w.operation_ref FROM ma_operation_work w JOIN ma_operation"
+                                    + " o ON o.operation_ref = w.operation_ref WHERE w.tenant_id ="
                                     + " ? AND w.session_id = ? AND w.work_kind = 'SESSION' AND"
                                     + " o.operation_kind = 'WORKSPACE_RECOVERY' AND o.state IN"
                                     + " ('CAPTURING', 'VERIFYING') LIMIT 1 FOR UPDATE",
@@ -109,13 +107,15 @@ final class ManagedProjectionResourceCollector {
                         .isEmpty();
         if (protectedBody) {
             jdbc.update(
-                    "UPDATE ma_resource SET retention_until = (" + ManagedSchemaTime.SQL_NOW + " + 60000) WHERE resource_key = ?", key);
+                    "UPDATE ma_resource SET retention_until = (" + ManagedSchemaTime.SQL_NOW + " + 60000) WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                    tenant, session, resourceId);
             return false;
         }
         // SQL inline deletion and its non-referenceable tombstone commit atomically; no external
         // I/O.
         return jdbc.update(
                         "UPDATE ma_resource SET inline_bytes = NULL, state = 'COLLECTED',"
-                                + " retention_until = NULL WHERE resource_key = ?", key) == 1;
+                                + " retention_until = NULL WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                        tenant, session, resourceId) == 1;
     }
 }

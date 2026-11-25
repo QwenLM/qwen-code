@@ -47,6 +47,18 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
     WEBSHELL_SIDE_QUERY_STREAM(Method.POST, "/api/agent/web-shell/v1/session-side-queries/stream",
             Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
+    WEBSHELL_CLIENT_FILES_REGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/register",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_REGISTER)),
+    WEBSHELL_CLIENT_FILES_UNREGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/unregister",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_UNREGISTER)),
+    WEBSHELL_CLIENT_FILES_STATUS(Method.POST, "/api/agent/web-shell/v1/client-files/status",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STATUS)),
+    WEBSHELL_CLIENT_FILES_STREAM(Method.POST, "/api/agent/web-shell/v1/client-files/requests/stream",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STREAM)),
+    WEBSHELL_CLIENT_FILES_RESPOND(Method.POST, "/api/agent/web-shell/v1/client-files/responses",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_RESPOND)),
+    INTERNAL_CLIENT_FILES_MCP(Method.POST, "/internal/managed-client-files/v1/sessions/{sessionId}/mcp",
+            Surface.INTERNAL, RuleClass.INTERNAL_CLIENT_FILES, EnumSet.of(Capability.INTERNAL_CLIENT_FILES_MCP)),
     INTERNAL_SIDE_QUERY_INPUT(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input",
             Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
@@ -80,6 +92,12 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_LIST)),
     INTERNAL_MEMORY_QUERY(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/memory:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_MEMORY_QUERY)),
+    INTERNAL_AUTOMATION_CREATE(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/automations:create",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_AUTOMATION_CREATE)),
+    INTERNAL_AUTOMATION_LIST(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/automations:list",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_AUTOMATION_LIST)),
+    INTERNAL_AUTOMATION_RETIRE(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/automations:retire",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_AUTOMATION_RETIRE)),
     PUBLIC_SESSION_ACTIVITY_STATS(Method.GET, "/v1/agents/sessions/{sessionId}/activity-stats",
             Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_ACTIVITY_STATS)),
     WEBSHELL_SESSION_ACTIVITY_STATS(Method.POST, "/api/agent/web-shell/v1/session-activity-stats/query",
@@ -354,6 +372,51 @@ public enum SurfaceRegistry {
             "/v1/agent-channels/{channelId}/deliveries/{deliveryId}",
             Surface.PUBLIC, RuleClass.TENANT_SCOPED,
             EnumSet.of(Capability.CHANNEL_DELIVERY_GET)),
+    // ManagedChannelAdapterController: the trusted adapter surface (H5b/H5c
+    // and the PR-watch bound-session slice), mounted on the isolated internal
+    // listener behind qwen.managed-agent.channels.enabled. The tenant header
+    // is the whole per-request admission; the deployment boundary authorizes
+    // the adapter, and the service validates the channel and its Workspace.
+    INTERNAL_CHANNEL_ADAPTER_REGISTER(Method.PUT,
+            "/internal/managed-channels/v1/channels/{channelId}",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_REGISTER)),
+    INTERNAL_CHANNEL_ADAPTER_DISCONNECT(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/disconnect",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DISCONNECT)),
+    INTERNAL_CHANNEL_ADAPTER_INBOUND(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/inbound",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_INBOUND)),
+    INTERNAL_CHANNEL_ADAPTER_DELIVERY_CLAIM(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/deliveries:claim",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DELIVERY_CLAIM)),
+    INTERNAL_CHANNEL_ADAPTER_DELIVERY_RECEIPT(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/deliveries/{deliveryId}:receipt",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DELIVERY_RECEIPT)),
+    INTERNAL_CHANNEL_ADAPTER_DELIVERY_RESEND(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/deliveries/{deliveryId}:resend",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DELIVERY_RESEND)),
+    INTERNAL_PR_WATCH_BINDING_CREATE(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:create",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_BINDING_CREATE)),
+    INTERNAL_PR_WATCH_BINDING_LIST(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:list",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_BINDING_LIST)),
+    INTERNAL_PR_WATCH_BINDING_RETIRE(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:retire",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_BINDING_RETIRE)),
+    INTERNAL_PR_WATCH_INJECT(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:inject",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_INJECT)),
     // AgentDefinitionController: tenant-scoped agent definition routes.
     PUBLIC_AGENT_DEFINITION_CREATE(Method.POST, "/v1/agents",
             Surface.PUBLIC, RuleClass.TENANT_SCOPED,
@@ -440,6 +503,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/sessions/create",
             Surface.WEBSHELL, RuleClass.WORKSPACE_CREATE,
             EnumSet.of(Capability.SESSION_CREATE)),
+    WEBSHELL_SESSION_TERMINAL_TICKET(Method.POST,
+            "/api/agent/web-shell/v1/sessions/terminal-ticket",
+            Surface.WEBSHELL, RuleClass.OPERATOR,
+            EnumSet.of(Capability.SESSION_TERMINAL_TICKET)),
     WEBSHELL_TURN_SUBMIT(Method.POST, "/api/agent/web-shell/v1/turns/submit",
             Surface.WEBSHELL, RuleClass.OPERATOR,
             EnumSet.of(Capability.TURN_SUBMIT)),
@@ -492,6 +559,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/artifacts/query",
             Surface.WEBSHELL, RuleClass.READER_ACTOR,
             EnumSet.of(Capability.ARTIFACT_LIST)),
+    WEBSHELL_WORKSPACE_ARTIFACT_LIST(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/artifacts/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_ARTIFACT,
+            EnumSet.of(Capability.WORKSPACE_ARTIFACT_LIST)),
     WEBSHELL_WORKSPACE_LIST(Method.POST,
             "/api/agent/web-shell/v1/workspaces/query",
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
@@ -582,6 +653,10 @@ public enum SurfaceRegistry {
             "/internal/managed-workspaces/v1/storage:register-external",
             Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
             EnumSet.of(Capability.EXTERNAL_STORAGE_REGISTER)),
+    INTERNAL_EXTERNAL_WORKSPACE_MATERIALIZE(Method.POST,
+            "/internal/managed-workspaces/v1/workspace:materialize-external",
+            Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
+            EnumSet.of(Capability.EXTERNAL_WORKSPACE_MATERIALIZE)),
     INTERNAL_APPROVAL_QUERY(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
@@ -838,11 +913,14 @@ public enum SurfaceRegistry {
     public enum Capability {
         SIDE_QUERY_CREATE, SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT, SIDE_QUERY_GET, SIDE_QUERY_CANCEL, SIDE_QUERY_STREAM,
         STORE_SIDE_QUERY,
+        CLIENT_FILES_REGISTER, CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS, CLIENT_FILES_STREAM, CLIENT_FILES_RESPOND,
+        INTERNAL_CLIENT_FILES_MCP,
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
         SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
+        EXTERNAL_WORKSPACE_MATERIALIZE,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
         SESSION_LIST,
@@ -856,6 +934,7 @@ public enum SurfaceRegistry {
         SESSION_DELETE,
         SESSION_OPERATION_GET,
         SESSION_CONTEXT_COMPRESSION,
+        SESSION_TERMINAL_TICKET,
         TURN_SUBMIT,
         TURN_CANCEL,
         TAIL_EVENTS,
@@ -877,6 +956,7 @@ public enum SurfaceRegistry {
         ARTIFACT_LIST,
         ARTIFACT_GET,
         ARTIFACT_CONTENT,
+        WORKSPACE_ARTIFACT_LIST,
         WORKSPACE_CREATE,
         WORKSPACE_DIRECTORIES,
         WORKSPACE_FILES_QUERY,
@@ -910,6 +990,16 @@ public enum SurfaceRegistry {
         CHANNEL_LIST,
         CHANNEL_DELIVERY_LIST,
         CHANNEL_DELIVERY_GET,
+        CHANNEL_ADAPTER_REGISTER,
+        CHANNEL_ADAPTER_DISCONNECT,
+        CHANNEL_ADAPTER_INBOUND,
+        CHANNEL_ADAPTER_DELIVERY_CLAIM,
+        CHANNEL_ADAPTER_DELIVERY_RECEIPT,
+        CHANNEL_ADAPTER_DELIVERY_RESEND,
+        PR_WATCH_BINDING_CREATE,
+        PR_WATCH_BINDING_LIST,
+        PR_WATCH_BINDING_RETIRE,
+        PR_WATCH_INJECT,
         AGENT_DEFINITION_CREATE,
         AGENT_DEFINITION_GET,
         AGENT_DEFINITION_UPDATE,
@@ -920,6 +1010,9 @@ public enum SurfaceRegistry {
         AUTOMATION_RETIRE,
         AUTOMATION_RUN,
         AUTOMATION_RUN_LIST,
+        STORE_AUTOMATION_CREATE,
+        STORE_AUTOMATION_LIST,
+        STORE_AUTOMATION_RETIRE,
         STORE_APPROVAL_QUERY,
         STORE_MODEL_CONFIG_QUERY,
         STORE_EXECUTION_AUTHORIZE,
@@ -966,6 +1059,33 @@ public enum SurfaceRegistry {
         SIDE_QUERY_ACTOR,
         /** Query-scoped claim, boot and generation; never a Session writer grant. */
         INTERNAL_SIDE_QUERY,
+        /**
+         * Client files registration and teardown: the read grant ({@code 404
+         * session_not_found} below it) plus current execution authority on the
+         * bound ACTIVE Workspace ({@code 403 client_files_execution_forbidden}
+         * below it). The {@code 503 client_files_disabled} refusal while the
+         * deployment opt-in is off is a service-layer flag check
+         * ({@code requireEnabled}), not an admission arm of this rule class, so
+         * the anonymous admission probes never reach it.
+         */
+        CLIENT_FILES_OPERATOR,
+        /**
+         * Client files reads and browser uplink: the read grant, then the
+         * registering actor's own active binding ({@code 404
+         * client_files_not_found} for any other actor or a closed binding,
+         * {@code 409 client_files_generation_conflict} for a stale
+         * generation). The status read answers an absent binding with an
+         * empty 200.
+         */
+        CLIENT_FILES_ACTOR,
+        /**
+         * The Runtime-facing MCP leg: no actor; the session relay credential
+         * issued at registration is the only admission ({@code 403
+         * client_files_credential_invalid} without it). On a dedicated
+         * internal listener the routing filter answers a public-connector
+         * caller {@code 404}.
+         */
+        INTERNAL_CLIENT_FILES,
         /** Authenticated tenant actor, restricted to that actor's personal Store. */
         PERSONAL_MEMORY,
         SESSION_WORKTREE,
@@ -1011,6 +1131,16 @@ public enum SurfaceRegistry {
          * {@code 403 artifact_content_forbidden}.
          */
         READER_ACTOR_POLICY,
+        /**
+         * Workspace-wide artifact metadata: a trusted actor ({@code 401
+         * actor_required} without one) holding a READER grant on the
+         * Workspace ({@code 404 workspace_not_found} below it, including
+         * unknown Workspaces). The page filters each row by the Session's
+         * current binding and owner-only visibility, and the deployment
+         * artifact gate answers {@code 404 artifact_not_found} when reads
+         * are off. No legacy arm: unbound Sessions never list.
+         */
+        WORKSPACE_ARTIFACT,
         /**
          * The OPERATOR families. Turn submit, Turn cancel, rename and cwd
          * change admit a caller holding OPERATOR or above on the bound
@@ -1123,6 +1253,19 @@ public enum SurfaceRegistry {
          * answers a public-connector caller {@code 404}.
          */
         INTERNAL_WRITER,
+        /**
+         * The trusted channel adapter surface: no actor and no per-request
+         * credential. The tenant header is the whole request admission
+         * ({@code 400 invalid_tenant} without it, {@code 403
+         * actor_scope_mismatch} for a cross-tenant principal); the adapter
+         * deployment on the isolated internal listener behind {@code
+         * qwen.managed-agent.channels.enabled} is the trust boundary, and
+         * the channel itself is the first domain gate ({@code 404
+         * channel_not_found}). The PR-watch binding writes validate the
+         * target Session against the channel instance's Workspace inside
+         * the service; injection forces the bound Session as its target.
+         */
+        INTERNAL_CHANNEL_ADAPTER,
         INTERNAL_OPERATOR
     }
 }

@@ -1022,10 +1022,14 @@ export function createDaemonWorkspaceActions({
     // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
     // DaemonClient transport; the clear path reuses the existing per-session
     // route so a page-level clear and a `/goal clear` in chat take the same
-    // code path in the daemon.
-    async listGoals() {
+    // code path in the daemon. With a `workspaceId` the listing targets that
+    // workspace's qualified route; without one it hits the primary surface.
+    async listGoals(workspaceId) {
       requireClient(getClient, 'List goals failed');
-      const url = createDaemonRequestUrl(baseUrl, '/goals');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/goals`
+        : '/goals';
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         requestRest(url, {
           headers: createDaemonHeaders(token),
@@ -1033,7 +1037,7 @@ export function createDaemonWorkspaceActions({
         'List goals timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, 'GET /goals'));
+        throw new Error(await readDaemonError(res, `GET ${path}`));
       }
       const data = (await res.json()) as {
         goals?: unknown[];
@@ -1436,6 +1440,20 @@ export function createDaemonWorkspaceActions({
         'Remove workspace timed out',
         options?.timeoutMs,
       );
+    },
+
+    async artifactLibrary(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Load artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibrary({ signal: options?.signal });
+    },
+
+    artifactLibraryStream(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Stream artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibraryStream({ signal: options?.signal });
     },
   };
 }
