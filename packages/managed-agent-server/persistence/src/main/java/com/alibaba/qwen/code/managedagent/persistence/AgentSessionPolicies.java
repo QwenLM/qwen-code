@@ -199,6 +199,9 @@ final class AgentSessionPolicies {
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
                 compiled.toolProfile(), content.containsKey("hook_catalog"),
+                // The stored read: a definition this deployment pinned is
+                // read back under the wider bound it was admitted with, so
+                // an older pin cannot wedge its Session out of the estimate.
                 !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile(), true).isEmpty(),
                 AgentDefinitionExtensions.skills(content.get("skills"), true));
     }

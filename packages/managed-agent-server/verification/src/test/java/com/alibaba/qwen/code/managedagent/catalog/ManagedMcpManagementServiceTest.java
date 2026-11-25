@@ -111,12 +111,24 @@ class ManagedMcpManagementServiceTest {
                 .thenReturn(snapshot(9_007_199_254_740_990L));
         assertThat(service.operation("tenant", "actor", "session", operation)
                 .path("revision").asLong()).isEqualTo(9_007_199_254_740_990L);
+        // The read path accepts exactly what submit() admits. 2^53-1 is inside
+        // both bounds, so a command committed at the top revision can be read
+        // back instead of turning into a 503 on its own snapshot.
         when(harness.mcpManagementOperation("tenant", "session", operation)).thenReturn(snapshot(9_007_199_254_740_991L));
-        assertThatThrownBy(() -> service.operation("tenant", "actor", "session", operation))
-                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                    assertThat(error.getStatus()).isEqualTo(503);
-                    assertThat(error.getCode()).isEqualTo("managed_mcp_management_unavailable");
-                });
+        assertThat(service.operation("tenant", "actor", "session", operation)
+                .path("revision").asLong()).isEqualTo(9_007_199_254_740_991L);
+    }
+
+    @Test
+    void readsBackARevisionThatSubmitAdmittedAtTheTopOfTheRange() {
+        var operation = "11111111-1111-4111-8111-111111111111";
+        var command = new ManagedMcpManagementCommand("add", "docs", 9_007_199_254_740_991L,
+                new ManagedMcpServerPin("docs", 2, "a".repeat(64)));
+        service.submit("tenant", "actor", "session", "key", command);
+        when(harness.mcpManagementOperation("tenant", "session", operation))
+                .thenReturn(snapshot(9_007_199_254_740_991L));
+        assertThat(service.operation("tenant", "actor", "session", operation)
+                .path("revision").asLong()).isEqualTo(9_007_199_254_740_991L);
     }
 
     private static Map<String, Object> snapshot() {
