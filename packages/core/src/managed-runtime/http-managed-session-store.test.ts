@@ -25,6 +25,7 @@ import {
   collectNestedResourceRefs,
   createHttpManagedSessionStores,
   readOnlyManagedSessionSnapshot,
+  type HttpManagedSessionStores,
 } from './http-managed-session-store.js';
 import type { McpConfiguration } from './managed-mcp-record.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
@@ -2892,6 +2893,79 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it('carries the action-parking capability and seal certificate', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsActionParking()).toBe(true);
+    await session.authority.close({
+      pending: false,
+      dueAt: 0,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345, approvalRevision: 7 },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: false,
+      dueAt: 0,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345, approvalRevision: 7 },
+    });
+  });
+
+  it('carries a park certificate beside a background hold', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsBackgroundActionParking()).toBe(false);
+    server.backgroundActionParking = true;
+    await stores.assertWritable();
+    expect(stores.supportsBackgroundActionParking()).toBe(true);
+    await session.authority.close({
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+  });
+
+  it("carries a wake-started Turn's park certificate with its wake claim", async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsWakeActionParking()).toBe(false);
+    server.wakeActionParking = true;
+    await stores.assertWritable();
+    expect(stores.supportsWakeActionParking()).toBe(true);
+    await session.authority.close({
+      pending: true,
+      dueAt: 2345,
+      parkedTurn: {
+        promptId: 'monitor-1:notify:1',
+        wakeAt: 2345,
+        owner: 'wake',
+      },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: true,
+      dueAt: 2345,
+      parkedTurn: {
+        promptId: 'monitor-1:notify:1',
+        wakeAt: 2345,
+        owner: 'wake',
+      },
+    });
+  });
+
   it('sends no wake stamp on a bare seal', async () => {
     const server = new FakeManagedSessionStore();
     server.wakeDispatch = true;
@@ -2900,17 +2974,22 @@ describe('HTTP Managed Session store', () => {
     expect(server.sealBodies.at(-1)).not.toHaveProperty('wake');
   });
 
-  it('refreshes the wake-dispatch capability on every ordinary writer renewal', async () => {
+  it('refreshes grant capabilities on every ordinary writer renewal', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
     try {
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
       server.wakeDispatch = true;
+      server.actionParking = true;
       await stores.assertWritable();
       expect(stores.supportsWakeDispatch()).toBe(true);
+      expect(stores.supportsActionParking()).toBe(true);
       server.wakeDispatch = false;
+      server.actionParking = false;
       await stores.assertWritable();
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
     } finally {
       await session.close().catch(() => undefined);
     }
@@ -2922,9 +3001,12 @@ describe('HTTP Managed Session store', () => {
     const { stores, authority } = await bootOriginalCsiAuthority(server);
     try {
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
       server.wakeDispatch = true;
+      server.actionParking = true;
       await authority.renewActivation({ leaseDurationMs: 60_000 });
       expect(stores.supportsWakeDispatch()).toBe(true);
+      expect(stores.supportsActionParking()).toBe(true);
     } finally {
       await stores.stopLocal();
     }
@@ -8052,6 +8134,246 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('keeps pre-fix config_install snapshots readable and commits a persisted record closure', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    let recovered: HttpManagedSessionStores | undefined;
+    try {
+      const bundleRef = await session.resources.publish(
+        'managed-extension-config-bundle',
+        Buffer.from('{}', 'utf8'),
+      );
+      const rootSnapshotRef = await session.resources.publish(
+        'managed-extension-root',
+        Buffer.from('{}', 'utf8'),
+      );
+      const stageAckRefs = await Promise.all([
+        session.resources.publish(
+          'managed-extension-stage-ack',
+          Buffer.from('{"stage":"host"}', 'utf8'),
+        ),
+        session.resources.publish(
+          'managed-extension-stage-ack',
+          Buffer.from('{"stage":"runtime"}', 'utf8'),
+        ),
+      ]);
+      const operationId = randomUUID();
+      const content = {
+        kind: 'hosted-extension-config',
+        formatVersion: 1,
+        command: {
+          operationId,
+          actorKey: 'b'.repeat(64),
+          expectedRevision: 0,
+          extensions: [],
+        },
+        mode: 'apply',
+        phaseOperationId: operationId,
+        configRevision: 1,
+        previousConfigRevision: 0,
+        phase: 'preparing',
+        previousBundleRef: null,
+        restoresBundleRef: null,
+        bundleRef,
+        rootSnapshotRef,
+        stageAckRefs: [],
+        enableAckRefs: [],
+        error: null,
+      } as const;
+      const preparingReceipt = await session.authority.commitDomainRecord(
+        {
+          operation: 'extensionConfig.apply.preparing',
+          commandId: operationId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'c'.repeat(64),
+        },
+        { domain: 'config_install', content },
+        { class: 'trusted_entry' },
+      );
+      const receipt = await session.authority.commitDomainRecord(
+        {
+          operation: 'extensionConfig.apply.prepared',
+          commandId: operationId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'c'.repeat(64),
+        },
+        {
+          domain: 'config_install',
+          content: {
+            ...content,
+            phase: 'prepared',
+            stageAckRefs,
+          },
+        },
+        { class: 'trusted_entry' },
+      );
+      expect(receipt.recordRef.kind).toBe('managed-config_install');
+
+      // After the domain commit releases its staged rows, this call exercises
+      // the persisted arm gated by isReferenceContainer.
+      interface CommittingResourceStore {
+        commitResources(
+          refs: readonly ManagedSessionDurableRef[],
+        ): Promise<Array<{ resourceId: string }>>;
+      }
+      // The public fixture type exposes publish/read only; this test pins the
+      // store's private commit walk through its checked-in contract.
+      const committingStore =
+        stores.resourceStore as unknown as CommittingResourceStore;
+      const census = await committingStore.commitResources([receipt.recordRef]);
+      expect(census.map((resource) => resource.resourceId)).toEqual(
+        expect.arrayContaining([
+          receipt.recordRef.resourceId,
+          bundleRef.resourceId,
+          rootSnapshotRef.resourceId,
+          ...stageAckRefs.map((ref) => ref.resourceId),
+        ]),
+      );
+
+      // A later transaction directly carries one child, proving a child first
+      // committed after the record's revision does not condemn the old edge.
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'config-install-late-child',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'd'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:config-install-late-child',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-config-install-late-child',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [stageAckRefs[0]],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+
+      const configRecordByOperation = new Map([
+        ['extensionConfig.apply.preparing', preparingReceipt.recordRef],
+        ['extensionConfig.apply.prepared', receipt.recordRef],
+      ]);
+      for (const commit of server.commits) {
+        const recordRef = configRecordByOperation.get(
+          String(commit['operation']),
+        );
+        if (recordRef === undefined) continue;
+        commit['resources'] = (
+          commit['resources'] as Array<Record<string, unknown>>
+        ).filter((resource) => resource['resourceId'] === recordRef.resourceId);
+      }
+      for (const ref of [bundleRef, rootSnapshotRef, stageAckRefs[1]!]) {
+        server.deleteResource(ref);
+      }
+
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const resourcesById = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as Array<
+          Record<string, unknown>
+        >) {
+          const ref = {
+            resourceId: String(raw['resourceId']),
+            kind: String(raw['kind']),
+            schemaVersion: Number(raw['schemaVersion']),
+            byteLength: Number(raw['byteLength']),
+            digest: String(raw['digest']),
+          };
+          const bytesBase64 = (await session.resources.read(ref)).toString(
+            'base64',
+          );
+          const row = resourcesById.get(ref.resourceId);
+          if (row === undefined) {
+            resourcesById.set(ref.resourceId, {
+              ref,
+              bytesBase64,
+              referencedRevisions: [index + 1],
+            });
+          } else {
+            row.referencedRevisions.push(index + 1);
+          }
+        }
+      }
+      const snapshotInput = {
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...resourcesById.values()],
+      };
+      const snapshot = readOnlyManagedSessionSnapshot(snapshotInput);
+      expect(await snapshot.resources.read(receipt.recordRef)).toEqual(
+        await session.resources.read(receipt.recordRef),
+      );
+      expect(await snapshot.resources.read(stageAckRefs[0]!)).toEqual(
+        await session.resources.read(stageAckRefs[0]!),
+      );
+      await expect(snapshot.resources.read(stageAckRefs[1]!)).rejects.toThrow(
+        'snapshot resource is missing.',
+      );
+
+      const expected = await (
+        await stores.journalStore.open({ sessionKey: SESSION_KEY })
+      ).read();
+      const fixture = nativeSnapshotFixture(
+        server,
+        server.storedTransactions.length,
+      );
+      await stores.stopLocal();
+      recovered = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-b',
+        writerToken: TOKEN_B,
+        fetchFn: fixture.fetchFn,
+      });
+      const journal = await recovered.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(await journal.read()).toEqual(expected);
+    } finally {
+      await recovered?.stopLocal().catch(() => undefined);
+      await session.close().catch(() => undefined);
+      await stores.close().catch(() => undefined);
+    }
+  });
+
   function nativeSnapshotFixture(
     server: FakeManagedSessionStore,
     coverage: number,
@@ -9507,6 +9829,9 @@ describe('HTTP Managed Session store', () => {
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   wakeDispatch = false;
+  actionParking = false;
+  backgroundActionParking = false;
+  wakeActionParking = false;
   readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
   readonly commits: Array<Record<string, unknown>> = [];
@@ -9521,6 +9846,10 @@ class FakeManagedSessionStore {
 
   editStoredTransaction(index: number, patch: Record<string, unknown>): void {
     Object.assign(this.transactions[index]!, patch);
+  }
+
+  deleteResource(ref: ManagedSessionDurableRef): void {
+    this.resources.delete(ref.resourceId);
   }
 
   /** The stored transaction records, for a test that rebuilds a page. */
@@ -9956,6 +10285,11 @@ class FakeManagedSessionStore {
     return {
       activationLeaseRenewal: this.activationLeaseRenewal,
       ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
+      ...(this.actionParking ? { actionParking: true } : {}),
+      ...(this.backgroundActionParking
+        ? { backgroundActionParking: true }
+        : {}),
+      ...(this.wakeActionParking ? { wakeActionParking: true } : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),
@@ -10114,6 +10448,86 @@ describe('collectNestedResourceRefs', () => {
         ),
       ),
     ).toEqual([contributionsRef]);
+  });
+
+  it('closes over a config_install record and every resource it names', () => {
+    // The leak: RESOURCE_REF_PATHS declares six edges for this kind and the
+    // cold-load RESTORE_CONTAINER_KINDS queue descends into it, but this walk
+    // answered [] — so the commit shipped the record without the bundle,
+    // root snapshot and acknowledgements it names, and a reopened reader
+    // found the record and 404'd on the hop the MCP settings history and the
+    // package selection both walk.
+    const ref = closureRef('managed-config_install', 'record');
+    const predecessorRef = closureRef('managed-config_install', 'predecessor');
+    const bundleRef = closureRef('managed-extension-config-bundle', 'bundle');
+    const previousBundleRef = closureRef(
+      'managed-extension-config-bundle',
+      'previous-bundle',
+    );
+    const restoresBundleRef = closureRef(
+      'managed-extension-config-bundle',
+      'restores-bundle',
+    );
+    const rootSnapshotRef = closureRef('managed-extension-root', 'root');
+    const stageAckRef = closureRef('managed-extension-stage-ack', 'stage');
+    const enableAckRef = closureRef('managed-extension-enable-ack', 'enable');
+    const nested = collectNestedResourceRefs(
+      ref,
+      Buffer.from(
+        JSON.stringify({
+          kind: 'hosted-extension-config',
+          revision: 2,
+          previousRecordRef: predecessorRef,
+          bundleRef,
+          previousBundleRef,
+          restoresBundleRef,
+          rootSnapshotRef,
+          stageAckRefs: [stageAckRef],
+          enableAckRefs: [enableAckRef],
+        }),
+      ),
+    );
+    // previousRecordRef is excluded: re-closing the chain would grow linearly
+    // (R1-2), and a pre-fix predecessor's children were never persisted (R1-1).
+    expect(nested).toHaveLength(6);
+    expect(nested).toEqual(
+      expect.arrayContaining([
+        bundleRef,
+        previousBundleRef,
+        restoresBundleRef,
+        rootSnapshotRef,
+        stageAckRef,
+        enableAckRef,
+      ]),
+    );
+    expect(nested).not.toEqual(expect.arrayContaining([predecessorRef]));
+    // The first revision names no predecessor and no restore target; its own
+    // edges still ship.
+    const first = collectNestedResourceRefs(
+      closureRef('managed-config_install', 'first'),
+      Buffer.from(
+        JSON.stringify({
+          kind: 'hosted-extension-config',
+          revision: 1,
+          previousRecordRef: null,
+          bundleRef,
+          rootSnapshotRef,
+          stageAckRefs: [],
+          enableAckRefs: [],
+        }),
+      ),
+    );
+    expect(first).toEqual(expect.arrayContaining([bundleRef, rootSnapshotRef]));
+    expect(first).toHaveLength(2);
+  });
+
+  it('labels a malformed config_install record instead of throwing a TypeError', () => {
+    expect(() =>
+      collectNestedResourceRefs(
+        closureRef('managed-config_install', 'malformed'),
+        Buffer.from('null', 'utf8'),
+      ),
+    ).toThrow(/config install record must be an object/);
   });
 
   it('refuses a malformed file history record instead of collapsing its closure', () => {

@@ -40,13 +40,13 @@ import type {
 import {
   DaemonHttpError,
   parseDaemonBackgroundTurn,
-  DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
   isDaemonTurnError,
   isStaleBranchPointError,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
+import { isDefinitelyRejectedPromptAdmission } from '../../utils/promptAdmission.js';
 import {
   extractHttpStatus,
   isInvalidClientIdError,
@@ -840,11 +840,28 @@ export function createDaemonSessionActions({
     );
   }
 
-  function isDefinitePromptAdmissionRejection(error: unknown): boolean {
-    return (
-      error instanceof DaemonHttpError ||
-      error instanceof DaemonPendingPromptLimitError
-    );
+  const PROMPT_ADMISSION_RETRY_DELAYS_MS = [400, 1200] as const;
+
+  function waitForAdmissionRetryDelay(
+    ms: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) {
+      return Promise.reject(
+        signal.reason ?? new DOMException('Aborted', 'AbortError'),
+      );
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   const registerAcceptedAttachmentSources = (
@@ -1488,6 +1505,9 @@ export function createDaemonSessionActions({
           prompt: uploaded.content,
           eventDetailMode: getEventDetailMode(),
         };
+        if (options?.idempotencyKey) {
+          promptRequest['idempotencyKey'] = options.idempotencyKey;
+        }
         options?.onAdmissionStarted?.();
         if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
           promptRequest['_meta'] = {
@@ -1502,19 +1522,52 @@ export function createDaemonSessionActions({
         }
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
         try {
-          accepted = await session.submitPrompt(
-            promptRequest as Parameters<typeof session.submitPrompt>[0],
-            ctrl.signal,
-            ...(options?.beforeDispatch ? [options.beforeDispatch] : []),
-          );
+          const request = promptRequest as Parameters<
+            typeof session.submitPrompt
+          >[0];
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              accepted = options?.beforeDispatch
+                ? await session.submitPrompt(
+                    request,
+                    ctrl.signal,
+                    options.beforeDispatch,
+                  )
+                : await session.submitPrompt(request, ctrl.signal);
+              break;
+            } catch (error) {
+              const retryDelayMs = PROMPT_ADMISSION_RETRY_DELAYS_MS[attempt];
+              if (
+                !options?.idempotencyKey ||
+                retryDelayMs === undefined ||
+                ctrl.signal.aborted ||
+                sessionRef.current !== session ||
+                isAbortError(error) ||
+                isDefinitelyRejectedPromptAdmission(error)
+              ) {
+                throw error;
+              }
+              await waitForAdmissionRetryDelay(retryDelayMs, ctrl.signal);
+              if (sessionRef.current !== session) {
+                throw new DOMException(
+                  'Session changed before prompt retry',
+                  'AbortError',
+                );
+              }
+            }
+          }
         } catch (error) {
           admissionError = true;
           publishStandaloneWorkingDirectoryError(sessionId, error);
-          const definiteRejection = isDefinitePromptAdmissionRejection(error);
+          const definiteRejection = isDefinitelyRejectedPromptAdmission(error);
           if (definiteRejection) {
             await removeUploadedAttachments(session, uploaded.references);
           }
-          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          if (
+            sessionRef.current === session &&
+            shouldAppendOptimisticMessage &&
+            !optimisticMessageAppended
+          ) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -1842,6 +1895,9 @@ export function createDaemonSessionActions({
         prompt: uploaded.content,
         eventDetailMode: getEventDetailMode(),
       };
+      if (options?.idempotencyKey) {
+        promptRequest['idempotencyKey'] = options.idempotencyKey;
+      }
       if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
         promptRequest['_meta'] = {
           ...(typeof options?.submittedPrompt === 'string'
@@ -1862,7 +1918,7 @@ export function createDaemonSessionActions({
         accepted = await session.submitPrompt(request);
       } catch (error) {
         publishStandaloneWorkingDirectoryError(session.sessionId, error);
-        const definiteRejection = isDefinitePromptAdmissionRejection(error);
+        const definiteRejection = isDefinitelyRejectedPromptAdmission(error);
         if (definiteRejection) {
           await removeUploadedAttachments(session, uploaded.references);
         }
@@ -1980,6 +2036,9 @@ export function createDaemonSessionActions({
           prompt: uploaded.content,
           eventDetailMode: getEventDetailMode(),
         };
+        if (options?.idempotencyKey) {
+          promptRequest['idempotencyKey'] = options.idempotencyKey;
+        }
         if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
           promptRequest['_meta'] = {
             ...(typeof options?.submittedPrompt === 'string'
@@ -1998,7 +2057,7 @@ export function createDaemonSessionActions({
             promptRequest as Parameters<typeof session.submitPrompt>[0],
           );
         } catch (error) {
-          if (isDefinitePromptAdmissionRejection(error)) {
+          if (isDefinitelyRejectedPromptAdmission(error)) {
             await removeUploadedAttachments(session, uploaded.references);
           }
           throw error;
@@ -3325,6 +3384,19 @@ export function createDaemonSessionActions({
           error,
           'recap_session',
         );
+      }
+    },
+
+    async rateAssistantTurn(promptId, rating) {
+      const session = sessionRef.current;
+      if (!session) return;
+      try {
+        await withActionTimeout(
+          session.rateSessionTurn(promptId, rating),
+          'Assistant feedback telemetry timed out',
+        );
+      } catch (error) {
+        console.warn('[web-shell] assistant feedback telemetry failed:', error);
       }
     },
 

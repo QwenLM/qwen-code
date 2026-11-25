@@ -30,7 +30,14 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   session_side_task: ['tasks'],
   session_sub_session_send: [],
   session_prompt: [],
+  turn_skill_file_snapshot: [],
+  turn_skill_session_effects_check: [],
+  turn_extension_store_lease: [],
+  session_retire_if_idle: [],
   session_turn_status: [],
+  // The marks gate on the capability directly in the app wiring; they are
+  // not a chat region, so no region flips with this tag.
+  session_turn_feedback: [],
   session_attachments: [],
   session_attachment_chunk_upload: [],
   session_attachment_list: [],

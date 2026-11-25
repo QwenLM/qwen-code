@@ -5414,6 +5414,138 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('requires snapshot capability before posting a pinned prompt and verifies its receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'hi' }],
+        pinSkills: true,
+        expectedSkillDigest: digest,
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: [] })
+          : jsonResponse(500, { error: 'unexpected prompt' }),
+      );
+      await expect(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }).promptNonBlocking(
+          's-1',
+          body,
+        ),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+
+      let admittedDigest = digest;
+      const { fetch: supported } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['turn_skill_file_snapshot'] })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 1,
+              skillDigest: admittedDigest,
+            }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: supported,
+      });
+      await expect(
+        client.promptNonBlocking('s-1', body),
+      ).resolves.toMatchObject({
+        promptId: 'p-1',
+        skillDigest: digest,
+      });
+      admittedDigest = 'b'.repeat(64);
+      await expect(client.promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm',
+      );
+    });
+
+    it('requires a usable event cursor and prompt identity in a pinned acceptance', async () => {
+      for (const receipt of [
+        { lastEventId: 0 },
+        { promptId: 'p', lastEventId: -1 },
+      ]) {
+        const { fetch } = recordingFetch((req) =>
+          req.url.endsWith('/capabilities')
+            ? jsonResponse(200, { features: ['turn_skill_file_snapshot'] })
+            : jsonResponse(202, { ...receipt, skillDigest: 'a'.repeat(64) }),
+        );
+        await expect(
+          new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch,
+          }).promptNonBlocking('s', {
+            pinSkills: true,
+            prompt: [{ type: 'text', text: 'test' }],
+          }),
+        ).rejects.toThrow('usable pinned prompt receipt');
+      }
+    });
+
+    it('rejects inconsistent resource pinning before contacting a legacy daemon', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const prompt = [{ type: 'text' as const, text: 'test' }];
+      for (const options of [
+        { expectedSkillDigest: 'a'.repeat(64) },
+        { pinExtensions: true, expectedExtensionGeneration: 1 },
+        { pinSkills: true, pinExtensions: true },
+        { pinSkills: true, expectedExtensionGeneration: 1 },
+        { pinSkills: true, expectedSkillDigest: 'invalid' },
+        {
+          pinSkills: true,
+          pinExtensions: true,
+          expectedExtensionGeneration: -1,
+        },
+      ]) {
+        await expect(
+          client.promptNonBlocking('s-1', { prompt, ...options }),
+        ).rejects.toThrow();
+        await expect(
+          client.prompt('s-1', { prompt, ...options }),
+        ).rejects.toThrow();
+      }
+      expect(calls).toHaveLength(0);
+    });
+
+    it('checks native skill session effects capability before sending and verifies its receipt', async () => {
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'guarded' }],
+        pinSkills: true,
+        requireSessionSkillEffects: true,
+      };
+      let capable = false;
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              features: capable
+                ? [
+                    'turn_skill_session_effects_check',
+                    'turn_skill_file_snapshot',
+                  ]
+                : ['turn_skill_file_snapshot'],
+            })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 0,
+              skillDigest: 'a'.repeat(64),
+            }),
+      );
+      const client = () =>
+        new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client().promptNonBlocking('s-1', body),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+      capable = true;
+      await expect(client().promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm the requested skill session effects',
+      );
+      expect(
+        calls.filter((call) => call.url.endsWith('/session/s-1/prompt')),
+      ).toHaveLength(1);
+    });
+
     it('maps invalid client id responses on non-blocking prompts', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/s-1/prompt')) {
@@ -8280,6 +8412,65 @@ describe('DaemonClient', () => {
         status,
         body,
         message: `POST /session/:id/model: ${expected}`,
+      });
+    });
+  });
+
+  describe('rateSessionTurn', () => {
+    it('POSTs promptId and rating and returns the recorded answer', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn('s-1', 'prompt-1', 'up');
+      expect(result).toEqual({ recorded: true });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/feedback');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'up',
+      });
+    });
+
+    it('sends the client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn(
+        's-1',
+        'prompt-1',
+        'down',
+        'client-1',
+      );
+      expect(result).toEqual({ recorded: false });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'down',
+      });
+    });
+
+    it('throws on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('surfaces the route label on failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: "`rating` must be 'up' or 'down'" }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining('POST /session/:id/feedback'),
       });
     });
   });

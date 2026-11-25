@@ -14,7 +14,7 @@ declare const __EXPORT_TRANSCRIPT_MAX_BLOCKS__: number;
 declare const __EXPORT_TRANSCRIPT_MAX_ENVELOPE_BYTES__: number;
 
 interface ExportTranscriptDocument {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   rendererVersion: string;
   blocks: DaemonTranscriptBlock[];
   metadata: {
@@ -55,6 +55,28 @@ function isOptionalNonNegativeNumber(
   );
 }
 
+function hasUnsupportedMetadata(block: unknown, schemaVersion: 1 | 2): boolean {
+  if (block === null || typeof block !== 'object' || !('meta' in block)) {
+    return false;
+  }
+  if (schemaVersion === 1) return true;
+  if (!('kind' in block) || block['kind'] !== 'user') return true;
+  const metadata = block['meta'];
+  if (
+    metadata === null ||
+    typeof metadata !== 'object' ||
+    Array.isArray(metadata)
+  ) {
+    return true;
+  }
+  const keys = Object.keys(metadata);
+  return (
+    keys.length !== 1 ||
+    keys[0] !== 'source' ||
+    (metadata as Record<string, unknown>)['source'] !== 'cron'
+  );
+}
+
 function parseDocument(): ExportTranscriptDocument {
   const envelope = document.getElementById('transcript-document');
   if (!(envelope instanceof HTMLScriptElement)) {
@@ -72,7 +94,7 @@ function parseDocument(): ExportTranscriptDocument {
   }
   const value = JSON.parse(serialized) as Partial<ExportTranscriptDocument>;
   if (
-    value.schemaVersion !== 1 ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     value.rendererVersion !== __EXPORT_TRANSCRIPT_RENDERER_VERSION__ ||
     !Array.isArray(value.blocks) ||
     value.blocks.length > __EXPORT_TRANSCRIPT_MAX_BLOCKS__ ||
@@ -98,6 +120,12 @@ function parseDocument(): ExportTranscriptDocument {
     typeof value.metadata.truncated !== 'boolean'
   ) {
     throw new Error('Transcript document is incompatible with this renderer.');
+  }
+  const schemaVersion = value.schemaVersion;
+  if (
+    value.blocks.some((block) => hasUnsupportedMetadata(block, schemaVersion))
+  ) {
+    throw new Error('Transcript document has unsupported user metadata.');
   }
   return value as ExportTranscriptDocument;
 }

@@ -137,6 +137,53 @@ async function registryFixture(
   await installed.body?.cancel();
   return { registry, prepares: () => prepares, refusals: () => refusals };
 }
+it('registers a writer generation on a worker without the capability as a legacy publisher', async () => {
+  const registry = new ManagedShellPublisherRegistry();
+  const workerApp = express();
+  registry.register(
+    workerApp,
+    { token: 'runtime-token', leaseId: 'lease-a', epoch: 1 },
+    (sessionId) => sessionId === 'runtime-a',
+  );
+  worker = createServer(workerApp);
+  await new Promise<void>((resolve) => worker!.listen(0, '127.0.0.1', resolve));
+  const install = (token: string, writerGeneration: unknown) =>
+    fetch(
+      `http://127.0.0.1:${(worker!.address() as AddressInfo).port}${MANAGED_SHELL_PUBLISHER_ROUTE.path}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer runtime-token',
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json',
+          'X-Qwen-Managed-Lease-Id': 'lease-a',
+          'X-Qwen-Managed-Lease-Epoch': '1',
+        },
+        body: JSON.stringify({
+          protocolVersion: 3,
+          toolResult: 'managed-tool-result/1',
+          sessionId: 'runtime-a',
+          publisher: {
+            url: `http://127.0.0.1:4001${HOSTED_SHELL_PUBLISHER_PATH}`,
+            token,
+          },
+          writerGeneration,
+        }),
+      },
+    );
+
+  const installed = await install('a'.repeat(43), 1);
+  expect(installed.status).toBe(200);
+  expect(await installed.json()).not.toHaveProperty('observation');
+  // The generation is ignored, so a different descriptor still conflicts
+  // even at a newer generation, exactly as before the capability existed.
+  const replaced = await install('b'.repeat(43), 2);
+  expect(replaced.status).toBe(409);
+  await replaced.body?.cancel();
+  const invalid = await install('a'.repeat(43), 0);
+  expect(invalid.status).toBe(400);
+  await invalid.body?.cancel();
+});
 it.skipIf(process.platform === 'win32')(
   'settles a physically stopped foreground Shell when its original publisher is lost',
   async () => {

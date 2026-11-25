@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
+import { TOUCH_COMPOSER_QUERY } from '../../hooks/useIsTouchComposer';
 import sidebarStyles from './WebShellSidebar.module.css';
 import { setLivePresence } from '../../live/live-presence';
 import {
@@ -1391,6 +1392,82 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       'calc(var(--web-shell-popover-z-index, 1000) + 1)',
     );
     expect(switcher?.dataset.state).toBe('open');
+  });
+
+  it('keeps a coarse-pointer Recent menu inside the collapsed switcher', async () => {
+    const previousMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === TOUCH_COMPOSER_QUERY,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      active.sessions = [
+        makeSession('session-a', {
+          displayName: 'Recent coarse row',
+          isPinned: false,
+        }),
+      ];
+      active.data = active.sessions;
+      const capabilities = {
+        qwenCodeVersion: '1.2.3',
+        features: [
+          'session_organization',
+          'session_archive',
+          'workspace_qualified_rest_core',
+          'standalone_sessions_v1',
+        ],
+      };
+      connection.capabilities = capabilities;
+      workspace.capabilities = capabilities;
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: active.sessions,
+      });
+      renderSidebar(true, { layout: 'single' });
+      await flushSidebar();
+
+      const trigger = container.querySelector<HTMLElement>(
+        '[data-web-shell-collapsed-session-trigger]',
+      );
+      act(() => {
+        trigger?.dispatchEvent(
+          new PointerEvent('pointerover', { bubbles: true }),
+        );
+      });
+      await flushSidebar();
+
+      const switcher = document.querySelector<HTMLElement>(
+        '[data-web-shell-collapsed-session-switcher]',
+      );
+      const recent = switcher?.querySelector('[data-testid="recent-sessions"]');
+      const more = recent?.querySelector<HTMLElement>(
+        'button[aria-label="More actions"]',
+      );
+      expect(more).not.toBeNull();
+      act(() => {
+        more!.dispatchEvent(
+          new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+      });
+      await flushSidebar();
+      const menu = document.querySelector<HTMLElement>('[role="menu"]');
+      expect(menu).not.toBeNull();
+      expect(menu?.style.zIndex).toBe(
+        'calc(var(--web-shell-popover-z-index, 1000) + 1)',
+      );
+
+      await act(async () => {
+        switcher?.dispatchEvent(
+          new PointerEvent('pointerout', { bubbles: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      });
+      expect(switcher?.dataset.state).toBe('open');
+      expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    } finally {
+      window.matchMedia = previousMatchMedia;
+    }
   });
 
   it('keeps the collapsed session switcher open when deleting a session', async () => {
@@ -3007,7 +3084,7 @@ describe('Recent sessions shared rows', () => {
     workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
       sessions: active.sessions,
     });
-    renderSidebar();
+    renderSidebar(false, { sessionActions: { inlineItems: ['pin'] } });
     await flushSidebar();
     const recent = container.querySelector('[data-testid="recent-sessions"]')!;
     expect(recent.textContent).not.toContain('Pinned chat');
@@ -3364,6 +3441,159 @@ describe('Recent sessions shared rows', () => {
     ).toBeNull();
     expect(active.archiveSession).not.toHaveBeenCalled();
   });
+
+  it.each(['session', 'group'] as const)(
+    'suppresses hover details while the %s menu is open',
+    async (kind) => {
+      vi.spyOn(window, 'matchMedia').mockImplementation(
+        (query) =>
+          ({
+            matches: query === TOUCH_COMPOSER_QUERY,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+          }) as unknown as MediaQueryList,
+      );
+      enableRecentSessions();
+      if (kind === 'group') {
+        connection.capabilities = {
+          ...organizationCapabilities,
+          features: [
+            ...organizationCapabilities.features,
+            'workspace_qualified_rest_core',
+          ],
+          workspaces: [
+            {
+              id: 'primary',
+              cwd: '/tmp/project',
+              primary: true,
+              trusted: true,
+            },
+            {
+              id: 'untrusted-secondary',
+              cwd: '/tmp/second',
+              primary: false,
+              trusted: false,
+            },
+          ],
+        };
+        workspace.capabilities = connection.capabilities;
+        const baseWorkspaceClient =
+          workspace.client.workspaceByCwd('/tmp/project');
+        workspace.client.workspaceByCwd.mockImplementation((cwd) => {
+          const client = {
+            ...baseWorkspaceClient,
+            workspaceGit: vi.fn().mockResolvedValue({
+              v: 2,
+              workspaceCwd: cwd,
+              branch: 'main',
+            }),
+          };
+          if (cwd !== '/tmp/second') return client;
+          return {
+            ...client,
+            listWorkspaceSessions: vi.fn().mockResolvedValue([
+              makeSession('readonly-hover', {
+                displayName: 'Read-only hover',
+                workspaceCwd: '/tmp/second',
+              }),
+            ]),
+          };
+        });
+      }
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [active.sessions[0]],
+      });
+      renderSidebar();
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const hover = async (element: HTMLElement) => {
+        await act(async () => {
+          element.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        });
+      };
+      // Coarse Recent offers Pin/Archive; Group lives on the canonical row.
+      const row =
+        kind === 'session'
+          ? recent.querySelector<HTMLElement>(
+              `div.${sidebarStyles.sessionRow}`,
+            )!
+          : [
+              ...container.querySelectorAll<HTMLElement>(
+                `div.${sidebarStyles.sessionRow}`,
+              ),
+            ].find(
+              (candidate) =>
+                !recent.contains(candidate) &&
+                candidate.textContent?.includes('API review'),
+            )!;
+      const otherHoverTargets =
+        kind === 'group'
+          ? [
+              container.querySelector<HTMLElement>('[role="note"]')!,
+              container.querySelector<HTMLElement>(
+                '[data-sidebar-workspace="/tmp/project"] button[aria-expanded]',
+              )!,
+            ]
+          : [];
+      const more = row.querySelector<HTMLButtonElement>(
+        '[aria-label="More actions"]',
+      )!;
+      await hover(row);
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      for (const target of otherHoverTargets) {
+        await hover(target);
+        expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      }
+      await act(async () => {
+        click(more, true);
+        await flushSidebar();
+      });
+      if (kind === 'group') {
+        const groupItem = [
+          ...document.body.querySelectorAll<HTMLElement>(
+            '[data-slot="dropdown-menu-content"] [role="menuitem"]',
+          ),
+        ].find((item) => item.textContent === 'Group')!;
+        await act(async () => {
+          click(groupItem, true);
+          await flushSidebar();
+        });
+      }
+      const menu =
+        kind === 'group'
+          ? document.body.querySelector<HTMLElement>(
+              '[data-web-shell-session-group-menu]',
+            )
+          : document.body.querySelector<HTMLElement>(
+              '[data-slot="dropdown-menu-content"]',
+            );
+      expect(menu).not.toBeNull();
+      expect(menu!.contains(document.activeElement)).toBe(true);
+      await act(async () => {
+        row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(menu!.contains(document.activeElement)).toBe(true);
+      for (const target of otherHoverTargets) {
+        await hover(target);
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        expect(menu!.contains(document.activeElement)).toBe(true);
+      }
+      await act(async () => {
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+        await flushSidebar();
+      });
+      expect(document.body.contains(menu!)).toBe(false);
+      await hover(row);
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    },
+  );
 
   it('disables archive for current and running sessions and provides the standard hover details', async () => {
     enableRecentSessions();

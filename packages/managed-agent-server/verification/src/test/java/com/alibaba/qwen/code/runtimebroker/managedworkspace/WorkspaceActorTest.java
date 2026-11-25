@@ -28,31 +28,43 @@ class WorkspaceActorTest {
                 actor);
         assertNotEquals(new WorkspaceActor("tenant-a", "Alice@example.com"),
                 actor);
-        assertNotEquals(new WorkspaceActor("tenant-a", "alice@example.com "),
-                actor);
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", "alice@example.com "));
         assertFalse(actor.equals(null));
         assertFalse(actor.equals("tenant-a"));
     }
 
     @Test
-    void acceptsAnActorIdOfUpTo512CodePoints() {
+    void acceptsAnActorIdOfUpTo36Utf16Units() {
+        // BMP (CJK) characters are one code point and one UTF-16 unit, so
+        // 36 of them exercise the budget on both MySQL and H2.
+        String han = "漢";
+        assertEquals(36, new WorkspaceActor("tenant-a", han.repeat(36))
+                .getActorId().length());
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", han.repeat(37)));
+        // Supplementary-plane characters cost two UTF-16 units each, so
+        // the VARCHAR(36) cap bites at 18 of them, not 36.
         String clef = "\uD834\uDD1E";
-        assertEquals(1024, new WorkspaceActor("tenant-a", clef.repeat(512))
+        assertEquals(36, new WorkspaceActor("tenant-a", clef.repeat(18))
                 .getActorId().length());
         assertThrows(IllegalArgumentException.class,
-                () -> new WorkspaceActor("tenant-a", clef.repeat(513)));
-        // Spaces count and are kept.
-        assertEquals(" ", new WorkspaceActor("tenant-a", " ").getActorId());
-        assertEquals(512, new WorkspaceActor("tenant-a", "x".repeat(511) + " ")
-                .getActorId().length());
+                () -> new WorkspaceActor("tenant-a", clef.repeat(19)));
+        // Interior spaces count and are kept; trailing spaces are refused
+        // so a PAD SPACE collation cannot fold two actors together.
+        assertEquals("a b", new WorkspaceActor("tenant-a", "a b").getActorId());
         assertThrows(IllegalArgumentException.class,
-                () -> new WorkspaceActor("tenant-a", "x".repeat(512) + " "));
+                () -> new WorkspaceActor("tenant-a", " "));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", "x".repeat(35) + " "));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", "x".repeat(36) + " "));
     }
 
     @Test
     void rejectsAnInvalidTenant() {
         for (String tenantId : new String[] {null, "", "tenant/a", "tenant a",
-                "t".repeat(129)}) {
+                "t".repeat(37)}) {
             assertThrows(IllegalArgumentException.class,
                     () -> new WorkspaceActor(tenantId, "alice"),
                     String.valueOf(tenantId));

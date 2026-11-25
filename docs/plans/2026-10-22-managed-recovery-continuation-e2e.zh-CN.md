@@ -41,7 +41,7 @@ MySQL 必须开启 `performance_schema`。并发检查前，使用真实阻塞�
 
 ## 可复用命令
 
-从各自包目录执行测试。在 `packages/cli` 运行原生状态测试及 `src/serve/hosted-harness-session.test.ts` 中所选恢复清理用例，记录 selector 与未执行数量。在 `packages/web-shell` 运行受影响的 provider、Session/recovery/cancel hooks、Session 页面、Workspace 创建和交接测试。浏览器 fixture 应通过真实 Chromium 验证准入、刷新后 operation 跟踪和可编辑交接，并注明 HTTP adapter 是受控替代。
+从各自包目录执行测试。在 `packages/cli` 运行原生状态测试及 `src/serve/hosted-harness-session.runtime-cleanup.test.ts` 中所选恢复清理用例，记录 selector 与未执行数量。在 `packages/web-shell` 运行受影响的 provider、Session/recovery/cancel hooks、Session 页面、Workspace 创建和交接测试。浏览器 fixture 应通过真实 Chromium 验证准入、刷新后 operation 跟踪和可编辑交接，并注明 HTTP adapter 是受控替代。
 
 同时覆盖未启用 durable operations 的取消：A 已收到投递 ACK 后不能阻挡用户明确停止后续 B；A 失败且仍缺匹配 ready 证明时继续显示未确认。丢回复保留原 key 和 Turn，过期或其他 Session 的响应不能退休投递跟踪。退休已确认投递槽不表示 A 已取消，也不改变恢复发送门禁。
 

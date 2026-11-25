@@ -202,6 +202,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RateSessionTurnResult,
   SetModelResult,
   SetSessionLanguageResult,
   SetUserLanguageResult,
@@ -275,6 +276,10 @@ import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
   SessionSourceInput,
   SessionSourcesResult,
   SessionSourceUpsertResult,
@@ -335,7 +340,7 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
-import { parseSseStream, SseFramingError } from './sse.js';
+import { parseNamedSseStream, parseSseStream, SseFramingError } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
@@ -372,6 +377,121 @@ import {
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
 const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
+
+function parseArtifactLibraryStreamEvent(
+  eventName: string | undefined,
+  data: Record<string, unknown>,
+): DaemonWorkspaceArtifactLibraryStreamEvent | undefined {
+  if (data['v'] !== 1) return undefined;
+  switch (eventName) {
+    case 'start':
+      if (
+        typeof data['total'] !== 'number' ||
+        !Number.isSafeInteger(data['total']) ||
+        data['total'] < 0
+      ) {
+        return undefined;
+      }
+      return { type: 'start', v: 1, total: data['total'] };
+    case 'session': {
+      const session = data['session'];
+      const limits = data['limits'];
+      if (
+        typeof data['sessionId'] !== 'string' ||
+        !Array.isArray(data['artifacts']) ||
+        typeof data['generatedAt'] !== 'string' ||
+        typeof session !== 'object' ||
+        session === null ||
+        Array.isArray(session) ||
+        typeof limits !== 'object' ||
+        limits === null
+      ) {
+        return undefined;
+      }
+      const meta = session as Record<string, unknown>;
+      if (
+        typeof meta['createdAt'] !== 'string' ||
+        (meta['archiveState'] !== 'active' &&
+          meta['archiveState'] !== 'archived') ||
+        typeof meta['sourceType'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'session',
+        v: 1,
+        sessionId: data['sessionId'],
+        artifacts: data[
+          'artifacts'
+        ] as DaemonArtifactLibrarySessionEnvelope['artifacts'],
+        generatedAt: data['generatedAt'],
+        limits: limits as DaemonArtifactLibrarySessionEnvelope['limits'],
+        session: meta as unknown as DaemonArtifactLibrarySessionMetadata,
+        ...(Array.isArray(data['warnings'])
+          ? { warnings: data['warnings'] as string[] }
+          : {}),
+        ...(Array.isArray(data['warningDetails'])
+          ? {
+              warningDetails: data[
+                'warningDetails'
+              ] as DaemonArtifactLibrarySessionEnvelope['warningDetails'],
+            }
+          : {}),
+      };
+    }
+    case 'session_error':
+      if (
+        typeof data['sessionId'] !== 'string' ||
+        typeof data['status'] !== 'number' ||
+        typeof data['code'] !== 'string' ||
+        typeof data['message'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'session_error',
+        v: 1,
+        sessionId: data['sessionId'],
+        status: data['status'],
+        code: data['code'],
+        message: data['message'],
+      };
+    case 'complete':
+      if (
+        typeof data['total'] !== 'number' ||
+        typeof data['succeeded'] !== 'number' ||
+        typeof data['failed'] !== 'number' ||
+        typeof data['skipped'] !== 'number'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'complete',
+        v: 1,
+        total: data['total'],
+        succeeded: data['succeeded'],
+        failed: data['failed'],
+        skipped: data['skipped'],
+      };
+    case 'error':
+      if (
+        typeof data['status'] !== 'number' ||
+        typeof data['code'] !== 'string' ||
+        typeof data['message'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'error',
+        v: 1,
+        status: data['status'],
+        code: data['code'],
+        message: data['message'],
+      };
+    default:
+      return undefined;
+  }
+}
 
 function parseSessionGenerationEvent(
   value: unknown,
@@ -859,6 +979,14 @@ export interface PromptRequest {
   /** Per-prompt projection for all subscribers and ring replay; defaults to full. */
   eventDetailMode?: 'full' | 'summary';
   prompt: PromptContentBlock[];
+  /** Opt in when the daemon advertises `turn_skill_file_snapshot`. */
+  pinSkills?: boolean;
+  /** Decline before admission if a captured skill could require unsupported session effects. Requires pinSkills. */
+  requireSessionSkillEffects?: boolean;
+  /** Lowercase SHA-256 of the intended skill material. Requires pinSkills. */
+  expectedSkillDigest?: string;
+  pinExtensions?: boolean;
+  expectedExtensionGeneration?: number;
   /** Deliver the successful final answer directly through a channel worker. */
   delivery?: DaemonChannelDelivery;
   /** Optional ACP _meta passthrough. */
@@ -877,6 +1005,12 @@ export interface PromptRequest {
    * relying on it.
    */
   deadlineMs?: number;
+  /**
+   * Caller-supplied deduplication key (1–200 chars). Retries with the same
+   * key after an uncertain admission return the original prompt admission
+   * instead of enqueueing a duplicate turn.
+   */
+  idempotencyKey?: string;
   [key: string]: unknown;
 }
 
@@ -886,6 +1020,10 @@ export interface PromptRequest {
  */
 export interface NonBlockingPromptAccepted {
   promptId: string;
+  /** The admitted skill-file digest, present when pinSkills was accepted. */
+  skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
+  extensionGeneration?: number;
   lastEventId: number;
   /**
    * Epoch token of the bus that produced `lastEventId`. Clients that seed
@@ -895,6 +1033,8 @@ export interface NonBlockingPromptAccepted {
    * older daemons.
    */
   eventEpoch?: string;
+  /** True when the daemon deduplicated this request via `idempotencyKey`. */
+  deduplicated?: boolean;
 }
 
 export interface SubscribeOptions {
@@ -1284,6 +1424,35 @@ export class DaemonClient {
       label,
       opts,
     );
+  }
+
+  /** @internal */
+  async *workspaceArtifactLibraryStream(
+    workspaceSelector: string,
+    opts: { signal?: AbortSignal; clientId?: string } = {},
+  ): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent> {
+    const label = 'GET /workspaces/:workspace/artifact-library';
+    const res = await this._fetch(
+      `${this.baseUrl}/workspaces/${workspaceSelector}/artifact-library`,
+      {
+        headers: this.headers({ Accept: 'text/event-stream' }, opts.clientId),
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, label);
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (!contentType.includes('text/event-stream')) {
+      throw new SseFramingError(
+        `${label}: expected text/event-stream response, got ${res.headers.get('content-type') ?? '(missing)'}`,
+      );
+    }
+    if (!res.body) {
+      throw new SseFramingError(`${label}: response body is missing`);
+    }
+    for await (const frame of parseNamedSseStream(res.body, opts.signal)) {
+      const event = parseArtifactLibraryStreamEvent(frame.event, frame.data);
+      if (event) yield event;
+    }
   }
 
   /** @internal */
@@ -7155,6 +7324,35 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the session's
+   * telemetry pipeline as a `user_feedback` event. The daemon fills model
+   * and approval mode from the live session Config; the caller supplies
+   * only the turn's admitted prompt id and the mark direction. Clearing a
+   * mark is client-local and has no wire call.
+   */
+  async rateSessionTurn(
+    sessionId: string,
+    promptId: string,
+    rating: 'up' | 'down',
+    clientId?: string,
+  ): Promise<RateSessionTurnResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/feedback`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ promptId, rating }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/feedback');
+        }
+        return (await res.json()) as RateSessionTurnResult;
+      },
+    );
+  }
+
   setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
@@ -7276,7 +7474,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    signal?.throwIfAborted();
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const releasePromptSlot = this.reservePromptSlot(sessionId);
     let releaseOnExit = true;
     try {
@@ -7294,7 +7493,7 @@ export class DaemonClient {
       );
 
       if (res.status === 202) {
-        const accept = (await res.json()) as NonBlockingPromptAccepted;
+        const accept = await this.readPromptAcceptance(res, req);
         releaseOnExit = false;
         try {
           return await this._awaitTurnComplete(
@@ -7317,6 +7516,8 @@ export class DaemonClient {
           sessionId,
         );
       }
+      if (req.pinSkills)
+        throw new Error('Expected a skill snapshot admission receipt');
       return (await res.json()) as PromptResult;
     } finally {
       if (releaseOnExit) releasePromptSlot();
@@ -7347,6 +7548,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const res = await this.transport.fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
@@ -7358,13 +7561,102 @@ export class DaemonClient {
     );
 
     if (res.status === 202) {
-      return (await res.json()) as NonBlockingPromptAccepted;
+      return this.readPromptAcceptance(res, req);
     }
 
     if (!res.ok) {
       throw await this.failOnError(res, 'POST /session/:id/prompt', sessionId);
     }
+    if (req.pinSkills)
+      throw new Error('Expected a skill snapshot admission receipt');
     return (await res.json()) as PromptResult;
+  }
+
+  private requirePinnedPromptCapability(
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<void> | undefined {
+    signal?.throwIfAborted();
+    if (
+      req.expectedSkillDigest !== undefined &&
+      (!req.pinSkills ||
+        typeof req.expectedSkillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(req.expectedSkillDigest))
+    )
+      throw new Error(
+        'expectedSkillDigest requires pinSkills and a lowercase SHA-256 digest',
+      );
+    const generation = req.expectedExtensionGeneration;
+    if (
+      req.pinExtensions
+        ? !req.pinSkills ||
+          typeof generation !== 'number' ||
+          !Number.isSafeInteger(generation) ||
+          generation < 0
+        : generation !== undefined
+    )
+      throw new Error(
+        'pinExtensions requires pinSkills and a nonnegative safe expectedExtensionGeneration',
+      );
+    if (req.requireSessionSkillEffects && !req.pinSkills)
+      throw new Error('requireSessionSkillEffects requires pinSkills');
+    if (!req.pinSkills) return undefined;
+    const features = ['turn_skill_file_snapshot'];
+    if (req.pinExtensions) features.push('turn_extension_store_lease');
+    if (req.requireSessionSkillEffects)
+      features.push('turn_skill_session_effects_check');
+    return this.capabilities().then((caps) => {
+      signal?.throwIfAborted();
+      for (const feature of features) {
+        if (!Array.isArray(caps.features) || !caps.features.includes(feature)) {
+          throw new DaemonCapabilityMissingError(
+            feature,
+            `daemon does not advertise the ${feature} feature`,
+          );
+        }
+      }
+    });
+  }
+
+  private async readPromptAcceptance(
+    res: Response,
+    req: PromptRequest,
+  ): Promise<NonBlockingPromptAccepted> {
+    const accepted = (await res.json()) as NonBlockingPromptAccepted;
+    if (
+      req.pinSkills &&
+      (!accepted ||
+        typeof accepted.promptId !== 'string' ||
+        !accepted.promptId ||
+        !Number.isSafeInteger(accepted.lastEventId) ||
+        accepted.lastEventId < 0)
+    )
+      throw new Error('Daemon did not return a usable pinned prompt receipt');
+    if (
+      req.requireSessionSkillEffects &&
+      accepted.sessionSkillEffectsChecked !== true
+    )
+      throw new Error(
+        'Daemon did not confirm the requested skill session effects check',
+      );
+    if (
+      req.pinSkills &&
+      (typeof accepted.skillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(accepted.skillDigest) ||
+        (req.expectedSkillDigest &&
+          accepted.skillDigest !== req.expectedSkillDigest))
+    ) {
+      throw new Error('Daemon did not confirm the requested skill snapshot');
+    }
+    if (
+      req.pinExtensions &&
+      (req.expectedExtensionGeneration === undefined ||
+        accepted.extensionGeneration !== req.expectedExtensionGeneration)
+    )
+      throw new Error(
+        'Daemon did not confirm the requested extension generation',
+      );
+    return accepted;
   }
 
   private async _awaitTurnComplete(
@@ -10421,6 +10713,28 @@ export class WorkspaceDaemonClient {
       '/file/delete',
       'POST /workspaces/:workspace/file/delete',
       { method: 'POST', body: { path: filePath }, clientId, mode: 'rest' },
+    );
+  }
+
+  artifactLibrary(opts?: {
+    signal?: AbortSignal;
+    clientId?: string;
+  }): Promise<DaemonWorkspaceArtifactLibraryResult> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceArtifactLibraryResult>(
+      this.workspaceSelector,
+      '/artifact-library',
+      'GET /workspaces/:workspace/artifact-library',
+      { mode: 'rest', signal: opts?.signal, clientId: opts?.clientId },
+    );
+  }
+
+  artifactLibraryStream(opts?: {
+    signal?: AbortSignal;
+    clientId?: string;
+  }): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent> {
+    return this.client.workspaceArtifactLibraryStream(
+      this.workspaceSelector,
+      opts,
     );
   }
 

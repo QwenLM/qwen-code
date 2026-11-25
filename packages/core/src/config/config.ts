@@ -1859,17 +1859,19 @@ export interface ConfigParameters {
   allowPrivateNetworkHooks?: boolean;
   /**
    * Callback for persisting a permission rule to settings.
-   * Injected by the CLI layer; core uses this to write allow/ask/deny rules
-   * to project or user settings when the user clicks "Always Allow".
+   * Injected by the CLI layer to write allow/ask/deny rules for an approved
+   * tool call.
    *
    * @param scope - 'project' for workspace settings, 'user' for user settings.
    * @param ruleType - 'allow' | 'ask' | 'deny'.
    * @param rule - The raw rule string, e.g. "Bash(git *)" or "Edit".
+   * @param workspaceDir - The project root of the Config that owns the call.
    */
   onPersistPermissionRule?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
+    workspaceDir: string,
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
@@ -2515,6 +2517,8 @@ export interface SubSessionSpawnRequest {
   workspaceGeneration?: string;
   /** The named workspace was selected under YOLO without one-time approval. */
   requiresYolo?: true;
+  /** The authorization was automatic under AUTO and requires that mode still. */
+  requiresAutoMode?: true;
   /** An existing session in `workspace` to send the prompt to. */
   sessionId?: string;
 }
@@ -2523,6 +2527,8 @@ export interface SubSessionWorkspaceBinding {
   workspaceId: string;
   workspaceCwd: string;
   workspaceGeneration: string;
+  /** Derived from launcher identity; used for approval, not launch authorization. */
+  sameWorkspace: boolean;
 }
 
 export type SubSessionWorkspaceResolver = (
@@ -3420,11 +3426,7 @@ export class Config {
   private ignoredExtensionRules: string[] = [];
   private readonly allowedHttpHookUrls: string[];
   private readonly allowPrivateNetworkHooks: boolean;
-  private readonly onPersistPermissionRuleCallback?: (
-    scope: 'project' | 'user',
-    ruleType: 'allow' | 'ask' | 'deny',
-    rule: string,
-  ) => Promise<void>;
+  private readonly onPersistPermissionRuleCallback: ConfigParameters['onPersistPermissionRule'];
   private initialized: boolean = false;
   private initializationPromise?: Promise<void>;
   private initializationSucceeded = false;
@@ -9112,6 +9114,11 @@ export class Config {
           mcpServers[key] = {
             ...server,
             extensionName: extension.config.name,
+            ...(extension.artifactGeneration !== undefined
+              ? {
+                  extensionArtifactRevision: `${extension.id}:${extension.artifactGeneration}`,
+                }
+              : {}),
           };
         },
       );
@@ -13543,7 +13550,11 @@ export class Config {
         rule: string,
       ) => Promise<void>)
     | undefined {
-    return this.onPersistPermissionRuleCallback;
+    const persist = this.onPersistPermissionRuleCallback;
+    return persist
+      ? (scope, ruleType, rule) =>
+          persist(scope, ruleType, rule, this.getProjectRoot())
+      : undefined;
   }
 
   // Check permission then register a lazy factory; its import runs on first use.

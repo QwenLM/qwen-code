@@ -106,7 +106,7 @@ public final class ManagedExtensionAgentLaunch {
             throw refused();
         }
         var capabilities = jdbc.queryForList("SELECT b.capability_digest FROM ma_runtime_binding b"
-                + " JOIN ma_runtime_slot s ON s.request_key=b.request_key AND s.active_binding_id=b.binding_id"
+                + " JOIN ma_runtime_slot s ON s.request_id=b.request_id AND s.active_binding_id=b.binding_id"
                 + " AND s.last_generation=b.runtime_generation WHERE b.binding_id=? AND b.runtime_generation=?"
                 + " AND b.tenant_id=? AND b.workspace_id=? AND b.workspace_generation=? AND b.storage_id=?"
                 + " AND b.isolation_class='session' AND b.isolation_key=? AND b.binding_state='READY'"
