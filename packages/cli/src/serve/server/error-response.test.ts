@@ -14,6 +14,7 @@ import {
   McpAuthenticationInProgressError,
   RequestedSessionIdRejectedError,
   SessionNotFoundError,
+  SystemOverloadedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
@@ -1208,4 +1209,38 @@ describe('standalone telemetry fidelity', () => {
       }
     },
   );
+
+  it('logs the stamped sessionId fallback for SystemOverloadedError without leaking workspaceCwd', () => {
+    const { response, set, status, json } = responseMock();
+    const warn = vi.fn();
+    const daemonLog = { warn } as unknown as DaemonLogger;
+    const err = Object.assign(new SystemOverloadedError('cpu_load', 3, 5), {
+      operation: 'spawn',
+      workspaceCwd: '/work/a',
+      sessionId: 'sess-caller-supplied',
+    });
+
+    sendBridgeError(response, err, { route: 'POST /session' }, daemonLog);
+
+    expect(set).toHaveBeenCalledWith('Retry-After', '15');
+    expect(status).toHaveBeenCalledWith(503);
+    const body = json.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body).toMatchObject({
+      code: 'system_overloaded',
+      reason: 'cpu_load',
+      loadRatio: 3,
+      eventLoopLagP99Ms: 5,
+    });
+    expect(body).not.toHaveProperty('workspaceCwd');
+    expect(warn).toHaveBeenCalledWith(
+      'load admission rejected',
+      expect.objectContaining({
+        route: 'POST /session',
+        sessionId: 'sess-caller-supplied',
+        operation: 'spawn',
+        workspaceCwd: '/work/a',
+        reason: 'cpu_load',
+      }),
+    );
+  });
 });

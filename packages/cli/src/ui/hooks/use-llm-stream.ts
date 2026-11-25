@@ -7646,6 +7646,9 @@ export const useLlmStream = (
       const ranCallIds = new Set<string>();
       let planModeEntryCallId: string | undefined;
       let batchEnded = false;
+      const abandonment = config.isEventBusAgentLoopEnabled?.('ink')
+        ? new AbortController()
+        : undefined;
       let finishBatch!: () => void;
       const batchFinished = new Promise<void>((resolve) => {
         finishBatch = resolve;
@@ -7712,6 +7715,7 @@ export const useLlmStream = (
           return waitForModelStreamsIdle(batchFinished);
         },
         schedulerHold,
+        abandonment?.signal,
       );
       const backgroundLaunchCallIds = new Set<string>();
       // Failed or abandoned batches roll back only their own replay answers.
@@ -7774,6 +7778,8 @@ export const useLlmStream = (
           clearUnsentReplays();
         }
         if (result.stop === 'cancelled' && settled.length === 0) {
+          batchEnded = true;
+          if (!result.responses) abandonment?.abort();
           let continuationOwner: ToolContinuationOwner | undefined;
           let goalBinding: GoalTurnBinding | undefined;
           for (const { callId, goalContext } of batch.calls) {
@@ -7792,8 +7798,6 @@ export const useLlmStream = (
             interactionOwnersByToolCallIdRef.current.delete(callId);
             continuationOwnersByToolCallIdRef.current.delete(callId);
           }
-          // From here on, the scheduler callback belongs to the ended batch.
-          batchEnded = true;
           const stillOwned = [
             ...continuationOwnersByToolCallIdRef.current.values(),
           ];
