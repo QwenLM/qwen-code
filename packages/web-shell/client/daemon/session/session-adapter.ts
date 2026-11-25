@@ -13,7 +13,13 @@ import type {
   RestoreStandaloneSessionRequest,
 } from '@qwen-code/sdk/daemon';
 
-/** Standalone session integration for an embedded WebShell. */
+/**
+ * Standalone session integration for an embedded WebShell.
+ *
+ * The client returned by `createClient` should invoke
+ * `opts.onSseStreamAccepted?.(streamId)` once its live event stream is ready
+ * so `DaemonSessionClient.waitForEventStream()` unblocks immediately.
+ */
 export interface WebShellSessionAdapter {
   createClient(
     options: DaemonClientOptions,

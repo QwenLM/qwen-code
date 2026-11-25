@@ -76,6 +76,7 @@ export {
   type DaemonSessionClientOptions,
   type DaemonSessionRestoreStrategy,
   type DaemonSessionSubscribeOptions,
+  type StandaloneSessionMetadata,
 } from './DaemonSessionClient.js';
 export {
   DaemonStandaloneCreationOutcomeUnknownError,

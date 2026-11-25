@@ -548,12 +548,13 @@ function StandaloneSessionGate({
       }),
     ).open;
 
+  const hasSessionAdapter = sessionAdapter !== undefined;
   useEffect(() => {
     if (
       sessionContext?.kind !== 'standalone' ||
       !standaloneSupported ||
       managedProvided ||
-      sessionAdapter
+      hasSessionAdapter
     )
       return;
     const generation = resolutionGenerationRef.current + 1;
@@ -626,7 +627,7 @@ function StandaloneSessionGate({
     sessionContext?.kind,
     standaloneSupported,
     managedProvided,
-    sessionAdapter,
+    hasSessionAdapter,
     workspace.client,
   ]);
 
@@ -677,7 +678,7 @@ function StandaloneSessionGate({
       </div>
     );
   }
-  if (!managedProvided && !standaloneSupported) {
+  if (!managedProvided && !hasSessionAdapter && !standaloneSupported) {
     return (
       <WorkspaceUnavailableState
         title={t('session.standaloneUnavailable')}

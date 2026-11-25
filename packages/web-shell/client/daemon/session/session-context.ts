@@ -207,5 +207,5 @@ export function daemonClientSessionContext(
     return { kind: 'standalone' };
   }
   const cwd = client.workspaceCwd;
-  return cwd === undefined ? undefined : { kind: 'workspace', cwd };
+  return cwd ? { kind: 'workspace', cwd } : undefined;
 }

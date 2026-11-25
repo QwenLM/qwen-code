@@ -239,6 +239,7 @@ export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
   sessionAdapter?: WebShellSessionAdapter;
+  getSessionAdapter?: () => WebShellSessionAdapter | undefined;
   activePromptsRef: RefBox<Map<string, ActivePrompt>>;
   settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
@@ -479,6 +480,7 @@ export function createDaemonSessionActions({
   store,
   sessionRef,
   sessionAdapter,
+  getSessionAdapter,
   activePromptsRef,
   settledPromptsRef,
   pendingSessionLoadRef,
@@ -530,10 +532,12 @@ export function createDaemonSessionActions({
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
 
-  const adapterFor = (session: DaemonSessionClient) =>
-    sessionAdapter && session.restoreStrategy.kind === 'standalone'
-      ? sessionAdapter
+  const adapterFor = (session: DaemonSessionClient) => {
+    const adapter = getSessionAdapter ? getSessionAdapter() : sessionAdapter;
+    return adapter && session.restoreStrategy.kind === 'standalone'
+      ? adapter
       : undefined;
+  };
 
   async function submitSessionPrompt(
     session: DaemonSessionClient,
@@ -1670,15 +1674,22 @@ export function createDaemonSessionActions({
           accepted.promptId,
         );
         if (!accepted.completion) return await turnResult;
-        const [result] = await Promise.all([
-          turnResult,
-          accepted.completion,
-        ]).catch((error: unknown) => {
-          const pending = activePromptsRef.current.get(sessionId);
-          if (pending?.controller === ctrl) pending.reject?.(error);
-          throw error;
+        let turnSettled = false;
+        const settledTurn = turnResult.finally(() => {
+          turnSettled = true;
         });
-        return result;
+        const completionFailure = new Promise<never>((_, reject) => {
+          accepted.completion!.then(
+            () => {},
+            (error: unknown) => {
+              if (turnSettled) return;
+              const pending = activePromptsRef.current.get(sessionId);
+              if (pending?.controller === ctrl) pending.reject?.(error);
+              reject(error);
+            },
+          );
+        });
+        return await Promise.race([settledTurn, completionFailure]);
       } catch (error) {
         if (isAbortError(error)) {
           if (sessionRef.current?.sessionId === sessionId) {
@@ -1995,6 +2006,7 @@ export function createDaemonSessionActions({
       }
       void accepted.completion?.catch((error: unknown) => {
         if (sessionRef.current === session && !isAbortError(error)) {
+          store.dispatch({ type: 'assistant.done', reason: 'error' });
           dispatchActionError(addNotice, 'Prompt failed', error, 'send_prompt');
         }
       });
@@ -2770,7 +2782,7 @@ export function createDaemonSessionActions({
             'List sessions timed out',
           );
         }
-        if (session.workspaceCwd === undefined) return [];
+        if (!session.workspaceCwd) return [];
         return await withActionTimeout(
           session.client.listWorkspaceSessions(session.workspaceCwd, options),
           'List sessions timed out',

@@ -7,7 +7,6 @@
 import type { DaemonClient } from './DaemonClient.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import {
-  composeAbortSignals,
   isNonBlockingAccepted,
   matchTurnEvent,
   normalizePendingPromptLimit,
@@ -103,7 +102,7 @@ export interface DaemonReplaySnapshot {
 }
 
 /** Standalone session metadata supplied by a host without a local workspace. */
-type StandaloneSessionMetadata = Omit<DaemonSession, 'workspaceCwd'> & {
+export type StandaloneSessionMetadata = Omit<DaemonSession, 'workspaceCwd'> & {
   sourceType: 'standalone';
   context: { kind: 'standalone' };
   workspaceCwd?: string;
@@ -276,7 +275,7 @@ function createStandaloneRestoredClient(
  */
 export class DaemonSessionClient {
   readonly client: DaemonClient;
-  readonly session: DaemonSession | StandaloneSessionMetadata;
+  readonly session: DaemonSession;
   readonly restoreStrategy: DaemonSessionRestoreStrategy;
   readonly state: DaemonSessionState;
   /**
@@ -356,8 +355,6 @@ export class DaemonSessionClient {
 
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
-    this.session = { ...opts.session };
-    this.updateGeneratedUi(this.session.generatedUi);
     if (
       opts.session.sourceType === 'standalone' &&
       'context' in opts.session &&
@@ -374,6 +371,11 @@ export class DaemonSessionClient {
         'The session did not identify its workspace or standalone context',
       );
     }
+    this.session = {
+      ...opts.session,
+      workspaceCwd: opts.session.workspaceCwd ?? '',
+    };
+    this.updateGeneratedUi(this.session.generatedUi);
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.backgroundTurn = parseDaemonBackgroundTurn(
@@ -645,7 +647,7 @@ export class DaemonSessionClient {
     return this.session.sessionId;
   }
 
-  get workspaceCwd(): string | undefined {
+  get workspaceCwd(): string {
     return this.session.workspaceCwd;
   }
 
@@ -715,21 +717,31 @@ export class DaemonSessionClient {
     signal?.throwIfAborted();
     if (this.eventStreamReady) return;
     const readiness = (this.eventStreamReadiness ??= new EventTarget());
-    const deadline = AbortSignal.timeout(30_000);
-    const waitSignal = signal
-      ? composeAbortSignals([signal, deadline])
-      : deadline;
     await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        readiness.removeEventListener('ready', onReady);
+        signal?.removeEventListener('abort', onAbort);
+      };
       const onReady = () => {
-        waitSignal.removeEventListener('abort', onAbort);
+        cleanup();
         resolve();
       };
       const onAbort = () => {
-        readiness.removeEventListener('ready', onReady);
-        reject(waitSignal.reason);
+        cleanup();
+        reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
       };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new DOMException(
+            'Timed out waiting for event stream',
+            'TimeoutError',
+          ),
+        );
+      }, 30_000);
       readiness.addEventListener('ready', onReady, { once: true });
-      waitSignal.addEventListener('abort', onAbort, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -1692,6 +1704,10 @@ export class DaemonSessionClient {
           callerOnEpoch?.(learned);
         },
       })) {
+        if (!this.eventStreamReady) {
+          this.eventStreamReady = true;
+          this.eventStreamReadiness?.dispatchEvent(new Event('ready'));
+        }
         const hydratedEvent = await this.hydrateEvent(event, opts.signal);
         this._dispatchTurnEvent(hydratedEvent);
         yield hydratedEvent;

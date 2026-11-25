@@ -34,6 +34,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
+  DaemonSession,
   DaemonSessionClient,
   DaemonSessionPrInfo,
   DaemonSessionSummary,
@@ -723,7 +724,7 @@ export interface DaemonSessionActions {
      */
     sourceVersion?: number;
     getCurrentSourceVersion?: () => number;
-  }): Promise<DaemonSessionClient | DaemonSessionClient['session']>;
+  }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;
   newSession(): Promise<void>;
