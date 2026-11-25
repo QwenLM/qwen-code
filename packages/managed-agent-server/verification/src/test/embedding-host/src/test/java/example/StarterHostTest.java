@@ -97,8 +97,10 @@ class StarterHostTest {
         assertThat(consumer.service()).isSameAs(context.getBean(ManagedAgentService.class));
         assertThatThrownBy(() -> consumer.service().getPublicSession(
                 new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "owner", null), "missing"))
-                .isInstanceOf(ManagedAgentException.class)
-                .hasMessageContaining("missing");
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("session_not_found");
+                });
     }
 
     private static org.assertj.core.api.AbstractThrowableAssert<?, ?> assertUnavailable(ManagedAgentService service) {
