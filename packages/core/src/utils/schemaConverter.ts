@@ -202,6 +202,13 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  * - When the source schema can be validated locally, empty object declarations
  *   and string / array length limits at or above 1999 are dropped because
  *   grammar-based endpoints can turn them into invalid or rejected rules.
+ * - With `openUndeclaredObjects`, an object level that declares properties
+ *   but omits `additionalProperties` gets an explicit
+ *   `additionalProperties: true`. JSON Schema already treats the omission
+ *   as open, but some constrained decoders (DashScope qwen4-max) read it as
+ *   closed: the model then drops the keys the task needs, or repeats the
+ *   declared ones until the token limit. The insertion skips schemas that
+ *   use `unevaluatedProperties` and levels with an explicit value.
  * - Other constraints pass through untouched; client-side
  *   `validateToolParams` still enforces the full source schema, so the
  *   constraint is relaxed on the wire only.
@@ -211,7 +218,10 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
 export function relaxSchemaForFunctionCalling(
   schema: Record<string, unknown>,
   relaxGrammarConstraints = false,
+  openUndeclaredObjects = false,
 ): Record<string, unknown> {
+  let openObjectCandidates: Array<Record<string, unknown>> | undefined =
+    openUndeclaredObjects ? [] : undefined;
   const relax = (obj: unknown): unknown => {
     if (typeof obj !== 'object' || obj === null) {
       return obj;
@@ -222,22 +232,26 @@ export function relaxSchemaForFunctionCalling(
     const source = obj as Record<string, unknown>;
     const target: Record<string, unknown> = {};
 
+    // An explicit additionalProperties annotates keys that unevaluatedProperties
+    // can observe through applicators and references elsewhere in the schema.
+    if ('unevaluatedProperties' in source) {
+      openObjectCandidates = undefined;
+    }
     const properties = source['properties'];
+    const propertyKeys =
+      typeof properties === 'object' &&
+      properties !== null &&
+      !Array.isArray(properties)
+        ? Object.keys(properties)
+        : undefined;
     const required = Array.isArray(source['required'])
       ? (source['required'] as unknown[]).filter(
           (r): r is string => typeof r === 'string',
         )
       : [];
     const hasOptionalProperties =
-      typeof properties === 'object' &&
-      properties !== null &&
-      !Array.isArray(properties) &&
-      Object.keys(properties).some((key) => !required.includes(key));
-    const hasEmptyProperties =
-      typeof properties === 'object' &&
-      properties !== null &&
-      !Array.isArray(properties) &&
-      Object.keys(properties).length === 0;
+      propertyKeys?.some((key) => !required.includes(key)) ?? false;
+    const hasEmptyProperties = propertyKeys?.length === 0;
     const type = source['type'];
     const canBeObject =
       type === undefined ||
@@ -314,8 +328,20 @@ export function relaxSchemaForFunctionCalling(
       }
       target[key] = relax(value);
     }
+    if (
+      openObjectCandidates &&
+      canBeObject &&
+      propertyKeys?.length &&
+      !('additionalProperties' in source)
+    ) {
+      openObjectCandidates.push(target);
+    }
     return target;
   };
 
-  return relax(schema) as Record<string, unknown>;
+  const relaxed = relax(schema) as Record<string, unknown>;
+  for (const target of openObjectCandidates ?? []) {
+    target['additionalProperties'] = true;
+  }
+  return relaxed;
 }

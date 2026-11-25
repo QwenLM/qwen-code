@@ -327,6 +327,7 @@ export function createChannelStartup({
             response,
             isExternalToolGuardRequired(),
           );
+          info.retirementReceipts = capabilities.retirementReceipts;
           if (capabilities.activeWork) {
             info.activeWork = { ...capabilities.activeWork, seq: 0 };
           }

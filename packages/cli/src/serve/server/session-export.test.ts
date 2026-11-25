@@ -6,7 +6,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
   type ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
@@ -19,7 +18,10 @@ import {
   toJsonl,
   toMarkdown,
 } from '../../ui/utils/export/index.js';
-import { exportSessionTranscript } from './session-export.js';
+import {
+  ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES,
+  exportSessionTranscript,
+} from './session-export.js';
 
 vi.mock('../../ui/utils/export/index.js', () => ({
   collectSessionData: vi.fn(),
@@ -77,8 +79,9 @@ describe('exportSessionTranscript', () => {
       archiveState: 'archived',
     });
 
+    expect(ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES).toBe(256 * 1024 * 1024);
     expect(loadArchivedSession).toHaveBeenCalledWith(sessionId, {
-      maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      maxBytes: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES,
     });
     expect(loadSession).not.toHaveBeenCalled();
   });

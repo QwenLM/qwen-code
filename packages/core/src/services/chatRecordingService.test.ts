@@ -158,6 +158,15 @@ const attributionSnapshot = {
 };
 
 vi.mock('node:path');
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  assertSessionArchiveGeneration: vi.fn(),
+  readSessionArchiveGeneration: vi.fn(),
+  withSessionArchiveWriteLockSync: vi.fn((_path, run) => run()),
+}));
 vi.mock('node:child_process');
 vi.mock('node:crypto', () => ({
   randomUUID: vi.fn(),
@@ -477,6 +486,19 @@ describe('ChatRecordingService', () => {
       user('persisted');
       await expect(svc.flush()).resolves.toBeUndefined();
     });
+  });
+
+  it('cancels work on the replaced branch after a rewind', async () => {
+    const branch = svc.getBranchAbortSignal();
+    turn('first', 'first answer');
+    user('second');
+    await svc.flush();
+    expect(svc.getBranchAbortSignal()).toBe(branch);
+    expect(branch.aborted).toBe(false);
+
+    svc.rewindRecording(1, { truncatedCount: 1 });
+    expect(branch.aborted).toBe(true);
+    expect(svc.getBranchAbortSignal().aborted).toBe(false);
   });
 
   describe('background execution recording ownership', () => {
