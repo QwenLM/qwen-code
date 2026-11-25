@@ -1782,7 +1782,11 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
 interface MicrovmProbeSession {
   sessionId: string;
   socketPath: string;
-  initialized: boolean;
+  /** The guest session exists/needs an explicit close, even after an install failure. */
+  sessionAllocated: boolean;
+  /** One install attempt per phase, never repeated after a failed install. */
+  installAttempted: boolean;
+  installError?: string;
 }
 
 function runProbeSuite(
@@ -1875,12 +1879,15 @@ function runProbeSuite(
     };
 
     // Content-only sync into the microVM — never expose host node_modules
-    // symlinks across a host mount boundary. When a session is active and a
-    // lockfile is present, initialize dependencies once in the guest session
-    // and then overlay mutated source files onto that session for each probe.
-    if (vmSession && !vmSession.initialized) {
+    // symlinks across a host mount boundary. Allocate dependencies once per
+    // session, and never mistake a failed install for a usable one on a later probe.
+    if (vmSession?.installError) {
+      throw new ProbeRunFailure(vmSession.installError, 'not-run');
+    }
+    if (vmSession && !vmSession.installAttempted) {
       const installer = lockfileInstaller(probeTree);
       if (installer) {
+        vmSession.installAttempted = true;
         const installCmd =
           installer === 'pnpm'
             ? 'corepack pnpm install --frozen-lockfile --reporter=append-only'
@@ -1894,13 +1901,15 @@ function runProbeSuite(
           workspaceSessionId: vmSession.sessionId,
           workspaceMode: 'replace',
         });
+        vmSession.sessionAllocated = true;
+        if (installRes.timedOut || installRes.protocolError) {
+          vmSession.installError = `microVM dependency install failed: ${installRes.protocolError ?? 'timed out'}`;
+        } else if (installRes.exitCode !== 0) {
+          vmSession.installError = `microVM dependency install exited ${String(installRes.exitCode)}`;
+        }
         handleBridgeFault(installRes, 'dependency install');
-        vmSession.initialized = true;
-        if (installRes.exitCode !== 0) {
-          throw new ProbeRunFailure(
-            `microVM dependency install exited ${String(installRes.exitCode)}`,
-            'not-run',
-          );
+        if (vmSession.installError) {
+          throw new ProbeRunFailure(vmSession.installError, 'not-run');
         }
       }
     }
@@ -1917,12 +1926,12 @@ function runProbeSuite(
             workspaceSessionId: vmSession.sessionId,
             // `sync` removes stale non-node_modules files (e.g. PR-added files
             // deleted during the revert probe) while keeping guest node_modules.
-            workspaceMode: vmSession.initialized ? 'sync' : 'replace',
+            workspaceMode: vmSession.sessionAllocated ? 'sync' : 'replace',
           }
         : {}),
     });
     handleBridgeFault(bridgeResult, 'probe');
-    if (vmSession) vmSession.initialized = true;
+    if (vmSession) vmSession.sessionAllocated = true;
     return {
       perFile: classifyProbeRun(
         bridgeResult.exitCode ?? 1,
@@ -2792,7 +2801,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       ? {
           sessionId: `eff-${randomBytes(6).toString('hex')}`,
           socketPath: initialVerdict.socketPath,
-          initialized: false,
+          sessionAllocated: false,
+          installAttempted: false,
         }
       : undefined;
   const sandboxRefusal = refuseUnsandboxedPhase(
@@ -3432,8 +3442,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           })),
         );
       } finally {
-        if (vmSession?.initialized) {
-          closeGuestSessionSync(vmSession.socketPath, vmSession.sessionId);
+        if (vmSession?.sessionAllocated) {
+          const closed = closeGuestSessionSync(
+            vmSession.socketPath,
+            vmSession.sessionId,
+          );
+          recordTeardown(closed ? 'clean' : 'partial');
         }
         // Discard the whole probe tree. There is no in-place restore to fail —
         // the shared worktree was never mutated — and a path that survives the

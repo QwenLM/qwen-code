@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -40,11 +41,13 @@ vi.mock('./sandbox-backends.js', async (importOriginal) => {
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import { runBuildTest } from '../build-test.js';
 import { runTestDelta } from '../test-delta.js';
+import { runControlMutant } from '../test-efficacy.js';
+import { closeGuestSessionSync } from './guest-exec-bridge.js';
 
 const SESSION_GUEST_AGENT_SCRIPT = `
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 
@@ -92,9 +95,13 @@ const server = createServer((sock) => {
         curFile = null;
         fileChunks = [];
       } else if (kind === 'C') {
-        const sid = payload.toString('utf8');
+        const closeRequest = JSON.parse(payload.toString('utf8'));
+        const sid = closeRequest.workspaceSessionId;
         rmSync(join(scratchBase, 'session-' + sid), { recursive: true, force: true });
         sock.write(enc('Z', JSON.stringify({
+          runId: closeRequest.runId,
+          workspaceSessionId: sid,
+          sessionSha256: sha(sid),
           exitCode: 0,
           signal: null,
           timedOut: false,
@@ -134,7 +141,20 @@ const server = createServer((sock) => {
         const cmdToRun =
           mode === 'fake-install-no-marker' && req.kind === 'install'
             ? 'mkdir -p node_modules && echo FAKE_INSTALL_NO_MARKER'
-            : req.command;
+            : mode === 'install-exit-1' && req.kind === 'install'
+              ? 'exit 1'
+              : req.command;
+        try {
+          appendFileSync(
+            join(scratchBase, 'requests.ndjson'),
+            JSON.stringify({
+              command: req.command,
+              kind: req.kind,
+              workspaceMode: req.workspaceMode,
+              workspaceSessionId: req.workspaceSessionId,
+            }) + String.fromCharCode(10),
+          );
+        } catch {}
 
         const child = spawn('/bin/sh', ['-c', cmdToRun], {
           cwd: join(guestDir, req.workdir || '.'),
@@ -174,7 +194,7 @@ server.listen(socketPath, () => process.stdout.write('READY\\n'));
 async function startSessionGuestAgent(
   socketPath: string,
   scratchBase: string,
-  mode: 'normal' | 'fake-install-no-marker' = 'normal',
+  mode: 'normal' | 'fake-install-no-marker' | 'install-exit-1' = 'normal',
 ): Promise<ChildProcess> {
   const child = spawn(
     process.execPath,
@@ -347,30 +367,31 @@ describe.skipIf(IS_WINDOWS)(
         ).toEqual([]);
 
         // Also exercise runTestDelta through the firecracker bridge on Linux CI & macOS.
+        // Use build-test's real emitter command (`npm test`), not `node -e`,
+        // which is deliberately rejected by test-delta's execution grammar.
         const failedBt = join(dir, 'failed-bt.json');
         writeFileSync(
           failedBt,
           JSON.stringify({
-            toolchain: 'npm',
-            affected: ['.'],
-            buildSet: ['.'],
-            widenedWith: [],
-            install: null,
-            build: [],
+            ...rep,
+            ok: false,
+            note: 'forced failing test for the net-new control report',
             test: [
               {
-                command: 'node -e "console.log(\'DELTA_IN_FIRECRACKER\')"',
+                ...rep.test[0]!,
                 exitCode: 1,
-                seconds: 1,
-                timedOut: false,
                 output: 'FAIL src/index.test.ts',
                 failingFiles: ['src/index.test.ts'],
               },
             ],
-            timedOut: [],
-            ok: false,
-            note: 'failed',
           }),
+        );
+        // A delta baseline is a BUILT base tree (as `base-tree` promises), not
+        // merely the PR source: seed the fixture's build artifact too.
+        mkdirSync(join(wt, 'dist'), { recursive: true });
+        writeFileSync(
+          join(wt, 'dist', 'built.txt'),
+          'FROM_GUEST_INSTALLED_DEP',
         );
         const delta = runTestDelta({
           report: failedBt,
@@ -383,11 +404,105 @@ describe.skipIf(IS_WINDOWS)(
           prTrust: 'external',
           executionClass: 'hardware-isolated',
           backend: 'firecracker',
+          teardownStatus: 'clean',
         });
+        expect(delta.entries).toHaveLength(1);
+        expect(delta.entries[0]?.base.exitCode).toBe(0);
+        expect(delta.netNew).toEqual(['src/index.test.ts']);
+        const requests = readFileSync(join(scratch, 'requests.ndjson'), 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as { command: string });
+        expect(
+          requests.filter((r) => r.command === 'npm ci --no-audit --no-fund')
+            .length,
+        ).toBeGreaterThanOrEqual(2);
+        expect(requests.some((r) => r.command === 'npm test')).toBe(true);
+        expect(
+          readdirSync(scratch).filter((d) => d.startsWith('session-')),
+        ).toEqual([]);
       } finally {
         settingsGuard.dispose();
       }
     }, 60_000);
+
+    it('never retries or reruns probes after a failed guest dependency install', async () => {
+      const settingsGuard = isolateOperatorReviewSettings();
+      const dir = mkdtempSync(join('/tmp', 'qvm-eff-fail-install-'));
+      tmpDirs.push(dir);
+      try {
+        const scratch = join(dir, 'scratch');
+        const wt = join(dir, 'probe-wt');
+        mkdirSync(scratch, { recursive: true });
+        createOfflineInstallableFixture(wt);
+        const probeFile = 'src/index.test.ts';
+        writeFileSync(
+          join(wt, probeFile),
+          'import { it } from "vitest";\nit("dummy", () => {});\n',
+        );
+        // `runControlMutant`'s own tracked-tree guard intentionally precedes
+        // the bridge: use a real Git worktree so the install path is reached.
+        execFileSync('git', ['init', '-q'], { cwd: wt });
+        execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+          cwd: wt,
+        });
+        execFileSync('git', ['config', 'user.name', 'Test'], { cwd: wt });
+        execFileSync('git', ['add', '.'], { cwd: wt });
+        execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: wt });
+        const sockPath = join(dir, 'eff-fail.sock');
+        children.push(
+          await startSessionGuestAgent(sockPath, scratch, 'install-exit-1'),
+        );
+        probeOverride.current = {
+          platform: 'linux',
+          arch: 'x64',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          hasVfkit: false,
+          hasSandboxExec: false,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: sockPath,
+        };
+        vi.stubEnv('QWEN_REVIEW_FORCE_HARDWARE', '1');
+        const vmSession: Parameters<typeof runControlMutant>[7] = {
+          sessionId: 'eff-failed-install-1',
+          socketPath: sockPath,
+          sessionAllocated: false,
+          installAttempted: false,
+        };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(() =>
+            runControlMutant(
+              wt,
+              probeFile,
+              undefined,
+              () => 1,
+              wt,
+              undefined,
+              undefined,
+              vmSession,
+            ),
+          ).toThrow(/microVM dependency install exited 1/);
+        }
+        expect(vmSession?.sessionAllocated).toBe(true);
+        expect(vmSession?.installAttempted).toBe(true);
+        const requests = readFileSync(join(scratch, 'requests.ndjson'), 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as { command: string });
+        expect(
+          requests.filter((r) => r.command === 'npm ci --no-audit --no-fund'),
+        ).toHaveLength(1);
+        expect(requests.some((r) => r.command.includes('vitest'))).toBe(false);
+        expect(closeGuestSessionSync(sockPath, 'eff-failed-install-1')).toBe(
+          true,
+        );
+      } finally {
+        settingsGuard.dispose();
+      }
+    }, 30_000);
 
     it('fails install honestly when guest npm ci exits 0 without writing the lockfile completeness marker', async () => {
       const settingsGuard = isolateOperatorReviewSettings();

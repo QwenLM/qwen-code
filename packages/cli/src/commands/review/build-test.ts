@@ -694,11 +694,13 @@ function containerised(
   };
 }
 
-interface MicrovmBuildSession {
+export interface MicrovmBuildSession {
   sessionId: string;
   socketPath: string;
   initialized: boolean;
   installed: boolean;
+  /** Whether the session-bound close frame was acknowledged intact. */
+  closeStatus?: 'clean' | 'partial' | 'failed';
 }
 
 export function run(
@@ -1222,6 +1224,7 @@ function refusedReport(why: string): BuildTestReport {
 function runBuildTestUnguarded(
   args: BuildTestArgs,
   trustContext: ReviewTrustInput | undefined = trustInputFromPlan(args.plan),
+  vmSession?: MicrovmBuildSession,
 ): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
@@ -1347,15 +1350,6 @@ function runBuildTestUnguarded(
     undefined,
     trustContext,
   );
-  const vmSession: MicrovmBuildSession | undefined =
-    !args.exec && initialVerdict.kind === 'microvm'
-      ? {
-          sessionId: `bt-${randomBytes(6).toString('hex')}`,
-          socketPath: initialVerdict.socketPath,
-          initialized: false,
-          installed: false,
-        }
-      : undefined;
   const runArgs = {
     root,
     changedFiles,
@@ -1477,7 +1471,12 @@ function runBuildTestUnguarded(
     return { ...adapter.run(runArgs), run: runIdentity };
   } finally {
     if (vmSession?.initialized) {
-      closeGuestSessionSync(vmSession.socketPath, vmSession.sessionId);
+      vmSession.closeStatus = closeGuestSessionSync(
+        vmSession.socketPath,
+        vmSession.sessionId,
+      )
+        ? 'clean'
+        : 'partial';
     }
   }
 }
@@ -1608,15 +1607,19 @@ export function resumeWouldDestroyReport(
 
 function aggregateTeardownStatus(
   report: BuildTestReport,
+  closeStatus?: 'clean' | 'partial' | 'failed',
 ): ReviewTeardownStatus {
   const cmds = [
     ...(report.install ? [report.install] : []),
     ...report.build,
     ...report.test,
   ];
-  const statuses = cmds
-    .map((c) => c.teardownStatus)
-    .filter((s): s is ReviewTeardownStatus => s !== undefined);
+  const statuses = [
+    ...cmds
+      .map((c) => c.teardownStatus)
+      .filter((s): s is ReviewTeardownStatus => s !== undefined),
+    ...(closeStatus !== undefined ? [closeStatus] : []),
+  ];
   if (statuses.includes('failed')) return 'failed';
   if (statuses.includes('partial')) return 'partial';
   if (statuses.includes('clean')) return 'clean';
@@ -1643,7 +1646,17 @@ export function applyHandOffPolicy(
 
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const trustContext = trustInputFromPlan(args.plan);
-  const report = runBuildTestUnguarded(args, trustContext);
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
+  const vmSession: MicrovmBuildSession | undefined =
+    !args.exec && verdict.kind === 'microvm'
+      ? {
+          sessionId: `bt-${randomBytes(6).toString('hex')}`,
+          socketPath: verdict.socketPath,
+          initialized: false,
+          installed: false,
+        }
+      : undefined;
+  const report = runBuildTestUnguarded(args, trustContext, vmSession);
   // The THIRD continuation exit, and the one the invariant had not reached.
   // "A continuation must never answer with a FRESH report" is enforced by a
   // throw at the refusal gate and at `!adapter`; this conversion was added
@@ -1667,8 +1680,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     );
   }
   const finalReport = applyHandOffPolicy(report);
-  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
-  const teardownStatus = aggregateTeardownStatus(finalReport);
+  const teardownStatus = aggregateTeardownStatus(
+    finalReport,
+    vmSession?.closeStatus,
+  );
   const mountable = mountRootFor(resolve(args.worktree)) !== null;
   const effectiveBackend =
     finalReport.toolchain === 'refused'
@@ -1684,7 +1699,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
         : 'container teardown verification failed — a timed-out container may still be running'
       : teardownStatus === 'partial' && verdict.kind === 'microvm'
-        ? `microVM (${verdict.backend}) timed out or faulted without QWEN_REVIEW_VM_PID_FILE — worker teardown could not be verified`
+        ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified`
         : verdict.kind === 'container' && !mountable
           ? 'tree is not under a review temp dir, so commands ran directly rather than in a container'
           : undefined;

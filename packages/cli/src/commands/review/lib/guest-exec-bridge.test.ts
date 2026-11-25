@@ -25,6 +25,7 @@ import {
   GUEST_EXEC_PROTOCOL,
   GuestExecFrameDecoder,
   LINUX_MAX_UDS_BYTES,
+  buildOutgoingWireBuffer,
   closeGuestSessionSync,
   encodeFrame,
   evaluateGuestResponseWire,
@@ -106,10 +107,29 @@ const server = createServer((sock) => {
         curFile = null;
         fileChunks = [];
       } else if (kind === 'C') {
-        const sid = payload.toString('utf8');
+        const closeRequest = JSON.parse(payload.toString('utf8'));
+        const sid = closeRequest.workspaceSessionId;
+        if (mode === 'close-no-ack') {
+          sock.end();
+          return;
+        }
+        if (mode === 'close-truncated') {
+          sock.write(enc('Z', '{"runId":').subarray(0, 3));
+          sock.end();
+          return;
+        }
         const sessionDir = join(scratchBase, 'session-' + sid);
         try { rmSync(sessionDir, { recursive: true, force: true }); } catch {}
+        if (mode === 'close-pretend-delete') {
+          // The peer can merely claim cleanup by exiting 0. Never accept that
+          // in place of the complete, session-bound ACK used by real agents.
+          sock.end();
+          return;
+        }
         sock.write(enc('Z', JSON.stringify({
+          runId: mode === 'close-wrong-sender' ? 'wrong-sender' : closeRequest.runId,
+          workspaceSessionId: mode === 'close-wrong-sender' ? 'other-session' : sid,
+          sessionSha256: sha(mode === 'close-wrong-sender' ? 'other-session' : sid),
           exitCode: 0,
           signal: null,
           timedOut: false,
@@ -221,7 +241,16 @@ server.listen(socketPath, () => {
 async function startGuestAgentChild(
   socketPath: string,
   scratchBase: string,
-  mode: 'normal' | 'truncate' | 'forged-digest' | 'bad-ack' | 'hang' = 'normal',
+  mode:
+    | 'normal'
+    | 'truncate'
+    | 'forged-digest'
+    | 'bad-ack'
+    | 'hang'
+    | 'close-no-ack'
+    | 'close-truncated'
+    | 'close-pretend-delete'
+    | 'close-wrong-sender' = 'normal',
 ): Promise<ChildProcess> {
   const child = spawn(
     process.execPath,
@@ -405,6 +434,26 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
     expect(validateWorkspaceSessionId('../escape')).toBe(false);
     expect(validateWorkspaceSessionId('bad id')).toBe(false);
     expect(validateWorkspaceSessionId('..')).toBe(false);
+
+    const reuseWithoutSid = buildOutgoingWireBuffer({
+      command: 'ls',
+      kind: 'test',
+      timeoutMs: 1_000,
+      env: {},
+      workspaceMode: 'reuse',
+    });
+    expect(reuseWithoutSid.ok).toBe(false);
+    if (!reuseWithoutSid.ok) {
+      expect(reuseWithoutSid.reason).toContain('requires workspaceSessionId');
+    }
+    const invalidMode = buildOutgoingWireBuffer({
+      command: 'ls',
+      kind: 'test',
+      timeoutMs: 1_000,
+      env: {},
+      workspaceMode: 'invalid' as never,
+    });
+    expect(invalidMode.ok).toBe(false);
   });
 
   it('packs regular workspace files by content while refusing symlinks, traversal, and over-budget trees', () => {
@@ -556,6 +605,54 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
       // Unrelated canary & argv decoy remain untouched.
       expect(() => process.kill(canary.pid!, 0)).not.toThrow();
       expect(() => process.kill(argvDecoy.pid!, 0)).not.toThrow();
+    },
+  );
+
+  it.skipIf(IS_WINDOWS)(
+    'rejects incomplete or unbound guest close acknowledgments instead of treating process exit 0 as proof',
+    async () => {
+      const dir = mkdtempSync(join('/tmp', 'qvm-close-ack-'));
+      tmpDirs.push(dir);
+      for (const mode of [
+        'close-no-ack',
+        'close-truncated',
+        'close-wrong-sender',
+        'close-pretend-delete',
+      ] as const) {
+        const sock = join(dir, `${mode}.sock`);
+        children.push(await startGuestAgentChild(sock, dir, mode));
+        expect(closeGuestSessionSync(sock, 'session-close-proof')).toBe(false);
+      }
+    },
+  );
+
+  it.skipIf(IS_WINDOWS)(
+    'reapVmWorker accepts the executable basename of a deleted or replaced Linux binary',
+    () => {
+      let terminated = false;
+      const result = reapVmWorker({
+        pid: 12345,
+        expectedExeTokens: ['firecracker'],
+        psSpawn: ((_cmd: string, args: string[]) => {
+          if (terminated) {
+            return { status: 1, stdout: '', stderr: 'no such pid' };
+          }
+          if (args.includes('args=')) {
+            return { status: 0, stdout: '/bin/sleep 60\n', stderr: '' };
+          }
+          return {
+            status: 0,
+            stdout: ' S /opt/vm/firecracker (deleted)\n',
+            stderr: '',
+          };
+        }) as typeof import('node:child_process').spawnSync,
+        signalProcess: () => {
+          terminated = true;
+          throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+        },
+        sleepMs: () => undefined,
+      });
+      expect(result.status).toBe('clean');
     },
   );
 

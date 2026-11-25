@@ -48,6 +48,13 @@ export type GuestExecFrameKind =
 
 export type GuestWorkspaceMode = 'replace' | 'sync' | 'overlay' | 'reuse';
 
+const VALID_WORKSPACE_MODES: ReadonlySet<string> = new Set([
+  'replace',
+  'sync',
+  'overlay',
+  'reuse',
+]);
+
 const VALID_FRAME_KINDS: ReadonlySet<string> = new Set([
   'H',
   'A',
@@ -456,6 +463,15 @@ export function buildOutgoingWireBuffer(
     return {
       ok: false,
       reason: `invalid workspaceSessionId: ${JSON.stringify(request.workspaceSessionId)}`,
+    };
+  }
+  if (
+    request.workspaceMode !== undefined &&
+    !VALID_WORKSPACE_MODES.has(request.workspaceMode)
+  ) {
+    return {
+      ok: false,
+      reason: `invalid workspaceMode: ${JSON.stringify(request.workspaceMode)}`,
     };
   }
   if (request.workspaceMode === 'reuse' && !request.workspaceSessionId) {
@@ -1091,7 +1107,12 @@ interface ProcessIdentity {
 }
 
 function normalizeExeBasename(raw: string): string | null {
-  const trimmed = raw.trim().replace(/^-+/, '');
+  // Linux `/proc/<pid>/exe` appends this suffix after a binary is unlinked or
+  // replaced. It describes the inode's deleted name, not a different program.
+  const trimmed = raw
+    .trim()
+    .replace(/\s+\(deleted\)$/, '')
+    .replace(/^-+/, '');
   if (!trimmed) return null;
   const base = basename(trimmed).toLowerCase();
   return base || null;
@@ -1180,9 +1201,17 @@ export function closeGuestSessionSync(
 ): boolean {
   if (!validateWorkspaceSessionId(workspaceSessionId)) return false;
   if (!validateBridgeSocketEndpoint(socketPath).ok) return false;
+  const runId = `close-${randomBytes(6).toString('hex')}`;
   const wire = Buffer.concat([
     encodeFrame('H', GUEST_EXEC_PROTOCOL),
-    encodeFrame('C', workspaceSessionId),
+    encodeFrame(
+      'C',
+      JSON.stringify({
+        runId,
+        workspaceSessionId,
+        sessionSha256: sha256Hex(workspaceSessionId),
+      }),
+    ),
   ]);
   const r = spawnSync(
     process.execPath,
@@ -1195,12 +1224,47 @@ export function closeGuestSessionSync(
     ],
     {
       input: wire,
-      maxBuffer: DEFAULT_MAX_FRAME_BYTES + 4096,
+      maxBuffer: DEFAULT_MAX_FRAME_BYTES + 65_536,
       timeout: Math.max(1, Math.round(timeoutMs)),
       killSignal: 'SIGKILL',
     },
   );
-  return !r.error && r.status === 0;
+  if (r.error || r.status !== 0) return false;
+  const wireOut = Buffer.isBuffer(r.stdout)
+    ? r.stdout
+    : Buffer.from(String(r.stdout ?? ''), 'utf8');
+  const decoder = new GuestExecFrameDecoder();
+  const decoded = decoder.push(wireOut);
+  if (decoded.error || decoder.hasTrailingBytes()) return false;
+  const frames = decoded.frames;
+  if (
+    frames.length !== 2 ||
+    frames[0]?.kind !== 'A' ||
+    frames[0].payload.toString('utf8') !== GUEST_EXEC_PROTOCOL ||
+    frames[1]?.kind !== 'Z'
+  ) {
+    return false;
+  }
+  try {
+    const ack = JSON.parse(frames[1].payload.toString('utf8')) as {
+      runId?: unknown;
+      workspaceSessionId?: unknown;
+      sessionSha256?: unknown;
+      exitCode?: unknown;
+      signal?: unknown;
+      timedOut?: unknown;
+    };
+    return (
+      ack.runId === runId &&
+      ack.workspaceSessionId === workspaceSessionId &&
+      ack.sessionSha256 === sha256Hex(workspaceSessionId) &&
+      ack.exitCode === 0 &&
+      ack.signal === null &&
+      ack.timedOut === false
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
