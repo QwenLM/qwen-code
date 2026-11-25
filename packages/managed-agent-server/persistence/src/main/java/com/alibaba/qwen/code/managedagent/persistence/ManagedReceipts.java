@@ -2,11 +2,13 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 
@@ -24,7 +26,7 @@ final class ManagedReceipts {
     }
 
     static String scope(String tenant, String scopeId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.receiptScopeRef(tenant, scopeId);
+        return ManagedIdentityRefs.receiptScopeRef(tenant, scopeId);
     }
 
     /** Raw actor bytes bind into the VARCHAR actor column as text; empty means unattributed. */
@@ -33,11 +35,11 @@ final class ManagedReceipts {
             return null;
         }
         return actor.length == 0
-                ? "" : new String(actor, java.nio.charset.StandardCharsets.UTF_8);
+                ? "" : new String(actor, StandardCharsets.UTF_8);
     }
 
     private static byte[] actorBytes(String actor) {
-        return actor == null ? null : actor.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return actor == null ? null : actor.getBytes(StandardCharsets.UTF_8);
     }
 
     static Receipt find(

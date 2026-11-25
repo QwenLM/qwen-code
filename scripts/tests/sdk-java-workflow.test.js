@@ -35,7 +35,12 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
 const writeBackFind =
   "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 
+const writeBackPurge =
+  "find -P \"${HOME}/.m2/repository\" -xdev -depth \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*' \\) -delete 9>&- || write_back=$?";
+
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
+const javaFastCondition =
+  "${{ inputs.tier != 'fast' || inputs.coverage == 'java' || inputs.coverage == 'both' }}";
 const job = (name) => {
   const start = workflow.indexOf(`  ${name}:`);
   const next = workflow.slice(start + 1).search(/\n {2}[a-z0-9-]+:\n/);
@@ -65,21 +70,116 @@ function inlineMavenCacheHelper(run) {
   );
 }
 
-const canDenyRemoval = (() => {
+function canDenyRemoval() {
   const dir = mkdtempSync(join(tmpdir(), 'sdk-java-deny-removal-'));
   const probe = join(dir, 'probe');
+  let denied = false;
+  let probeError;
+  let cleanupError;
   try {
     writeFileSync(probe, 'probe');
     chmodSync(dir, 0o555);
-    rmSync(probe);
-    return false;
+    try {
+      rmSync(probe);
+    } catch (error) {
+      if (!['EACCES', 'EPERM'].includes(error?.code)) throw error;
+      denied = true;
+    }
   } catch (error) {
-    return ['EACCES', 'EPERM'].includes(error?.code);
+    probeError = error;
   } finally {
-    chmodSync(dir, 0o700);
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      chmodSync(dir, 0o700);
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      cleanupError ??= error;
+    }
   }
-})();
+  if (probeError) throw probeError;
+  if (cleanupError) throw cleanupError;
+  return denied;
+}
+
+const readSeedHelperSteps = () =>
+  Object.values(parse(workflow).jobs)
+    .flatMap((entry) => entry.steps ?? [])
+    .filter((candidate) => candidate.run?.includes('seed_helper'));
+
+const hasLineContinuation = (line) =>
+  ((line.match(/\\+$/)?.[0].length ?? 0) & 1) === 1;
+
+function readBashCodeLines(run) {
+  const lines = [];
+  let current = '';
+  let continuing = false;
+  // A continuation can land on a comment; bash runs only the prefix, so
+  // keeping the comment text would reject words that never execute.
+  const flush = () => {
+    const text = current.trim();
+    if (text && !text.startsWith('#')) lines.push(text);
+    current = '';
+    continuing = false;
+  };
+  for (const rawLine of run.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    const trimmedStart = line.trimStart();
+    if (!continuing) {
+      if (!trimmedStart || trimmedStart.startsWith('#')) continue;
+      current = trimmedStart;
+    } else {
+      const hadSpace = /\s$/.test(current) || /^\s/.test(line);
+      if (hadSpace && trimmedStart.startsWith('#')) {
+        flush();
+        continue;
+      }
+      current = hadSpace
+        ? `${current.trimEnd()} ${trimmedStart}`
+        : `${current}${line}`;
+    }
+    if (hasLineContinuation(line)) {
+      current = current.slice(0, -1);
+      continuing = true;
+    } else {
+      flush();
+    }
+  }
+  if (continuing) flush();
+  return lines;
+}
+
+const readStepTraps = (run) =>
+  readBashCodeLines(run).filter((line) => /\btrap\b/.test(line));
+
+function assertReferenceSeedHelperContract(referenceStep) {
+  expect(referenceStep['continue-on-error']).toBeUndefined();
+  expect(referenceStep.if).toBeUndefined();
+  expect(referenceStep.env).toBeUndefined();
+  expect(referenceStep.shell).toBeUndefined();
+  const codeLines = readBashCodeLines(referenceStep.run);
+  expect(codeLines.slice(0, 8)).toEqual([
+    'set -euo pipefail',
+    'export MAVEN_ARGS="--settings ${RUNNER_TEMP}/setup-java-m2/settings.xml --toolchains ${RUNNER_TEMP}/setup-java-m2/toolchains.xml"',
+    'if [[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]; then',
+    'repo="${RUNNER_TEMP}/m2-repo"',
+    'seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"',
+    'source "${seed_helper}"',
+    'MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"',
+    'fi',
+  ]);
+  const mavenLines = codeLines.slice(8);
+  expect(mavenLines.length).toBeGreaterThan(0);
+  for (const line of mavenLines) {
+    expect(line).toMatch(/^mvn\s/);
+  }
+  const mavenBody = mavenLines.join('\n');
+  expect(mavenBody).not.toMatch(
+    /\b(?:seed_helper|maven-cache-seed\.sh|source|shopt|curl|wget|aria2c|fetch|mktemp)\b|\bset\s|[;&|{}<>()$#`]|(?:^|\s)\.\s/m,
+  );
+}
 
 const step = (block, name) => {
   const marker = `      - name: '${name}'`;
@@ -252,7 +352,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('sizes the daemon-e2e budget for the stretched setup on the fast tier', () => {
-    // The fast tier runs this leg on every touched PR push instead of nightly
+    // The fast tier runs this leg on daemon-related PR pushes as well as nightly
     // only, so it meets the ~44 min stretched-setup tail far more often than a
     // 45 ceiling leaves room for. This budget was originally sized for the
     // post-job Maven cache save, which #14396 has since suppressed on
@@ -305,6 +405,11 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(existsSync('scripts/run-java-daemon-sdk-e2e.ts')).toBe(true);
     expect(scripts.build).toBeTruthy();
     expect(scripts.bundle).toBeTruthy();
+  });
+
+  it('starts the daemon fixture independently of host load admission', () => {
+    const source = readFileSync('scripts/run-java-daemon-sdk-e2e.ts', 'utf8');
+    expect(source).toContain("'--no-load-admission',");
   });
 
   it('gates every pool-capable Java job and calibrates its floor', () => {
@@ -509,7 +614,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     // A red leg waits only as long as the copy itself may run: a failure
     // that is already decided must not spend the green lane's queue budget.
     expect(runs[0]).toMatch(
-      /lock_wait=9600[\s\S]{0,80}if \[ "\$\{mvn_status:-0\}" -ne 0 \]; then\s+lock_wait=300/,
+      /lock_wait=9600\s+if \[ "\$\{TIER\}" = "fast" \] \|\| \[ "\$\{mvn_status:-0\}" -ne 0 \]; then\s+lock_wait=300/,
     );
     expect(runs[1]).toMatch(
       /lock_wait=5400[\s\S]{0,80}if \[ "\$\{mvn_status:-0\}" -ne 0 \]; then\s+lock_wait=300/,
@@ -1750,7 +1855,7 @@ describe('SDK Java self-hosted workflow guards', () => {
             }
             if (arm === 'helper' || arm === 'helper-capitalised') {
               const expectedWait =
-                status !== 0 ? '300' : name === 'test' ? '9600' : '5400';
+                status !== 0 || name === 'test' ? '300' : '5400';
               expect(
                 readFileSync(join(runnerTemp, 'lock-wait'), 'utf8').trim(),
                 label,
@@ -1801,10 +1906,9 @@ describe('SDK Java self-hosted workflow guards', () => {
         '              # Server suites inside the SDK module.\n' +
         '              cd ../../managed-agent-server || mvn_status=$?\n' +
         '              if [ "${mvn_status}" -eq 0 ]; then\n' +
-        '                # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
         '                if [ "${TIER}" = "fast" ]; then\n' +
-        "                  mvn_stage='runtime-broker H2 suite'\n" +
-        '                  mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?\n' +
+        "                  mvn_stage='managed-agent compile and class-size ratchet'\n" +
+        '                  mvn --batch-mode --no-transfer-progress -pl verification -am -Dtest=ClassSizeRatchetTest -Dsurefire.failIfNoSpecifiedTests=false clean test || mvn_status=$?\n' +
         '                else\n' +
         "                  mvn_stage='runtime-broker suite'\n" +
         `                  mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test || mvn_status=$?\n` +
@@ -1981,16 +2085,12 @@ describe('SDK Java self-hosted workflow guards', () => {
       candidate.uses?.startsWith('actions/checkout@'),
     );
     expect(referenceCheckout.with.ref).toBeUndefined();
-    const referenceRun = referenceJob.steps.find(
+    const referenceStep = referenceJob.steps.find(
       (candidate) => candidate.name === 'Build Java components',
-    ).run;
-    expect(referenceRun).toContain(
-      'seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"',
     );
-    expect(referenceRun).toContain('source "${seed_helper}"');
+    const referenceRun = referenceStep.run;
+    assertReferenceSeedHelperContract(referenceStep);
     expect(referenceRun).not.toContain('seed_mount_guard() {');
-    expect(referenceRun).not.toMatch(/\bcurl\b/);
-    expect(referenceRun).not.toContain('mktemp');
     expect(referenceRun).toContain(
       'MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"',
     );
@@ -2008,6 +2108,137 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(writeBackGuards).toHaveLength(2);
     expect(writeBackGuards[1]).toBe(writeBackGuards[0]);
   });
+
+  it('pins cleanup to the downloaded helper only', () => {
+    const seedSteps = readSeedHelperSteps();
+    expect(seedSteps).toHaveLength(4);
+    const traps = seedSteps.map(({ run }) => {
+      const codeLines = readBashCodeLines(run);
+      const stepTraps = readStepTraps(run);
+      expect(stepTraps).toHaveLength(1);
+      const [trap] = stepTraps;
+      expect(trap).toMatch(
+        /^trap 'seed_helper_status=\$\?; rm -f -- "\$\{seed_helper\}" \|\| \(echo "::warning::[^'"$`\\]*\$\{seed_helper\}[^'"$`\\]*"\) \|\| true; exit "\$\{seed_helper_status\}"' EXIT$/,
+      );
+      const guardAt = codeLines.indexOf('if [ ! -f "${seed_helper}" ]; then');
+      const sourceAt = codeLines.indexOf('source "${seed_helper}"', guardAt);
+      expect(guardAt).toBeGreaterThanOrEqual(0);
+      expect(sourceAt).toBeGreaterThan(guardAt);
+      const guardLines = codeLines.slice(guardAt + 1, sourceAt);
+      expect(guardLines.at(-1)).toBe('fi');
+      const guardBody = guardLines.slice(0, -1);
+      expect(
+        guardBody.some((line) => /\b(?:if|fi|else|elif)\b/.test(line)),
+      ).toBe(false);
+      const mktempAt = guardBody.indexOf(
+        'seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1',
+      );
+      const trapAt = guardBody.indexOf(trap);
+      const curlAt = guardBody.findIndex((line) =>
+        line.startsWith('curl --fail '),
+      );
+      expect(mktempAt).toBeGreaterThanOrEqual(0);
+      expect(trapAt).toBeGreaterThan(mktempAt);
+      expect(curlAt).toBeGreaterThan(trapAt);
+      const nonTrapLines = codeLines.filter((line) => line !== trap);
+      // The trap owns the step's only removal: matching "command + helper" on
+      // one line lets an aliased target delete the checkout helper unseen.
+      expect(nonTrapLines.some((line) => /\b(?:rm|unlink)\b/.test(line))).toBe(
+        false,
+      );
+      // Allow only the write-back's host-cache coordinate purge, verbatim: a
+      // prefix match would also admit a broad purge of the shared cache.
+      expect(
+        nonTrapLines
+          .filter((line) => /-delete\b/.test(line))
+          .every((line) => line === writeBackPurge),
+      ).toBe(true);
+      return trap;
+    });
+    expect(new Set(traps).size).toBe(1);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'stops the reference build when the checkout helper is missing',
+    () => {
+      const referenceStep = Object.values(
+        parse(
+          readFileSync(
+            '.github/workflows/release-managed-agent-reference.yml',
+            'utf8',
+          ),
+        ).jobs,
+      )
+        .flatMap((entry) => entry.steps ?? [])
+        .find((candidate) => candidate.name === 'Build Java components');
+      assertReferenceSeedHelperContract(referenceStep);
+      const referenceRun = referenceStep.run;
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reference-missing-'));
+      try {
+        const runnerTemp = join(dir, 'runner-temp');
+        const workspace = join(dir, 'workspace');
+        const missingHelper = join(
+          workspace,
+          '.github',
+          'scripts',
+          'maven-cache-seed.sh',
+        );
+        // Pre-create .github/scripts so only the helper file itself is missing.
+        mkdirSync(dirname(missingHelper), { recursive: true });
+        mkdirSync(runnerTemp, { recursive: true });
+        const commandLog = join(runnerTemp, 'commands.log');
+        const fetchAttempt = join(runnerTemp, 'helper-fetch-attempted');
+        for (const command of ['curl', 'wget', 'aria2c', 'fetch']) {
+          const executable = join(dir, 'bin', command);
+          mkdirSync(dirname(executable), { recursive: true });
+          writeFileSync(
+            executable,
+            '#!/bin/sh\nprintf \'%s\\n\' "$0" > "${FETCH_ATTEMPT}"\nexit 97\n',
+            { mode: 0o755 },
+          );
+        }
+        const invocation = `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }
+trap 'printf "%s\\n" "$BASH_COMMAND" >> "\${RUNNER_TEMP}/commands.log"' DEBUG
+${referenceRun}`;
+        // Run the full step without forcing -e externally so its own set -euo pipefail is tested.
+        const result = spawnSync('bash', ['-c', invocation], {
+          cwd: workspace,
+          encoding: 'utf8',
+          timeout: 15000,
+          env: {
+            ...process.env,
+            PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+            HOME: join(dir, 'home'),
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_WORKSPACE: workspace,
+            RUNNER_ENVIRONMENT: 'self-hosted',
+            FETCH_ATTEMPT: fetchAttempt,
+            LC_ALL: 'C',
+          },
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.signal).toBeNull();
+        expect(result.status, result.stderr).not.toBe(0);
+        expect(result.stderr).toContain(
+          `${missingHelper}: No such file or directory`,
+        );
+        expect(readFileSync(commandLog, 'utf8').trim().split('\n')).toEqual([
+          'set -euo pipefail',
+          'export MAVEN_ARGS="--settings ${RUNNER_TEMP}/setup-java-m2/settings.xml --toolchains ${RUNNER_TEMP}/setup-java-m2/toolchains.xml"',
+          '[[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]',
+          'repo="${RUNNER_TEMP}/m2-repo"',
+          'seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"',
+          'source "${seed_helper}"',
+        ]);
+        expect(existsSync(missingHelper)).toBe(false);
+        expect(existsSync(fetchAttempt)).toBe(false);
+        expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+        expect(existsSync(join(runnerTemp, 'm2-repo'))).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform !== 'linux')(
     'loads the shared Maven cache seed helper only when it exists',
@@ -2028,6 +2259,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(body).not.toContain('${{');
       expect(body).toContain('source "${seed_helper}"');
       expect(body).not.toContain('seed_mount_guard() {');
+      const removalDenied = canDenyRemoval();
       for (const [
         helperExists,
         curlFailure,
@@ -2056,11 +2288,12 @@ describe('SDK Java self-hosted workflow guards', () => {
           'rm-denied-nonzero',
           'rm-denied-closed-stdout-nonzero',
         ].includes(mutation);
-        if (cleanupDenied && !canDenyRemoval) continue;
+        if (cleanupDenied && !removalDenied) continue;
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-helper-'));
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
         const workspace = join(dir, 'workspace');
+        mkdirSync(workspace, { recursive: true });
         const hostJar = join(
           home,
           '.m2',
@@ -2189,6 +2422,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             'bash',
             ['-e', '-c', `${stub}\n${executableBody}`],
             {
+              cwd: workspace,
               encoding: 'utf8',
               timeout: 15000,
               env: {
@@ -2313,20 +2547,18 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
     },
   );
 
-  it.skipIf(process.platform !== 'linux' || !canDenyRemoval)(
+  it.skipIf(process.platform !== 'linux')(
     'preserves step status when the cleanup log pipe closes',
     async () => {
-      const source = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
-      const traps = source.match(/trap '[^\n]*seed_helper_status=[^\n]*\n/g);
+      const traps = readSeedHelperSteps().flatMap(({ run }) =>
+        readStepTraps(run),
+      );
       expect(traps).toHaveLength(4);
-      expect(new Set(traps?.map((trap) => trap.trim())).size).toBe(1);
+      expect(new Set(traps.map((entry) => entry.trim())).size).toBe(1);
       const [trap] = traps;
-      expect(trap).toContain('|| (echo ');
       for (const expected of [0, 37]) {
         for (const closingPipe of [false, true]) {
           const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-log-pipe-'));
-          const helper = join(dir, 'maven-cache-seed.fixture');
-          writeFileSync(helper, 'download fixture\n');
           let reader;
           let writer;
           let closed = false;
@@ -2337,6 +2569,23 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             if (writer !== undefined) closeSync(writer);
           };
           try {
+            const helper = join(dir, 'maven-cache-seed.fixture');
+            // rm -f fails on a directory regardless of DAC capabilities.
+            mkdirSync(helper, { recursive: true });
+            const workspace = join(dir, 'workspace');
+            const workspaceHelper = join(
+              workspace,
+              '.github',
+              'scripts',
+              'maven-cache-seed.sh',
+            );
+            mkdirSync(dirname(workspaceHelper), { recursive: true });
+            const workspaceHelperContents = readFileSync(
+              '.github/scripts/maven-cache-seed.sh',
+              'utf8',
+            );
+            // The armed trap must leave the fixture workspace helper untouched.
+            writeFileSync(workspaceHelper, workspaceHelperContents);
             if (closingPipe) {
               const fifo = join(dir, 'warning.fifo');
               execFileSync('mkfifo', [fifo]);
@@ -2349,11 +2598,18 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
                 [
                   '-e',
                   '-c',
-                  `seed_helper=${JSON.stringify(helper)}\n${trap}\nIFS= read -r _ || true\nexit ${expected}`,
+                  `seed_helper="\${HELPER_PATH}"\n${trap}\nIFS= read -r _ || true\nexit ${expected}`,
                 ],
                 {
+                  cwd: workspace,
                   stdio: ['pipe', writer ?? 'pipe', 'pipe'],
-                  env: { ...process.env, RUNNER_TEMP: dir },
+                  env: {
+                    ...process.env,
+                    RUNNER_TEMP: dir,
+                    GITHUB_WORKSPACE: workspace,
+                    HELPER_PATH: helper,
+                    LC_ALL: 'C',
+                  },
                 },
               );
               let stdout = '';
@@ -2368,7 +2624,6 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
               });
               // Make the pipe loss deterministic before allowing the exit trap.
               child.once('spawn', () => {
-                chmodSync(dir, 0o555);
                 closePorts();
                 child.stdin.end();
               });
@@ -2386,15 +2641,10 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
                 resolve({ status, signal, stdout, stderr });
               });
             });
-            expect(result.error).toBeUndefined();
             expect(result.signal, result.stderr).toBeNull();
             expect(result.status, result.stderr).toBe(expected);
-            expect(result.stderr).toContain('Permission denied');
-            if (closingPipe) {
-              expect(result.stdout).toBe('');
-              // A fatal SIGPIPE need not leave an echo error line.
-              expect(readFileSync(helper, 'utf8')).toBe('download fixture\n');
-            } else {
+            expect(result.stderr).toContain('Is a directory');
+            if (!closingPipe) {
               expect(
                 result.stdout
                   .split('\n')
@@ -2406,9 +2656,12 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
               ).toHaveLength(1);
               expect(result.stdout).toContain(helper);
             }
+            expect(lstatSync(helper).isDirectory()).toBe(true);
+            expect(readFileSync(workspaceHelper, 'utf8')).toBe(
+              workspaceHelperContents,
+            );
           } finally {
             closePorts();
-            chmodSync(dir, 0o755);
             rmSync(dir, { recursive: true, force: true });
           }
         }
@@ -5697,7 +5950,7 @@ exec /usr/bin/find "$@"
     expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(hosted.run).toContain(
       'if [ "${TIER}" = "fast" ]; then\n' +
-        '  mvn --batch-mode --no-transfer-progress clean test\n' +
+        '  mvn --batch-mode --no-transfer-progress -pl verification -am -Dtest=ClassSizeRatchetTest -Dsurefire.failIfNoSpecifiedTests=false clean test\n' +
         'else\n' +
         `  mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
         'fi',
@@ -5758,29 +6011,19 @@ exec /usr/bin/find "$@"
     },
   );
 
-  it('builds the JavaScript the full module suite loads before the fast tier runs it', () => {
+  it('keeps the Java fast tier independent of a workspace JavaScript build', () => {
     const steps = parse(workflow).jobs.test.steps;
-    const names = steps.map((candidate) => candidate.name);
-    const build = steps.find(
-      (candidate) =>
-        candidate.name ===
-        'Build Managed Agent JavaScript prerequisites (fast tier)',
+    const node = steps.find(
+      (step) => step.name === 'Set up Node.js 22 (hosted)',
     );
-    expect(build.if).toBe("${{ inputs.tier == 'fast' }}");
-    expect(build.run).toBe(
-      parse(workflow).jobs['mysql-integration'].steps.find(
-        (candidate) => candidate.name === 'Build native producer prerequisites',
-      ).run,
+    expect(node.if).toContain("inputs.tier != 'fast'");
+    expect(steps.some((step) => step.run?.includes('pnpm install'))).toBe(
+      false,
     );
-    for (const later of [
-      'Run Java SDK tests (self-hosted)',
-      'Run Runtime Broker state tests',
-    ]) {
-      expect(names.indexOf(build.name)).toBeLessThan(names.indexOf(later));
-    }
-    expect(names.indexOf('Set up Node.js 22 (hosted)')).toBeLessThan(
-      names.indexOf(build.name),
+    const checkstyle = steps.find(
+      (step) => step.name === 'Run Java SDK Checkstyle',
     );
+    expect(checkstyle.if).toContain("inputs.tier == 'fast'");
   });
 
   it.skipIf(process.platform === 'win32').each([0, 23])(
@@ -5970,15 +6213,15 @@ exec /usr/bin/find "$@"
 });
 
 // #12940: the duplicate-version guard is the fast lane for a collision two
-// green PRs can only produce in the merge result, so it runs on every
-// trigger — no job-level condition, no Java, no database. #13245 moved its
+// green PRs can only produce in the merge result. It runs for Java coverage
+// and in the full tier, without Java or a database. #13245 moved its
 // trusted runs onto the ECS pool (a seconds-long scan sat 26 minutes in the
 // hosted queue); untrusted fork PRs stay hosted.
 describe('SDK Java Flyway migration version guard', () => {
-  it('runs the uniqueness check as an unconditional job', () => {
+  it('runs the uniqueness check for Java coverage and the full tier', () => {
     const block = job('flyway-migrations');
     const parsed = parse(workflow).jobs['flyway-migrations'];
-    expect(parsed.if).toBeUndefined();
+    expect(parsed.if).toBe(javaFastCondition);
     for (const fragment of [
       "github.event_name != ''pull_request''",
       'github.event.pull_request.head.repo.full_name == github.repository',
@@ -6920,8 +7163,8 @@ describe('Java SDK release validation gate', () => {
       required: true,
       type: 'string',
     });
-    // The only lane condition is the fast-tier skip, and the release caller
-    // passes no tier, so the default 'full' runs every lane.
+    // The lane conditions only restrict the fast tier. Release uses the full
+    // default, so every lane validates the prepared release source.
     expect(checks.on.workflow_call.inputs.tier).toMatchObject({
       required: false,
       default: 'full',
@@ -6931,7 +7174,11 @@ describe('Java SDK release validation gate', () => {
         entry.uses?.startsWith('actions/checkout@'),
       );
       expect(checkout.with.ref).toBe('${{ inputs.ref || github.sha }}');
-      expect([undefined, "${{ inputs.tier != 'fast' }}"]).toContain(lane.if);
+      expect([
+        "${{ inputs.tier != 'fast' }}",
+        javaFastCondition,
+        "${{ inputs.tier != 'fast' || inputs.coverage == 'daemon' || inputs.coverage == 'both' }}",
+      ]).toContain(lane.if);
       expect(lane['continue-on-error']).toBeUndefined();
     }
     expect(release.jobs.java_checks).toMatchObject({
@@ -7054,7 +7301,7 @@ describe('SDK Java runner-local tool-cache repair', () => {
 // and qwen-autofix.yml already absorb (#11726); the heap class is capped in
 // pnpm-workspace.yaml, and a retry only offers it a quieter host. Pin the
 // recipe on every install so a new bare step fails here instead of on main.
-// For the five installs that do not set QWEN_SKIP_PREPARE, each attempt
+// For the installs that do not set QWEN_SKIP_PREPARE, each attempt
 // re-runs prepare's build (~4m32s observed), not just backoff; daemon-e2e
 // skips the build and only runs `npm run generate` on each attempt.
 // Scope is sdk-java.yml: release-sdk-java.yml's install is a bare one-liner
@@ -7087,7 +7334,6 @@ describe('SDK Java install-transient retry', () => {
       'hosted-failover-e2e',
       'hosted-harness-mysql',
       'mysql-integration',
-      'test',
     ]);
   });
 

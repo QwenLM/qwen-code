@@ -197,6 +197,8 @@ export interface HttpManagedSessionStores {
   supportsActionParking(): boolean;
   /** Whether a park certificate may share its seal with a background hold. */
   supportsBackgroundActionParking(): boolean;
+  /** Whether a wake-started Turn's approval wait may park. */
+  supportsWakeActionParking(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -445,6 +447,7 @@ export function createHttpManagedSessionStores(
     supportsActionParking: () => client.supportsActionParking(),
     supportsBackgroundActionParking: () =>
       client.supportsBackgroundActionParking(),
+    supportsWakeActionParking: () => client.supportsWakeActionParking(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -999,6 +1002,7 @@ interface WriterGrant {
   readonly runtimeObservation: boolean;
   readonly actionParking: boolean;
   readonly backgroundActionParking: boolean;
+  readonly wakeActionParking: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1079,6 +1083,10 @@ class ManagedSessionStoreHttpClient {
 
   supportsBackgroundActionParking(): boolean {
     return this.grant?.backgroundActionParking === true;
+  }
+
+  supportsWakeActionParking(): boolean {
+    return this.grant?.wakeActionParking === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -3157,6 +3165,7 @@ class ManagedSessionStoreHttpClient {
         runtimeObservation: renewed.runtimeObservation,
         actionParking: renewed.actionParking,
         backgroundActionParking: renewed.backgroundActionParking,
+        wakeActionParking: renewed.wakeActionParking,
       };
       this.scheduleRenewal();
     })();
@@ -3803,6 +3812,7 @@ function parseWriterGrant(value: unknown): WriterGrant {
     runtimeObservation: record['runtimeObservation'] === true,
     actionParking: record['actionParking'] === true,
     backgroundActionParking: record['backgroundActionParking'] === true,
+    wakeActionParking: record['wakeActionParking'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),

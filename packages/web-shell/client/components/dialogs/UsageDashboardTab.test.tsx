@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -86,7 +86,7 @@ function makeDashboard(overrides: Record<string, unknown> = {}) {
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-function renderTab(language: 'en' | 'zh-CN' = 'en') {
+function renderTab(language: WebShellLanguage = 'en') {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -145,6 +145,24 @@ describe('UsageDashboardTab', () => {
     expect(grid!.querySelectorAll('div').length).toBeGreaterThan(150);
   });
 
+  it('shows the output tile without billing reasoning twice', () => {
+    // The server already counted reasoning once in outputTokens; thoughtsTokens
+    // is the raw subset of it. Adding the two would render 5.8M under a 746.7M
+    // hero whose input + output is 742.1M + 4.6M.
+    mockState = {
+      dashboard: makeDashboard({
+        summary: { ...makeDashboard().summary, thoughtsTokens: 1_200_000 },
+      }),
+      loading: false,
+      error: null,
+      reload,
+    };
+    renderTab();
+    const text = digits();
+    expect(text).toContain('4.6M');
+    expect(text).not.toContain('5.8M');
+  });
+
   it('renders model share, skill table, and daily charts', () => {
     mockState = {
       dashboard: makeDashboard(),
@@ -170,8 +188,25 @@ describe('UsageDashboardTab', () => {
     expect(
       container!.querySelectorAll('svg[role="img"]').length,
     ).toBeGreaterThanOrEqual(1);
-    // Daily sessions bar chart section renders (locale-independent sub-label).
-    expect(text).toContain('activesessioncountsperday');
+    // The label states that sessions follow the run's end day, not request day.
+    expect(text).toContain('runsendedperday');
+  });
+
+  it.each([
+    ['en', 'runs ended per day'],
+    ['zh-CN', '每日结束运行数'],
+    ['zh-TW', '每日結束執行數'],
+    ['ru', 'завершённые запуски по дням'],
+  ] as const)('labels ended runs in %s', (language, label) => {
+    mockState = {
+      dashboard: makeDashboard(),
+      loading: false,
+      error: null,
+      reload,
+    };
+    renderTab(language);
+
+    expect(container!.textContent).toContain(label);
   });
 
   it('renders the Today/7D/30D toggle and passes the selected range to the hook', () => {

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -42,7 +43,7 @@ final class WorkspaceLocalDirectories {
             }
             requirePublic(path, false);
             return path;
-        } catch (IOException | java.nio.file.InvalidPathException error) {
+        } catch (IOException | InvalidPathException error) {
             throw invalid();
         }
     }

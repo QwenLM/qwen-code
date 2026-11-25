@@ -42,10 +42,12 @@ class ManagedSessionStoreControllerTest {
             assertThat(advertised.runtimeObservation()).isTrue();
             assertThat(advertised.actionParking()).isTrue();
             assertThat(advertised.backgroundActionParking()).isTrue();
+            assertThat(advertised.wakeActionParking()).isTrue();
         }
         assertThat(grant.wakeDispatch()).isFalse();
         assertThat(grant.runtimeObservation()).isFalse();
         assertThat(grant.actionParking()).isFalse();
         assertThat(grant.backgroundActionParking()).isFalse();
+        assertThat(grant.wakeActionParking()).isFalse();
     }
 }

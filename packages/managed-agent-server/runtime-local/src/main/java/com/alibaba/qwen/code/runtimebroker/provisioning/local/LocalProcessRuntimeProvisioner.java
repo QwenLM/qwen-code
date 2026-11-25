@@ -657,7 +657,7 @@ public final class LocalProcessRuntimeProvisioner
         boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
         boot.put("workspaceId", scope.getWorkspaceId());
         Map<String, Object> document = request.isManagedContext()
-                ? ManagedContextProtocol.boot(request, seed, ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null) : boot;
+                ? ManagedContextProtocol.boot(request, seed, ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null).toWire() : boot;
         byte[] encoded = JsonCodec.encode(document);
         if (encoded.length > READY_RECORD_LIMIT) {
             throw new IllegalArgumentException("Managed Runtime boot exceeds 32 KiB.");
@@ -677,7 +677,8 @@ public final class LocalProcessRuntimeProvisioner
         URI endpoint;
         if (request.isManagedContext()) {
             try {
-                endpoint = ManagedContextProtocol.ready(ready, document);
+                endpoint = ManagedContextProtocol.ready(ready,
+                        ManagedContextProtocol.parseBoot(document)).url();
             } catch (IllegalArgumentException exception) {
                 // A rejected record is a provision failure in both store
                 // modes; the durable store would retype it as a 409.

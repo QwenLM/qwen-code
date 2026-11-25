@@ -128,6 +128,16 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // a process boundary, so a repository must not be able to write the key into
   // the environment at all, not merely be ignored when it does.
   'QWEN_REVIEW_SANDBOX',
+  'QWEN_REVIEW_SANDBOX_IMAGE',
+  'QWEN_REVIEW_SANDBOX_BACKEND',
+  'QWEN_REVIEW_FORCE_HARDWARE',
+  'QWEN_REVIEW_VM_KERNEL',
+  'QWEN_REVIEW_VM_ROOTFS',
+  'QWEN_REVIEW_VM_BRIDGE_SOCKET',
+  'QWEN_REVIEW_VM_PID_FILE',
+  'QWEN_REVIEW_PROVIDER_VM_DRIVER',
+  'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
+  'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo

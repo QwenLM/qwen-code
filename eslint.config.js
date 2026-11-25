@@ -85,6 +85,7 @@ export default tseslint.config(
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
       'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
+      'packages/harness/**', // synced from the Harness repository by its scripts/sync-to-qwen-code.mjs
     ],
   },
   eslint.configs.recommended,

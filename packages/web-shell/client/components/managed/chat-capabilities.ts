@@ -1,5 +1,9 @@
 import type { ManagedAgentSessionSummary } from './managed-agent-provider.js';
-import type { ChatRegion } from '../../chat-core/capabilities.js';
+import type { ChatCapabilities } from '../../chat-core/contract.js';
+import {
+  regionsToCapabilities,
+  type ChatRegion,
+} from '../../chat-core/capabilities.js';
 
 export type ManagedCapabilityKey =
   keyof ManagedAgentSessionSummary['capabilities'];
@@ -39,4 +43,23 @@ export function isManagedCapabilityOn(
   value: boolean | null | undefined,
 ): boolean {
   return value === true;
+}
+
+const MANAGED_CAPABILITY_KEYS = Object.keys(
+  MANAGED_CHAT_CAPABILITY_MAP,
+) as readonly ManagedCapabilityKey[];
+
+export function managedCapabilitiesFromSummary(
+  capabilities: Partial<ManagedAgentSessionSummary['capabilities']> | undefined,
+): ChatCapabilities {
+  if (!capabilities) return regionsToCapabilities([]);
+  const regions = new Set<ChatRegion>();
+  for (const key of MANAGED_CAPABILITY_KEYS) {
+    if (isManagedCapabilityOn(capabilities[key])) {
+      for (const region of MANAGED_CHAT_CAPABILITY_MAP[key]) {
+        regions.add(region);
+      }
+    }
+  }
+  return regionsToCapabilities(regions);
 }
