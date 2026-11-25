@@ -249,6 +249,10 @@ import {
 } from '../confirmation-bus/types.js';
 import { partToString } from '../utils/partUtils.js';
 import { createHookOutput, SessionStartSource } from '../hooks/types.js';
+import {
+  runUserPromptSubmit,
+  type UserPromptSubmitDecision,
+} from '../hooks/user-prompt-submit.js';
 import fsPromises from 'node:fs/promises';
 import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 
@@ -429,6 +433,8 @@ interface StopHookChain {
 export interface SendMessageOptions {
   onPreparedRequest?: LlmPreparedRequestCallback;
   type: SendMessageType;
+  /** The caller already checked this UserQuery or dispatched it internally. */
+  skipUserPromptSubmit?: true;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
   /**
@@ -446,8 +452,8 @@ export interface SendMessageOptions {
   onPromptAdmitted?: () => void;
   /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
-   * place of running UserPromptSubmit again. It is spent by the UserQuery or
-   * Retry with the prompt id it was issued for; any other use throws.
+   * place of running UserPromptSubmit again. It is spent by the UserQuery
+   * with the prompt id it was issued for; any other use throws.
    */
   promptAdmission?: UserPromptAdmission;
   /**
@@ -551,12 +557,6 @@ export interface SendMessageOptions {
 /** UserPromptSubmit's verdict on a prompt, taken before the prompt expands. */
 export interface UserPromptAdmission {
   readonly blocked: boolean;
-}
-
-interface UserPromptSubmitDecision {
-  /** Set when a hook blocked the prompt or stopped execution. */
-  blockReason?: string;
-  additionalContext?: string;
 }
 
 interface IssuedUserPromptAdmission extends UserPromptSubmitDecision {
@@ -3991,7 +3991,7 @@ export class LlmClient {
 
   /**
    * Runs UserPromptSubmit on a prompt before the caller expands it, so a block
-   * also stops the expansion. The prompt's first UserQuery or Retry send takes
+   * also stops the expansion. The prompt's first UserQuery send takes
    * the result as `promptAdmission` and applies it instead of running the hook on
    * the expanded text, so hooks registered during the expansion do not check
    * this prompt, even when none was configured here.
@@ -4006,25 +4006,19 @@ export class LlmClient {
     } = {},
   ): Promise<UserPromptAdmission> {
     const owner = captureHookExecutionOwner(this.config);
-    const messageBus = this.config.getMessageBus();
-    const decision =
-      !this.config.getDisableAllHooks() &&
-      messageBus &&
-      this.config.hasHooksForEvent('UserPromptSubmit')
-        ? await this.requestUserPromptSubmit(
-            messageBus,
-            owner,
-            prompt,
-            'submittedPrompt' in options
-              ? options.submittedPrompt
-              : prompt.trim().length > 0
-                ? prompt
-                : undefined,
-            options.signal,
-          )
-        : {};
+    const decision = await runUserPromptSubmit(
+      this.config,
+      prompt,
+      'submittedPrompt' in options
+        ? options.submittedPrompt
+        : prompt.trim().length > 0
+          ? prompt
+          : undefined,
+      options.signal,
+      owner,
+    );
     const admission: UserPromptAdmission = Object.freeze({
-      blocked: decision.blockReason !== undefined,
+      blocked: decision?.blockReason !== undefined,
     });
     this.userPromptAdmissions.set(admission, {
       ...decision,
@@ -4046,8 +4040,7 @@ export class LlmClient {
     const owner = captureHookExecutionOwner(this.config);
     if (
       !issued ||
-      (messageType !== SendMessageType.UserQuery &&
-        messageType !== SendMessageType.Retry) ||
+      messageType !== SendMessageType.UserQuery ||
       issued.promptId !== promptId ||
       issued.sessionId !== this.config.getSessionId() ||
       issued.owner?.runtimeId !== owner?.runtimeId ||
@@ -4057,40 +4050,6 @@ export class LlmClient {
       throw new Error('UserPromptSubmit admission does not match this prompt');
     }
     return issued;
-  }
-
-  private async requestUserPromptSubmit(
-    messageBus: NonNullable<ReturnType<Config['getMessageBus']>>,
-    owner: HookExecutionOwner | undefined,
-    prompt: string,
-    submittedPrompt: string | undefined,
-    signal?: AbortSignal,
-  ): Promise<UserPromptSubmitDecision> {
-    const response = await messageBus.request<
-      HookExecutionRequest,
-      HookExecutionResponse
-    >(
-      {
-        type: MessageBusType.HOOK_EXECUTION_REQUEST,
-        owner,
-        eventName: 'UserPromptSubmit',
-        input: {
-          prompt,
-          ...(submittedPrompt !== undefined
-            ? { submitted_prompt: submittedPrompt }
-            : {}),
-        },
-        ...(signal ? { signal } : {}),
-      },
-      MessageBusType.HOOK_EXECUTION_RESPONSE,
-    );
-    const hookOutput = response.output
-      ? createHookOutput('UserPromptSubmit', response.output)
-      : undefined;
-    if (hookOutput?.isBlockingDecision() || hookOutput?.shouldStopExecution()) {
-      return { blockReason: hookOutput.getEffectiveReason() };
-    }
-    return { additionalContext: hookOutput?.getAdditionalContext() };
   }
 
   async *sendMessageStream(
@@ -4616,31 +4575,18 @@ export class LlmClient {
           prompt_id,
         );
       } else if (
-        messageType !== SendMessageType.Retry &&
-        messageType !== SendMessageType.Steer &&
-        messageType !== SendMessageType.Cron &&
-        messageType !== SendMessageType.Notification &&
-        // Teammate envelopes are machine-driven re-entries like Cron /
-        // Notification, not user prompts: user-authored UserPromptSubmit
-        // hooks must not fire on (or be able to block) internal team
-        // coordination traffic.
-        messageType !== SendMessageType.Teammate &&
-        messageType !== SendMessageType.Goal &&
-        hooksEnabled &&
-        messageBus &&
-        this.config.hasHooksForEvent('UserPromptSubmit')
+        messageType === SendMessageType.UserQuery &&
+        !options?.skipUserPromptSubmit &&
+        options?.submittedByMod === undefined
       ) {
         const promptText = preHookUserPromptText ?? partToString(request);
-        verdict = {
-          prompt: promptText,
-          ...(await this.requestUserPromptSubmit(
-            messageBus,
-            captureHookExecutionOwner(this.config),
-            promptText,
-            submittedPrompt,
-            signal,
-          )),
-        };
+        const decision = await runUserPromptSubmit(
+          this.config,
+          promptText,
+          submittedPrompt,
+          signal,
+        );
+        if (decision) verdict = { ...decision, prompt: promptText };
       }
 
       if (verdict || promptContext?.length) {
@@ -4691,9 +4637,7 @@ export class LlmClient {
           // A blocked send never reaches the history push: settle the
           // attached carrier by unconditional restore, never by the push
           // counter (a concurrent push inside the hook window above would
-          // otherwise masquerade as this send's acceptance). A blocked Retry
-          // puts back the attempt it stripped above.
-          restoreStrippedRetryEntries();
+          // otherwise masquerade as this send's acceptance).
           settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
