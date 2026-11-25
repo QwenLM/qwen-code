@@ -505,9 +505,7 @@ final class AgentSessionPolicies {
                         Integer.class,
                         ManagedSchemaKeys.identity(sessionId),
                         ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
-                        ManagedSchemaKeys
-                                .identity(
-                                        excludingOperationId == null ? "" : excludingOperationId));
+                        excludingOperationId == null ? "" : excludingOperationId);
         return (commands != null && commands > 0)
                 || (operations != null && operations > 0);
     }
