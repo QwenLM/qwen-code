@@ -2628,6 +2628,8 @@ export default {
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
+  'Save the context window for the current model.':
+    'Save the context window for the current model.',
   'body loaded': 'body loaded',
   memory: 'memory',
   '{{region}} configuration updated successfully.':
