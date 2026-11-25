@@ -12,6 +12,7 @@ import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.convert.DurationStyle;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -50,12 +51,14 @@ public final class ManagedAgentBootstrapPreparationService implements ManagedAge
             @Value("${qwen.managed-agent.definition-input.download.allowed-hosts:}") String allowedHosts,
             @Value("${qwen.managed-agent.definition-input.download.max-bytes:104857600}") long maxBytes,
             @Value("${qwen.managed-agent.definition-input.download.max-concurrency:4}") int maxConcurrency,
-            @Value("${qwen.managed-agent.definition-input.download.connect-timeout:10s}") Duration connectTimeout,
-            @Value("${qwen.managed-agent.definition-input.download.request-timeout:120s}") Duration requestTimeout) {
+            @Value("${qwen.managed-agent.definition-input.download.connect-timeout:10s}") String connectTimeout,
+            @Value("${qwen.managed-agent.definition-input.download.request-timeout:120s}") String requestTimeout) {
         this(providers, storage, new BootstrapDownloadSettings(Set.of(allowedHosts.split(",", -1)),
-                maxBytes, maxConcurrency, connectTimeout, requestTimeout),
+                maxBytes, maxConcurrency, DurationStyle.detectAndParse(connectTimeout),
+                DurationStyle.detectAndParse(requestTimeout)),
                 HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
-                        .connectTimeout(connectTimeout).version(HttpClient.Version.HTTP_1_1).build());
+                        .connectTimeout(DurationStyle.detectAndParse(connectTimeout))
+                        .version(HttpClient.Version.HTTP_1_1).build());
     }
 
     ManagedAgentBootstrapPreparationService(ManagedDefinitionInputProviders providers,

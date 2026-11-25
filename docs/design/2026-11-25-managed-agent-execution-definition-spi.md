@@ -2,7 +2,7 @@
 
 [English](2026-11-25-managed-agent-execution-definition-spi.md) | [简体中文](2026-11-25-managed-agent-execution-definition-spi.zh-CN.md)
 
-> Status: design proposal; not implemented. Revised on 2026-11-25.
+> Status: first Java preparation slice implemented and locally verified; Section 8 records its exact limits and remaining qualifications. Revised on 2026-11-25.
 >
 > Tracking: [#18289](https://github.com/QwenLM/qwen-code/issues/18289). The host integration companion document is maintained by the host workspace; this document owns the generic MA input contract, not any product-specific catalog.
 >
@@ -79,21 +79,24 @@ public interface ManagedAgentDefinitionSource {
     record Context(String tenantId, String actorId, String workspaceId,
             String executionScope, String requestId, Instant deadline) {}
 
-    sealed interface Selection permits Current, Exact {}
+    sealed interface Selection permits Current, Exact, PreRegistered {}
     record Current(String agentKey) implements Selection {}
     record Exact(SourceRef ref) implements Selection {}
 
     record Definition(SourceRef ref, String modelId,
             String instructions, ToolPolicy toolPolicy,
             List<SkillInput> skills, List<ExtensionUse> suites,
-            List<ManagedMcpDefinitionSource.Ref> mcpServers,
             List<BundleRef> bootstrapBundles) {}
 
     record ToolPolicy(String profile, String approvalMode) {}
 }
 ```
 
-This returns bounded text and exact references, not a runtime download of every business setting. MA transforms accepted fields into its native immutable Definition and resource pins. Generated instructions and static Skill refs are published during native Session creation for the admitted sessionId, not as unscoped global resources beforehand.
+`PreRegistered` is an MA application-selection variant carrying the complete existing `AgentDefinitionRequest`; it is not passed to a host Source. Source preparation maps `modelId`, `instructions`, `toolPolicy` and inline Skills into native Definition fields. Extension Skill and Suite choices are preserved as non-secret source/material references in metadata; this slice does not automatically import or apply them. Sealed Skill JSON uses explicit `inline`/`extension` type tags for durable receipt replay.
+
+For a new `Current`, a single registered Definition provider may be selected implicitly; multiple providers require an explicit `Exact` ref. The host provider owns the exact `projectionDigest` input identity. MA separately computes the command digest and native Definition digest. There is no independent MCP source in this slice.
+
+A settled operation replay uses its saved projection without re-evaluating current. A fresh operation re-authorizes its exact Source input. Existing Session creation still publishes instructions/static Skill refs for a particular admitted sessionId, not as unscoped global resources; that application operation is not included in preparation.
 
 ### 3.2 Bootstrap bundles
 
@@ -117,7 +120,11 @@ public interface AgentBootstrapBundleSource {
 
 An implementation may also return a bounded byte stream through an analogous source contract where that is cheaper than a URL indirection. The existing `ManagedExtensionSource.resolve/open` remains the preferred existing implementation when no URL-based initialization is needed.
 
-MA retains the downloaded/normalized immutable package and precise pin. Once captured, subsequent Worker preparation uses MA's saved artifact rather than a second signed URI. Once an invocation has started, its outcome is reconciled through the same preparation receipt, not by minting a new address under another projection.
+Every new preparation resolves the exact ref for source authorization. MA then looks up raw immutable bytes under `Key(tenantId, workspaceId, expectedDigest)` using archive `stat`; only a missing artifact streams from the signed URI. This does not bypass revocation: a refused Source resolution still fails. A cache hit consumes no download body or URI expiry, so an expired original URL does not invalidate the saved artifact.
+
+The supplied `expectedDigest` is mandatory for bootstrap preparation, and a supplied `expectedLength` is checked against actual bytes. MA persists the original verified archive, not an unsigned URL or an inspected/recompiled business configuration. `stat` is a narrowly added metadata/read operation on `ExtensionArchiveStorage`; existing `putIfAbsent/open` behavior remains unchanged. Custom storage providers implement it only when serving this input path.
+
+Receipt preparation finishes with immutable Definition and raw material references. Bootstrap storage does not register an Extension catalog row and does not create a settings revision. Runtime delivery/application must stream from this native archive and remains a separate operation, not an assumed consequence of preparation.
 
 ### 3.3 Skill and suite
 
@@ -131,6 +138,8 @@ Re-use the existing `ManagedExtensionSource`:
 `settingsRevision` is a separately saved/applied settings identity and never a by-product of ZIP compilation.
 
 ### 3.4 Independent MCP and credentials
+
+The following remains a future protocol design; these MCP/credential interfaces are not implemented in the first Java slice.
 
 ```java
 public interface ManagedMcpDefinitionSource {
@@ -161,11 +170,12 @@ Every credential open re-authorizes the exact secret revision and returns a hand
 public interface ManagedAgentDefinitionPreparation {
     PrepareReceipt prepare(Command command);
 
-    record Command(Principal principal, Selection selection,
-            String operationKey) {}
+    record Command(String tenantId, String actorId, String workspaceId,
+            String executionScope, String operationKey,
+            Selection selection, Instant deadline) {}
 
-    record PrepareReceipt(OperationRef operation,
-            NativeDefinitionRef definition, MaterialPlanRef materials) {}
+    record PrepareReceipt(OperationRef operation, AgentDefinition definition,
+            List<PreparedBundle> bundles) {}
 }
 ```
 
@@ -179,14 +189,14 @@ The host calls this MA-owned method. It is not a host SPI implementation.
 
 | Record                                                      | What remains authoritative                                                               |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `ma_agent_definition`                                       | Pre-registered, complete immutable definition content keyed by tenant/id/revision/digest |
+| `ma_agent_definition`                                       | Immutable native Definition content keyed by tenant/id/revision/digest, never a ZIP BLOB |
 | `ma_session`, `ma_turn`, `ma_session_record`, `ma_resource` | Actual Session, Turn, journal and immutable content/ref evidence                         |
 | `ma_runtime_binding`                                        | Runtime placement and drain/ownership facts                                              |
 | `ma_extension_package` / archive storage                    | Existing compiled extension material and immutable payloads                              |
 | `ma_extension_settings`                                     | Independently saved, encrypted settings revisions                                        |
 | `ma_request_receipt`                                        | Admitted operation identity and replayable results for its own operation namespace       |
 
-For SPI-produced definitions, associate the `SourceRef` with the native Definition and Material Plan using the native source-preparation/metadata and receipt representation chosen during implementation. That association is necessary to decide whether an exact native projection already exists; it is not a license to reinterpret a free-text agent name as a unique accurate cache key.
+SPI-produced native Definition metadata records `sourceProjection`, non-secret extension Skill/Suite choices and bootstrap references. The `SOURCE_DEFINITION_PREPARATION` receipt stores the command digest, phase, effective input, native Definition ref and immutable bundle refs. The original `ma_extension_package` catalog remains independent; bootstrap archives are content-addressed bytes in the archive backend, not implicitly new catalog entries. No signed locator or private settings value is stored in these public representations.
 
 ### No mandatory pair of new tables by default
 
@@ -214,27 +224,35 @@ sequenceDiagram
     participant Runtime as MA Broker / Runtime Worker
 
     Note over Host,Runtime: PRE_REGISTERED remains the default and keeps its existing API/store flows
-    Host->>Prep: prepare(authenticated Principal, Selection, operationKey)
-    Prep->>Store: Validate Principal; inspect original receipt and exact native projection
-    alt Matching committed native projection exists
-        Store-->>Prep: Exact native Definition/material refs and original receipt
-        Note over Def,Bundle: No host call and no latest lookup
+    Host->>Prep: prepare(caller fields, Selection, operationKey, deadline)
+    Prep->>Store: Require Workspace OPERATOR; find/admit the original operation receipt
+    alt The same operation is settled
+        Store-->>Prep: Original native Definition, bundle refs and receipt
+        Note over Def,Bundle: No provider call and no latest lookup
         Prep-->>Host: PrepareReceipt(original)
-    else New source preparation (or a saved pending stage to continue)
-        Prep->>Store: Admit/continue the exact operation phase before external I/O
-        Prep->>Def: resolve(MA-derived Context, Current / Exact)
-        Def-->>Prep: SourceRef and complete effective Definition
-        Prep->>Store: Preserve exact SourceRef/projection and native Definition identity
-        opt A specified bootstrap package has no matching native artifact
-            Prep->>Bundle: resolve(Context, exact BundleRef)
-            Bundle-->>Prep: Short-lived signed download locator, expected digest and length
-            Prep->>Bundle: Controlled streaming download through the downloader
-            Bundle-->>Prep: Bytes validated against expected limits/digest, never whole-blob in heap
-            Prep->>Store: Save immutable native package and source-to-native mapping
-            Note over Store: No signed URL, Authorization or ZIP bytes in Definition JSON
+    else Pending, or a saved RESOLVED stage to continue
+        Prep->>Store: Admit PENDING before external Source I/O
+        opt A projection still needs resolution
+            Prep->>Def: resolve(MA-checked context, Current / Exact)
+            Def-->>Prep: Exact SourceRef and effective Definition
+            Prep->>Store: Save the exact input as RESOLVED
         end
-        Prep->>Store: Commit native Definition/material plan and original operation
-        Prep-->>Host: PrepareReceipt(native definition/material plan)
+        Prep->>Store: Create/reuse the deterministic native Definition and verify its pin
+        opt The input names bootstrap bundles
+            Prep->>Bundle: resolve(authorized Context, exact BundleRef)
+            Bundle-->>Prep: Exact ref and private signed locator
+            Prep->>Store: Look up the immutable archive by content digest
+            opt The matching native artifact is missing
+                Prep->>Bundle: Bounded HTTPS streaming
+                Bundle-->>Prep: Actual bytes and digest verified in private staging
+                Prep->>Store: putIfAbsent(raw verified archive)
+                Note over Store: No signed URL, Authorization or ZIP bytes in Definition JSON
+            else A matching native archive already exists
+                Note over Bundle,Store: Reuse saved bytes without download, even if the old URL expired
+            end
+        end
+        Prep->>Store: Mark the Definition and bundle refs PREPARED on the original receipt
+        Prep-->>Host: PrepareReceipt(native definition, immutable bundle refs)
     else Same operationKey, different original command
         Store-->>Prep: idempotency conflict
         Prep-->>Host: Reject without selecting latest or inventing a new source identity
@@ -258,7 +276,7 @@ The `Current` path requires fresh host authorization and selection. `Exact` mean
 
 The current Extension import provides a useful receiving pattern: chunk input into a private temporary file, stage hash and byte counts while reading, cap concurrent preparation, and only proceed after verified content. Its existing example uses 64 KiB chunks and a limit of four concurrent preparation operations (`ManagedExtensionPackageService.java:246-290`). This is an implementation pattern, not a promise that every deployment shares one size limit.
 
-For the proposed bootstrap download:
+For the implemented bootstrap download:
 
 1. enforce a configured maximum archive size and concurrent download count;
 2. count actually read bytes, rather than trusting `Content-Length`;
@@ -292,12 +310,20 @@ Required observational assertions:
 
 ## 8. Current status and change log
 
-The previous revision conflated preparation and application in one sequence, and imposed two unspecified preparation/material tables. This revision narrows the first delivery to:
+The first Java slice is implemented on `feature/managed-agent-definition-input-spi`: Q1 `97e4b6c2efc024e9eba26327352d87c2e5a7c4de`, Q2 `e07b74d2c5`, Q3 `d48bc5a036`. Initial source-reading baseline was `dev/managed-agent@e8c189fb90a204ab8762f8c8fc8e66d0f833271c`; these feature-branch commits are not a merged baseline or released artifact.
 
-- source-reference identity input plus immutable native Definition/material persistence;
-- one-shot initialization only for a missing native artifact, using bounded streaming download;
-- preservation of pre-registered full AgentDefinition behavior;
-- independent native application operations and their receipts;
-- a small, generic SPI that can be implemented by arbitrary hosts.
+Implemented behavior received in this slice:
 
-Source-reading baseline: `dev/managed-agent@e8c189fb90a204ab8762f8c8fc8e66d0f833271c`. The new names and tables mentioned as proposals are not present implementations. No build, run, recovery or real-process acceptance is claimed by this design revision.
+- The embedding application selects `PRE_REGISTERED` or `SPI` through deployment configuration. Its trusted Java caller supplies the caller fields; MA checks Workspace OPERATOR access and derives receipt scope before a host Source resolves input. No public preparation HTTP route is added.
+- Precise input is transformed into a deterministic native Definition with revision/digest read-back. Source references, effective input and material refs are replayable through `SOURCE_DEFINITION_PREPARATION` in the existing receipt table, with no preparation/material table added.
+- Bootstrap preparation authorizes the exact ref, checks the native archive by content digest, downloads only a missing artifact using bounded HTTPS staging, and saves the validated raw bytes. A settled replay reads saved references without another Source call, while a fresh operation does not bypass source authorization.
+- Existing pre-registered API/update/get flows, their random IDs and existing stored-definition Session admission remain available. New SPI preparation does not silently rewrite those data models.
+
+Verification actually performed:
+
+- Q1: 14 focused tests plus Checkstyle.
+- Q2: 32 focused tests, plus one real MySQL 8.4 case that coordinates two concurrent Java service calls into the same native identity and receipt.
+- Q3: 76 focused tests, one real MySQL preparation case, and a later 28-test authorization/download/replay selection; overlaps are not counted as unique coverage.
+- Q4 adds 20 focused checks, including ten real-HTTPS bootstrap cases for reuse, revoked source authorization, digest/length/content failures, timeout, expiry, redirects and coordinated concurrent missing downloads. A further 19 checks include the same bootstrap suite and nine embedded-Spring tests proving `ManagedAgentDefinitionPreparation` can be created without a host Source provider. An embedding-only string-to-Duration conversion issue was fixed using Boot 3.5.16's `DurationStyle`. Checkstyle passes on these code paths.
+
+This does not implement host-product adapters, independent MCP/credential refresh, automatic import/apply of Extension Skill/Suite refs, or Runtime activation of bootstrap artifacts. No actual Node/Worker apply, real OSS account or production host binding was exercised, and the pre-registered Admission regression is not claimed as an SPI Node execution E2E. Full unit/H2, SpotBugs and hosted/OS-process profiles belong to CI before broader acceptance. Custom storage backends supporting bootstrap lookup must provide `stat` when this path is used. Existing Source reuse/import and Session apply APIs retain their own operations and receipts; this slice does not create a second Session/Turn state machine.

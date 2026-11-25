@@ -36,6 +36,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -53,6 +55,8 @@ class ManagedAgentBootstrapPreparationTest {
     private HttpsServer server;
     private URI uri;
     private ManagedAgentBootstrapPreparationService service;
+    private ManagedDefinitionInputProviders providers;
+    private HttpClient client;
     private ExtensionArchiveStorage storage;
     private Download download;
     private RuntimeException sourceFailure;
@@ -107,10 +111,10 @@ class ManagedAgentBootstrapPreparationTest {
             }
         };
         ObjectProvider<AgentBootstrapBundleSource> bundles = provider(List.of(source));
-        var providers = new ManagedDefinitionInputProviders("SPI",
+        providers = new ManagedDefinitionInputProviders("SPI",
                 ManagedAgentBootstrapPreparationTest.<com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource>provider(List.of()),
                 bundles, workspace);
-        var client = HttpClient.newBuilder().sslContext(ssl).followRedirects(HttpClient.Redirect.NEVER)
+        client = HttpClient.newBuilder().sslContext(ssl).followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(Duration.ofSeconds(2)).version(HttpClient.Version.HTTP_1_1).build();
         service = new ManagedAgentBootstrapPreparationService(providers, storage,
                 new BootstrapDownloadSettings(Set.of("localhost"), 64 * 1024, 1,
@@ -165,6 +169,37 @@ class ManagedAgentBootstrapPreparationTest {
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getStatus()).isEqualTo(403));
         assertThat(networkCalls).hasValue(1);
+    }
+
+    @Test
+    void concurrentMissingDownloadsConvergeOnOneImmutableArtifact() throws Exception {
+        var gated = org.mockito.Mockito.spy(storage);
+        var barrier = new CyclicBarrier(2);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            barrier.await(10, TimeUnit.SECONDS);
+            return invocation.callRealMethod();
+        }).when(gated).stat(org.mockito.ArgumentMatchers.any(ExtensionArchiveStorage.Key.class));
+        var racing = new ManagedAgentBootstrapPreparationService(providers, gated,
+                new BootstrapDownloadSettings(Set.of("localhost"), 64 * 1024, 2,
+                        Duration.ofSeconds(2), Duration.ofSeconds(3)), client);
+        var bundle = bundle(bytes, "concurrent");
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> racing.prepare(context(), List.of(bundle)));
+            var second = executor.submit(() -> racing.prepare(context(), List.of(bundle)));
+            var left = first.get(30, TimeUnit.SECONDS);
+            var right = second.get(30, TimeUnit.SECONDS);
+            assertThat(left).hasSize(1);
+            assertThat(right).hasSize(1);
+            assertThat(left.getFirst().digest()).isEqualTo(right.getFirst().digest());
+            assertThat(left.getFirst().byteLength()).isEqualTo(right.getFirst().byteLength());
+            assertThat(left.getFirst().source()).isEqualTo(right.getFirst().source());
+        }
+        assertThat(networkCalls.get()).isBetween(1, 2);
+        try (var saved = storage.open(new ExtensionArchiveStorage.Key("tenant", "workspace",
+                bundle.expectedDigest()))) {
+            assertThat(saved.readAllBytes()).isEqualTo(bytes);
+        }
     }
 
     @Test

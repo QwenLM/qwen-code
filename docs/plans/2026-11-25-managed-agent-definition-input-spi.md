@@ -2,9 +2,13 @@
 
 [English](2026-11-25-managed-agent-definition-input-spi.md) | [简体中文](2026-11-25-managed-agent-definition-input-spi.zh-CN.md)
 
-> Status: Q1 implemented and locally verified; Q2–Q4 pending. Date: 2026-11-25.
+> Status: Q1–Q3 implemented and locally verified; Q4 records the actual implementation, configuration and remaining CI/process qualifications. Date: 2026-11-25.
 >
-> Q1 verification with JDK 21 and Maven 3.9.11: `mvn -Dmaven.repo.local=<task-specific-repository> -Dtest=DefinitionInputContractsTest,ManagedDefinitionInputProvidersTest,ManagedAgentDefinitionServiceTest test checkstyle:check` — 14 tests, no failures, errors or skips; Checkstyle passed. No real MySQL, process or host acceptance was run.
+> Implemented commits: Q1 `97e4b6c2efc024e9eba26327352d87c2e5a7c4de`, Q2 `e07b74d2c5`, Q3 `d48bc5a036`. These are feature-branch commits, not a merged/release baseline.
+>
+> Q1: 14 focused tests plus Checkstyle. Q2: 32 focused tests plus a real MySQL 8.4 concurrent-preparation case. Q3: 76 focused tests plus the same real-MySQL path, followed by 28 focused contract/download/replay checks including the added authorization test. Overlapping test selectors are not added together as unique coverage.
+>
+> JDK 21 and Maven 3.9.11 were used with a task-specific Maven repository. Full CI gates, full SQL/Hosted profiles, SpotBugs, real Node/Worker application, host-product acceptance and production OSS qualification remain separate and are not claimed here.
 >
 > Parent contract: [execution-definition and bootstrap-input design](../design/2026-11-25-managed-agent-execution-definition-spi.md) ([简体中文](../design/2026-11-25-managed-agent-execution-definition-spi.zh-CN.md)).
 >
@@ -14,12 +18,12 @@
 
 ## 1. Deliverable and hard limits
 
-Deliver a **Java-embedded, opt-in SPI preparation path** that produces the same kinds of immutable native Definition and Extension artifacts already supported by MA. The first vertical slice contains only:
+Deliver a **Java-embedded, opt-in SPI preparation path** that produces immutable native Definitions and bootstrap archives. The first vertical slice contains only:
 
-- an exact `sourceRef → native definition/material plan` mapping;
-- bounded-text Definition input from a host Source;
-- one-shot bootstrap archive download only when the matching native Extension package does not exist;
-- immutable native artifacts usable in subsequent native admissions.
+- an exact `sourceRef → native Definition/material refs` mapping;
+- typed Definition input from a host Source;
+- one-shot raw bootstrap archive download only when the matching native artifact does not exist;
+- immutable references that subsequent, separate native application operations can consume.
 
 `PRE_REGISTERED` remains the default and keeps the existing public definition API, JSON shapes, JDBC store and Session behavior. SPI is enabled through explicit embedding configuration and registered providers, never by an arbitrary request/Turn parameter. Missing provider or required configuration fails closed, without an opaque fallback to a different database or latest object.
 
@@ -42,7 +46,7 @@ Deliver a **Java-embedded, opt-in SPI preparation path** that produces the same 
 - `ManagedExtensionPackageService.importSource` already stages bounded archive streams into an output stream with per-iteration deadline checks. Reuse the current streaming and bounded-staging pattern rather than `readAllBytes()` (`ManagedExtensionPackageService.java:246-290`).
 - During Session creation, `QwenHostedHarnessConnector.agentDefinition` publishes instructions/Skill refs after a concrete native sessionId exists. Node reads them through the Resource Store. No pre-Session global resource is introduced.
 
-The interfaces and operation below are new; they are not claimed to already exist.
+The following contracts now exist under `contracts/definitions`, `contracts/extensions` and `contracts/repository`. `managedAgentDefinitionPreparation` is implemented in the control-plane catalog package, with bootstrap download/storage in the extensions and persistence layers. Their scope is still the narrow one below, rather than a complete host configuration system.
 
 ## 3. Contracts to freeze before production edits
 
@@ -56,7 +60,7 @@ Definition resolve(Context context, Selection selection);
 
 Inputs and invariants:
 
-- `Context` contains MA-derived tenant/actor/workspace, an authorized `executionScope`, requestId and deadline. It is derived from an authenticated MA Principal, not trusted from arbitrary caller strings.
+- `Context` contains tenant/actor/workspace, `executionScope`, requestId and deadline. A trusted embedding application supplies these caller fields after authenticating its caller; MA verifies Workspace OPERATOR access and does not add a second login facade or accept arbitrary HTTP identity headers for this Java path.
 - `Selection` is `Current(agentKey)` or `Exact(sourceRef)`.
 - `Current` is used only for a fresh authorized selection, returning a complete exact definition.
 - `Exact` must return the original exact revision/projection or fail explicitly; it cannot return the latest publication instead.
@@ -78,15 +82,15 @@ Return `Resolved` from `resolve(Context, BundleRef)`:
 - an optional expected byte length;
 - expected source digest;
 - `signedUri` and `expiresAt`: the short-lived, scoped download URI and its issuer-provided expiry;
-- content type/schema profile for the existing **canonical Managed Extension package**.
+- `application/zip` or `application/octet-stream` for a trusted raw initialization archive; no URI userinfo or redirect-based replacement. MA does not infer executable or Extension-catalog semantics from this raw ZIP.
 
 MA itself owns bounded download handling. The URI represents one exact fetch operation, never a durable permission grant and never a future lookup key. A Source may offer an analogous bounded stream where that avoids an unnecessary URL round-trip. Existing `ManagedExtensionSource.resolve/open` remains the implementation for normal Extension materials.
 
-Only canonical, already-supported Managed Extension packages are accepted in this slice. MA does not infer safe executable semantics from an arbitrary opaque ZIP name.
+This slice accepts a raw, trusted initialization archive and verifies its identity and bytes, without interpreting its inner business semantics. MA does not infer safe executable semantics from an arbitrary opaque ZIP name or automatically turn it into a registered Extension package. Consumption by a Worker remains a separate operation and responsibility.
 
 ### 3.3 `ManagedAgentDefinitionPreparation`
 
-`prepare(Command)` is implemented by MA. It accepts an authenticated Principal, Selection and stable operationKey. It does not:
+`prepare(Command)` is implemented by MA. It accepts tenant/actor/workspace/execution scope, `Current`/`Exact`/`PreRegistered` selection, an exact deadline and a stable operationKey through the trusted embedding caller. It does not:
 
 - create a Session;
 - apply an Extension or independent MCP configuration;
@@ -103,7 +107,7 @@ Only canonical, already-supported Managed Extension packages are accepted in thi
 2. Add a provider registration boundary that accepts embedded Spring source providers, rejects missing/duplicate provider IDs and uses MA's verified Principal/Workspace checks to construct Source Context.
 3. Expose `ManagedAgentDefinitionPreparation` from `ManagedAgentConfiguration`'s existing no-Servlet composition. There is no new default controller/Web endpoint.
 4. Keep public AgentDefinition create/update/get and direct-definition native admission exactly as before when `PRE_REGISTERED` is selected. Do not hard-wire Mode into old methods or alter their JSON serialization.
-5. Define and test a single canonicalization path for `commandDigest`, `SourceRef.projectionDigest` and native digest using existing MA `RequestDigests` and the existing native definition digest generation. Preserve scope in the command/receipt identity rather than globally deduplicating all tenants and actors.
+5. Compute `commandDigest` over the canonical original command with existing MA `RequestDigests`; include tenant, actor, Workspace, execution scope and selection. Treat the Source's exact `projectionDigest` as an input identity, not a hash recomputed from the complete native request. Compute native Definition digest over MA's transformed native content. Derive the deterministic SPI native `agentId` from tenant and the complete exact SourceRef; keep random IDs for the existing public create API.
 
 **Exit evidence:** pre-registered paths work unchanged with no source provider. An explicitly selected SPI mode without required provider/configuration gives a deterministic refusal before source or Runtime side effects.
 
@@ -111,15 +115,15 @@ Only canonical, already-supported Managed Extension packages are accepted in thi
 
 Implement `ManagedAgentDefinitionPreparation` using these steps:
 
-1. Resolve and validate the MA Principal and authorized Workspace/execution scope.
+1. Accept the trusted embedding caller fields and verify MA Workspace OPERATOR access for the requested execution scope.
 2. Find an existing matching native projection. If an already-settled receipt and matching exact projection exist, return its native refs and then verify the native Definition revision/digest before submission. No fresh `current` evaluation.
 3. Otherwise, register a pending preparation in the existing receipt boundary before first external Source I/O. Its namespace separates it from legacy Definition create and later admission/apply operations.
-4. Invoke the selected Source. Immediately preserve the exact SourceRef/projection and its native Definition identity, before any package I/O. Continue later stages only from this exact projection.
+4. Invoke the selected Source. Persist its exact SourceRef and effective input before package I/O. Derive native identity from the tenant and complete SourceRef, persist the transformed native Definition and verify its id/revision/digest on read-back, and continue later stages only from that exact projection.
 5. Convert the accepted Definition through the existing native definition representation. Use its JSON/response shape to store an immutable native revision; associate SourceRef in a non-secret metadata/source-preparation representation without changing the meaning of old metadata.
 6. If there are pending stages with a saved exact projection, resume/reconcile them. If no resolved projection is persisted, do not claim to have one and do not select a new latest one.
 7. Commit the native Definition/material plan with the atomic write/replay behavior already used by the Definition store. If the host's separate ProviderBinding save fails, recover the same native receipt under the original command and retry just that host-local save.
 
-**Exit evidence:** two concurrent replicas committing the same exact normalized request converge to one native definition identity and receipt. A different input using the same operation key is rejected. A repeated call can recover its original result without querying latest or requiring host lookup.
+**Exit evidence:** two coordinated concurrent Java service calls using real MySQL and the production Definition-store transaction semantics converge to one native definition identity and receipt. This is not evidence about several independent OS processes. A different input using the same operation key is rejected. A repeated call recovers its original result without querying latest or requiring host lookup.
 
 Required rules:
 
@@ -131,13 +135,12 @@ Required rules:
 
 Add a bounded downloader/preparation component for the new Source shape:
 
-1. For an accepted `BundleRef`, look for an exact native package identity first (including source digest, package version and compiler format). Do not consider a live latest bundle cache a substitute for an exact pin.
-2. If found with matching immutable content, reuse it and continue **without** `resolve/open`/compilation/downloading. Worker consumers later access MA's saved artifact.
-3. If absent, authorize through `AgentBootstrapBundleSource.resolve`, obtain the short-lived URI, and stream through MA's controlled downloader to private staging. Do not hand the URI to Node as an external access grant.
-4. During transfer, count actual read bytes, compute source SHA-256 incrementally with `DigestUtils`, enforce configured size/concurrency/time limits, and honor the Source Context deadline. Use an approved target/redirect policy and HTTPS for the URI client; status and exception categories must be explicit.
-5. On mismatch/timeout/too-large/failure, close stream/response in `try/finally` and do not replace any existing package. Give download responses and exception summaries a deliberately redacted view rather than relying on a record's default `toString()` or logging a signed URI/header. Do not issue a new initial bundle under another latest source name.
-6. Feed the verified artifact to the existing Harness package preparation path for the supported canonical Managed Extension package format. That path, not MA's own semantic review of arbitrary ZIP content, supplies the package-specific parsing/validation needed for actual Worker usage.
-7. Persist the normalized package atomically using `ExtensionArchiveStorage.putIfAbsent` and existing package/receipt contracts. `settingsRevision` remains null unless an independent settings-save operation provides a non-null revision. Saving a receipt must not be portrayed as actual Worker configuration application.
+1. `ManagedAgentBootstrapPreparationService` accepts the authorized Definition context and at most 32 distinct bundle refs. An actual `expectedDigest` is mandatory for this preparation path; expected length is optional but verified when supplied.
+2. As with the existing extension path, every new `prepare` invokes `AgentBootstrapBundleSource.resolve` to authorize the exact ref. A settled replay of the outer Definition preparation returns its saved receipt without any provider call. Revocation must not be hidden by cached bytes.
+3. Look up `ExtensionArchiveStorage.Key(tenantId, workspaceId, expectedDigest)` with the new `stat` operation. A valid existing object is reused without an HTTP body download; only a missing object proceeds to the downloader. An original URL that has expired does not invalidate the saved artifact, but source authorization failure still fails the new prepare.
+4. Require an approved HTTPS hostname and non-expired signed URI, reject userinfo and redirects, and download an HTTP 200 `application/zip` or `application/octet-stream` response into a private temporary file. Consume no more than 64 KiB per read, incrementally compute digest/length, fail closed on oversize, digest mismatch, truncation or timeout, and remove unsuccessful staging.
+5. Store validated raw bytes atomically with `putIfAbsent`. Return immutable `PreparedBundle{source,digest,byteLength,reused}` references in the Definition preparation result and receipt. A matching content digest may share saved bytes, without creating an unbounded cache key or another Definition revision.
+6. There is deliberately no second ZIP-in-JVM-heap path, preparation/material table, or default Node URL handoff. The saved archive is an opaque bootstrap artifact, not automatically an entry in the registered Extension catalog, a `settingsRevision`, or an applied/active Session configuration. Any Worker materialization/application remains a separate operation and needs its own acceptance evidence.
 
 For denied hosts, malformed endpoints, expiring downloads or corrupted bytes, fail the initialization rather than executing a package or silently using a previous blob. There is no unconditional fallback to latest data.
 
@@ -150,24 +153,24 @@ Compile/prove the smallest live path before considering any optional host integr
 ```text
 pre-registered input → original flow (unchanged)
 one Source definition → immutable native Definition → exact native admission/read-back
-one missing Extension package → bounded fetch → immutable native archive → saved-artifact delivery
+one missing bootstrap archive → bounded HTTPS fetch → immutable raw artifact/ref (separate from apply)
 ```
 
 Do not claim the broader host integration, dynamic configuration transitions, independent MCP private refresh or full process recovery until those have their own implementation and evidence. Updating this plan's status must use actual test/commit identifiers and actual checks run.
 
-## 5. Proposed code/test locations
+## 5. Actual code/test locations
 
 Use existing module structure and no new parallel project/module.
 
-- `contracts/.../catalog/`: new SourceRef/Definition source types and context/selection;
-- `contracts/.../extensions/`: Bootstrap Source and bounded download descriptor in the same general material family;
+- `contracts/.../definitions/`: `ManagedAgentDefinitionSource`, `ManagedAgentDefinitionPreparation`, exact SourceRef and selection types;
+- `contracts/.../extensions/`: `AgentBootstrapBundleSource`, `ManagedAgentBootstrapPreparation`, `ExtensionArchiveStorage.Info` and the shared immutable archive key;
 - `control-plane/.../catalog/`: `ManagedAgentDefinitionPreparation` composition, projection normalization, receipt assembly and read-back;
 - `control-plane/.../extensions/`: bounded bundle download/reuse and the existing native package preparation path;
 - Existing JDBC Definition/Extension repositories and `ExtensionArchiveStorage`: continue owning immutable native storage;
 - `ManagedAgentConfiguration`: opt-in Spring provider wiring only;
 - `verification/src/test/java/.../catalog/`: source and preparation tests;
 - `verification/src/test/java/.../extensions/`: downloader and reuse/recovery tests;
-- existing `ManagedPublishedAgentConfigurationTest`, `ManagedAgentDefinitionAdmissionTest`, `HostedExtensionsIT`: unchanged/shared regression, used only when behavior warrants their profile.
+- existing `ManagedAgentEmbeddingTest`, `ManagedAgentDefinitionAdmissionTest`, `HostedExtensionsIT`: unchanged/shared regression, used only when behavior warrants their profile. The embedding test explicitly obtains the preparation service without SPI providers; `HostedExtensionsIT` was not run for this slice.
 
 Do not hand-edit generated public OpenAPI types. If an eventual public HTTP surface is separately approved, update `managed-agent-public-api.openapi.json`, all mapped routes and client generation as a distinct delivery.
 
@@ -185,7 +188,7 @@ Do not hand-edit generated public OpenAPI types. If an eventual public HTTP surf
 
 1. A fake bounded OSS HTTP server hands a short-lived URI. Assert one fetch occurs only while the native package does not exist, and that streamed bytes do not produce an in-memory copy of the whole ZIP.
 2. Match expected source digest/length/content type, atomically retain the normalized package and mark the plan prepared. Do not mark it applied.
-3. A second exact preparation has no source `open`, URL issuance or recompilation. A Worker with no local archive still consumes the saved native artifact, without a retry to the expired original address.
+3. A subsequent exact preparation may `resolve` again for authorization, but does not download original bytes or create another native revision. It reuses the saved raw artifact rather than retrying an expired original URL. The native artifact is not an applied Worker configuration; delivery/application uses a separate operation and validation path.
 4. Interrupt download, oversize response, short body, digest mismatch, target redirect, timeout and URI expiry all preserve the last valid package. Signed URLs/auth headers and ZIP bytes never enter logs, Definition JSON, ordinary refs or prompts.
 5. An actually concurrent race either returns one immutable artifact or uses the settled winner. It never produces two independently accepted plans or silently chooses a different revision.
 
@@ -198,12 +201,12 @@ Do not hand-edit generated public OpenAPI types. If an eventual public HTTP surf
 
 ## 7. Validation entry points
 
-This is currently a document-only plan. Production edits would require the following project-local checks with actual reports, not assumed success.
+The implementation was exercised with project-local checks and actual reports, not assumed success. Reproduce the affected checks from `packages/managed-agent-server/` rather than inferring acceptance from documentation status.
 
 From `packages/managed-agent-server/`, choose focused new and affected tests rather than an indiscriminate full-repo run:
 
 ```bash
-mvn -Dtest=ManagedDefinitionPreparationTest,ManagedBootstrapBundleTest \
+mvn -Dtest=ManagedDefinitionPreparationTest,ManagedAgentBootstrapPreparationTest,ExtensionArchiveStorageTest \
   test checkstyle:check
 ```
 
@@ -217,16 +220,10 @@ Before testing, ensure JDK 21/Maven and an isolated sibling SDK matching the tes
 
 Each final report should identify: source commit, selected test commands and outcomes, exact mode tested, real-MySQL evidence etc. No deployment, release or host product acceptance is presumed by this plan.
 
-## 8. Stop conditions and unknowns carried into implementation review
+## 8. Remaining qualifications
 
-Only these narrow decisions remain for the implementation review, not a larger redesign:
+The implementation fixes the source packages to `contracts/definitions` and `contracts/extensions`, includes the original command and actor scope in receipt identity, uses `SOURCE_DEFINITION_PREPARATION`, and requires an explicit exact ref when multiple Definition providers exist. Bundle resolution has its own Source Context rather than making execution scope an anonymous credential or handing a signed URL to Node.
 
-- exact Java package chosen for Source contracts and its authenticated `Principal` type;
-- canonical SourceRef representation in native metadata and the receipt namespace for the new prepare operation;
-- whether the authorized `executionScope` needs a backward-compatible Source Context extension versus a narrow adapter mapping in the selected Source provider;
-- concrete approved size/concurrency/time limits for the supported deployment, under the existing staging pattern;
-- any required real-process/MySQL checks still pending locally, rather than pretending CI evidence exists.
+The verified scope is limited to the commits and tests recorded above. Full CI, complete MySQL/Hosted profiles, SpotBugs, host adaptation, production OSS access and Node/Worker application are not established by focused Java/H2/mock tests. Reusing bytes does not establish independent Runtime activation.
 
-Stop rather than silently degrade if supported package structure forces a new parser or a new native store, if a pending/recovery path cannot be represented, if identity authorization requires weakening Workspace/Principal checks, or if bootstrap exceeds resource constraints despite streaming.
-
-Do not convert this first step into a generic dynamic configuration system. It remains an optional, bounded SPI preparation and missing-native-bootstrap mechanism alongside the untouched pre-registered AgentDefinition pipeline.
+No generic dynamic configuration system, MCP secret refresh, second Session/Turn state machine or claim of Worker application was added. Full CI, real native processes and real host integration are remaining gates, not facts inferred from this document.
