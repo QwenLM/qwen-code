@@ -173,8 +173,8 @@ function isExecutionTimeoutFailure(
   // user cancellation against the timeout SLI, so the abort side wins.
   if (signal.aborted) return false;
   // The v2 SDK rejects with SdkError(REQUEST_TIMEOUT) when the `timeout`
-  // passed to callTool (mcpTimeout) runs out; -32001 now only comes from a
-  // server. Both mean the call got no answer in time.
+  // passed to callTool (mcpTimeout) runs out; a non-aborted -32001 now comes
+  // only from a server. Both mean the call got no answer in time.
   if (!isMcpRequestTimeout(error) && !isMcpSdkRequestTimeout(error)) {
     return false;
   }
