@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -14,6 +14,7 @@ import { Storage } from '../config/storage.js';
 import {
   ChatRecordingService,
   type ChatRecord,
+  type ChatRecordingRestoreState,
 } from './chatRecordingService.js';
 import {
   readSessionTitleSidecar,
@@ -30,6 +31,8 @@ describe('ChatRecordingService - list title sidecar', () => {
   let service: ChatRecordingService;
   let sessionService: SessionService;
   let sidecarPath: string;
+  let transcriptPath: string;
+  const recorders: ChatRecordingService[] = [];
 
   function makeConfig(overrides: Record<string, unknown> = {}): Config {
     return {
@@ -51,12 +54,35 @@ describe('ChatRecordingService - list title sidecar', () => {
     } as unknown as Config;
   }
 
-  const newService = (config = makeConfig()) =>
-    new ChatRecordingService(
+  const newService = (
+    config = makeConfig(),
+    restoreState?: ChatRecordingRestoreState,
+  ) => {
+    const recorder = new ChatRecordingService(
       config,
       undefined,
       /* writerLeaseRequired */ false,
+      restoreState,
     );
+    recorders.push(recorder);
+    return recorder;
+  };
+
+  function resume(messages: ChatRecord[]): ChatRecordingService {
+    writeFileSync(
+      transcriptPath,
+      messages.map((message) => JSON.stringify(message) + '\n').join(''),
+    );
+    return newService(
+      makeConfig({
+        getResumedSessionData: () => ({
+          conversation: { messages },
+          filePath: transcriptPath,
+          lastCompletedUuid: messages.at(-1)?.uuid ?? null,
+        }),
+      }),
+    );
+  }
 
   beforeEach(() => {
     root = mkdtempSync(path.join(tmpdir(), 'qwen-recording-title-'));
@@ -64,6 +90,7 @@ describe('ChatRecordingService - list title sidecar', () => {
     projectDir = new Storage(root, runtimeBaseDir).getProjectDir();
     sessionService = new SessionService(root, { runtimeBaseDir });
     mkdirSync(path.join(projectDir, 'chats'), { recursive: true });
+    transcriptPath = sessionService.getSessionTranscriptPath(SESSION_ID);
     sidecarPath = sessionTitleSidecarPath(
       path.join(projectDir, 'chats'),
       SESSION_ID,
@@ -73,8 +100,14 @@ describe('ChatRecordingService - list title sidecar', () => {
     );
   });
 
-  afterEach(() => {
-    rmSync(root, { recursive: true, force: true });
+  afterEach(async () => {
+    try {
+      await Promise.all(
+        recorders.splice(0).map((recorder) => recorder.flush()),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('persists the first prompt as the list label', () => {
@@ -204,15 +237,7 @@ describe('ChatRecordingService - list title sidecar', () => {
       message: { role: 'user', parts: [{ text: prompt }] },
       systemPayload: { displayText: prompt },
     };
-    newService(
-      makeConfig({
-        getResumedSessionData: () => ({
-          conversation: { messages: [resumed] },
-          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
-          lastCompletedUuid: null,
-        }),
-      }),
-    );
+    resume([resumed]);
 
     expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
       displayName: prompt,
@@ -232,15 +257,7 @@ describe('ChatRecordingService - list title sidecar', () => {
       version: '1.0.0',
       systemPayload: { customTitle: '恢复的自定义标题', titleSource: 'manual' },
     };
-    newService(
-      makeConfig({
-        getResumedSessionData: () => ({
-          conversation: { messages: [title] },
-          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
-          lastCompletedUuid: null,
-        }),
-      }),
-    );
+    resume([title]);
 
     expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
       displayName: '恢复的自定义标题',
@@ -282,15 +299,7 @@ describe('ChatRecordingService - list title sidecar', () => {
       message: { role: 'user', parts: [{ text: `prompt ${index + 1}` }] },
       systemPayload: { displayText: `prompt ${index + 1}` },
     }));
-    newService(
-      makeConfig({
-        getResumedSessionData: () => ({
-          conversation: { messages },
-          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
-          lastCompletedUuid: null,
-        }),
-      }),
-    );
+    resume(messages);
 
     expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
       displayName: 'prompt 1',
@@ -310,15 +319,7 @@ describe('ChatRecordingService - list title sidecar', () => {
       version: '1.0.0',
       message: { role: 'user', parts: [{ text: prompt }] },
     };
-    newService(
-      makeConfig({
-        getResumedSessionData: () => ({
-          conversation: { messages: [resumed] },
-          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
-          lastCompletedUuid: null,
-        }),
-      }),
-    );
+    resume([resumed]);
 
     expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
       displayName: prompt,
@@ -379,15 +380,7 @@ describe('ChatRecordingService - list title sidecar', () => {
       message: { role: 'user', parts: [{ text: 'wire text' }] },
       systemPayload: { displayText: prompt, hookContext: '', mod: 'lint' },
     };
-    newService(
-      makeConfig({
-        getResumedSessionData: () => ({
-          conversation: { messages: [resumed] },
-          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
-          lastCompletedUuid: null,
-        }),
-      }),
-    );
+    resume([resumed]);
 
     expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
       displayName: prompt,
@@ -408,15 +401,7 @@ describe('ChatRecordingService - list title sidecar', () => {
       message: { role: 'user', parts: [{ text: '首条 prompt' }] },
       systemPayload: { displayText: '首条 prompt', hookContext: '' },
     };
-    newService(
-      makeConfig({
-        getResumedSessionData: () => ({
-          conversation: { messages: [resumed] },
-          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
-          lastCompletedUuid: null,
-        }),
-      }),
-    );
+    resume([resumed]);
 
     expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
       displayName: '手动名字',
@@ -425,7 +410,16 @@ describe('ChatRecordingService - list title sidecar', () => {
   });
 
   it('seeds an explicit title when the projected restore runs', () => {
-    new ChatRecordingService(makeConfig(), undefined, false, {
+    writeFileSync(
+      transcriptPath,
+      JSON.stringify({
+        uuid: 'tail',
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { customTitle: '投影标题', titleSource: 'manual' },
+      }) + '\n',
+    );
+    newService(makeConfig(), {
       lastCompletedUuid: 'tail',
       turnParentUuids: [null],
       customTitle: '投影标题',
@@ -438,8 +432,18 @@ describe('ChatRecordingService - list title sidecar', () => {
     });
   });
 
+  it('does not seed a projected title without an active transcript', () => {
+    newService(makeConfig(), {
+      lastCompletedUuid: 'tail',
+      turnParentUuids: [null],
+      customTitle: 'No active transcript',
+    });
+
+    expect(readSessionTitleSidecar(sidecarPath)).toBeUndefined();
+  });
+
   it('does not label a resumed session from its first post-resume prompt', () => {
-    const recorder = new ChatRecordingService(makeConfig(), undefined, false, {
+    const recorder = newService(makeConfig(), {
       lastCompletedUuid: 'tail',
       turnParentUuids: [null],
     });
@@ -466,18 +470,10 @@ describe('ChatRecordingService - list title sidecar', () => {
         parts: [{ inlineData: { mimeType: 'image/png', data: 'AA==' } }],
       },
     };
-    newService(
-      makeConfig({
-        getResumedSessionData: () => ({
-          conversation: { messages: [imageOnly] },
-          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
-          lastCompletedUuid: null,
-        }),
-      }),
-    );
+    const resumed = resume([imageOnly]);
     expect(readSessionTitleSidecar(sidecarPath)).toBeUndefined();
 
-    service.recordUserMessage([{ text: '恢复后的文本 prompt' }], undefined, {
+    resumed.recordUserMessage([{ text: '恢复后的文本 prompt' }], undefined, {
       displayText: '恢复后的文本 prompt',
       hookContext: '',
     });
