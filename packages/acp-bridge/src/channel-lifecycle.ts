@@ -11,6 +11,7 @@ import type { ChannelLivenessMonitor } from './channel-liveness.js';
 import type { BridgeExecutionEngine } from './bridgeOptions.js';
 
 export interface HarnessChannel {
+  retirementReceipts?: boolean;
   readonly id: string;
   readonly executionEngine?: BridgeExecutionEngine;
   /** Epoch allocated when the handshake completed; 0 until then. */

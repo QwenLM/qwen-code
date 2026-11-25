@@ -29199,6 +29199,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           cancelMcpAppCalls: vi.fn(),
+          collectActiveWorkHolds: vi.fn().mockReturnValue([]),
           cancelPendingPrompt: liveCancelPendingPrompt,
           cancelPromptAdmission: vi.fn(
             (controller: AbortController, reason: string) =>
@@ -30381,6 +30382,58 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('acknowledges only an actual strict retirement and keeps ordinary close idempotent', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    const request = {
+      sessionId: liveSessionId,
+      retirementOperationId: '648dff9c-7fc2-4f15-9e57-3291c3d9d935',
+      requireFlush: true,
+      onlyIfUnheld: true,
+    };
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, request),
+      ).rejects.toThrow('requires a live native session');
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      innerConfig.getChatRecordingService.mockReturnValueOnce(null);
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, request),
+      ).resolves.toMatchObject({
+        closed: false,
+        retirementOperationId: request.retirementOperationId,
+        retirementUnavailable: true,
+      });
+      recording.flush.mockRejectedValueOnce(new Error('recorder flush failed'));
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, request),
+      ).resolves.toMatchObject({
+        closed: false,
+        retirementOperationId: request.retirementOperationId,
+        retirementUnavailable: true,
+      });
+      expect(recording.close).not.toHaveBeenCalled();
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, request),
+      ).resolves.toEqual({
+        sessionId: liveSessionId,
+        closed: true,
+        retirementOperationId: request.retirementOperationId,
+      });
+      expect(recording.flush).toHaveBeenCalled();
+      expect(recording.close).toHaveBeenCalled();
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+          sessionId: liveSessionId,
+        }),
+      ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('does not finalize the source recorder while a branch mutation is active', async () => {
