@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
@@ -67,7 +68,7 @@ public final class ManagedHostedRecoveryRecords {
             return;
         }
         if (KINDS.contains(stored.kind())) {
-            validateBody(stored.kind(), body, tenant, workspace, session);
+            validateBody(stored.kind(), body, tenant, workspace, session, resources);
         }
         for (JsonNode ref : references(body)) {
             ManagedExtensionRecords.durableRef(ref, "Hosted nested reference");
@@ -151,11 +152,7 @@ public final class ManagedHostedRecoveryRecords {
                 return;
             }
             require(seen.size() <= ManagedSessionStoreModels.MAX_RESOURCES_PER_TRANSACTION, "Hosted reference closure is too large.");
-            StoredResource stored = resources.apply(id);
-            require(stored.kind().equals(node.get("kind").asText())
-                    && stored.schemaVersion() == node.get("schemaVersion").asInt()
-                    && stored.byteLength() == node.get("byteLength").asLong()
-                    && stored.digest().equals(node.get("digest").asText()), "Hosted nested resource conflicts.");
+            StoredResource stored = resolveResource(node, resources);
             if (ManagedCheckpointHistory.KIND.equals(stored.kind()) && resources instanceof HistoricalResources historical) {
                 historical.checkpointHistory(node);
                 return;
@@ -166,7 +163,7 @@ public final class ManagedHostedRecoveryRecords {
                 JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
                 require(body != null && stored.schemaVersion() == 1, "Invalid Hosted recovery resource.");
                 if (KINDS.contains(stored.kind())) {
-                    validateBody(stored.kind(), body, tenant, workspace, session);
+                    validateBody(stored.kind(), body, tenant, workspace, session, resources);
                 }
                 if (KINDS.contains(stored.kind())) {
                     for (JsonNode ref : references(body)) {
@@ -182,6 +179,31 @@ public final class ManagedHostedRecoveryRecords {
         for (JsonNode child : node) {
             closure(child, tenant, workspace, session, resources, seen);
         }
+    }
+
+    private static StoredResource resolveResource(JsonNode ref, Function<String, StoredResource> resources) {
+        StoredResource stored = resources.apply(ref.path("resourceId").asText());
+        require(stored != null && stored.kind().equals(ref.path("kind").asText())
+                && stored.schemaVersion() == ref.path("schemaVersion").asInt()
+                && stored.byteLength() == ref.path("byteLength").asLong()
+                && stored.digest().equals(ref.path("digest").asText()), "Hosted nested resource conflicts.");
+        return stored;
+    }
+
+    private static boolean shellPublicationLane(JsonNode ref, Function<String, StoredResource> resources) {
+        ManagedExtensionRecords.durableRef(ref, "Hosted Shell definition");
+        require("managed-definition".equals(ref.path("kind").asText()) && ref.path("schemaVersion").asInt() == 1,
+                "Invalid Hosted Shell definition reference.");
+        StoredResource stored = resolveResource(ref, resources);
+        JsonNode definition = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
+        require(definition != null && WorkspaceToolProfiles.isPublicShell(definition.path("toolProfile").asText()),
+                "Native Shell continuation requires a public Shell profile.");
+        if (definition.has("captureBytes")) {
+            ManagedExtensionRecords.count(definition.get("captureBytes"), 1, ToolPublicationContract.MAX_CAPTURE_BYTES,
+                    "Shell publication captureBytes");
+            return true;
+        }
+        return false;
     }
 
     private static String runtimeSessionId(String promptId) {
@@ -208,7 +230,8 @@ public final class ManagedHostedRecoveryRecords {
         return refs;
     }
 
-    private static void validateBody(String kind, JsonNode body, String tenant, String workspace, String session) {
+    private static void validateBody(String kind, JsonNode body, String tenant, String workspace, String session,
+            Function<String, StoredResource> resources) {
         ManagedExtensionRecords.count(body.get("v"), 1, 1, "Hosted recovery version");
         JsonNode key = body.get("sessionKey");
         ManagedExtensionRecords.closed(key, Set.of("tenantId", "workspaceId", "sessionId"), "Hosted recovery Session key");
@@ -354,6 +377,7 @@ public final class ManagedHostedRecoveryRecords {
                 generation(runtime.get("workspaceGeneration"));
             }
             ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, calls.size() - 1, "approvalOrdinal");
+            Boolean publicationLane = null;
             for (JsonNode call : calls) {
                 if (memoryOnly) {
                     require(Set.of("context_search", "context_remember", "context_get", "context_forget")
@@ -380,12 +404,17 @@ public final class ManagedHostedRecoveryRecords {
                             && (owner + ":" + callId).equals(call.path("prepareKey").asText()),
                             "Native Runtime correlation conflicts.");
                 }
-                if (body.has("publicChildModel") && call.has("publicationId")) {
+                boolean shell = "run_shell_command".equals(call.path("call").path("name").asText());
+                require(shell == call.has("publicationId"), "Invalid public Shell publication identity.");
+                if (shell) {
+                    if (publicationLane == null) {
+                        publicationLane = shellPublicationLane(body.get("definitionRef"), resources);
+                    }
                     callFields.add("publicationId");
-                    require("run_shell_command".equals(call.path("call").path("name").asText())
-                            && (call.get("publicationId").isNull() || (call.get("publicationId").isTextual()
-                                    && call.get("publicationId").asText().matches("[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"))),
-                            "Invalid public Shell publication identity.");
+                    JsonNode publication = call.get("publicationId");
+                    require(publicationLane
+                            ? publication.isTextual() && publication.asText().matches("[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
+                            : publication.isNull(), "Invalid public Shell publication identity.");
                 }
                 ManagedExtensionRecords.closed(call, callFields, "native batch member");
                 ManagedExtensionRecords.durableRef(call.get("inputRef"), "inputRef");
