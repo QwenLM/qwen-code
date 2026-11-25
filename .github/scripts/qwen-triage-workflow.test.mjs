@@ -1012,26 +1012,107 @@ describe('qwen-triage: token isolation contract', () => {
     );
   });
 
-  it('falls back to GITHUB_TOKEN only when both bot PATs are absent', () => {
+  it('falls back to GITHUB_TOKEN only on the three allowed steps', () => {
     const expected =
       '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}';
-    // Only the identity read needs the fallback in the read-only triage job;
-    // its reaction/status steps stay PAT-only because the built-in token
-    // cannot write there. The publish job's token has write scopes, so both
-    // of its steps fall back.
-    assert.equal(
-      steps.find((step) => step.name === 'Prepare agent context').env.GH_TOKEN,
-      expected,
-    );
-    for (const name of [
-      'Publish triage drafts',
-      'Notify silent triage re-run',
-    ]) {
-      assert.equal(
-        publishTriageJob.steps.find((step) => step.name === name).env.GH_TOKEN,
-        expected,
-      );
+    const hasBotPat =
+      "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}";
+    const allowed = [
+      'triage/Prepare agent context',
+      'publish-triage/Publish triage drafts',
+      'publish-triage/Notify silent triage re-run',
+    ];
+    // Exhaustively scan every job/step so adding `|| github.token` to any
+    // other write step (such as a read-only triage step) fails this test.
+    const actual = [];
+    for (const [jobName, jobDef] of Object.entries(doc.jobs)) {
+      for (const step of jobDef.steps ?? []) {
+        if (String(step.env?.GH_TOKEN ?? '').includes('github.token')) {
+          actual.push(`${jobName}/${step.name}`);
+          assert.equal(step.env.GH_TOKEN, expected);
+          assert.equal(
+            step.env.HAS_BOT_PAT,
+            hasBotPat,
+            `${jobName}/${step.name} must distinguish PAT vs installation-token identity`,
+          );
+        }
+      }
     }
+    assert.deepEqual(actual, allowed);
+  });
+
+  it('resolves github-actions[bot] without calling GET /user in no-PAT mode', () => {
+    // GITHUB_TOKEN is an installation token whose GET /user returns HTTP 403.
+    // Execute Prepare agent context's identity resolution against a gh stub
+    // that fails GET /user with 403 to prove no-PAT mode succeeds and PAT mode
+    // still fails closed.
+    const body = triageContextStep.run;
+    const identityBlock = body.slice(
+      0,
+      body.indexOf('echo "bot_login=$BOT_LOGIN" >> "$GITHUB_OUTPUT"') +
+        'echo "bot_login=$BOT_LOGIN" >> "$GITHUB_OUTPUT"'.length,
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'triage-ctx-id-'));
+    try {
+      const ghPath = join(dir, 'gh');
+      const outPath = join(dir, 'github-output');
+      writeFileSync(
+        ghPath,
+        '#!/usr/bin/env bash\necho "gh: Resource not accessible by integration (HTTP 403)" >&2\nexit 1\n',
+      );
+      chmodSync(ghPath, 0o755);
+
+      const noPat = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', identityBlock],
+        {
+          env: {
+            PATH: `${dir}:${process.env.PATH}`,
+            RUNNER_TEMP: dir,
+            GITHUB_OUTPUT: outPath,
+            HAS_BOT_PAT: 'false',
+          },
+          encoding: 'utf8',
+        },
+      );
+      assert.equal(noPat.status, 0, noPat.stderr);
+      assert.equal(
+        readFileSync(outPath, 'utf8').trim(),
+        'bot_login=github-actions[bot]',
+      );
+
+      const badPat = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', identityBlock],
+        {
+          env: {
+            PATH: `${dir}:${process.env.PATH}`,
+            RUNNER_TEMP: dir,
+            GITHUB_OUTPUT: outPath,
+            HAS_BOT_PAT: 'true',
+          },
+          encoding: 'utf8',
+        },
+      );
+      assert.notEqual(badPat.status, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const publish = publishTriageJob.steps.find(
+      (s) => s.name === 'Publish triage drafts',
+    );
+    assert.match(
+      publish.run,
+      /if \[ "\$HAS_BOT_PAT" != 'true' \]; then\n\s+export BOT_LOGIN='github-actions\[bot\]'/,
+    );
+    const notify = publishTriageJob.steps.find(
+      (s) => s.name === 'Notify silent triage re-run',
+    );
+    assert.match(
+      notify.run,
+      /if \[ "\$HAS_BOT_PAT" = 'true' \]; then[\s\S]*else\n\s+BOT_LOGIN='github-actions\[bot\]'/,
+    );
   });
 
   it('keeps triage-job write steps PAT-only', () => {

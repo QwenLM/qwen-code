@@ -600,7 +600,6 @@ jobs:
         if: "github.event_name == 'issue_comment'"
         env:
           # Reactions need write scope; the job's GITHUB_TOKEN is read-only.
-          # PAT-only: without a PAT the reaction is skipped (best-effort).
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
@@ -714,8 +713,7 @@ jobs:
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
-          # PAT-only: the read-only GITHUB_TOKEN cannot post comments; without
-          # a PAT this step skips with a warning instead of attempting a 403.
+          # PAT-only: the job's GITHUB_TOKEN is read-only.
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           NUMBER: '${{ steps.resolve.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
@@ -798,16 +796,19 @@ jobs:
       - name: 'Prepare agent context'
         id: 'context'
         env:
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
         run: |-
           set -euo pipefail
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           mkdir -p "$QWEN_HOME"
-          # Under the read-only GITHUB_TOKEN the agent will run with,
-          # `gh api user` returns github-actions[bot]; the skill's duplicate
-          # guard, reopen guard, and review dedup filter on the PAT's bot
-          # login, so resolve it here and pass it in.
-          BOT_LOGIN="$(gh api user --jq '.login')"
+          # GITHUB_TOKEN returns 403 on GET /user; query API only with a PAT
+          # (no-PAT uses github-actions[bot]; finalize skips without a PAT).
+          if [ "$HAS_BOT_PAT" = 'true' ]; then
+            BOT_LOGIN="$(gh api user --jq '.login')"
+          else
+            BOT_LOGIN='github-actions[bot]'
+          fi
           if [ -z "$BOT_LOGIN" ]; then
             echo "::error::Cannot resolve the bot identity; refusing to run the agent without it."
             exit 1
@@ -1576,10 +1577,7 @@ jobs:
     # no agent-provided code runs here. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Comments, reviews, labels, assignees and closes are all writes: with no
-    # bot PAT configured, the built-in GITHUB_TOKEN fallback needs these write
-    # scopes to actually publish. Only trusted base-repo scripts run here, so
-    # the write token never reaches agent-provided code.
+    # No-PAT fallback needs write scopes; only trusted base scripts run here.
     permissions:
       contents: 'read'
       issues: 'write'
@@ -1629,6 +1627,7 @@ jobs:
 
       - name: 'Publish triage drafts'
         env:
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIAGE_RESULT: '${{ needs.triage.result }}'
@@ -1647,6 +1646,9 @@ jobs:
             echo "::warning::The triage run ended before writing drafts; nothing to publish."
             exit 0
           fi
+          if [ "$HAS_BOT_PAT" != 'true' ]; then
+            export BOT_LOGIN='github-actions[bot]'
+          fi
           node .github/scripts/triage-publish.mjs \
             --drafts triage-drafts \
             --repo "$GITHUB_REPOSITORY" \
@@ -1663,6 +1665,7 @@ jobs:
           startsWith(github.event.comment.body, '@qwen-code /triage')
         shell: 'bash'
         env:
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIGGERED_AT: '${{ github.event.comment.created_at }}'
@@ -1694,7 +1697,12 @@ jobs:
           HEAD_SHA=''
           # unknown until both the review list and the head SHA are readable
           STANDING=unknown
-          if BOT_LOGIN="$(gh api user --jq '.login')" &&
+          if [ "$HAS_BOT_PAT" = 'true' ]; then
+            BOT_LOGIN="$(gh api user --jq '.login' || true)"
+          else
+            BOT_LOGIN='github-actions[bot]'
+          fi
+          if [ -n "$BOT_LOGIN" ] &&
              REVIEWS="$(
                gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
                  --method GET \
