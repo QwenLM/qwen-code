@@ -5619,6 +5619,181 @@ describe('loadUsageDashboard', () => {
     }
   });
 
+  it('does not replace a different-project record via single-ledger execution id when transcriptScope binds the session to another project', async () => {
+    const now = Date.now();
+    const today = dayKey(now);
+    const root = process.env['QWEN_HOME']!;
+    writeTestLedgerRow(root, {
+      timestamp: new Date(now - 500).toISOString(),
+      localDate: today,
+      sessionId: 'proj-guard-c',
+      executionId: 'exec-guard-c',
+      model: 'qwen-max',
+      authType: 'openai',
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+    });
+    const ledger = await loadLedgerOrEmpty(today);
+    setLedgerTranscriptScope(ledger, {
+      root,
+      pathsBySessionId: new Map(),
+      projectKeysBySession: new Map([
+        ['proj-guard-c', new Set(['/project-a'])],
+      ]),
+    });
+
+    const dash = buildUsageDashboard(
+      [
+        {
+          ...rec({
+            sessionId: 'proj-guard-c',
+            project: '/project-b',
+            timestamp: now,
+            startTime: now - 1_000,
+            model: {
+              requests: 1,
+              inputTokens: 80,
+              outputTokens: 20,
+              totalTokens: 100,
+            },
+          }),
+          runScoped: true,
+          requestExecutionIds: ['exec-guard-c'],
+          successfulRequestExecutionIds: ['exec-guard-c'],
+        },
+      ],
+      { range: 'all' },
+      ledger,
+    );
+    expect(dash.summary).toMatchObject({
+      requests: 2,
+      totalTokens: 200,
+    });
+  });
+
+  it('does not let another runtime scope replace a different-project record sharing sessionId and executionId', async () => {
+    const now = Date.now();
+    const today = dayKey(now);
+    const rootA = path.join(tmpHome, 'runtime-proj-guard-a');
+    const globalRoot = process.env['QWEN_HOME']!;
+    const projectA = path.join(tmpHome, 'proj-guard-a');
+    const projectB = path.join(tmpHome, 'proj-guard-b');
+    const projectC = path.join(tmpHome, 'proj-guard-c');
+    fs.mkdirSync(rootA, { recursive: true });
+    fs.mkdirSync(projectA, { recursive: true });
+    fs.mkdirSync(projectB, { recursive: true });
+    fs.mkdirSync(projectC, { recursive: true });
+
+    const writeMinimalTranscript = (
+      root: string,
+      project: string,
+      sessionId: string,
+    ) => {
+      const file = new SessionService(project, {
+        runtimeBaseDir: root,
+      }).getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          uuid: `u-${path.basename(project)}`,
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date(now - 2_000).toISOString(),
+          type: 'user',
+          cwd: project,
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'hi' }] },
+        }) + '\n',
+      );
+    };
+
+    writeMinimalTranscript(rootA, projectA, 'shared-proj-sid');
+    // Two different projects sharing the same sessionId in globalRoot cause
+    // globalRoot's single-ledger project check to decline and defer to the
+    // runtimeScopes loop, where Guard D must still block rootA from replacing
+    // projectB's record.
+    writeMinimalTranscript(globalRoot, projectB, 'shared-proj-sid');
+    writeMinimalTranscript(globalRoot, projectC, 'shared-proj-sid');
+    writeTestLedgerRow(rootA, {
+      timestamp: new Date(now - 500).toISOString(),
+      localDate: today,
+      sessionId: 'shared-proj-sid',
+      executionId: 'exec-shared-proj',
+      model: 'qwen-max',
+      authType: 'openai',
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+    });
+    seed([
+      {
+        ...rec({
+          sessionId: 'shared-proj-sid',
+          project: projectA,
+          timestamp: now,
+          startTime: now - 1_000,
+          model: {
+            requests: 1,
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['exec-shared-proj'],
+        successfulRequestExecutionIds: ['exec-shared-proj'],
+      },
+      {
+        ...rec({
+          sessionId: 'shared-proj-sid',
+          project: projectB,
+          timestamp: now,
+          startTime: now - 1_000,
+          model: {
+            requests: 1,
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['exec-shared-proj'],
+        successfulRequestExecutionIds: ['exec-shared-proj'],
+      },
+      {
+        ...rec({
+          sessionId: 'shared-proj-sid',
+          project: projectC,
+          timestamp: now,
+          startTime: now - 1_000,
+          model: {
+            requests: 1,
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['exec-other-c'],
+        successfulRequestExecutionIds: ['exec-other-c'],
+      },
+    ]);
+
+    const sources = await loadUsageDashboardSources([rootA, globalRoot]);
+    const dash = buildUsageDashboard(
+      sources.records,
+      { range: 'today' },
+      sources.ledgerDaily,
+      sources.runtimeScopes,
+    );
+    expect(dash.summary).toMatchObject({
+      requests: 3,
+      totalTokens: 300,
+    });
+  });
+
   it('returns zeros for an empty history', async () => {
     const dash = await loadUsageDashboard();
     expect(dash.summary.totalTokens).toBe(0);

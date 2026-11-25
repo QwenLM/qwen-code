@@ -938,15 +938,21 @@ than a fabricated attribution.
 - **Maintainer decision on R10-1 (residual uncorrelatable legacy replay-only
   double-count is accepted).** An unmarked pre-upgrade record whose `sessionId`
   has zero ledger rows in known roots cannot be proved to be another session's
-  replay copy from day and model alone. Relaxing the session-identity guard
-  would delete genuine independent spend (measured counterexample: an existing
-  real-reader case drops from `600 + 900` to `600`), and
-  `packages/cli/src/serve/server.ts` merges multiple workspaces into one table
-  where per-session identity prevents one root's ledger row from suppressing
-  another root's run. On 2026-11-23 the maintainer explicitly chose the
-  conservative boundary for this PR: keep the session-identity guard and accept
-  residual double-counting for uncorrelatable pre-upgrade replay-only records
-  rather than risking deletion of legitimate usage. Newly written runs carry
+  replay copy from day and model alone. Replacing unmarked zero-ledger records
+  by day and model alone would delete genuine independent spend in another
+  runtime or session (for example, the `usage-stats.test.ts` cross-runtime
+  fixture keeps `600 + 900 = 1,500` via per-root scope isolation and missing
+  execution identity, whereas a day+model-only replacement would drop it to
+  `600`), and relaxing the per-session execution-identity lookup breaks
+  owning-session isolation (`usage-dashboard-service.test.ts`
+  `matches execution evidence within the owning session only` regresses from
+  `100 + 200 = 300` to `400`). In addition, `packages/cli/src/serve/server.ts`
+  merges multiple workspaces into one table where per-session and per-project
+  identity prevents one root's ledger row from suppressing another root's run.
+  On 2026-11-23 the maintainer explicitly chose the conservative boundary for
+  this PR: keep the session/project identity guards and accept residual
+  double-counting for uncorrelatable pre-upgrade replay-only records rather than
+  risking deletion of legitimate usage. Newly written runs carry
   `runScoped: true` and persist only their own delta, so no new replay copies
   are produced.
 - **Runs with no ledger overlap keep session-record attribution.** This preserves
@@ -1166,9 +1172,10 @@ than a fabricated attribution.
   model; residual double-counting from such uncorrelatable pre-upgrade
   replay-only copies is explicitly accepted for this PR so legitimate
   independent spend is never deleted, while newly persisted runs do not emit
-  replay copies. **Verified** by unit tests (same-day/same-model independent
-  spend `600 + 900` stays `1,500`, and multi-workspace server aggregation keeps
-  per-session isolation).
+  replay copies. **Verified** by unit tests (`usage-dashboard-service.test.ts`
+  owning-session and per-project identity guards keep `100 + 200 = 300` and
+  `100 + 100 = 200`, and `usage-stats.test.ts` cross-runtime isolation keeps
+  `600 + 900 = 1,500` for an independent runtime's unmarked record).
 - `inputTokens + outputTokens == totalTokens` for every range. **Verified.**
 - Session-granular tiles (sessions, tool calls, changed lines, skills) are unchanged
   by the ledger. **Verified** against the same records with an empty ledger.
