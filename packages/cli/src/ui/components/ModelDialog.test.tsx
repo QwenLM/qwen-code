@@ -93,7 +93,6 @@ const renderComponent = (
   const recordSlashCommand = vi.fn();
 
   const mockConfig = {
-    hasSubscriptionCatalog: vi.fn(() => true),
     refreshSubscriptionModels: vi.fn().mockResolvedValue({ cached: false }),
     refreshSubscriptionScenes: vi.fn().mockResolvedValue({ cached: false }),
     // --- Functions used by ModelDialog ---
@@ -202,7 +201,7 @@ describe('<ModelDialog />', () => {
     },
   );
 
-  it('shows only loading until the first directory request completes when no cache exists', async () => {
+  it('keeps the existing list interactive without loading during the first directory request', async () => {
     let finish!: (value: { models: string[]; cached: boolean }) => void;
     const refresh = vi.fn(
       () =>
@@ -213,12 +212,12 @@ describe('<ModelDialog />', () => {
     const dialog = renderComponent(
       {},
       {
-        hasSubscriptionCatalog: () => false,
         refreshSubscriptionModels: refresh,
       },
     );
-    expect(dialog.getByText('Loading models from provider…')).toBeDefined();
-    expect(mockedSelect).not.toHaveBeenCalled();
+    expect(dialog.queryByText('Loading models from provider…')).toBeNull();
+    expect(mockedSelect).toHaveBeenCalled();
+    expect(mockedSelect.mock.calls.at(-1)![0].isFocused).toBe(true);
     await act(async () => finish({ models: [], cached: false }));
     expect(dialog.queryByText('Loading models from provider…')).toBeNull();
     expect(mockedSelect).toHaveBeenCalled();
@@ -251,7 +250,6 @@ describe('<ModelDialog />', () => {
       const dialog = renderComponent(
         {},
         {
-          hasSubscriptionCatalog: () => true,
           getAllConfiguredModels: () => models,
           getSubscriptionModelIds: () =>
             models

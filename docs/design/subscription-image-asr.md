@@ -19,7 +19,8 @@ file, bound to the login revision and OAuth environment/client. Do not fetch at
 startup. Opening a picker immediately displays that directory and refreshes it
 in the background on every opening. An unchanged directory keeps the same layout
 and highlighted route; changed responses replace the directory, adding and removing
-entries. A first opening without a directory shows loading until discovery finishes.
+entries. Keep the existing list or empty state visible and interactive during
+discovery, including when no directory is cached; do not add a loading UI.
 Transient failures retain the directory with the existing cached-data warning;
 authentication and permission errors do not fall back. Within a process, only the
 newest request may write each cached directory. Successful empty scene catalogs

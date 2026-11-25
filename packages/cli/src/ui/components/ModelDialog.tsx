@@ -377,7 +377,6 @@ export function ModelDialog({
   // Local error state for displaying errors within the dialog
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [highlightedValue, setHighlightedValue] = useState<string | null>(null);
-  const [catalogLoading, setCatalogLoading] = useState(subscriptionSignedIn);
   const [catalogRevision, setCatalogRevision] = useState(0);
   const scene = isImageModelMode
     ? 'image'
@@ -390,15 +389,9 @@ export function ModelDialog({
           : isCompactionModelMode
             ? 'compaction'
             : undefined;
-  const showCatalogLoading =
-    catalogLoading && !config?.hasSubscriptionCatalog?.(scene);
   useEffect(() => {
-    if (!config || !subscriptionSignedIn) {
-      setCatalogLoading(false);
-      return;
-    }
+    if (!config || !subscriptionSignedIn) return;
     const controller = new AbortController();
-    setCatalogLoading(true);
     void refreshSubscriptionCatalog(
       config,
       scene !== undefined,
@@ -409,10 +402,7 @@ export function ModelDialog({
         if (warning) setErrorMessage(warning);
         setCatalogRevision((value) => value + 1);
       })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!controller.signal.aborted) setCatalogLoading(false);
-      });
+      .catch(() => undefined);
     return () => controller.abort();
   }, [config, subscriptionSignedIn, scene]);
 
@@ -1472,9 +1462,7 @@ export function ModelDialog({
               : '')}
       </Text>
 
-      {showCatalogLoading ? (
-        <Text>{t('Loading models from provider…')}</Text>
-      ) : !hasModels ? (
+      {!hasModels ? (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.status.warning}>
             {t(
@@ -1495,7 +1483,7 @@ export function ModelDialog({
       ) : (
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
-            isFocused={!showCatalogLoading}
+            isFocused={true}
             items={MODEL_OPTIONS}
             onSelect={handleSelect}
             onHighlight={handleHighlight}
@@ -1506,7 +1494,7 @@ export function ModelDialog({
         </Box>
       )}
 
-      {!showCatalogLoading && highlightedEntry && (
+      {highlightedEntry && (
         <Box marginTop={1} flexDirection="column">
           <Box
             borderStyle="single"
@@ -1558,13 +1546,11 @@ export function ModelDialog({
         </Box>
       )}
 
-      {!showCatalogLoading && (
-        <Box marginTop={1} flexDirection="column">
-          <Text color={theme.text.secondary}>
-            {t('Enter to select, ↑↓ to navigate, Esc to close')}
-          </Text>
-        </Box>
-      )}
+      <Box marginTop={1} flexDirection="column">
+        <Text color={theme.text.secondary}>
+          {t('Enter to select, ↑↓ to navigate, Esc to close')}
+        </Text>
+      </Box>
     </Box>
   );
 }
