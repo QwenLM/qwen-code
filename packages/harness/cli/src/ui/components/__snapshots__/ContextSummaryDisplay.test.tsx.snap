@@ -1,0 +1,6 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`<ContextSummaryDisplay /> > should render on a single line on a wide screen 1`] = `
+" 1 AGENTS.md file · 1 MCP server · 1 skill
+"
+`;

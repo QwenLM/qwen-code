@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +18,9 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -102,7 +106,7 @@ final class AgentStoreRows {
 
     final RowMapper<SessionRecord> sessionListMapper;
 
-    SessionRecord readSession(java.sql.ResultSet result, StreamCounters counters) throws java.sql.SQLException {
+    SessionRecord readSession(ResultSet result, StreamCounters counters) throws SQLException {
         return new SessionRecord(
                 result.getString("tenant_id"),
                 result.getString("session_id"),
@@ -127,9 +131,9 @@ final class AgentStoreRows {
                 result.getString("preview"), counters.lastActivity());
     }
 
-    private static Long optionalLong(java.sql.ResultSet result, String column)
-            throws java.sql.SQLException {
-        java.sql.ResultSetMetaData meta = result.getMetaData();
+    private static Long optionalLong(ResultSet result, String column)
+            throws SQLException {
+        ResultSetMetaData meta = result.getMetaData();
         for (int index = 1; index <= meta.getColumnCount(); index++) {
             if (meta.getColumnLabel(index).equalsIgnoreCase(column)) {
                 return nullableLong(result, column);
@@ -150,7 +154,7 @@ final class AgentStoreRows {
     }
 
     static String sessionOperationKey(String tenantId, String sessionId, OperationKind kind, String operationId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.operationRef(
+        return ManagedIdentityRefs.operationRef(
                 kind.name(), tenantId, "SESSION", sessionId, sessionId, operationId);
     }
 
@@ -276,8 +280,8 @@ final class AgentStoreRows {
         }
     }
 
-    static ContextBinding readBinding(java.sql.ResultSet result)
-            throws java.sql.SQLException {
+    static ContextBinding readBinding(ResultSet result)
+            throws SQLException {
         String workspaceId = result.getString("workspace_id");
         if (workspaceId == null) {
             return null;
@@ -299,8 +303,8 @@ final class AgentStoreRows {
                 result.getLong("context_revision"));
     }
 
-    static Long nullableLong(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static Long nullableLong(ResultSet result, String name)
+            throws SQLException {
         long value = result.getLong(name);
         return result.wasNull() ? null : value;
     }
@@ -308,23 +312,23 @@ final class AgentStoreRows {
     // The cwd columns arrive with V46; an operation read against an
     // additive-upgrade schema that predates them must treat the columns as
     // absent instead of erroring the whole query.
-    static String additiveString(java.sql.ResultSet result,
-            String name) throws java.sql.SQLException {
+    static String additiveString(ResultSet result,
+            String name) throws SQLException {
         return hasColumn(result, name) ? result.getString(name) : null;
     }
 
-    static Long additiveLong(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static Long additiveLong(ResultSet result, String name)
+            throws SQLException {
         return hasColumn(result, name) ? nullableLong(result, name) : null;
     }
 
-    static int additiveInt(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static int additiveInt(ResultSet result, String name)
+            throws SQLException {
         return hasColumn(result, name) ? result.getInt(name) : 0;
     }
 
-    static boolean hasColumn(java.sql.ResultSet result, String name)
-            throws java.sql.SQLException {
+    static boolean hasColumn(ResultSet result, String name)
+            throws SQLException {
         var meta = result.getMetaData();
         for (int column = 1; column <= meta.getColumnCount(); column++) {
             if (name.equalsIgnoreCase(meta.getColumnLabel(column))) {
