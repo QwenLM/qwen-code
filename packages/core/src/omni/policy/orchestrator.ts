@@ -121,6 +121,8 @@ export interface RunFixedPoliciesOptions {
   store: OmniObjectStore;
   policies: NormalizedFixedPolicy[];
   signal?: AbortSignal;
+  /** Returns true when the tool that owns this media accepted the turn stop. */
+  onHookStop?: (reason: string) => boolean;
   /** Request/session condition namespaces from the caller. The resource
    * namespace is always derived from each item's recognition, and
    * `request.totalEstimatedMediaTokens` is computed internally from the
@@ -587,6 +589,7 @@ async function runFixedPoliciesUnbounded(
           options.memory && item.memoryBinding
             ? { service: options.memory.service, source: item.memoryBinding }
             : undefined,
+          options.onHookStop,
         );
         records.push({
           policyId: policy.id,
@@ -745,6 +748,7 @@ async function executePolicy(
   memory:
     | { service: MediaMemoryService; source: MediaMemoryBinding }
     | undefined,
+  onHookStop: RunFixedPoliciesOptions['onHookStop'],
 ): Promise<PolicyExecution> {
   const tool = config.getToolRegistry().getTool(policy.toolName);
   const descriptor = tool?.mediaPolicyDescriptor;
@@ -979,6 +983,15 @@ async function executePolicy(
       signal ?? new AbortController().signal,
       { recordToolResult: false },
     );
+    if (
+      response.hookStopReason !== undefined &&
+      !signal?.aborted &&
+      !onHookStop?.(response.hookStopReason) &&
+      !response.error
+    ) {
+      // Outside a tool batch, retain the policy's original failure handling.
+      throw new Error(response.hookStopReason);
+    }
     if (response.error) {
       throw new Error(response.error.message, { cause: response.error });
     }

@@ -7,8 +7,23 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  chownSync,
+  copyFileSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +31,7 @@ import {
   DEFAULT_IDLE_TIMEOUT_MS,
   createModelProxy,
   formatLocalBaseUrl,
+  isTokenFileRevoked,
   normalizeBasePath,
   parseArgs,
 } from '../../scripts/verify-pr-model-proxy.mjs';
@@ -7086,5 +7102,363 @@ describe('local container recipe pins', () => {
       'git -C <pr-clone> rev-parse "<baseRefOid>:.qwen/skills/verify-pr/SKILL.md"',
     );
     expect(skill).toContain("never the PR head's copy");
+  });
+});
+
+describe('per-round token revocation, request budget, and UDS listener (microVM slice)', () => {
+  it('enforces tokenFile revocation fail-closed (revoked, missing, symlinked, malformed) and maxRequests budget', async () => {
+    const tmp = mkdtempSync('/tmp/qc-mproxy-');
+    cleanups.push(() => rmSync(tmp, { recursive: true, force: true }));
+    const tokenFile = join(tmp, 'token.json');
+    writeFileSync(tokenFile, JSON.stringify({ token: TOKEN, revoked: false }));
+
+    let upstreamHits = 0;
+    const upstreamPort = await listen(
+      http.createServer((req, res) => {
+        upstreamHits += 1;
+        expect(req.headers.authorization).toBe(`Bearer ${REAL_KEY}`);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, hit: upstreamHits }));
+      }),
+    );
+
+    const proxyServer = createModelProxy({
+      baseUrl: `http://127.0.0.1:${upstreamPort}`,
+      apiKey: REAL_KEY,
+      token: TOKEN,
+      nonce: NONCE,
+      tokenFile,
+      maxRequests: 2,
+    });
+    const proxyPort = await listen(proxyServer);
+
+    const call = (auth = `Bearer ${TOKEN}`) =>
+      fetch(`http://127.0.0.1:${proxyPort}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: auth, 'content-type': 'application/json' },
+        body: '{}',
+      });
+
+    // 1. Wrong token -> 401 and does not consume request budget
+    expect((await call('Bearer wrong')).status).toBe(401);
+    expect(upstreamHits).toBe(0);
+
+    // 2. First valid request succeeds (1/2)
+    expect((await call()).status).toBe(200);
+    expect(upstreamHits).toBe(1);
+
+    // 3. Revoking tokenFile immediately blocks with 403 and never hits upstream
+    writeFileSync(tokenFile, JSON.stringify({ token: TOKEN, revoked: true }));
+    const revRes = await call();
+    expect(revRes.status).toBe(403);
+    expect(await revRes.text()).toMatch(/token revoked/);
+    expect(upstreamHits).toBe(1);
+
+    // 4. Symlinked, hardlinked, oversized, missing, or malformed tokenFile fails closed to revoked
+    const symTok = join(tmp, 'sym-token.json');
+    symlinkSync(tokenFile, symTok);
+    expect(isTokenFileRevoked(symTok)).toBe(true);
+    const hlSrc = join(tmp, 'hl-src.json');
+    const hlAlias = join(tmp, 'hl-alias.json');
+    writeFileSync(hlSrc, JSON.stringify({ revoked: false }));
+    expect(isTokenFileRevoked(hlSrc)).toBe(false);
+    linkSync(hlSrc, hlAlias);
+    expect(isTokenFileRevoked(hlSrc)).toBe(true);
+    expect(isTokenFileRevoked(hlAlias)).toBe(true);
+    const oversizedTok = join(tmp, 'big-token.json');
+    writeFileSync(
+      oversizedTok,
+      `{"revoked":false,"pad":"${'a'.repeat(70000)}"}`,
+    );
+    expect(isTokenFileRevoked(oversizedTok)).toBe(true);
+    expect(isTokenFileRevoked(join(tmp, 'missing.json'))).toBe(true);
+    const badJson = join(tmp, 'bad.json');
+    writeFileSync(badJson, '{bad');
+    expect(isTokenFileRevoked(badJson)).toBe(true);
+    const stringFalse = join(tmp, 'str-false.json');
+    writeFileSync(stringFalse, JSON.stringify({ revoked: 'false' }));
+    expect(isTokenFileRevoked(stringFalse)).toBe(true);
+
+    // 5. Re-enable tokenFile to verify maxRequests=2 cap: 2nd passes, 3rd returns 429
+    writeFileSync(tokenFile, JSON.stringify({ token: TOKEN, revoked: false }));
+    expect((await call()).status).toBe(200);
+    expect(upstreamHits).toBe(2);
+    const overBudget = await call();
+    expect(overBudget.status).toBe(429);
+    expect(await overBudget.text()).toMatch(/request budget exceeded/);
+    expect(upstreamHits).toBe(2);
+
+    expect(proxyServer.getStats()).toEqual({
+      acceptedRequests: 2,
+      rejectedUnauthorized: 1,
+      rejectedRevoked: 1,
+      rejectedBudget: 1,
+    });
+  });
+
+  it('validates CLI flags and listens on a private Unix domain socket without exposing the real key', async () => {
+    expect(() =>
+      parseArgs(['--listen', '127.0.0.1', '--socket', '/tmp/a.sock']),
+    ).toThrow(/mutually exclusive/);
+    expect(() => parseArgs(['--vmm-uid', '65534'])).toThrow(
+      /must be provided together/,
+    );
+    expect(() =>
+      parseArgs(['--vmm-uid', '65534', '--vmm-gid', '65534']),
+    ).toThrow(/require --socket/);
+    expect(() => parseArgs(['--max-requests', '0'])).toThrow(
+      /positive integer/,
+    );
+
+    const tmp = mkdtempSync('/tmp/qc-mpuds-');
+    cleanups.push(() => rmSync(tmp, { recursive: true, force: true }));
+    const sockPath = join(tmp, 'm.sock');
+    const tokFile = join(tmp, 't.json');
+    writeFileSync(tokFile, JSON.stringify({ revoked: false }));
+
+    const upstreamPort = await listen(
+      http.createServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"reply":"via-uds"}');
+      }),
+    );
+
+    const child = spawn(
+      process.execPath,
+      [
+        SCRIPT,
+        '--socket',
+        sockPath,
+        '--token-file',
+        tokFile,
+        '--max-requests',
+        '1',
+      ],
+      {
+        env: {
+          ...process.env,
+          REVIEW_OPENAI_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+          REVIEW_OPENAI_API_KEY: REAL_KEY,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    cleanups.push(() => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+    });
+
+    const line = await new Promise((resolve, reject) => {
+      let out = '';
+      child.stdout.on('data', (chunk) => {
+        out += chunk.toString('utf8');
+        if (out.includes('\n')) resolve(out.split('\n')[0]);
+      });
+      child.once('exit', (code) =>
+        reject(new Error(`proxy exited early: ${code}`)),
+      );
+    });
+    expect(line).not.toContain(REAL_KEY);
+    const info = JSON.parse(line);
+    expect(info.socketPath).toBe(sockPath);
+
+    // Send a real HTTP POST over the Unix domain socket
+    const resp = await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath: sockPath,
+          path: '/chat/completions',
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${info.token}`,
+            'content-type': 'application/json',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (c) => {
+            body += c.toString('utf8');
+          });
+          res.on('end', () => resolve({ status: res.statusCode, body }));
+        },
+      );
+      req.on('error', reject);
+      req.end('{}');
+    });
+    expect(resp).toEqual({ status: 200, body: '{"reply":"via-uds"}' });
+
+    // Sending SIGTERM to the UDS proxy must unlink the socket file cleanly
+    child.kill('SIGTERM');
+    await once(child, 'exit');
+    expect(existsSync(sockPath)).toBe(false);
+
+    // Invalid empty tokenFile is rejected at construction time
+    expect(() =>
+      createModelProxy({
+        baseUrl: `http://127.0.0.1:${upstreamPort}`,
+        apiKey: REAL_KEY,
+        token: TOKEN,
+        nonce: NONCE,
+        tokenFile: '   ',
+      }),
+    ).toThrow(/tokenFile must be a non-empty path/);
+  });
+
+  it('exits nonzero on SIGTERM when the owned Unix socket cannot be removed', async () => {
+    const tmp = mkdtempSync('/tmp/qc-mp-term-');
+    chmodSync(tmp, 0o755);
+    const workDir = join(tmp, 'work');
+    mkdirSync(workDir, { mode: 0o777 });
+    mkdirSync(join(workDir, 'lib'));
+    const script = join(workDir, 'verify-pr-model-proxy.mjs');
+    copyFileSync(SCRIPT, script);
+    chmodSync(script, 0o444);
+    copyFileSync(
+      fileURLToPath(
+        new URL('../../scripts/verify-pr-vm-collector.mjs', import.meta.url),
+      ),
+      join(workDir, 'verify-pr-vm-collector.mjs'),
+    );
+    chmodSync(join(workDir, 'verify-pr-vm-collector.mjs'), 0o444);
+    copyFileSync(
+      fileURLToPath(
+        new URL('../../scripts/lib/entry-point.js', import.meta.url),
+      ),
+      join(workDir, 'lib/entry-point.js'),
+    );
+    chmodSync(join(workDir, 'lib/entry-point.js'), 0o444);
+    if (process.getuid?.() === 0) chownSync(workDir, 65534, 65534);
+    chmodSync(workDir, 0o700);
+    const socketPath = join(workDir, 'm.sock');
+    cleanups.push(() => {
+      chmodSync(workDir, 0o700);
+      chmodSync(tmp, 0o700);
+      rmSync(tmp, { recursive: true, force: true });
+    });
+    const child = spawn(
+      process.execPath,
+      [script, '--socket', socketPath, '--max-requests', '1'],
+      {
+        env: {
+          ...process.env,
+          REVIEW_OPENAI_BASE_URL: 'http://127.0.0.1:9',
+          REVIEW_OPENAI_API_KEY: 'local-placeholder',
+        },
+        ...(process.getuid?.() === 0 ? { uid: 65534, gid: 65534 } : {}),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    cleanups.push(() => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', () =>
+        reject(new Error(`proxy exited before ready: ${stderr}`)),
+      );
+    });
+    let exitCode = null;
+    try {
+      chmodSync(workDir, 0o500);
+      child.kill('SIGTERM');
+      [exitCode] = await once(child, 'exit');
+      expect(existsSync(socketPath)).toBe(true);
+    } finally {
+      chmodSync(workDir, 0o700);
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it('does not erase an altered socket identity from the shutdown result', async () => {
+    const tmp = mkdtempSync('/tmp/qc-mp-sub-');
+    cleanups.push(() => rmSync(tmp, { recursive: true, force: true }));
+    const socketPath = join(tmp, 'm.sock');
+    const child = spawn(
+      process.execPath,
+      [SCRIPT, '--socket', socketPath, '--max-requests', '1'],
+      {
+        env: {
+          ...process.env,
+          REVIEW_OPENAI_BASE_URL: 'http://127.0.0.1:9',
+          REVIEW_OPENAI_API_KEY: 'local-placeholder',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    cleanups.push(() => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+    });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', () => reject(new Error('proxy exited before ready')));
+    });
+    unlinkSync(socketPath);
+    writeFileSync(socketPath, 'unowned-replacement');
+    child.kill('SIGTERM');
+    const [exitCode] = await once(child, 'exit');
+    expect(exitCode).toBe(1);
+    expect(readFileSync(socketPath, 'utf8')).toBe('unowned-replacement');
+  });
+
+  it('preserves a replacement Unix socket with a different dev/ino on SIGTERM and rejects unsafe maxRequests', async () => {
+    expect(() => parseArgs(['--max-requests', '1e30'])).toThrow(
+      /--max-requests requires a positive integer/,
+    );
+    expect(() =>
+      createModelProxy({
+        baseUrl: 'http://127.0.0.1:9',
+        apiKey: REAL_KEY,
+        token: TOKEN,
+        nonce: NONCE,
+        maxRequests: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toThrow(/maxRequests must be a positive integer/);
+
+    const tmp = mkdtempSync('/tmp/qc-mp-uds-');
+    cleanups.push(() => rmSync(tmp, { recursive: true, force: true }));
+    const socketPath = join(tmp, 'm.sock');
+    const child = spawn(
+      process.execPath,
+      [SCRIPT, '--socket', socketPath, '--max-requests', '1'],
+      {
+        env: {
+          ...process.env,
+          REVIEW_OPENAI_BASE_URL: 'http://127.0.0.1:9',
+          REVIEW_OPENAI_API_KEY: 'local-placeholder',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    cleanups.push(() => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+    });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', () => reject(new Error('proxy exited before ready')));
+    });
+
+    unlinkSync(socketPath);
+    const replacement = net.createServer((sock) => sock.end('replacement-ok'));
+    await new Promise((resolve, reject) => {
+      replacement.once('error', reject);
+      replacement.listen(socketPath, resolve);
+    });
+    cleanups.push(() => replacement.close());
+
+    child.kill('SIGTERM');
+    const [exitCode] = await once(child, 'exit');
+    expect(exitCode).toBe(1);
+    expect(existsSync(socketPath)).toBe(true);
+    const reply = await new Promise((resolve, reject) => {
+      const client = net.createConnection(socketPath);
+      const chunks = [];
+      client.on('data', (c) => chunks.push(c));
+      client.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      client.on('error', reject);
+    });
+    expect(reply).toBe('replacement-ok');
   });
 });

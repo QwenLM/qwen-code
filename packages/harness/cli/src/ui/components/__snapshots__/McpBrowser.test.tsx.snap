@@ -1,0 +1,275 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`McpBrowser > clears a cancelled auth session after runtime recovery at width 40 > recovered authentication 1`] = `
+" MCP >      · Dynam Loc   Proj User Plu
+Dynamic > au ic (1)al    ct (0 (0) gin
+th-recovery        (0)             (0)
+
+
+────────────────────────────────────────
+ Status: ready
+
+ ❯ Enabled           ✓ Yes
+   Authenticate      ✓ Authenticated
+   Host URL      https://mcp.example.co
+                 m/mcp
+   Type              http
+   Connection        Hosted MCP Server
+   Origin            Dynamic
+
+ ────────────────────────────────────
+  Delete       (Dynamic server, managed
+  server        by host)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > clears a cancelled auth session after runtime recovery at width 80 > recovered authentication 1`] = `
+" MCP > Dynamic >         ·  Dynamic     Local     Project     User     Plugin
+auth-recovery              (1)         (0)       (0)         (0)      (0)
+────────────────────────────────────────────────────────────────────────────────
+ Status: ready
+
+ ❯ Enabled           ✓ Yes
+   Authenticate      ✓ Authenticated
+   Host URL          https://mcp.example.com/mcp
+   Type              http
+   Connection        Hosted MCP Server
+   Origin            Dynamic
+
+ ──────────────────────────────────────────────────
+   Delete server     (Dynamic server, managed by host)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > keeps expired ordinary OAuth credentials visible and allows Enter while connected > expired direct OAuth 1`] = `
+" MCP > Flag >               ·  Flag      Local     Project    User     Plugin
+expired-direct-oauth          (1)       (0)       (0)        (0)      (0)
+────────────────────────────────────────────────────────────────────────────────
+ Status: ready
+
+ ❯ Enabled           ✓ Yes
+   Authenticate      ⚠ Toke n expired · ⏎ Enter authenticate
+   URL               https://provider.example/mcp
+   Type              http
+   Connection        Direct MCP Server
+   Origin            Flag
+
+ ──────────────────────────────────────────────────
+   Delete server     (Flag server, cannot delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows address failures and recovery details at width 60 1`] = `
+" MCP      ·  Flag     Local     Project    User     Plugin
+Servers     (3)      (0)       (0)        (0)      (0)
+────────────────────────────────────────────────────────────
+ ──────────────────────────────────────────────────────────
+  Search servers
+ ──────────────────────────────────────────────────────────
+  ❯ Linear        ✖  Failed
+    Context7      ✖  Failed
+    qca           ○ blocked by policy
+
+ MCP server address does not match this environment.
+
+ Tab/←→ switch · ↑↓ navigate · Enter details · Esc back
+"
+`;
+
+exports[`McpBrowser > shows address failures and recovery details at width 60 3`] = `
+" MCP > Flag >  ·  Flag    Local    Project   User    Plugin
+Linear           (3)     (0)      (0)       (0)     (0)
+────────────────────────────────────────────────────────────
+ Status: Failed
+
+ MCP server address https://test-openapi.vpc.example.com.c…
+
+ ❯ Enabled           ✓ Yes
+   Host URL      https://test-openapi.vpc.example.com.cn/mc
+                 p/linear
+   Origin            Flag
+
+ ──────────────────────────────────────────────────
+   Delete server     (Flag server, cannot delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows address failures and recovery details at width 120 1`] = `
+" MCP Servers ·  Flag (3)   Local (0)   Project (0)   User (0)   Plugin (0)
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Search servers
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯ Linear        ✖  Failed
+    Context7      ✖  Failed
+    qca           ○ blocked by policy
+
+ MCP server address does not match this environment.
+
+ Tab/←→ switch · ↑↓ navigate · Enter details · Esc back
+"
+`;
+
+exports[`McpBrowser > shows address failures and recovery details at width 120 3`] = `
+" MCP > Flag > Linear ·  Flag (3)   Local (0)   Project (0)   User (0)   Plugin (0)
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Status: Failed
+
+ MCP server address https://test-openapi.vpc.example.com.cn does not belong to the current environment.
+
+ ❯ Enabled           ✓ Yes
+   Host URL          https://test-openapi.vpc.example.com.cn/mcp/linear
+   Origin            Flag
+
+ ──────────────────────────────────────────────────
+   Delete server     (Flag server, cannot delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows the effective connection and updates on reload at width 40 > awaiting authentication 1`] = `
+" MCP > Flag ·  Flag Loc   Proj  User Plu
+> connection  (1) !al    ect    (0) gin
+-demo              (0)   (0)        (0)
+
+
+────────────────────────────────────────
+ Status: needs authentication
+
+ ❯ Enabled           ✓ Yes
+   Authenticate    ⏎ Enter
+                   authenticate
+   URL            https://example.com/m
+                  cp
+   Host URL      https://gateway.exampl
+                 e/mcp
+   Type              http
+   Origin            Flag
+
+ ────────────────────────────────────
+   Delete server(Flag server, cannot
+                delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows the effective connection and updates on reload at width 40 > direct connection 1`] = `
+" MCP > Flag ·  Flag Loc  Proj  User Plu
+> connection   (1) al   ect    (0) gin
+-demo              (0)  (0)        (0)
+
+
+────────────────────────────────────────
+ Status: ready
+
+ ❯ Enabled           ✓ Yes
+   Authenticate      ✓ Authenticated
+   URL            https://example.com/m
+                  cp
+   Host URL      https://gateway.exampl
+                 e/mcp
+   Type              http
+   Connection        Direct MCP Server
+   Origin            Flag
+
+ ────────────────────────────────────
+   Delete server(Flag server, cannot
+                delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows the effective connection and updates on reload at width 40 > gateway connection 1`] = `
+" MCP > Flag ·  Flag Loc  Proj  User Plu
+> connection   (1) al   ect    (0) gin
+-demo              (0)  (0)        (0)
+
+
+────────────────────────────────────────
+ Status: ready
+
+ ❯ Enabled           ✓ Yes
+   URL            https://example.com/m
+                  cp
+   Type              http
+   Connection        Hosted MCP Server
+   Origin            Flag
+
+ ────────────────────────────────────
+   Delete server(Flag server, cannot
+                delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows the effective connection and updates on reload at width 80 > awaiting authentication 1`] = `
+" MCP > Flag >            ·  Flag (1)   Local      Project     User     Plugin
+connection-demo            !          (0)        (0)         (0)      (0)
+────────────────────────────────────────────────────────────────────────────────
+ Status: needs authentication
+
+ ❯ Enabled           ✓ Yes
+   Authenticate      ⏎ Enter authenticate
+   URL               https://example.com/mcp
+   Host URL          https://gateway.example/mcp
+   Type              http
+   Origin            Flag
+   
+ ──────────────────────────────────────────────────
+   Delete server     (Flag server, cannot delete)
+   
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows the effective connection and updates on reload at width 80 > direct connection 1`] = `
+" MCP > Flag >            ·   Flag     Local      Project     User      Plugin
+connection-demo             (1)      (0)        (0)         (0)       (0)
+────────────────────────────────────────────────────────────────────────────────
+ Status: ready
+
+ ❯ Enabled           ✓ Yes
+   Authenticate      ✓ Authenticated
+   URL               https://example.com/mcp
+   Host URL          https://gateway.example/mcp
+   Type              http
+   Connection        Direct MCP Server
+   Origin            Flag
+
+ ──────────────────────────────────────────────────
+   Delete server     (Flag server, cannot delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;
+
+exports[`McpBrowser > shows the effective connection and updates on reload at width 80 > gateway connection 1`] = `
+" MCP > Flag >            ·   Flag     Local      Project     User      Plugin
+connection-demo             (1)      (0)        (0)         (0)       (0)
+────────────────────────────────────────────────────────────────────────────────
+ Status: ready
+
+ ❯ Enabled           ✓ Yes
+   URL               https://example.com/mcp
+   Type              http
+   Connection        Hosted MCP Server
+   Origin            Flag
+
+ ──────────────────────────────────────────────────
+   Delete server     (Flag server, cannot delete)
+
+ Tab/←→ switch · ↑↓ navigate · Esc back
+"
+`;

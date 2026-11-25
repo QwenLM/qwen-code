@@ -1,0 +1,19 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ToolMessage Sticky Header Regression > verifies that ShellToolMessage in a ToolGroupMessage in a ScrollableList has sticky headers 1`] = `
+"  ✓  Shell Command Description for Shell Command
+     shell-01
+     shell-02
+     shell-03
+     shell-04
+"
+`;
+
+exports[`ToolMessage Sticky Header Regression > verifies that multiple ToolMessages in a ToolGroupMessage in a ScrollableList have sticky headers 1`] = `
+"  ✓  tool-1 Description for tool-1
+     c1-01
+     c1-02
+     c1-03
+     c1-04
+"
+`;

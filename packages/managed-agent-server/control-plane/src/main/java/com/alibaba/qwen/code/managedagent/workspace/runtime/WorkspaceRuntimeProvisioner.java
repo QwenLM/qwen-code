@@ -2,6 +2,9 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -18,7 +21,7 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     private final RuntimeProvisioner delegate;
     private final WorkspaceRuntimeResolver resolver;
     private final WorkspaceExecutionStore executionStore;
-    private final com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindings;
+    private final RuntimeBindingRepository bindings;
 
     public WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore executionStore) {
@@ -26,7 +29,7 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     public WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver,
-            WorkspaceExecutionStore executionStore, com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindings) {
+            WorkspaceExecutionStore executionStore, RuntimeBindingRepository bindings) {
         this.bindings = bindings;
         this.delegate = delegate;
         this.resolver = resolver;
@@ -124,13 +127,13 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
-    public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
-        boolean external = com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+    public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        boolean external = WorkspaceExecutionProfile
                 .isExternalWorkspaceRequest(binding.getRequest());
         if (external ? bindings == null || !executionStore.canStopExternalDrained(binding, bindings)
                 : binding.getRequest().isManagedContext() ? !executionStore.canStopDrained(binding)
                         : executionStore.hasHolder(binding)) {
-            return CompletableFuture.failedFuture(new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(
+            return CompletableFuture.failedFuture(new RuntimeBrokerException(
                     409, "workspace_close_execution_unsettled", "Original Workspace holder remains.", false));
         }
         return delegate.stopDrained(binding);

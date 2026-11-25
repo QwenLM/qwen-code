@@ -2,10 +2,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /** Called by the fenced retirement collector after its reader/recovery/effect checks. */
@@ -110,8 +112,8 @@ final class ManagedSessionRetirementStore {
                         limit);
         for (var row : messages) {
             String id = (String) row.get("item_id");
-            release(jdbc, tenant, session, "MESSAGE", com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session, id));
+            release(jdbc, tenant, session, "MESSAGE", ManagedIdentityRefs.ref(
+                    ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session, id));
             jdbc.update(
                     "DELETE FROM ma_message WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
                     tenant,
@@ -136,8 +138,8 @@ final class ManagedSessionRetirementStore {
                                 + " WHERE tenant_id = ? AND run_id = ? AND session_id = ?",
                         tenant, recordId, session);
             }
-            release(jdbc, tenant, session, "SESSION_RECORD", com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES, session, domain, recordId));
+            release(jdbc, tenant, session, "SESSION_RECORD", ManagedIdentityRefs.ref(
+                    ManagedIdentityRefs.OWNER_REF_BYTES, session, domain, recordId));
             jdbc.update(
                     "DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
                     tenant,
@@ -162,8 +164,8 @@ final class ManagedSessionRetirementStore {
                             + " 'JOURNAL' AND owner_ref = ? AND owner_revision = ?",
                     tenant,
                     session,
-                    ManagedSchemaKeys.identity(com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
-                            com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session)),
+                    ManagedSchemaKeys.identity(ManagedIdentityRefs.ref(
+                            ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session)),
                     revision);
             jdbc.update(
                     "DELETE FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND"
@@ -419,6 +421,6 @@ final class ManagedSessionRetirementStore {
 
     private static String text(Object value) {
         return value instanceof byte[] bytes
-                ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8) : (String) value;
+                ? new String(bytes, StandardCharsets.UTF_8) : (String) value;
     }
 }

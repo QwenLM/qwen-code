@@ -11,6 +11,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -190,7 +192,7 @@ class ManagedMcpSettingsProjection {
 
     private Set<String> existingResources(String tenantId, String sessionId, Set<String> resourceIds) {
         String placeholders = String.join(",",
-                java.util.Collections.nCopies(resourceIds.size(), "?"));
+                Collections.nCopies(resourceIds.size(), "?"));
         List<Object> args = new ArrayList<>();
         args.add(tenantId);
         args.add(sessionId);
@@ -202,7 +204,7 @@ class ManagedMcpSettingsProjection {
     }
 
     private static void requireConfigurationBinding(JsonNode settings, String[] lines) {
-        List<JsonNode> bindings = java.util.Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
+        List<JsonNode> bindings = Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
                 .filter(Objects::nonNull).map(line -> line.path("managedSession"))
                 .filter(event -> "config.bound".equals(event.path("kind").asText())).map(event -> event.path("payload")).toList();
         if (!"committed".equals(settings.path("phase").asText())) {

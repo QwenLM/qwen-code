@@ -412,19 +412,20 @@ public final class ToolExecutionRecord {
                 dispatchGeneration, version, completionTime);
     }
 
-    public ToolExecutionRecord withMeasurements(Map<String, Object> metadata) {
+    public ToolExecutionRecord withMeasurements(RuntimeToolMeasurements.Metadata metadata) {
         if (!isSettled() || !RuntimeToolMeasurements.selected(reference) || result == null) {
             throw new IllegalStateException(
                     "Only a measured settled execution accepts observations");
         }
         if (result.containsKey(RuntimeToolMeasurements.FIELD)) {
-            if (!BrokerValues.sameJsonMap(RuntimeToolMeasurements.metadata(result), metadata)) {
+            if (!BrokerValues.sameJsonMap(RuntimeToolMeasurements.metadata(result).wireValue(),
+                    metadata.wireValue())) {
                 throw new IllegalArgumentException("Measured result metadata conflicts");
             }
             return this;
         }
-        Map<String, Object> enriched = new java.util.LinkedHashMap<>(result);
-        enriched.put(RuntimeToolMeasurements.FIELD, metadata);
+        Map<String, Object> enriched = new LinkedHashMap<>(result);
+        enriched.put(RuntimeToolMeasurements.FIELD, metadata.wireValue());
         return withResult(enriched, lastSequence, settledAt);
     }
 

@@ -2619,6 +2619,11 @@ export interface DaemonArtifactLibraryMemberError {
   status: number;
   code: string;
   message: string;
+  snapshotSize?: number;
+  maxBytes?: number;
+  dimension?: 'snapshot' | 'line' | 'index' | 'replay' | 'artifact_library';
+  measuredBytes?: number;
+  retryable?: boolean;
 }
 
 export interface DaemonWorkspaceArtifactLibraryResult {
@@ -4444,8 +4449,10 @@ export type DaemonUsageRange = 'today' | 'week' | 'month';
 export interface DaemonUsageDashboardTotals {
   totalTokens: number;
   inputTokens: number;
+  /** Output tokens with reasoning counted once, so input + output = total. */
   outputTokens: number;
   cachedTokens: number;
+  /** Raw reasoning count; most providers already include it in outputTokens. */
   thoughtsTokens: number;
   requests: number;
   sessions: number;
@@ -4472,10 +4479,11 @@ export interface DaemonUsageSkillCall {
   count: number;
 }
 
-/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+/** Tokens plus ended-run counts for daily charts. Mirrors `UsageDailyPoint`. */
 export interface DaemonUsageDailyPoint {
   date: string;
   tokens: number;
+  /** Runs ended on this date, which can differ from their request-token day. */
   sessions: number;
 }
 
@@ -4500,7 +4508,7 @@ export interface DaemonUsageDashboard {
   models: DaemonUsageModelShare[];
   /** Skill invocations for the range, sorted by count desc. */
   skills: DaemonUsageSkillCall[];
-  /** Per-day tokens + sessions across the range window. */
+  /** Per-day tokens + ended-run counts across the range window. */
   daily: DaemonUsageDailyPoint[];
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, DaemonUsageHeatmapDay>;
@@ -4784,6 +4792,12 @@ export interface DaemonSettingDescriptor {
   description?: string;
   requiresRestart: boolean;
   default: unknown;
+  /**
+   * The value a host writes when it toggles a boolean that has no stored
+   * value and no schema default, mirroring `unsetToggleValue` in the CLI
+   * settings dialogs. Absent when the schema does not declare one.
+   */
+  unsetToggleValue?: boolean;
   options?: ReadonlyArray<{ value: string | number; label: string }>;
   values: {
     effective: unknown;
