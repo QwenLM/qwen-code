@@ -2097,6 +2097,16 @@ describe('EditTool', () => {
         expect(readText(filePath)).toBe(fixture.content);
       });
 
+      it('keeps the line break when a recovered edit deletes text inside a line', async () => {
+        seedFile(filePath, 'xfoo();\n');
+        modifyExternally(filePath, 'y\nxfoo();\n');
+
+        const result = await run(edit(filePath, 'foo();', ''));
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('y\nx\n');
+      });
+
       it('recovers when a previously read text file changed elsewhere and old_string matches uniquely', async () => {
         seedFile(filePath, 'header-v1\ntarget line\nfooter\n');
         modifyExternally(filePath, 'header-v2\ntarget line\nfooter\n');
