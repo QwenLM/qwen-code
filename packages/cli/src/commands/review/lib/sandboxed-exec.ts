@@ -82,6 +82,7 @@ import {
   selectReviewSandboxBackend,
   type ReviewBackendProbe,
 } from './sandbox-backends.js';
+import { validateBridgeSocketEndpoint } from './guest-exec-bridge.js';
 
 export type {
   ReviewBoundaryExecutionClass,
@@ -104,6 +105,16 @@ export {
   requestedSandboxBackend,
   selectReviewSandboxBackend,
 } from './sandbox-backends.js';
+export {
+  closeGuestSessionSync,
+  executeViaGuestBridge,
+  executeViaGuestBridgeSync,
+  reapVmWorker,
+  validateBridgeSocketEndpoint,
+  type GuestExecRequest,
+  type GuestExecResult,
+  type GuestWorkspaceMode,
+} from './guest-exec-bridge.js';
 
 // Re-exported from its old home: `mountRootFor` moved into `worktree.ts` so
 // the gates there — `untrustedGitfile`, `untrustedRepositoryFrom` and the
@@ -323,6 +334,12 @@ const infoDocuments = new Map<ContainerRuntime, string>();
 export type SandboxVerdict =
   | { kind: 'direct'; disclose?: string }
   | { kind: 'container'; runtime: ContainerRuntime }
+  | {
+      kind: 'microvm';
+      backend: 'firecracker' | 'vfkit';
+      socketPath: string;
+      workerPidFile?: string;
+    }
   | { kind: 'refused'; reason: string };
 
 /**
@@ -358,6 +375,16 @@ export function sandboxVerdict(
     });
     if (selection.kind === 'container') {
       return { kind: 'container', runtime: selection.runtime };
+    }
+    if (selection.kind === 'hardware-bridge') {
+      return {
+        kind: 'microvm',
+        backend: selection.backend,
+        socketPath: selection.socketPath,
+        ...(selection.workerPidFile
+          ? { workerPidFile: selection.workerPidFile }
+          : {}),
+      };
     }
     const reasons =
       trust.escalationReasons.length > 0
@@ -398,6 +425,16 @@ export function sandboxVerdict(
       containerRuntime: probe(),
       hostProbe,
     });
+    if (selection.kind === 'hardware-bridge') {
+      return {
+        kind: 'microvm',
+        backend: selection.backend,
+        socketPath: selection.socketPath,
+        ...(selection.workerPidFile
+          ? { workerPidFile: selection.workerPidFile }
+          : {}),
+      };
+    }
     return {
       kind: 'refused',
       reason:
@@ -464,6 +501,15 @@ export function refuseUnsandboxedPhase(
     sandboxVerdict(policy, process.env, containerRuntime, trustContext);
   if (resolvedVerdict.kind === 'refused') return resolvedVerdict.reason;
   if (resolvedVerdict.kind === 'direct') return null;
+  if (resolvedVerdict.kind === 'microvm') {
+    // MicroVM bridge packs workspace files by content over UDS/vsock instead of
+    // RW-mounting a host temp dir, so `.qwen/tmp` mountability is not required;
+    // the bridge socket itself must remain a non-symlinked Unix socket.
+    const check = validateBridgeSocketEndpoint(resolvedVerdict.socketPath);
+    return check.ok
+      ? null
+      : `microVM bridge (${resolvedVerdict.backend}) unavailable: ${check.reason}`;
+  }
   // Only `required` and `tiered` turn an unmountable tree into a refusal. Under
   // `auto` the contract is "contain it when that is possible" — a `/review` of
   // a local checkout has no layout to mount, and refusing there would take the
@@ -563,9 +609,11 @@ export function describeExecutionBoundary(opts: {
     opts.backend ??
     (opts.verdict?.kind === 'container'
       ? 'container'
-      : opts.verdict?.kind === 'refused'
-        ? 'refused'
-        : 'direct');
+      : opts.verdict?.kind === 'microvm'
+        ? opts.verdict.backend
+        : opts.verdict?.kind === 'refused'
+          ? 'refused'
+          : 'direct');
   return {
     policy,
     prTrust: trust?.prTrust ?? 'unknown',
@@ -917,6 +965,29 @@ export function containerCommandEnv(
     entries.push(`NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
   }
   return entries;
+}
+
+/**
+ * Allowlisted environment map for microVM guest execution (same credential-free
+ * allowlist as `containerCommandEnv`, with a guest-local cache path so no host
+ * path leaks across the VM boundary).
+ */
+export function guestCommandEnv(
+  kind: CommandKind,
+  heapMb?: number,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of containerCommandEnv({
+    tmpDir: '/tmp/qwen-review-guest',
+    kind,
+    heapMb,
+  })) {
+    const eq = entry.indexOf('=');
+    if (eq > 0) {
+      out[entry.slice(0, eq)] = entry.slice(eq + 1);
+    }
+  }
+  return out;
 }
 
 /**

@@ -785,6 +785,8 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Управлять хуками Qwen Code',
   'List all configured hooks': 'Показать все настроенные хуки',
+  'No hooks were loaded.': 'Ни один хук не был загружен.',
+  'skipped (unsupported args)': 'пропущен (параметр args не поддерживается)',
   // Hooks - Dialog
   Hooks: 'Хуки',
   'Loading hooks...': 'Загрузка хуков...',
