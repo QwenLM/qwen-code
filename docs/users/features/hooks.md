@@ -749,7 +749,7 @@ If the hooks fail, or do not finish within 15 seconds, the batch continues with 
 
 #### UserPromptSubmit
 
-**Purpose**: Runs once for a fresh user message before it enters the model, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed.
+**Purpose**: Runs once when admitting a fresh user message, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, model-request retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed. ACP cancellation can preserve a message that the host has already delivered. This history operation skips the event.
 
 **Event-specific fields**:
 

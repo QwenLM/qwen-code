@@ -13097,7 +13097,7 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       preserveFallbackOnAbort?: boolean;
       prefix?: string;
-      /** Also ends resolution, which then falls back to the message text. */
+      /** Limits attachment resolution while preserving unsent input. */
       deadline?: AbortSignal;
     } = {},
   ): Promise<Part[]> {
@@ -13112,7 +13112,6 @@ export class Session implements SessionContext {
       proposalTurn.settlementBlocked = true;
     }
     const parts: Part[] = [];
-    let preserveHookSignal: AbortSignal | undefined;
     for (const [index, message] of messages.entries()) {
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
@@ -13174,18 +13173,14 @@ export class Session implements SessionContext {
         displayText,
         options.prefix,
       );
-      if (message.kind !== 'structured' || !message.queueOnly) {
-        const preserving =
-          abortSignal.aborted || options.deadline !== undefined;
-        // Attachment resolution and its fallback both need a prompt check.
-        const hookSignal = preserving
-          ? (preserveHookSignal ??= AbortSignal.timeout(
-              MID_TURN_KEEP_RESOLVE_TIMEOUT_MS,
-            ))
-          : resolveSignal;
+      // Only live input admission can start a prompt hook.
+      if (
+        !abortSignal.aborted &&
+        options.deadline === undefined &&
+        (message.kind !== 'structured' || !message.queueOnly)
+      ) {
         let decision;
         try {
-          hookSignal.throwIfAborted();
           decision = await runUserPromptSubmit(
             this.config,
             message.kind === 'text'
@@ -13196,13 +13191,13 @@ export class Session implements SessionContext {
                   )
                   .join(' '),
             undefined,
-            hookSignal,
+            abortSignal,
           );
-          hookSignal.throwIfAborted();
+          abortSignal.throwIfAborted();
         } catch (error) {
-          if (!preserving && abortSignal.aborted) {
-            // The host already settled these queue IDs. Let the prompt's
-            // finalizer check and preserve them before recording history.
+          if (abortSignal.aborted) {
+            // The host already settled these queue IDs. The finalizer keeps
+            // the unsent input without starting another hook check.
             const unsent = messages.slice(index);
             for (const item of unsent)
               this.earlyDrainedMidTurnMessages.add(item);

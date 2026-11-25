@@ -6582,24 +6582,19 @@ describe('Session', () => {
       );
     });
 
-    it('checks interrupted steering again before preserving it in history', async () => {
+    it('preserves interrupted steering without starting another prompt hook', async () => {
       useTool(core.Kind.Read, 'read_file');
-      const request = vi
-        .fn()
-        .mockImplementationOnce(async () => {
-          await session.cancelPendingPrompt();
-          return { output: undefined };
-        })
-        .mockResolvedValueOnce({
-          output: { decision: 'block', reason: 'declined' },
-        });
+      const request = vi.fn().mockImplementationOnce(async () => {
+        await session.cancelPendingPrompt();
+        return { output: undefined };
+      });
       mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
       mockConfig.hasHooksForEvent = vi.fn(
         (event) => event === 'UserPromptSubmit',
       );
       vi.mocked(mockClient.extMethod).mockImplementation(async (method) =>
         method === 'craft/drainMidTurnQueue'
-          ? { messages: ['do not include this'], hasQueuedPrompt: false }
+          ? { messages: ['keep this steering message'], hasQueuedPrompt: false }
           : {},
       );
       const send = useSharedRounds([
@@ -6615,14 +6610,14 @@ describe('Session', () => {
         stopReason: 'cancelled',
       });
 
-      expect(request).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenCalledOnce();
       expect(send).toHaveBeenCalledOnce();
       expect(
         mockChatRecordingService.recordMidTurnUserMessage,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledOnce();
       expect(
         JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
-      ).not.toContain('do not include this');
+      ).toContain('keep this steering message');
     });
 
     it('judges a next-speaker continuation in the round by its own response', async () => {
@@ -37694,26 +37689,9 @@ describe('Session', () => {
           'a stuck media bridge',
           'a slow media bridge',
         ] as const)(
-          'keeps unsent input after %s and a prompt check',
+          'keeps unsent input after %s without another prompt check',
           async (hang) => {
-            const request = vi.fn(
-              async ({
-                eventName,
-                input,
-              }: {
-                eventName?: string;
-                input?: { prompt: string };
-              }) => {
-                if (
-                  hang === 'a slow media bridge' &&
-                  eventName === 'UserPromptSubmit' &&
-                  input?.prompt === 'compare with this'
-                ) {
-                  await new Promise((resolve) => setTimeout(resolve, 100));
-                }
-                return { output: {} };
-              },
-            );
+            const request = vi.fn().mockResolvedValue({ output: {} });
             mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
             mockConfig.hasHooksForEvent = vi.fn(
               (event) => event === 'UserPromptSubmit',
@@ -37847,7 +37825,6 @@ describe('Session', () => {
               expect(started).toHaveBeenCalled();
               expect(mockChat.addHistory).not.toHaveBeenCalledWith(kept);
 
-              // A hook that starts near the attachment deadline still gets time.
               await vi.advanceTimersByTimeAsync(2_100);
               const isKept = () =>
                 JSON.stringify(
@@ -37860,7 +37837,7 @@ describe('Session', () => {
                   ? [call.input?.prompt]
                   : [],
               );
-              expect(checkedPrompts).toEqual(['do it', content[0]?.text]);
+              expect(checkedPrompts).toEqual(['do it']);
               if (hang === 'a stuck media bridge') {
                 // The deadline cancels the bridge, so it cannot run on and
                 // report after the turn.
