@@ -91,9 +91,21 @@
     "qwen.managed-agent.session-resources": {
       "en": "Externalization of oversized private Session resources and cold storage of closed Session journals into immutable object storage, with independent default-off controls for resource writes, pack building, and SQL body eviction.",
       "zh": "将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。"
+    },
+    "qwen.managed-agent.schema": {
+      "en": "Admission of the dedicated Managed database catalog, including whether embedding may initialize its baseline or must only validate an existing deployment-managed structure.",
+      "zh": "Managed 专用数据库 catalog 的准入，包括嵌入场景是否允许初始化基线，或是否只能校验部署流程已准备的结构。"
     }
   },
   "properties": {
+    "qwen.managed-agent.enabled": {
+      "en": "Whether the official Spring Boot Starter imports the embedded control plane. Defaults to false. The standalone application and an explicit ManagedAgentConfiguration import do not consult this property; neither mode mounts public or internal controllers through the starter.",
+      "zh": "官方 Spring Boot Starter 是否导入嵌入式控制面，默认 false。独立应用和显式导入 ManagedAgentConfiguration 不读取此属性；Starter 两种方式下都不会挂载公共或内部 Controller。"
+    },
+    "qwen.managed-agent.schema.initialize-enabled": {
+      "en": "Whether embedded persistence initializes a fresh Managed catalog. Defaults to true to preserve existing imports and standalone behavior. Set false for deployment-managed schemas to validate the existing baseline instead of executing DDL. Missing, partial and foreign catalogs are refused.",
+      "zh": "嵌入式持久层是否初始化新的 Managed catalog。默认 true，保持显式导入和独立服务原行为。部署托管 schema 时应设置 false，只校验既有基线而不执行 DDL。缺失、部分结构或外部 catalog 都会被拒绝。"
+    },
     "qwen.managed-agent.object-storage.enabled": {
       "en": "Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`.",
       "zh": "通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。"

@@ -17,7 +17,7 @@ class ModuleArchitectureTest {
     @Test
     void compiledModulesRespectTheirBoundariesAndOwnTheirPackages() {
         var modules = new LinkedHashMap<String, JavaClasses>();
-        for (String module : List.of("contracts", "control-plane", "runtime-broker", "persistence", "runtime-http", "runtime-host", "runtime-local", "runtime-external", "runtime-ssh", "runtime-static", "adapters", "server")) {
+        for (String module : List.of("contracts", "control-plane", "runtime-broker", "persistence", "runtime-http", "runtime-host", "runtime-local", "runtime-external", "runtime-ssh", "runtime-static", "adapters", "server", "qwen-managed-agent-spring-boot-starter")) {
             var classes = new ClassFileImporter().importPath(Path.of("..", module, "target", "classes"));
             assertThat(classes).as("compiled classes of %s", module).isNotEmpty();
             modules.put(module, classes);
@@ -35,6 +35,7 @@ class ModuleArchitectureTest {
             Set<String> permitted = switch (module) {
                 case "server" -> Set.of("server", "contracts", "control-plane", "runtime-broker", "persistence",
                         "adapters", "runtime-http", "runtime-host");
+                case "qwen-managed-agent-spring-boot-starter" -> Set.of("qwen-managed-agent-spring-boot-starter", "server");
                 case "contracts" -> Set.of("contracts");
                 case "adapters", "runtime-local", "runtime-ssh" -> Set.of(module, "contracts", "runtime-http", "runtime-host");
                 case "runtime-external" -> Set.of(module, "contracts", "runtime-http");

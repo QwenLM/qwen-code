@@ -17,4 +17,9 @@ public interface RuntimeProviderDependencies {
     public default SshRuntimeAccess ssh() {
         throw new IllegalStateException("SSH Workspace access is unavailable");
     }
+
+    /** Optional Java implementation; null retains the stock HTTP provider. */
+    public default ExternalRuntimeClient externalClient() {
+        return null;
+    }
 }

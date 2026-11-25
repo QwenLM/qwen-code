@@ -38,8 +38,14 @@ public class ManagedAgentPersistenceConfiguration {
     }
 
     @Bean(defaultCandidate = false)
-    JdbcTemplate managedJdbcTemplate(@Qualifier("managedAgentDataSource") DataSource source) {
-        ManagedSchema.initialize(source);
+    JdbcTemplate managedJdbcTemplate(
+            @Qualifier("managedAgentDataSource") DataSource source,
+            ManagedAgentProperties properties) {
+        if (properties.getSchema().isInitializeEnabled()) {
+            ManagedSchema.initialize(source);
+        } else {
+            ManagedSchema.validate(source);
+        }
         return new ManagedSchemaJdbcTemplate(source);
     }
 

@@ -16,7 +16,7 @@
     <dependencies>
         <dependency>
             <groupId>com.alibaba</groupId>
-            <artifactId>qwen-managed-agent-server</artifactId>
+            <artifactId>qwen-managed-agent-spring-boot-starter</artifactId>
             <version>${managed-agent.version}</version>
         </dependency>
         <dependency>
@@ -39,7 +39,7 @@
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <configuration><includes><include>**/EnabledHostTest.java</include></includes></configuration>
+                <configuration><includes><include>**/EnabledHostTest.java</include><include>**/StarterHostTest.java</include></includes></configuration>
             </plugin></plugins></build>
         </profile>
     </profiles>

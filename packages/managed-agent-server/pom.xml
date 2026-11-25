@@ -60,6 +60,7 @@
         <module>runtime-static</module>
         <module>adapters</module>
         <module>server</module>
+        <module>qwen-managed-agent-spring-boot-starter</module>
         <module>verification</module>
     </modules>
     <dependencyManagement>
@@ -152,6 +153,11 @@
             <dependency>
                 <groupId>com.alibaba</groupId>
                 <artifactId>qwen-managed-agent-server</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-spring-boot-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

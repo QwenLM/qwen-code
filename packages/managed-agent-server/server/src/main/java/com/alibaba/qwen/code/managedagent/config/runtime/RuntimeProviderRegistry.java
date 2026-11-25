@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
@@ -16,10 +17,15 @@ import java.util.ServiceLoader;
 
 /** Discovers factories only. Validation and resource creation belong to the selected factory. */
 public final class RuntimeProviderRegistry {
+    private final ExternalRuntimeClient externalClient;
     private final Map<String, RuntimeProviderFactory> factories = new LinkedHashMap<>();
 
     public RuntimeProviderRegistry() {
         this(discover());
+    }
+
+    public RuntimeProviderRegistry(ExternalRuntimeClient externalClient) {
+        this(discover(), externalClient);
     }
 
     // Broker callbacks can run on threads whose context loader cannot see the host's provider
@@ -41,6 +47,11 @@ public final class RuntimeProviderRegistry {
     }
 
     RuntimeProviderRegistry(Iterable<RuntimeProviderFactory> providers) {
+        this(providers, null);
+    }
+
+    private RuntimeProviderRegistry(Iterable<RuntimeProviderFactory> providers, ExternalRuntimeClient externalClient) {
+        this.externalClient = externalClient;
         for (RuntimeProviderFactory factory : providers) {
             for (String kind : factory.kinds()) {
                 BrokerValues.requireId(kind, "Runtime provider kind");
@@ -68,7 +79,7 @@ public final class RuntimeProviderRegistry {
     public RuntimeProvisioner create(String kind, ManagedAgentSettings settings, RuntimeTransport transport,
             RuntimeProviderDependencies dependencies) {
         RuntimeProviderFactory factory = require(kind);
-        factory.validate(settings);
+        factory.validate(settings, dependencies);
         RuntimeProvisioner provider = factory.create(settings, transport, dependencies);
         if (!kind.equals(provider.kind())) {
             provider.close();
@@ -78,8 +89,17 @@ public final class RuntimeProviderRegistry {
     }
 
     public void validateSelected(ManagedAgentSettings settings) {
+        validateSelected(settings, null);
+    }
+
+    public void validateSelected(ManagedAgentSettings settings, RuntimeProviderDependencies dependencies) {
         for (String kind : RuntimeBackendSelection.from(settings).kinds().stream().sorted().toList()) {
-            require(kind).validate(settings);
+            RuntimeProviderFactory factory = require(kind);
+            if (externalClient == null) {
+                factory.validate(settings);
+            } else {
+                factory.validate(settings, dependencies);
+            }
         }
     }
 

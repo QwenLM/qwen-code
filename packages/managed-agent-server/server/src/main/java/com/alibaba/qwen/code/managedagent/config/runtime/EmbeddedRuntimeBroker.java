@@ -29,6 +29,7 @@ import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
@@ -128,6 +129,17 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, jdbc, manager, ssh, null);
+    }
+
+    public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh,
+            ExternalRuntimeClient externalClient) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -150,8 +162,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         require(properties.getHarness().getCapabilityDigest(),
                 "Hosted Harness capability digest");
         var selection = RuntimeBackendSelection.from(properties);
-        var registry = new RuntimeProviderRegistry();
-        registry.validateSelected(properties);
+        var registry = new RuntimeProviderRegistry(externalClient);
         boolean remote = selection.includes(RuntimeProviderKinds.SSH_PROCESS);
         if (remote && (ssh == null || !ssh.configured() || workspaceExecutionStore == null)) {
             throw new IllegalStateException("SSH Runtime requires configured Workspace services");
@@ -191,6 +202,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             }
 
             @Override
+            public ExternalRuntimeClient externalClient() { return externalClient; }
+
+            @Override
             public com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeAccess ssh() {
                 if (ssh == null || !ssh.configured()) {
                     return RuntimeProviderDependencies.super.ssh();
@@ -200,7 +214,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         };
         RuntimeProvisioner baseProvisioner = provisioner(properties,
                 remote && !RuntimeProviderKinds.SSH_PROCESS.equals(broker.getProvisioner())
-                        ? new HttpRuntimeTransport() : http, dependencies);
+                        ? new HttpRuntimeTransport() : http, dependencies, externalClient);
         this.primaryProvisioner = baseProvisioner;
         if (remote && !RuntimeProviderKinds.SSH_PROCESS.equals(broker.getProvisioner())) {
             RuntimeProvisioner local = baseProvisioner;
@@ -543,6 +557,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             ManagedAgentProperties properties,
             HttpRuntimeTransport transport,
             RuntimeProviderDependencies dependencies) {
+        return provisioner(properties, transport, dependencies, null);
+    }
+
+    static RuntimeProvisioner provisioner(
+            ManagedAgentProperties properties,
+            HttpRuntimeTransport transport,
+            RuntimeProviderDependencies dependencies,
+            ExternalRuntimeClient externalClient) {
         var broker = properties.getRuntimeBroker();
         if (broker.isTrustedLocalRebootRecovery()
                 && (!broker.isDurableLocalProcess() || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner()))) {
@@ -559,7 +581,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                     + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false)"
                     + " for non-durable provisioners");
         }
-        return new RuntimeProviderRegistry().create(properties, transport, dependencies);
+        return new RuntimeProviderRegistry(externalClient).create(properties, transport, dependencies);
     }
 
     /** The workspace ID this Broker resolves, which the Session Store shares. */

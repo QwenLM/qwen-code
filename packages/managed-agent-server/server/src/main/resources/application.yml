@@ -33,6 +33,9 @@ management:
 
 qwen:
   managed-agent:
+    enabled: '${QWEN_MANAGED_AGENT_ENABLED:false}'
+    schema:
+      initialize-enabled: '${QWEN_MANAGED_AGENT_SCHEMA_INITIALIZE_ENABLED:true}'
     extensions:
       enabled: '${QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED:false}'
       artifact-directory: '${QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY:}'
