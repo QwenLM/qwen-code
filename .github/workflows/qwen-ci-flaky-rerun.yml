@@ -256,13 +256,12 @@ jobs:
       # Removing the repository's own .git is not enough: git also reads
       # ~/.gitconfig, $XDG_CONFIG_HOME/git/config and /etc/gitconfig, and a
       # core.hooksPath planted there redirects hook lookup for every git
-      # command on the host. actions/checkout copies $HOME/.gitconfig into its
-      # temp home and then runs `git checkout --force`, so a planted
+      # command on the host. By default, actions/checkout copies $HOME/.gitconfig
+      # into its temp home and then runs `git checkout --force`, so a planted
       # post-checkout hook fires *during* the checkout this step exists to make
       # trustworthy, and can rewrite the driver before act runs it with the
       # PAT. Neutralise both scopes, as triage, autofix and serve-ab already do.
       - name: 'Recreate runner Git metadata'
-        id: 'gitmeta'
         if: "${{ runner.environment == 'self-hosted' }}"
         env:
           RM_BIN: '${{ steps.guard.outputs.rm }}'
@@ -301,7 +300,6 @@ jobs:
           # inside the very checkout this step exists to make trustworthy.
           # /dev/null is root-owned, reads as empty and offers nothing to race.
           # repo-hygiene already makes this choice for its PAT-bearing step.
-          echo "gitconfig=/dev/null" >> "${GITHUB_OUTPUT}"
           echo "GIT_CONFIG_GLOBAL=/dev/null" >> "${GITHUB_ENV}"
           echo "GIT_CONFIG_SYSTEM=/dev/null" >> "${GITHUB_ENV}"
 
@@ -315,8 +313,10 @@ jobs:
         # config too: it outranks the appendable $GITHUB_ENV copy.
         env:
           PATH: '${{ steps.guard.outputs.system_path }}'
-          GIT_CONFIG_GLOBAL: '${{ steps.gitmeta.outputs.gitconfig }}'
-          GIT_CONFIG_SYSTEM: '${{ steps.gitmeta.outputs.gitconfig }}'
+          # Skipping checkout's global write also skips its temporary HOME.
+          HOME: '/dev/null'
+          GIT_CONFIG_GLOBAL: '/dev/null'
+          GIT_CONFIG_SYSTEM: '/dev/null'
           # git layers env-provided config ABOVE both file scopes, so
           # neutralising the files alone leaves core.hooksPath reachable through
           # $GITHUB_ENV. Same channel qwen-autofix closes; step env, because the
@@ -327,11 +327,13 @@ jobs:
           # core.fsmonitor / post-checkout inside this very checkout. Probed:
           # with only the file scopes neutralised the hook fires; with these
           # two entries it does not.
-          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_COUNT: '3'
           GIT_CONFIG_KEY_0: 'core.hooksPath'
           GIT_CONFIG_VALUE_0: '/dev/null'
           GIT_CONFIG_KEY_1: 'core.fsmonitor'
           GIT_CONFIG_VALUE_1: 'false'
+          GIT_CONFIG_KEY_2: 'safe.directory'
+          GIT_CONFIG_VALUE_2: '${{ github.workspace }}'
           GIT_CONFIG_PARAMETERS: ''
           # Transport helpers and template hooks come from these, not from
           # config files, so pin them as well.
@@ -342,6 +344,8 @@ jobs:
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
+          # Git gets the workspace exception from protected command config.
+          set-safe-directory: false
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
@@ -1093,7 +1097,6 @@ jobs:
       # planted in ~/.gitconfig survives deleting the repository's own .git and
       # fires during checkout, which is the one thing this step must guarantee.
       - name: 'Recreate runner Git metadata'
-        id: 'gitmeta'
         if: "${{ runner.environment == 'self-hosted' }}"
         env:
           RM_BIN: '${{ steps.guard.outputs.rm }}'
@@ -1132,7 +1135,6 @@ jobs:
           # inside the very checkout this step exists to make trustworthy.
           # /dev/null is root-owned, reads as empty and offers nothing to race.
           # repo-hygiene already makes this choice for its PAT-bearing step.
-          echo "gitconfig=/dev/null" >> "${GITHUB_OUTPUT}"
           echo "GIT_CONFIG_GLOBAL=/dev/null" >> "${GITHUB_ENV}"
           echo "GIT_CONFIG_SYSTEM=/dev/null" >> "${GITHUB_ENV}"
 
@@ -1141,8 +1143,10 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
         env:
           PATH: '${{ steps.guard.outputs.system_path }}'
-          GIT_CONFIG_GLOBAL: '${{ steps.gitmeta.outputs.gitconfig }}'
-          GIT_CONFIG_SYSTEM: '${{ steps.gitmeta.outputs.gitconfig }}'
+          # Skipping checkout's global write also skips its temporary HOME.
+          HOME: '/dev/null'
+          GIT_CONFIG_GLOBAL: '/dev/null'
+          GIT_CONFIG_SYSTEM: '/dev/null'
           # git layers env-provided config ABOVE both file scopes, so
           # neutralising the files alone leaves core.hooksPath reachable through
           # $GITHUB_ENV. Same channel qwen-autofix closes; step env, because the
@@ -1153,11 +1157,13 @@ jobs:
           # core.fsmonitor / post-checkout inside this very checkout. Probed:
           # with only the file scopes neutralised the hook fires; with these
           # two entries it does not.
-          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_COUNT: '3'
           GIT_CONFIG_KEY_0: 'core.hooksPath'
           GIT_CONFIG_VALUE_0: '/dev/null'
           GIT_CONFIG_KEY_1: 'core.fsmonitor'
           GIT_CONFIG_VALUE_1: 'false'
+          GIT_CONFIG_KEY_2: 'safe.directory'
+          GIT_CONFIG_VALUE_2: '${{ github.workspace }}'
           GIT_CONFIG_PARAMETERS: ''
           # Transport helpers and template hooks come from these, not from
           # config files, so pin them as well.
@@ -1168,6 +1174,8 @@ jobs:
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
+          # Git gets the workspace exception from protected command config.
+          set-safe-directory: false
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
