@@ -194,15 +194,23 @@ class ExternalWorkspaceOwnershipTest {
     void sharedExternalDrainStopsOnTheStorageFenceAlone() throws Exception {
         prepareBinding("workspace", null, "shared-member-1");
         ownership.claim(context, session, binding, bindings);
+        var second = readyMember("shared-member-2");
+        ownership.claim(context, second, binding, bindings);
         binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
         binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
                 .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = ?", "retire");
         assertThat(ownership.canStopExternalDrained(binding, bindings)).isTrue();
         executions.findOrCreate(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord.prepared(
                 "execution", "tenant", binding.getBindingId(), binding.getGeneration(), "harness",
                 session.getRuntimeSessionId(), "turn", "call", "digest", Map.of("sessionId", session.getRuntimeSessionId(),
                         "promptId", "turn", "callId", "call", "argsDigest", "digest")));
         assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+        jdbc.update("UPDATE ma_runtime_session SET runtime_generation = runtime_generation - 1 WHERE runtime_session_id = ?",
+                second.getRuntimeSessionId());
+        assertThatThrownBy(() -> ownership.canStopExternalDrained(binding, bindings))
+                .isInstanceOf(RuntimeBrokerException.class);
     }
 
     @ParameterizedTest

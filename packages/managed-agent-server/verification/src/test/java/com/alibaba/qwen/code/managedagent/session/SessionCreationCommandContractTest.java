@@ -66,10 +66,13 @@ class SessionCreationCommandContractTest {
         assertThat(command.memoryStoreId()).isNull();
         assertThat(SessionCreationCommand.builder().memoryStoreId("memory-store").build().memoryStoreId())
                 .isEqualTo("memory-store");
+        assertThat(command.requestedToolProfile()).isNull();
+        assertThat(SessionCreationCommand.builder().requestedToolProfile("workspace-external-files/1").build().requestedToolProfile())
+                .isEqualTo("workspace-external-files/1");
         var extensionSelection = new ExtensionPackages.Selection() { };
         assertThat(SessionCreationCommand.builder().extensionSelection(extensionSelection).build().extensionSelection())
                 .isSameAs(extensionSelection);
-        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(24);
+        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(25);
     }
 
     @Test

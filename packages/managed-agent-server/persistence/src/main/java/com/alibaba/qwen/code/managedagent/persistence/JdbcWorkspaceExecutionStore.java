@@ -294,14 +294,20 @@ public class JdbcWorkspaceExecutionStore
         WorkspaceStorageKindGuard.requireFreshTransaction();
         return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<T>) connection -> {
             var owner = JdbcExternalWorkspaceOwnership.lockOwner(connection, binding);
-            var saved = JdbcExternalWorkspaceOwnership.savedContext(
-                    connection, binding, harnessSessionId, acquiring);
-            if (context != null && !context.equals(saved)) {
+            boolean storageRetirement = harnessSessionId == null
+                    && HarnessOwnership.sharesRuntimeSessions(binding.getRequest());
+            if (!storageRetirement) {
+                var saved = JdbcExternalWorkspaceOwnership.savedContext(
+                        connection, binding, harnessSessionId, acquiring);
+                if (context != null && !context.equals(saved)) {
+                    throw unavailable();
+                }
+                JdbcExternalWorkspaceOwnership.requireExternalHarnessAdmission(
+                        connection, binding.getRequest(), scope,
+                        harnessSessionId, !acquiring);
+            } else if (context != null) {
                 throw unavailable();
             }
-            JdbcExternalWorkspaceOwnership.requireExternalHarnessAdmission(
-                    connection, binding.getRequest(), scope,
-                    harnessSessionId, !acquiring);
             if (claimDriftRetryable) {
                 JdbcExternalWorkspaceOwnership.requireUnchangedClaimOrRetry(connection, original, binding);
             }
@@ -595,16 +601,18 @@ public class JdbcWorkspaceExecutionStore
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
-                || HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
             return false;
         }
+        boolean shared = HarnessOwnership.sharesRuntimeSessions(saved.getRequest());
         return external(null, saved, repository,
-                saved.getRequest().getScope(),
-                saved.getRequest().getIsolationKey(), false,
+                saved.getRequest().getScope(), shared ? null : saved.getRequest().getIsolationKey(), false,
                 (connection, owner, current) -> {
+                if (shared && !JdbcExternalWorkspaceOwnership.storageFenced(connection, current.getRequest())) {
+                    return false;
+                }
                 JdbcExternalWorkspaceOwnership.requireDrainMembers(connection, owner, current);
                 return noActiveExecutions(current);
             });

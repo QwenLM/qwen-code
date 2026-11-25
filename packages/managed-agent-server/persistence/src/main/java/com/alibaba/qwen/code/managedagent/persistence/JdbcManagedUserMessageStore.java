@@ -371,16 +371,17 @@ public class JdbcManagedUserMessageStore
 
     private QueuedIdentity queuedIdentity(String tenant, String session,
             String messageId) {
-        record QueuedActor(String actorId, boolean unbound) { }
+        record QueuedActor(String actorId, boolean unbound, boolean owned) { }
         QueuedActor owner = jdbc.queryForObject(
-                "SELECT m.actor_id, s.workspace_id IS NULL"
+                "SELECT m.actor_id, s.workspace_id IS NULL,"
+                        + " s.creator_actor_key IS NOT NULL AND s.creator_actor_key = m.actor_id"
                         + " FROM ma_user_message m JOIN ma_session s"
                         + " ON s.tenant_id = m.tenant_id"
                         + " AND s.session_id = m.session_id"
                         + " WHERE m.tenant_id = ? AND m.session_id = ?"
                         + " AND m.message_id = ?",
                 (result, index) -> new QueuedActor(result.getString(1),
-                        result.getBoolean(2)),
+                        result.getBoolean(2), result.getBoolean(3)),
                 tenant, session, messageId);
         if (owner == null || owner.actorId() == null) {
             throw new ManagedAgentException(404, "session_not_found",
@@ -411,6 +412,11 @@ public class JdbcManagedUserMessageStore
                 ? SessionPrincipal.of(tenant, row.userId(),
                         row.actorSubjectId())
                 : SessionPrincipal.ofUser(tenant, row.userId());
+        if (owner.owned()) {
+            // 队列已按所有权准入时，重启派发沿用该消息的创建者身份；
+            // 保留其持久化 principal，避免调用方无法取得租户与 actor 身份。
+            return new QueuedIdentity(owner.actorId(), durable);
+        }
         return new QueuedIdentity(row.userId(), durable);
     }
 
