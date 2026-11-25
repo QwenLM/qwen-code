@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { evaluatePermissionRules } from '../core/permission-helpers.js';
 import { runWithTurnSkillSnapshot } from '../skills/turn-skill-snapshot.js';
 import {
   parseRule,
@@ -238,45 +239,65 @@ const PROTO_KEYS = [
 const sessionAllowRules = (pm: PermissionManager) =>
   (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules.allow;
 
-it('retains source Read restrictions on a prepared skill file', async () => {
-  const manager = makePm({
-    permissionsAllow: ['Read'],
-    permissionsDeny: ['Read(./skills/fixture/private.txt)'],
-  });
-  const source = path.resolve('/project/skills/fixture/SKILL.md');
-  const staged = path.resolve('/snapshot/0/SKILL.md');
-  const request = {
-    toolName: 'read_file',
-    filePath: path.join(path.dirname(staged), 'private.txt'),
-  };
-  expect(await manager.evaluate(request)).toBe('allow');
-  await runWithTurnSkillSnapshot(
-    {
-      version: 1,
-      id: 'fixture',
-      digest: 'fixture',
-      skills: [
-        {
-          name: 'fixture',
-          description: 'fixture',
-          body: 'fixture',
-          level: 'project',
-          filePath: staged,
-          sourceFilePath: source,
-        },
+it.each(['read_file', 'run_shell_command'])(
+  'enforces source and staged Read restrictions for %s',
+  async (toolName) => {
+    const source = path.resolve('/project/skills/fixture/SKILL.md');
+    const staged = path.resolve('/snapshot/0/SKILL.md');
+    const request = (name: string) => {
+      const filePath = path.join(path.dirname(staged), name);
+      return toolName === 'read_file'
+        ? { toolName, filePath }
+        : { toolName, command: `cat "${filePath}"` };
+    };
+    const deny = makePm({
+      permissionsDeny: ['Read(./skills/fixture/private.txt)'],
+    });
+    const ask = makePm({
+      permissionsAsk: ['Read(./skills/fixture/review.txt)'],
+    });
+    const stagedFile = path
+      .join(path.dirname(staged), 'local.txt')
+      .replaceAll(path.sep, '/');
+    const stagedDeny = makePm({
+      permissionsDeny: [
+        `Read(${stagedFile.startsWith('/') ? '/' : ''}${stagedFile})`,
       ],
-    },
-    async () => {
-      expect(await manager.evaluate(request)).toBe('deny');
-      expect(
-        await manager.evaluate({
-          ...request,
-          filePath: path.join(path.dirname(staged), 'public.txt'),
-        }),
-      ).toBe('allow');
-    },
-  );
-});
+    });
+
+    await runWithTurnSkillSnapshot(
+      {
+        version: 1,
+        id: 'fixture',
+        digest: 'fixture',
+        skills: [
+          {
+            name: 'fixture',
+            description: 'fixture',
+            body: 'fixture',
+            level: 'project',
+            filePath: staged,
+            sourceFilePath: source,
+          },
+        ],
+      },
+      async () => {
+        await expect(
+          evaluatePermissionRules(deny, 'allow', request('private.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(ask, 'allow', request('review.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: true });
+        await expect(
+          evaluatePermissionRules(ask, 'ask', request('public.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(stagedDeny, 'allow', request('local.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+      },
+    );
+  },
+);
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
