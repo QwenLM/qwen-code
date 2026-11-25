@@ -22,6 +22,7 @@ import * as ruPart4Stub from './i18n-ru-part4.transcript-stub';
 import * as ruPart5Stub from './i18n-ru-part5.transcript-stub';
 import * as ruPart6Stub from './i18n-ru-part6.transcript-stub';
 import * as ruRemainderStub from './i18n-ru-remainder.transcript-stub';
+import * as archivedSessionsStub from './components/sidebar/archived-sessions-messages.transcript-stub';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -1105,6 +1106,48 @@ describe('touch follow-up catalog parity', () => {
         const translated = getTranslator(language)(key);
         expect(translated).not.toBe(key);
         expect(translated).not.toBe(en);
+      }
+    }
+  });
+});
+
+const ARCHIVED_PANEL_KEYS = [
+  'sidebar.archivedSearchPlaceholder',
+  'sidebar.clearSearch',
+  'sidebar.archiveFilterAndSort',
+  'sidebar.archiveType',
+  'sidebar.archiveTypeAll',
+  'sidebar.archiveTypeLocal',
+  'sidebar.archiveTypeCloud',
+  'sidebar.sortUpdated',
+  'sidebar.sortCreated',
+  'sidebar.sortAlphabetical',
+  'sidebar.allWorkspaces',
+  'sidebar.archivedCount',
+  'sidebar.archivedCountMore',
+  'sidebar.archivedLoadMore',
+  'sidebar.archivedFilteredEmpty',
+  'sidebar.archivedWorkspaceEmpty',
+  'sidebar.clearFilters',
+  'sidebar.showAllWorkspaces',
+  'sidebar.archivedPaginationHint',
+] as const;
+
+describe('archived conversations catalog parity', () => {
+  it('carries every archived conversations key in every shipped catalog and keeps transcript stub empty', () => {
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_EN).toEqual({});
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_ZH).toEqual({});
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_RU).toEqual({});
+    for (const key of ARCHIVED_PANEL_KEYS) {
+      const en = getTranslator('en')(key, { count: 2 });
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key, { count: 2 });
+        expect(translated).not.toBe(key);
+        expect(translated).not.toBe(en);
+        if (language === 'zh-TW') {
+          expect(`${key}: ${translated}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
+        }
       }
     }
   });

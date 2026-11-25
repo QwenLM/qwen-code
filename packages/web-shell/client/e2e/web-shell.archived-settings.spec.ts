@@ -123,9 +123,14 @@ for (const touch of [false, true]) {
             .locator('[class*="archivedRow"]')
             .filter({ hasText: name });
           await expect(row).toBeVisible();
+          await expect(row.locator('time')).toBeVisible();
           await page.mouse.move(0, 0);
           const exportButton = row.getByRole('button', {
             name: 'Export conversation record',
+            exact: true,
+          });
+          const moreButton = row.getByRole('button', {
+            name: 'More actions',
             exact: true,
           });
           const restoreButton = row.getByRole('button', {
@@ -142,25 +147,21 @@ for (const touch of [false, true]) {
             ).toBe(true);
             await expect(actions).toHaveCSS('opacity', '1');
           } else {
-            await expect(actions).toHaveCSS('opacity', '0');
-            await exportButton.focus();
             await expect(actions).toHaveCSS('opacity', '1');
+            await exportButton.focus();
+            await page.keyboard.press('Tab');
+            await expect(moreButton).toBeFocused();
             await page.keyboard.press('Tab');
             await expect(restoreButton).toBeFocused();
             await restoreButton.blur();
-            await row.hover();
-            await expect(actions).toHaveCSS('opacity', '1');
           }
           await expect(exportButton).toHaveAttribute(
             'title',
             'Export conversation record',
           );
+          await expect(moreButton).toHaveAttribute('title', 'More actions');
           await expect(restoreButton).toHaveAttribute('title', 'Restore');
-          const controls = [
-            exportButton,
-            restoreButton,
-            row.getByRole('button', { name: 'More actions', exact: true }),
-          ];
+          const controls = [exportButton, moreButton, restoreButton];
           const boxes = await Promise.all(
             controls.map((control) => control.boundingBox()),
           );
@@ -178,7 +179,7 @@ for (const touch of [false, true]) {
           await page.screenshot({
             path: testInfo.outputPath(`${id}-actions.png`),
           });
-          await controls[2].click();
+          await moreButton.click();
           const menu = page.getByRole('menu');
           await expect(
             menu.getByRole('menuitem', { name: 'Rename', exact: true }),
@@ -324,7 +325,9 @@ for (const variant of [
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(variant.width);
     await page.screenshot({
-      path: `/tmp/qwen-15549-${variant.theme}-${variant.language}-${variant.width}.png`,
+      path: testInfo.outputPath(
+        `archived-settings-${variant.theme}-${variant.language}-${variant.width}.png`,
+      ),
     });
     expect(archiveReads.filter((cwd) => cwd === primary)).toHaveLength(1);
     expect(archiveReads.filter((cwd) => cwd === secondary)).toHaveLength(1);
@@ -351,13 +354,30 @@ for (const variant of [
       ).toBeVisible();
     }
     if (variant.language === 'en') {
+      const filterButton = archive.getByRole('button', {
+        name: 'Filter and sort archived conversations',
+        exact: true,
+      });
+      await expect(filterButton).toBeVisible();
+      await filterButton.click();
       await expect(
-        archive.getByRole('tablist', {
-          name: 'Archived session source',
+        page.getByRole('menuitemradio', {
+          name: 'All conversations',
           exact: true,
         }),
       ).toBeVisible();
-      await archive.getByRole('tab', { name: 'Channels', exact: true }).click();
+      await expect(
+        page.getByRole('menuitemradio', { name: 'Tasks', exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('menuitemradio', { name: 'Created', exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('menuitemradio', { name: 'Alphabetical', exact: true }),
+      ).toBeVisible();
+      await page
+        .getByRole('menuitemradio', { name: 'Channels', exact: true })
+        .click();
       await expect(
         archive.getByText('Channel archive primary', { exact: true }),
       ).toBeVisible();
@@ -445,4 +465,200 @@ test('hides archive management when the daemon has no archive capability @smoke'
   await expect(page.locator('[data-web-shell-archived-sessions]')).toHaveCount(
     0,
   );
+});
+
+test('supports archived search, workspace filter, sort persistence, and per-workspace Load more @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: primary,
+    capabilities: {
+      features: [
+        'session_events',
+        'workspace_settings',
+        'session_archive',
+        'session_last_user_prompt_sort',
+        'workspace_qualified_rest_core',
+      ],
+      workspaces: [
+        { id: 'primary', cwd: primary, primary: true, trusted: true },
+        { id: 'secondary', cwd: secondary, primary: false, trusted: true },
+      ],
+    },
+  });
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  let secondaryRestored = false;
+  await page.route(/\/workspaces?\/[^/]+\/sessions(?:\?|$)/, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('archiveState') !== 'archived') {
+      await route.fulfill({ json: { sessions: [] } });
+      return;
+    }
+    const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
+    const cursor = url.searchParams.get('cursor');
+    if (cwd === primary) {
+      if (cursor === 'page-2') {
+        await route.fulfill({
+          json: {
+            sessions: [
+              {
+                sessionId: 'primary-page-2',
+                workspaceCwd: primary,
+                displayName: 'Alpha page 2 archived',
+                isArchived: true,
+                createdAt: '2026-10-01T00:00:00Z',
+                updatedAt: '2026-10-01T00:00:00Z',
+              },
+            ],
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          nextCursor: 'page-2',
+          sessions: [
+            {
+              sessionId: 'primary-zulu',
+              workspaceCwd: primary,
+              displayName: 'Zulu primary archived',
+              branch: { name: 'feat/archive-pr', baseBranch: 'main' },
+              prs: [
+                {
+                  number: 4242,
+                  url: 'https://github.com/QwenLM/qwen-code/pull/4242',
+                },
+              ],
+              isArchived: true,
+              createdAt: '2026-10-10T00:00:00Z',
+              updatedAt: '2026-10-20T00:00:00Z',
+            },
+            {
+              sessionId: 'primary-mid',
+              workspaceCwd: primary,
+              displayName: 'Mid primary archived',
+              isArchived: true,
+              createdAt: '2026-10-05T00:00:00Z',
+              updatedAt: '2026-10-25T00:00:00Z',
+            },
+          ],
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        sessions: secondaryRestored
+          ? []
+          : [
+              {
+                sessionId: 'secondary-only',
+                workspaceCwd: secondary,
+                displayName: 'Secondary archived item',
+                isArchived: true,
+                createdAt: '2026-10-12T00:00:00Z',
+                updatedAt: '2026-10-12T00:00:00Z',
+              },
+            ],
+      },
+    });
+  });
+  await page.route(/\/sessions\/unarchive$/, async (route) => {
+    const body = route.request().postDataJSON() as { sessionIds: string[] };
+    if (body.sessionIds.includes('secondary-only')) {
+      secondaryRestored = true;
+    }
+    await route.fulfill({
+      json: { unarchived: body.sessionIds, alreadyActive: [], errors: [] },
+    });
+  });
+
+  await page.goto('/settings?language=en&theme=light');
+  await page
+    .getByRole('navigation', { name: 'Settings', exact: true })
+    .getByRole('button', { name: 'Archived conversations', exact: true })
+    .click();
+
+  const archive = page.locator('[data-web-shell-archived-sessions]');
+  await expect(archive.getByText('Zulu primary archived')).toBeVisible();
+  await expect(archive.getByText('Secondary archived item')).toBeVisible();
+  await expect(archive.locator('time').first()).toBeVisible();
+
+  // Search by PR/branch metadata and clear via Escape without closing Settings.
+  const searchInput = archive.getByRole('textbox', {
+    name: 'Search archived conversations',
+    exact: true,
+  });
+  await searchInput.fill('4242');
+  await expect(archive.getByText('Zulu primary archived')).toBeVisible();
+  await expect(archive.getByText('Mid primary archived')).toHaveCount(0);
+  await expect(archive.getByText('Secondary archived item')).toHaveCount(0);
+  await searchInput.press('Escape');
+  await expect(archive).toBeVisible();
+  await expect(archive.getByText('Mid primary archived')).toBeVisible();
+
+  // Workspace filter -> restore last item -> Show all workspaces.
+  await archive
+    .getByRole('combobox', { name: 'All workspaces', exact: true })
+    .click();
+  await page.getByRole('option', { name: /archive-secondary/ }).click();
+  await expect(archive.getByText('Secondary archived item')).toBeVisible();
+  await expect(archive.getByText('Zulu primary archived')).toHaveCount(0);
+  await archive.getByRole('button', { name: 'Restore', exact: true }).click();
+  await expect(
+    archive.getByText('No archived conversations in this workspace.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await archive
+    .getByRole('button', { name: 'Show all workspaces', exact: true })
+    .click();
+  await expect(archive.getByText('Zulu primary archived')).toBeVisible();
+
+  // Load more appends page 2 under archive-primary.
+  await archive.getByRole('button', { name: 'Load more', exact: true }).click();
+  await expect(archive.getByText('Alpha page 2 archived')).toBeVisible();
+
+  // Switch Sort by to Alphabetical and confirm persistence across reload.
+  await archive
+    .getByRole('button', {
+      name: 'Filter and sort archived conversations',
+      exact: true,
+    })
+    .click();
+  await expect(page.getByRole('menu')).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath('archived-menu-open-desktop.png'),
+  });
+  await page
+    .getByRole('menuitemradio', { name: 'Alphabetical', exact: true })
+    .click();
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  const titlesAfterSort = await archive
+    .locator('[data-web-shell-session-title]')
+    .allTextContents();
+  expect(titlesAfterSort).toEqual([
+    'Alpha page 2 archived',
+    'Mid primary archived',
+    'Zulu primary archived',
+  ]);
+
+  await page.screenshot({
+    path: testInfo.outputPath('archived-controls-desktop.png'),
+  });
+
+  await page.reload();
+  await page
+    .getByRole('navigation', { name: 'Settings', exact: true })
+    .getByRole('button', { name: 'Archived conversations', exact: true })
+    .click();
+  await expect(
+    archive.getByRole('button', {
+      name: 'Filter and sort archived conversations',
+      exact: true,
+    }),
+  ).toContainText('Alphabetical');
 });
