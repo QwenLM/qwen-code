@@ -613,4 +613,32 @@ describe('POST /session/:id/worktree-restore', () => {
       );
     },
   );
+
+  it('refuses a retirement-fenced session with 409 session_retirement_fenced before mutating disk', async () => {
+    const fixture = makeFixture({ primary: true });
+    const id = randomUUID();
+    await fixture.seed(id, true);
+    (
+      fixture.runtime.bridge as unknown as {
+        getSessionRetirement?: (sessionId: string) => unknown;
+      }
+    ).getSessionRetirement = (candidateId: string) =>
+      candidateId.toLowerCase() === id.toLowerCase()
+        ? {
+            sessionId: id,
+            operationId: 'op-retired',
+            eventEpoch: 'epoch-1',
+            state: 'retired',
+          }
+        : undefined;
+
+    const response = await request(fixture.app)
+      .post(`/session/${id}/worktree-restore`)
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('session_retirement_fenced');
+    expect(restoreMocks.restore).not.toHaveBeenCalled();
+    expect(fixture.loadSession).not.toHaveBeenCalled();
+  });
 });

@@ -1069,4 +1069,41 @@ describe('session worktree snapshot restore', () => {
       fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
     ).toBe('dirty-rollback-initial-verify-mismatch\n');
   });
+
+  it('refuses restoreWorktreeFromSessionSnapshot under lock when the session is retirement-fenced without mutating disk', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'locked-retirement-fence',
+        dirty: true,
+      }),
+    );
+    (
+      target.runtime.bridge as unknown as {
+        getSessionRetirement?: (sessionId: string) => unknown;
+      }
+    ).getSessionRetirement = (candidateId: string) =>
+      candidateId.toLowerCase() === state.id.toLowerCase()
+        ? {
+            sessionId: state.id,
+            operationId: 'op-fence',
+            eventEpoch: 'epoch-1',
+            state: 'retired',
+          }
+        : undefined;
+
+    await expect(restore(target, state.id, true)).rejects.toMatchObject({
+      code: 'session_retirement_fenced',
+    });
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+    const persisted = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(persisted.state).toBe('valid');
+    if (persisted.state === 'valid') {
+      expect(persisted.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+  });
 });

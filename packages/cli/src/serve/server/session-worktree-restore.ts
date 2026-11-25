@@ -23,6 +23,8 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { runGit } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import {
@@ -41,6 +43,26 @@ import {
   assertRestoreCoordinates,
   resolveManagedWorktreePath,
 } from './worktree-snapshot-binding.js';
+
+export function assertNotRetirementFenced(
+  bridge: Partial<Pick<AcpSessionBridge, 'getSessionRetirement'>>,
+  candidateIds: readonly string[],
+): void {
+  if (!bridge.getSessionRetirement) return;
+  const ids = new Set<string>();
+  for (const id of candidateIds) {
+    ids.add(id);
+    ids.add(normalizeSessionIdForLookup(id));
+  }
+  for (const id of ids) {
+    if (bridge.getSessionRetirement(id)) {
+      throw Object.assign(
+        new Error('This native session is fenced for retirement'),
+        { code: 'session_retirement_fenced' },
+      );
+    }
+  }
+}
 
 async function stateAt(directory: string): Promise<string | null> {
   try {
@@ -161,6 +183,7 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
       heldLockKeys.add(key);
     }
     const task = archiveCoordinator.runExclusiveMany([sessionId], async () => {
+      assertNotRetirementFenced(runtime.bridge, [sessionId]);
       const location = await service.getMaintainableSessionLocation(sessionId);
       if (location === 'archived') {
         throw new WorktreeRestoreUnavailableError(
@@ -303,6 +326,7 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
             selected.meta.branch,
             selected.meta.headCommit,
           ));
+        assertNotRetirementFenced(runtime.bridge, [sessionId]);
         const created = await source.createUserWorktree(
           latest.sidecar.slug,
           selected.meta.headCommit,
@@ -378,6 +402,7 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
             );
           }
           options.assertRuntimeGenerationOpen?.();
+          assertNotRetirementFenced(runtime.bridge, [sessionId]);
           if (!(await preservedMarkerMatches(sessionId, expected))) {
             await createWorktreeSessionMarkerExclusive(expected, sessionId);
           }
@@ -429,6 +454,7 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
         );
       }
       options.assertRuntimeGenerationOpen?.();
+      assertNotRetirementFenced(runtime.bridge, [sessionId]);
       if (!(await preservedMarkerMatches(sessionId, expected))) {
         throw new WorktreeRestoreUnavailableError(
           'The restore target does not have the exclusive session marker',

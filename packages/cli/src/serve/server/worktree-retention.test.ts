@@ -1144,6 +1144,149 @@ describe('worktree retention with real repositories', () => {
     expect(fs.existsSync(newest.worktreePath)).toBe(true);
   });
 
+  it('protects uppercase legacy UUID sessions matched via normalized lowercase bridge lookup or pending registration', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const liveLowerKeyId = '550E8400-E29B-41D4-A716-446655440202';
+    const pendingRegId = '550E8400-E29B-41D4-A716-446655440203';
+    const liveLowerSession = await makeRetainedSession(target, {
+      sessionId: liveLowerKeyId,
+      slug: 'legacy-upper-normalized-bridge',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const pendingSession = await makeRetainedSession(target, {
+      sessionId: pendingRegId,
+      slug: 'legacy-upper-pending-registration',
+      dirty: true,
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'plain-evicted-norm-control',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-norm-control',
+      activity: '2026-01-04T00:00:00.000Z',
+    });
+
+    const getSessionSummary = target.runtime.bridge.getSessionSummary.bind(
+      target.runtime.bridge,
+    );
+    vi.spyOn(target.runtime.bridge, 'getSessionSummary').mockImplementation(
+      (id: string) => {
+        // Answer ONLY the normalized lowercase id (not the raw uppercase id)
+        // so both the normalization loop and the pending-registration probe are pinned.
+        if (id === liveLowerKeyId.toLowerCase()) {
+          return {
+            sessionId: liveLowerKeyId.toLowerCase(),
+            hasActivePrompt: false,
+            pendingPromptCount: 0,
+            pendingInteractionCount: 0,
+          } as ReturnType<typeof getSessionSummary>;
+        }
+        return getSessionSummary(id);
+      },
+    );
+    const bridgeWithPending = target.runtime.bridge as unknown as {
+      hasSessionOrPendingRegistration?: (id: string) => boolean;
+    };
+    bridgeWithPending.hasSessionOrPendingRegistration = (id: string) =>
+      id.toLowerCase() === pendingRegId.toLowerCase();
+
+    const outcome = await sweep(target);
+    expect(outcome.issues).toEqual([]);
+    expect(outcome.removed).toEqual([evicted.id]);
+    expect(fs.existsSync(liveLowerSession.worktreePath)).toBe(true);
+    expect(fs.existsSync(pendingSession.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves retirement-fenced sessions (retired, result_unknown, and corrupt ledger) and marks catalog changed on sweep', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const retired = await makeRetainedSession(target, {
+      slug: 'retired-fenced-session',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const unknownState = await makeRetainedSession(target, {
+      slug: 'result-unknown-fenced-session',
+      dirty: true,
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const corruptLedger = await makeRetainedSession(target, {
+      slug: 'corrupt-ledger-fenced-session',
+      dirty: true,
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'evicted-open-control',
+      activity: '2026-01-04T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-open-control',
+      activity: '2026-01-05T00:00:00.000Z',
+    });
+
+    const markCatalogChanged = vi.fn();
+    (
+      target.runtime.bridge as unknown as {
+        markSessionCatalogChanged?: () => void;
+        getSessionRetirement?: (sessionId: string) => unknown;
+      }
+    ).markSessionCatalogChanged = markCatalogChanged;
+    (
+      target.runtime.bridge as unknown as {
+        getSessionRetirement?: (sessionId: string) => unknown;
+      }
+    ).getSessionRetirement = (candidateId: string) => {
+      const lower = candidateId.toLowerCase();
+      if (lower === retired.id.toLowerCase()) {
+        return {
+          sessionId: retired.id,
+          operationId: 'op-retired',
+          eventEpoch: 'epoch-1',
+          state: 'retired',
+        };
+      }
+      if (lower === unknownState.id.toLowerCase()) {
+        return {
+          sessionId: unknownState.id,
+          operationId: 'op-unknown',
+          eventEpoch: 'epoch-1',
+          state: 'result_unknown',
+        };
+      }
+      if (lower === corruptLedger.id.toLowerCase()) {
+        throw new Error('corrupt retirement ledger');
+      }
+      return undefined;
+    };
+
+    const retiredBefore = fs.readFileSync(retired.sidecarPath, 'utf8');
+    const unknownBefore = fs.readFileSync(unknownState.sidecarPath, 'utf8');
+    const corruptBefore = fs.readFileSync(corruptLedger.sidecarPath, 'utf8');
+
+    const outcome = await sweep(target);
+    expect(outcome.issues).toEqual([]);
+    expect(outcome.removed).toEqual([evicted.id]);
+    expect(markCatalogChanged).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(retired.worktreePath)).toBe(true);
+    expect(fs.existsSync(unknownState.worktreePath)).toBe(true);
+    expect(fs.existsSync(corruptLedger.worktreePath)).toBe(true);
+    expect(fs.readFileSync(retired.sidecarPath, 'utf8')).toBe(retiredBefore);
+    expect(fs.readFileSync(unknownState.sidecarPath, 'utf8')).toBe(
+      unknownBefore,
+    );
+    expect(fs.readFileSync(corruptLedger.sidecarPath, 'utf8')).toBe(
+      corruptBefore,
+    );
+    await expectRetainedSnapshot(target, evicted);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
   it('skips a session with a case-variant duplicate in the other archive state', async () => {
     const target = makeRetentionRepo(root, 'primary');
     configureRetention(target, 1);

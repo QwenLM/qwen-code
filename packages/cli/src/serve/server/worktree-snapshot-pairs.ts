@@ -6,7 +6,10 @@
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
+import {
+  readWorktreeSnapshotMeta,
+  selectWorktreeSnapshot,
+} from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type {
@@ -101,21 +104,21 @@ async function statOrNull(
   }
 }
 
-/**
- * Completes an interrupted two-phase snapshot move left behind by a crash
- * between Phase 1 `fs.link` and Phase 2 `fs.unlink`. Only acts when at least
- * one pair member is an exact same-inode twin (`nlink === 2n`) across source
- * and destination and the other member is either also a twin, unmoved
- * (`nlink === 1n` in source only), or already moved (`nlink === 1n` in
- * destination only). Any foreign hardlink or conflicting destination file is
- * left untouched so downstream validation fails closed.
- */
-export async function finishInterruptedSnapshotMove(
+interface InterruptedMemberState {
+  source: string;
+  target: string;
+  kind: 'linked' | 'sourceOnly' | 'destOnly';
+}
+
+const COMMIT_OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const MAX_SNAPSHOT_META_BYTES = 64 * 1024;
+
+async function classifyInterruptedSnapshotMove(
   sourceDirectory: string,
   destinationDirectory: string,
   sessionId: string,
   archiveKey: string,
-): Promise<void> {
+): Promise<InterruptedMemberState[] | null> {
   if (
     archiveKey.includes('/') ||
     archiveKey.includes('\\') ||
@@ -123,7 +126,7 @@ export async function finishInterruptedSnapshotMove(
     !archiveKey.startsWith(`${sessionId}.`) ||
     !archiveKey.endsWith('.worktree-snapshot.tar.gz')
   ) {
-    return;
+    return null;
   }
   const [srcDirLstat, dstDirLstat] = await Promise.all([
     statOrNull(sourceDirectory),
@@ -137,18 +140,14 @@ export async function finishInterruptedSnapshotMove(
     !dstDirLstat?.isDirectory() ||
     (srcDirLstat.dev === dstDirLstat.dev && srcDirLstat.ino === dstDirLstat.ino)
   ) {
-    return;
+    return null;
   }
   const metaName = `${archiveKey.slice(0, -'.tar.gz'.length)}.json`;
   const members = [archiveKey, metaName].map((name) => ({
     source: path.join(sourceDirectory, name),
     target: path.join(destinationDirectory, name),
   }));
-  const states: Array<{
-    source: string;
-    target: string;
-    kind: 'linked' | 'sourceOnly' | 'destOnly';
-  }> = [];
+  const states: InterruptedMemberState[] = [];
   for (const member of members) {
     const src = await statOrNull(member.source);
     const dst = await statOrNull(member.target);
@@ -165,10 +164,77 @@ export async function finishInterruptedSnapshotMove(
     } else if (src === null && dst?.isFile() && dst.nlink === 1n) {
       states.push({ ...member, kind: 'destOnly' });
     } else {
-      return;
+      return null;
     }
   }
   if (!states.some((entry) => entry.kind === 'linked')) {
+    return null;
+  }
+  return states;
+}
+
+/**
+ * Read-only probe used by session list preview: returns true when an
+ * interrupted two-phase move between `sourceDirectory` and
+ * `destinationDirectory` can be safely converged by
+ * `finishInterruptedSnapshotMove` and its metadata matches the owning session.
+ */
+export async function canConvergeInterruptedSnapshotMove(
+  sourceDirectory: string,
+  destinationDirectory: string,
+  sessionId: string,
+  slug: string,
+  archiveKey: string,
+): Promise<boolean> {
+  const states = await classifyInterruptedSnapshotMove(
+    sourceDirectory,
+    destinationDirectory,
+    sessionId,
+    archiveKey,
+  );
+  if (!states || states.length !== 2) return false;
+  const metaEntry = states[1]!;
+  const metaPath =
+    metaEntry.kind === 'destOnly' ? metaEntry.target : metaEntry.source;
+  const metaStat = await statOrNull(metaPath);
+  if (!metaStat?.isFile() || metaStat.size > BigInt(MAX_SNAPSHOT_META_BYTES)) {
+    return false;
+  }
+  try {
+    const meta = await readWorktreeSnapshotMeta(metaPath);
+    return (
+      meta.sessionId === sessionId &&
+      meta.slug === slug &&
+      COMMIT_OID_PATTERN.test(meta.baseCommit) &&
+      COMMIT_OID_PATTERN.test(meta.headCommit)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Completes an interrupted two-phase snapshot move left behind by a crash
+ * between Phase 1 `fs.link` and Phase 2 `fs.unlink`. Only acts when at least
+ * one pair member is an exact same-inode twin (`nlink === 2n`) across source
+ * and destination and the other member is either also a twin, unmoved
+ * (`nlink === 1n` in source only), or already moved (`nlink === 1n` in
+ * destination only). Any foreign hardlink or conflicting destination file is
+ * left untouched so downstream validation fails closed.
+ */
+export async function finishInterruptedSnapshotMove(
+  sourceDirectory: string,
+  destinationDirectory: string,
+  sessionId: string,
+  archiveKey: string,
+): Promise<void> {
+  const states = await classifyInterruptedSnapshotMove(
+    sourceDirectory,
+    destinationDirectory,
+    sessionId,
+    archiveKey,
+  );
+  if (!states) {
     return;
   }
   const createdLinks: SnapshotLink[] = [];
@@ -177,6 +243,9 @@ export async function finishInterruptedSnapshotMove(
     for (const entry of states) {
       if (entry.kind !== 'sourceOnly') continue;
       const sourceIdentity = await fs.lstat(entry.source, { bigint: true });
+      if (!sourceIdentity.isFile() || sourceIdentity.nlink !== 1n) {
+        throw new Error(`Snapshot source changed during move: ${entry.source}`);
+      }
       await fs.link(entry.source, entry.target);
       const link: SnapshotLink = {
         source: entry.source,

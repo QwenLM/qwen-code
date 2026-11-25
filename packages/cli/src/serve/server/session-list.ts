@@ -42,6 +42,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { preclassifyWorktreeCleanup } from './worktree-orphan-cleanup.js';
 import { assertRestoreCoordinates } from './worktree-snapshot-binding.js';
+import { canConvergeInterruptedSnapshotMove } from './worktree-snapshot-pairs.js';
 import {
   PersistedSessionListCache,
   waitForSessionListLoad,
@@ -50,7 +51,10 @@ import {
 } from './persisted-session-list-cache.js';
 import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
-import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../../config/session-id.js';
 import {
   HIDDEN_CATALOG_SOURCE_TYPES,
   isHiddenCatalogSource,
@@ -143,6 +147,8 @@ export interface ListWorkspaceSessionsReadOptions {
   runtimeBaseDir?: string;
   /** Aborts this caller's wait without cancelling other shared waiters. */
   signal?: AbortSignal;
+  /** Optional retirement-fence probe for search results that lack a bridge parameter. */
+  isSessionRetirementFenced?: (sessionId: string) => boolean;
 }
 
 interface ResolvedListWorkspaceSessionsReadOptions {
@@ -494,11 +500,27 @@ function encodeMetadataSessionCursor(
  * files so the ⑂ badge survives daemon restarts. Shared by all three
  * listing paths (default, organized, metadata-filtered).
  */
+export function isBridgeSessionRetirementFenced(
+  bridge: Partial<Pick<AcpSessionBridge, 'getSessionRetirement'>>,
+  sessionId: string,
+): boolean {
+  if (!bridge.getSessionRetirement) return false;
+  const normalized = normalizeSessionIdForLookup(sessionId);
+  const ids = normalized === sessionId ? [sessionId] : [sessionId, normalized];
+  try {
+    return ids.some((id) => Boolean(bridge.getSessionRetirement!(id)));
+  } catch {
+    // Unreadable or corrupt retirement ledger entries fail closed.
+    return true;
+  }
+}
+
 export async function enrichWorktreeSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
   sessionService: SessionService,
   archiveState: SessionArchiveState = 'active',
   signal?: AbortSignal,
+  isSessionRetirementFenced?: (sessionId: string) => boolean,
 ): Promise<void> {
   let runtimeRoots: readonly string[] | undefined;
   const getRuntimeRoots = async () => {
@@ -602,7 +624,11 @@ export async function enrichWorktreeSidecars(
       }
     }
     let canRestore = false;
-    if (removed && archiveState === 'active') {
+    if (
+      removed &&
+      archiveState === 'active' &&
+      !isSessionRetirementFenced?.(sessionId)
+    ) {
       try {
         // The restore route refuses every non-active location, so a row that
         // still has an archived twin must not advertise a capability the
@@ -622,30 +648,50 @@ export async function enrichWorktreeSidecars(
             path.dirname(candidate.sidecarPath) === path.dirname(sidecarPath)
           ) {
             await assertRestoreCoordinates(candidate);
-            canRestore =
-              (await selectWorktreeSnapshot({
-                directory: path.dirname(sidecarPath),
+            try {
+              canRestore =
+                (await selectWorktreeSnapshot({
+                  directory: path.dirname(sidecarPath),
+                  sessionId,
+                  slug: sidecar.slug,
+                  archiveKey: removed.archiveKey,
+                })) !== undefined;
+            } catch {
+              canRestore = false;
+            }
+            if (!canRestore && candidate.otherStateSidecarDir !== undefined) {
+              canRestore = await canConvergeInterruptedSnapshotMove(
+                candidate.otherStateSidecarDir,
+                path.dirname(sidecarPath),
                 sessionId,
-                slug: sidecar.slug,
-                archiveKey: removed.archiveKey,
-              })) !== undefined;
+                sidecar.slug,
+                removed.archiveKey,
+              );
+            }
           }
         }
       } catch {
         // An unavailable pair is shown as such, never as a restore capability.
       }
     }
-    // Normal metadata remains with its snapshot; lifecycle fields follow the
-    // current sidecar read.
-    const worktree = {
-      ...(summary.worktree ?? {}),
-      slug: sidecar.slug,
-      path: sidecar.worktreePath,
-      branch: sidecar.worktreeBranch,
-      baseCommit:
-        sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
-      baseBranch: sidecar.originalBranch || undefined,
-    };
+    // Normal metadata remains with its scan snapshot so a concurrent sidecar
+    // write never tears a cold response; refresh coordinates only when a
+    // previously removed entry has just been restored or no worktree was
+    // cached yet.
+    const worktree =
+      !removed &&
+      summary.worktree &&
+      summary.worktree.worktreeRemoved === undefined
+        ? { ...summary.worktree }
+        : {
+            ...(summary.worktree ?? {}),
+            slug: sidecar.slug,
+            path: sidecar.worktreePath,
+            branch: sidecar.worktreeBranch,
+            baseCommit:
+              sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+            baseBranch: sidecar.originalBranch || undefined,
+          };
     delete worktree.worktreeRemoved;
     delete worktree.canRestore;
     if (removed) {
@@ -1100,6 +1146,7 @@ function readPersistedSidecars(
   archiveState: SessionArchiveState,
   signal: AbortSignal | undefined,
   revalidateWorktree: boolean,
+  isSessionRetirementFenced?: (sessionId: string) => boolean,
 ): Promise<BridgeSessionSummary> {
   signal?.throwIfAborted();
   const cachedLoad = persistedSidecarLoads.get(session);
@@ -1117,7 +1164,13 @@ function readPersistedSidecars(
       const readSignal = controller.signal;
       readSignal.throwIfAborted();
       const rows = new Map([[session.sessionId, { ...session }]]);
-      await enrichWorktreeSidecars(rows, service, archiveState, readSignal);
+      await enrichWorktreeSidecars(
+        rows,
+        service,
+        archiveState,
+        readSignal,
+        isSessionRetirementFenced,
+      );
       await enrichPrSidecars(rows, service, archiveState, readSignal);
       await enrichArtifactSummaries(rows, service, archiveState, readSignal);
       await enrichGoalSidecars(rows, service, archiveState, readSignal);
@@ -1171,6 +1224,7 @@ function readPersistedSidecars(
               service,
               archiveState,
               controller.signal,
+              isSessionRetirementFenced,
             );
             controller.signal.throwIfAborted();
             return rows.get(session.sessionId)!;
@@ -1202,6 +1256,7 @@ async function enrichCatalogPage(
   archiveState: SessionArchiveState,
   signal: AbortSignal | undefined,
   revalidateWorktree: boolean,
+  isSessionRetirementFenced?: (sessionId: string) => boolean,
 ): Promise<void> {
   const selectedIds = new Set(page.map((session) => session.sessionId));
   const detailsById = new Map<string, BridgeSessionSummary>();
@@ -1217,6 +1272,7 @@ async function enrichCatalogPage(
             archiveState,
             signal,
             revalidateWorktree,
+            isSessionRetirementFenced,
           ),
         ),
       );
@@ -1756,6 +1812,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     archiveState,
     readOptions.signal,
     persisted.revalidateWorktree,
+    (id) => isBridgeSessionRetirementFenced(bridge, id),
   );
   return {
     sessions: page,
@@ -1970,6 +2027,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
     archiveState,
     readOptions.signal,
     persisted.revalidateWorktree,
+    (id) => isBridgeSessionRetirementFenced(bridge, id),
   );
   return {
     sessions: page,
@@ -2161,6 +2219,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     sessionService,
     archiveState,
     readOptions.signal,
+    (id) => isBridgeSessionRetirementFenced(bridge, id),
   );
   await enrichPrSidecars(
     bySessionId,
@@ -2359,6 +2418,7 @@ export async function searchWorkspaceSessionsForResponse(
       sessionService,
       'active',
       readOptions.signal,
+      readOptions.isSessionRetirementFenced,
     );
     await enrichPrSidecars(
       bySessionId,

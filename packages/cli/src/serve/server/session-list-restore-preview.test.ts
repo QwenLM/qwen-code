@@ -32,7 +32,9 @@ import {
 } from '../../test-utils/worktree-session-retention-fixtures.js';
 import {
   enrichWorktreeSidecars,
+  isBridgeSessionRetirementFenced,
   listWorkspaceSessionsForResponse,
+  searchWorkspaceSessionsForResponse,
 } from './session-list.js';
 
 const coreMocks = vi.hoisted(() => ({
@@ -407,6 +409,188 @@ describe('worktree restoration preview metadata', () => {
 
     fs.rmSync(record.sidecarPath);
     expect((await load()).worktree).toBeUndefined();
+  });
+
+  it('preserves a non-removed scan snapshot across concurrent sidecar writes while refreshing a restored entry', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+
+    // 1. A non-removed scan snapshot must not be torn by a concurrent sidecar write.
+    const live = await makeRetainedSession(target, {
+      slug: 'before-sidecar-write',
+    });
+    const liveMap = summaries(target, live.id);
+    const liveRow = liveMap.get(live.id)!;
+    liveMap.set(live.id, {
+      ...liveRow,
+      worktree: {
+        slug: 'before-sidecar-write',
+        path: live.worktreePath,
+        branch: 'qwen/before-sidecar-write',
+      },
+    });
+    await writeWorktreeSession(live.sidecarPath, {
+      ...live.sidecar,
+      slug: 'after-sidecar-write',
+      worktreeBranch: 'qwen/after-sidecar-write',
+    });
+    await enrichWorktreeSidecars(liveMap, target.service, 'active');
+    expect(liveMap.get(live.id)!.worktree?.slug).toBe('before-sidecar-write');
+    expect(liveMap.get(live.id)!.worktree?.branch).toBe(
+      'qwen/before-sidecar-write',
+    );
+
+    // 2. A cached removed entry that has just been restored to detached HEAD refreshes branch and clears removal fields.
+    const restored = await makeRetainedSession(target, {
+      slug: 'restored-detached-refresh',
+    });
+    const restoredMap = summaries(target, restored.id);
+    restoredMap.set(restored.id, {
+      ...restoredMap.get(restored.id)!,
+      worktree: {
+        slug: restored.sidecar.slug,
+        path: restored.worktreePath,
+        branch: 'qwen/old-branch',
+        worktreeRemoved: {
+          archiveKey: `${restored.id}.1.1.worktree-snapshot.tar.gz`,
+        },
+        canRestore: true,
+      },
+    });
+    await writeWorktreeSession(restored.sidecarPath, {
+      ...restored.sidecar,
+      worktreeBranch: '',
+    });
+    await enrichWorktreeSidecars(restoredMap, target.service, 'active');
+    expect(restoredMap.get(restored.id)!.worktree?.branch).toBe('');
+    expect(
+      restoredMap.get(restored.id)!.worktree?.worktreeRemoved,
+    ).toBeUndefined();
+    expect(restoredMap.get(restored.id)!.worktree?.canRestore).toBeUndefined();
+  });
+
+  it('sets canRestore to false when a retained session is fenced for retirement', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target, { slug: 'retired-preview' });
+    const map = summaries(target, record.id);
+
+    await enrichWorktreeSidecars(
+      map,
+      target.service,
+      'active',
+      undefined,
+      (id) => id === record.id,
+    );
+
+    expect(map.get(record.id)!.worktree?.worktreeRemoved).toEqual({
+      archiveKey: record.archiveKey,
+    });
+    expect(map.get(record.id)!.worktree?.canRestore).toBe(false);
+  });
+
+  it('keeps canRestore true for an interrupted unarchive twin (nlink === 2) and fails closed on corrupt retirement ledger in list/search', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target, {
+      slug: 'interrupted-twin-preview',
+    });
+    const activeDir = path.dirname(record.sidecarPath);
+    const archivedDir = path.dirname(
+      target.service.getWorktreeSessionPathForArchiveState(
+        record.id,
+        'archived',
+      ),
+    );
+    fs.mkdirSync(archivedDir, { recursive: true });
+    const metaName = `${record.archiveKey.slice(0, -'.tar.gz'.length)}.json`;
+    fs.linkSync(
+      path.join(activeDir, record.archiveKey),
+      path.join(archivedDir, record.archiveKey),
+    );
+    fs.linkSync(
+      path.join(activeDir, metaName),
+      path.join(archivedDir, metaName),
+    );
+
+    const openBridge = {
+      listSessions: () => [],
+      getSessionRetirement: () => undefined,
+    } as unknown as AcpSessionBridge;
+    const openListed = await runWithWorkspaceRuntimeStorage(
+      target.runtime,
+      () =>
+        listWorkspaceSessionsForResponse(
+          openBridge,
+          target.repo,
+          { size: 20 },
+          {
+            mergeLive: false,
+            runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+          },
+        ),
+    );
+    const openRow = openListed.sessions.find((s) => s.sessionId === record.id);
+    expect(openRow?.worktree?.canRestore).toBe(true);
+    // Preview must remain strictly read-only (twins untouched on disk).
+    expect(fs.existsSync(path.join(archivedDir, record.archiveKey))).toBe(true);
+
+    const corruptLedgerBridge = {
+      listSessions: () => [],
+      getSessionRetirement: () => {
+        throw new Error('corrupt retirement ledger');
+      },
+    } as unknown as AcpSessionBridge;
+    const fencedListed = await runWithWorkspaceRuntimeStorage(
+      target.runtime,
+      () =>
+        listWorkspaceSessionsForResponse(
+          corruptLedgerBridge,
+          target.repo,
+          { size: 20 },
+          {
+            mergeLive: false,
+            runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+          },
+        ),
+    );
+    expect(
+      fencedListed.sessions.find((s) => s.sessionId === record.id)?.worktree
+        ?.canRestore,
+    ).toBe(false);
+
+    fs.writeFileSync(
+      record.transcriptPath,
+      JSON.stringify({
+        uuid: 'u-1',
+        parentUuid: null,
+        sessionId: record.id,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: record.worktreePath,
+        version: '0.28.3',
+        message: {
+          role: 'user',
+          parts: [{ text: 'searchable retired twin prompt' }],
+        },
+      }) + '\n',
+    );
+    const searchResult = await runWithWorkspaceRuntimeStorage(
+      target.runtime,
+      () =>
+        searchWorkspaceSessionsForResponse(
+          target.repo,
+          'searchable retired twin prompt',
+          { maxResults: 10 },
+          {
+            runtimeBaseDir: target.runtime.sessionRuntimeBaseDir,
+            isSessionRetirementFenced: (id) =>
+              isBridgeSessionRetirementFenced(corruptLedgerBridge, id),
+          },
+        ),
+    );
+    const searchRow = searchResult.results.find(
+      (r) => r.session.sessionId === record.id,
+    );
+    expect(searchRow).toBeDefined();
+    expect(searchRow?.session.worktree?.canRestore).toBe(false);
   });
 
   it('attests the selected runtime root once for multiple preview records', async () => {

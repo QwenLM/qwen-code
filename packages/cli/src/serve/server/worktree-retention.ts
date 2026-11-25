@@ -33,6 +33,10 @@ import type {
 } from '../workspace-registry.js';
 import type { SessionArchiveCoordinator } from './session-archive.js';
 import {
+  invalidateWorkspaceSessionListCache,
+  isBridgeSessionRetirementFenced,
+} from './session-list.js';
+import {
   canonicalPathForTesting,
   executeWorktreeCleanup,
   preclassifyWorktreeCleanup,
@@ -445,6 +449,9 @@ async function collectEligible(
       if (sessionLiveOnBridge(scope.runtime.bridge, sessionId)) {
         continue;
       }
+      if (isBridgeSessionRetirementFenced(scope.runtime.bridge, sessionId)) {
+        continue;
+      }
       if (hasRegisteredWorkspaceInsideCheckout(registry, plan.lockKey)) {
         continue;
       }
@@ -686,6 +693,7 @@ async function removeRetainedCheckout(
   plan: WorktreeCleanupPlan,
   expectedRoot: RetentionScope['root'],
   canContinue: () => boolean,
+  onBindingPersisted?: () => void,
 ): Promise<boolean> {
   const release = await acquireWorktreeCleanupLock(plan);
   try {
@@ -698,6 +706,9 @@ async function removeRetainedCheckout(
       }
       const organization = new SessionOrganizationService(runtime.workspaceCwd);
       if (await isRetentionSessionPinned(organization, plan.sessionId)) {
+        return false;
+      }
+      if (isBridgeSessionRetirementFenced(runtime.bridge, plan.sessionId)) {
         return false;
       }
       let attemptSnapshot: WorktreeSnapshotPaths | undefined;
@@ -715,6 +726,8 @@ async function removeRetainedCheckout(
             }
             if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
               return false;
+            if (isBridgeSessionRetirementFenced(runtime.bridge, plan.sessionId))
+              return false;
             if (hasRegisteredWorkspaceInsideCheckout(registry, plan.lockKey))
               return false;
             if (await ownerProcessActive(plan.sessionId, plan.sidecar))
@@ -730,6 +743,7 @@ async function removeRetainedCheckout(
             if (snapshot) {
               attemptSnapshot = snapshot;
               await persistRetainedAttemptBinding(plan, snapshot);
+              onBindingPersisted?.();
             }
             return true;
           },
@@ -804,6 +818,8 @@ async function removeRetainedCheckout(
               return false;
             }
             if (sessionLiveOnBridge(runtime.bridge, plan.sessionId))
+              return false;
+            if (isBridgeSessionRetirementFenced(runtime.bridge, plan.sessionId))
               return false;
             if (hasRegisteredWorkspaceInsideCheckout(registry, plan.lockKey))
               return false;
@@ -929,44 +945,69 @@ async function sweepWorktreeRetentionOnceInStorage(
   }
   const service = createWorkspaceRuntimeSessionService(runtime);
   let candidates: WorktreeCleanupPlan[];
+  let bindingPersisted = false;
   try {
-    candidates = await collectEligible(
-      scope,
-      registry,
-      service,
-      coordinator,
-      report,
-    );
-  } catch (error) {
-    report.issues.push(error instanceof Error ? error.message : String(error));
-    return report;
-  }
-  writeStderrLine(
-    `qwen serve: retention candidates workspace=${safeLogValue(runtime.workspaceCwd)} count=${candidates.length}`,
-  );
-  for (const plan of candidates) {
-    if (!assertCurrentRuntime(registry, runtime, canContinue)) {
-      report.skipped.push(`${plan.sessionId}: runtime drained`);
-      continue;
-    }
     try {
-      const removed = await removeRetainedCheckout(
-        runtime,
+      candidates = await collectEligible(
+        scope,
         registry,
+        service,
         coordinator,
-        plan,
-        scope.root,
-        canContinue,
+        report,
       );
-      if (removed) report.removed.push(plan.sessionId);
-      else report.skipped.push(plan.sessionId);
     } catch (error) {
       report.issues.push(
-        `${plan.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.message : String(error),
       );
+      return report;
+    }
+    writeStderrLine(
+      `qwen serve: retention candidates workspace=${safeLogValue(runtime.workspaceCwd)} count=${candidates.length}`,
+    );
+    for (const plan of candidates) {
+      if (!assertCurrentRuntime(registry, runtime, canContinue)) {
+        report.skipped.push(`${plan.sessionId}: runtime drained`);
+        continue;
+      }
+      try {
+        const removed = await removeRetainedCheckout(
+          runtime,
+          registry,
+          coordinator,
+          plan,
+          scope.root,
+          canContinue,
+          () => {
+            bindingPersisted = true;
+          },
+        );
+        if (removed) report.removed.push(plan.sessionId);
+        else report.skipped.push(plan.sessionId);
+      } catch (error) {
+        report.issues.push(
+          `${plan.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return report;
+  } finally {
+    const catalogChanged =
+      bindingPersisted ||
+      report.removed.length > 0 ||
+      report.skipped.some((entry) =>
+        entry.startsWith('worktree removal record reconciled from snapshot: '),
+      );
+    if (catalogChanged) {
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        workspaceCwd: runtime.workspaceCwd,
+        archiveStates: ['active', 'archived'],
+      });
+      if (assertCurrentRuntime(registry, runtime, canContinue)) {
+        runtime.bridge.markSessionCatalogChanged?.();
+      }
     }
   }
-  return report;
 }
 
 export interface WorktreeRetentionController {

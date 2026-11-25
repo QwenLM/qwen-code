@@ -162,6 +162,7 @@ import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
   invalidateWorkspaceSessionListCache,
+  isBridgeSessionRetirementFenced,
   isPersistedSessionCursor,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
@@ -206,6 +207,7 @@ import {
   type WorktreeRestoreHandoff,
 } from '../server/session-restore.js';
 import {
+  assertNotRetirementFenced,
   restoreWorktreeFromSessionSnapshot,
   WorktreeRestoreUnavailableError,
 } from '../server/session-worktree-restore.js';
@@ -1016,7 +1018,7 @@ export function registerSessionRoutes(
     archiveStates: readonly SessionArchiveState[],
   ): void => {
     invalidateSessionLists(runtime, archiveStates);
-    runtime.bridge.markSessionCatalogChanged();
+    runtime.bridge.markSessionCatalogChanged?.();
   };
   const runWithSessionListInvalidation = async <T>(
     runtime: WorkspaceRuntime,
@@ -5301,10 +5303,13 @@ export function registerSessionRoutes(
         throw new SessionNotFoundError(sessionId);
       }
       let busy = false;
-      const busyCandidateIds =
-        storedSessionId === sessionId
-          ? [sessionId]
-          : [sessionId, storedSessionId];
+      const busyCandidateIds = [
+        ...new Set([
+          sessionId,
+          normalizeSessionIdForLookup(sessionId),
+          storedSessionId,
+        ]),
+      ];
       for (const candidateId of busyCandidateIds) {
         try {
           const summary = runtime.bridge.getSessionSummary(candidateId);
@@ -5332,6 +5337,7 @@ export function registerSessionRoutes(
         });
         return;
       }
+      assertNotRetirementFenced(runtime.bridge, [sessionId, storedSessionId]);
       if (
         (await service.getMaintainableSessionLocation(storedSessionId)) ===
         'conflict'
@@ -5350,6 +5356,7 @@ export function registerSessionRoutes(
           explicitWorkspaceCwd: Object.hasOwn(body, 'cwd'),
         });
       });
+      invalidateSessionListsAndMarkCatalog(runtime, ['active']);
       await restoreSessionHandler(
         'load',
         fields,
@@ -7675,6 +7682,7 @@ export function registerSessionRoutes(
         identity,
         clientId === undefined ? undefined : { clientId },
       );
+      invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
       sendRetirement(res, receipt);
     } catch (error) {
       const code =
@@ -11974,6 +11982,8 @@ export function registerSessionRoutes(
                 {
                   runtimeBaseDir: runtime.sessionRuntimeBaseDir,
                   signal: controller.signal,
+                  isSessionRetirementFenced: (id) =>
+                    isBridgeSessionRetirementFenced(runtime.bridge, id),
                 },
               ),
             );
