@@ -188,32 +188,36 @@ describe('useWorkspaceTrustGrant', () => {
     expect(latest?.trustPendingCwd).toBeNull();
   });
 
-  it('handles the rejection of the poll refresh, not just the post-grant one', async () => {
+  it('does not let a rejected poll refresh escape as an unhandled rejection', async () => {
     vi.useFakeTimers();
-    // This worker never delivers `unhandledRejection` (measured with and
-    // without fake timers), so the observable contract is that each refresh
-    // gets a rejection handler attached.
-    const handlers: Array<ReturnType<typeof vi.fn>> = [];
-    const { options } = harness({
-      refreshCapabilities: vi.fn(() => {
-        const handler = vi.fn();
-        handlers.push(handler);
-        return { catch: handler } as unknown as Promise<unknown>;
-      }),
-    });
-    await render(options);
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      escaped.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { options } = harness({
+        // A plain function, not vi.fn: the spy attaches its own handler to
+        // the returned promise, which would swallow the very rejection this
+        // test has to observe.
+        refreshCapabilities: () =>
+          Promise.reject(new Error('poll refresh failed')),
+      });
+      await render(options);
 
-    await act(async () => {
-      latest!.grantTrust(untrusted);
-      await Promise.resolve();
-    });
-    expect(handlers).toHaveLength(1);
-    expect(handlers[0]).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        latest!.grantTrust(untrusted);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      // The poll tick has run and its rejection had a chance to surface.
+      await new Promise((resolve) => process.nextTick(resolve));
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
-    expect(handlers).toHaveLength(2);
-    expect(handlers[1]).toHaveBeenCalledTimes(1);
+      expect(escaped).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });
