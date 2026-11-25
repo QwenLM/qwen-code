@@ -9,7 +9,13 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
-import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarClockIcon } from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../ui/tooltip';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { FileAttachmentContent } from '../FileAttachmentContent';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
@@ -80,6 +86,7 @@ interface UserMessageProps {
   inputAnnotations?: readonly DaemonInputAnnotation[];
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
+  sendFailedStatus?: 'failed' | 'uncertain';
   onRetrySend?: () => void;
   /** Render the message as an in-place editor instead of rendered content. */
   editing?: boolean;
@@ -340,6 +347,7 @@ export const UserMessage = memo(function UserMessage({
   inputAnnotations,
   isLocateFlashing = false,
   sendFailed = false,
+  sendFailedStatus = 'failed',
   onRetrySend,
   editing = false,
   submittingEdit = false,
@@ -601,15 +609,14 @@ export const UserMessage = memo(function UserMessage({
     measureOverflow,
   ]);
 
+  const retryLabel =
+    sendFailedStatus === 'uncertain'
+      ? t('userMessage.retryUncertain')
+      : t('userMessage.retrySend');
+
   return (
     <div className={styles.chatMessageRow} data-web-shell-user-row>
-      <div
-        className={`${styles.chatMessageColumn}${
-          isLocateFlashing && content.trim().length === 0
-            ? ` ${flashStyles.flash}`
-            : ''
-        }`}
-      >
+      <div className={styles.chatMessageColumn}>
         {sentFrom && (
           <div
             className={styles.sentFrom}
@@ -640,189 +647,223 @@ export const UserMessage = memo(function UserMessage({
             <span className={styles.authorName}>{author.name}</span>
           </div>
         )}
-        {images && images.length > 0 && (
-          <div className={styles.chatImages} data-web-shell-user-images>
-            {images.map((img, index) => {
-              const src = img.data.startsWith('data:')
-                ? img.data
-                : `data:${img.mimeType};base64,${img.data}`;
-              if (!isSafeImageSrc(src)) return null;
-              return (
-                <img
-                  key={index}
-                  src={src}
-                  alt={t('user.uploadedImage', { index: index + 1 })}
-                  className={`${styles.chatImageThumb}${
-                    onImagePreview ? ` ${styles.chatImageThumbInteractive}` : ''
-                  }`}
-                  onClick={
-                    onImagePreview
-                      ? () =>
-                          onImagePreview(
-                            src,
-                            t('user.uploadedImage', { index: index + 1 }),
-                            img.attachmentId
-                              ? {
-                                  kind: 'attachment',
-                                  attachmentId: img.attachmentId,
-                                }
-                              : undefined,
-                          )
-                      : undefined
-                  }
-                />
-              );
-            })}
-          </div>
-        )}
-        {files && files.length > 0 && (
-          <div className={styles.chatFiles} data-web-shell-user-files>
-            {files.map((file, index) => {
-              const previewable = Boolean(
-                onAttachmentPreview &&
-                  (file.data !== undefined ||
-                    file.text !== undefined ||
-                    file.attachmentId),
-              );
-              return (
-                <span
-                  key={`${file.name}-${index}`}
-                  className={`${styles.chatFileChip}${
-                    previewable ? ` ${styles.chatFileChipPreviewable}` : ''
-                  }`}
-                  role={previewable ? 'button' : undefined}
-                  tabIndex={previewable ? 0 : undefined}
-                  onClick={
-                    previewable ? () => onAttachmentPreview?.(file) : undefined
-                  }
-                  onKeyDown={(event) => {
-                    if (
-                      previewable &&
-                      (event.key === 'Enter' || event.key === ' ')
-                    ) {
-                      event.preventDefault();
-                      onAttachmentPreview?.(file);
-                    }
-                  }}
-                >
-                  <FileAttachmentContent
-                    name={file.name}
-                    mimeType={file.mimeType}
-                  />
-                </span>
-              );
-            })}
-          </div>
-        )}
-        {(content.trim().length > 0 || editing) && (
+        <div className={styles.chatMessageBodyRow}>
+          {sendFailed && onRetrySend && (
+            <TooltipProvider delayDuration={200} disableHoverableContent>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={styles.sendFailureIndicator}
+                    onClick={onRetrySend}
+                    aria-label={retryLabel}
+                    data-send-failed-status={sendFailedStatus}
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      aria-hidden="true"
+                      width="12"
+                      height="12"
+                    >
+                      <path
+                        d="M8 3.25v5.5"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
+                      <circle cx="8" cy="12" r="1.15" fill="currentColor" />
+                    </svg>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" variant="black">
+                  {retryLabel}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
           <div
-            className={`${styles.chatBubble}${
-              scheduledTaskRun || automaticTriggerSource
-                ? ` ${styles.scheduledTaskBubble}`
+            className={`${styles.chatMessageContentColumn}${
+              isLocateFlashing && content.trim().length === 0
+                ? ` ${flashStyles.flash}`
                 : ''
-            }${
-              automaticTriggerSource ? ` ${styles.automaticTriggerBubble}` : ''
-            }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
-            data-web-shell-user-bubble
+            }`}
           >
-            <div
-              ref={contentRef}
-              className={`${styles.chatContent} ${
-                heightOverflowing &&
-                !documentMode &&
-                !expanded &&
-                !automaticTriggerSource
-                  ? styles.chatContentCollapsed
-                  : ''
-              }`}
-              hidden={editing}
-            >
-              {bodyContent}
-            </div>
-            {editing && (
-              <div className={styles.editArea}>
-                <textarea
-                  className={styles.editInput}
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={handleEditKeyDown}
-                  aria-label={t('userMessage.edit')}
-                  readOnly={submittingEdit}
-                  autoFocus
-                />
-                <div className={styles.editActions}>
-                  <button
-                    type="button"
-                    className={styles.editCancel}
-                    onClick={onEditCancel}
-                    disabled={submittingEdit}
-                  >
-                    {t('common.cancel')}
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.editSubmit}
-                    onClick={submitEdit}
-                    disabled={
-                      submittingEdit ||
-                      (!draft.trim() && !images?.length && !files?.length)
-                    }
-                  >
-                    {submittingEdit
-                      ? t('userMessage.editSending')
-                      : t('userMessage.editSubmit')}
-                  </button>
-                </div>
+            {images && images.length > 0 && (
+              <div className={styles.chatImages} data-web-shell-user-images>
+                {images.map((img, index) => {
+                  const src = img.data.startsWith('data:')
+                    ? img.data
+                    : `data:${img.mimeType};base64,${img.data}`;
+                  if (!isSafeImageSrc(src)) return null;
+                  return (
+                    <img
+                      key={index}
+                      src={src}
+                      alt={t('user.uploadedImage', { index: index + 1 })}
+                      className={`${styles.chatImageThumb}${
+                        onImagePreview
+                          ? ` ${styles.chatImageThumbInteractive}`
+                          : ''
+                      }`}
+                      onClick={
+                        onImagePreview
+                          ? () =>
+                              onImagePreview(
+                                src,
+                                t('user.uploadedImage', { index: index + 1 }),
+                                img.attachmentId
+                                  ? {
+                                      kind: 'attachment',
+                                      attachmentId: img.attachmentId,
+                                    }
+                                  : undefined,
+                              )
+                          : undefined
+                      }
+                    />
+                  );
+                })}
               </div>
             )}
-            {heightOverflowing &&
-              !documentMode &&
-              !editing &&
-              !automaticTriggerSource && (
-                <button
-                  type="button"
-                  className={styles.toggleButton}
-                  onClick={() => setExpanded((value) => !value)}
+            {files && files.length > 0 && (
+              <div className={styles.chatFiles} data-web-shell-user-files>
+                {files.map((file, index) => {
+                  const previewable = Boolean(
+                    onAttachmentPreview &&
+                      (file.data !== undefined ||
+                        file.text !== undefined ||
+                        file.attachmentId),
+                  );
+                  return (
+                    <span
+                      key={`${file.name}-${index}`}
+                      className={`${styles.chatFileChip}${
+                        previewable ? ` ${styles.chatFileChipPreviewable}` : ''
+                      }`}
+                      role={previewable ? 'button' : undefined}
+                      tabIndex={previewable ? 0 : undefined}
+                      onClick={
+                        previewable
+                          ? () => onAttachmentPreview?.(file)
+                          : undefined
+                      }
+                      onKeyDown={(event) => {
+                        if (
+                          previewable &&
+                          (event.key === 'Enter' || event.key === ' ')
+                        ) {
+                          event.preventDefault();
+                          onAttachmentPreview?.(file);
+                        }
+                      }}
+                    >
+                      <FileAttachmentContent
+                        name={file.name}
+                        mimeType={file.mimeType}
+                      />
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            {(content.trim().length > 0 || editing) && (
+              <div
+                className={`${styles.chatBubble}${
+                  scheduledTaskRun || automaticTriggerSource
+                    ? ` ${styles.scheduledTaskBubble}`
+                    : ''
+                }${
+                  automaticTriggerSource
+                    ? ` ${styles.automaticTriggerBubble}`
+                    : ''
+                }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
+                data-web-shell-user-bubble
+              >
+                <div
+                  ref={contentRef}
+                  className={`${styles.chatContent} ${
+                    heightOverflowing &&
+                    !documentMode &&
+                    !expanded &&
+                    !automaticTriggerSource
+                      ? styles.chatContentCollapsed
+                      : ''
+                  }`}
+                  hidden={editing}
                 >
-                  <span>
-                    {expanded
-                      ? t('userMessage.showLess')
-                      : t('userMessage.showMore')}
-                  </span>
-                  <svg
-                    className={`${styles.toggleIcon} ${
-                      expanded ? styles.toggleIconExpanded : ''
-                    }`}
-                    viewBox="0 0 16 16"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="m4 6 4 4 4-4"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
+                  {bodyContent}
+                </div>
+                {editing && (
+                  <div className={styles.editArea}>
+                    <textarea
+                      className={styles.editInput}
+                      value={draft}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onKeyDown={handleEditKeyDown}
+                      aria-label={t('userMessage.edit')}
+                      readOnly={submittingEdit}
+                      autoFocus
                     />
-                  </svg>
-                </button>
-              )}
+                    <div className={styles.editActions}>
+                      <button
+                        type="button"
+                        className={styles.editCancel}
+                        onClick={onEditCancel}
+                        disabled={submittingEdit}
+                      >
+                        {t('common.cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.editSubmit}
+                        onClick={submitEdit}
+                        disabled={
+                          submittingEdit ||
+                          (!draft.trim() && !images?.length && !files?.length)
+                        }
+                      >
+                        {submittingEdit
+                          ? t('userMessage.editSending')
+                          : t('userMessage.editSubmit')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {heightOverflowing &&
+                  !documentMode &&
+                  !editing &&
+                  !automaticTriggerSource && (
+                    <button
+                      type="button"
+                      className={styles.toggleButton}
+                      onClick={() => setExpanded((value) => !value)}
+                    >
+                      <span>
+                        {expanded
+                          ? t('userMessage.showLess')
+                          : t('userMessage.showMore')}
+                      </span>
+                      <svg
+                        className={`${styles.toggleIcon} ${
+                          expanded ? styles.toggleIconExpanded : ''
+                        }`}
+                        viewBox="0 0 16 16"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="m4 6 4 4 4-4"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  )}
+              </div>
+            )}
           </div>
-        )}
-        {sendFailed && onRetrySend && (
-          <div className={styles.sendFailure}>
-            <span>{t('userMessage.sendFailed')}</span>
-            <button
-              type="button"
-              className={styles.retryButton}
-              onClick={onRetrySend}
-              aria-label={t('userMessage.retrySend')}
-              title={t('userMessage.retrySend')}
-            >
-              <RefreshCwIcon aria-hidden="true" />
-              <span>{t('common.retry')}</span>
-            </button>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );

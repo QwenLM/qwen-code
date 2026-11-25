@@ -1,11 +1,11 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -18,7 +18,6 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -95,30 +94,26 @@ public class JdbcAutomationLedgerStore
         for (int start = 0; start < identities.size(); start += RUN_READ_BATCH_SIZE) {
             int end = Math.min(start + RUN_READ_BATCH_SIZE, identities.size());
             StringBuilder sql = new StringBuilder(
-                    "SELECT record_key,"
+                    "SELECT session_id, record_id,"
                             + " CASE WHEN task_kind IS NOT NULL THEN task_state END AS task_state FROM"
                             + " ma_session_record WHERE ");
             List<Object> args = new ArrayList<>((end - start) * 3);
-            Map<String, RunIdentity> runByRecordKey = new HashMap<>();
             for (int index = start; index < end; index += 1) {
                 if (index > start) {
                     sql.append(" OR ");
                 }
-                sql.append("(tenant_id = ? AND session_id = ? AND record_key = ?)");
-                String recordKey = ManagedExtensionProjection.recordKey(
-                        identities.get(index).sessionId(), "automation_run",
-                        identities.get(index).runId());
+                sql.append("(tenant_id = ? AND session_id = ? AND domain = 'automation_run' AND record_id = ?)");
                 args.add(tenantId);
                 args.add(identities.get(index).sessionId());
-                args.add(recordKey);
-                runByRecordKey.put(recordKey, identities.get(index));
+                args.add(identities.get(index).runId());
             }
-            for (String[] pair : jdbc.query(sql.toString(),
+            for (String[] triple : jdbc.query(sql.toString(),
                     (result, row) -> new String[] {
-                            result.getString("record_key"),
+                            result.getString("session_id"),
+                            result.getString("record_id"),
                             result.getString("task_state") },
                     args.toArray())) {
-                byIdentity.put(runByRecordKey.get(pair[0]), pair[1]);
+                byIdentity.put(new RunIdentity(triple[0], triple[1]), triple[2]);
             }
         }
         return byIdentity;
@@ -144,8 +139,8 @@ public class JdbcAutomationLedgerStore
         String actorId = jdbc.query("SELECT creator_actor_key FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 (result, row) -> {
-                    byte[] actor = result.getBytes("creator_actor_key");
-                    return actor == null ? "" : new String(actor, StandardCharsets.UTF_8);
+                    String actor = result.getString("creator_actor_key");
+                    return actor == null ? "" : actor;
                 }, tenantId, sessionId).stream().findFirst().orElse("");
         JsonNode limit = record.required("catchUpLimit");
         JsonNode gate = record.required("gate");
@@ -491,11 +486,10 @@ public class JdbcAutomationLedgerStore
 
     private boolean readRunTerminal(String tenantId, String sessionId, String runId) {
         return jdbc.query("SELECT task_state FROM ma_session_record"
-                        + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND domain = 'automation_run' AND record_id = ?"
                         + " AND task_kind IS NOT NULL FOR UPDATE",
                 (result, row) -> result.getString("task_state"),
-                tenantId, sessionId,
-                ManagedExtensionProjection.recordKey(sessionId, "automation_run", runId))
+                tenantId, sessionId, runId)
                 .stream().anyMatch(state -> state != null && TERMINAL_MIRROR_STATES.contains(state));
     }
 
@@ -731,12 +725,11 @@ public class JdbcAutomationLedgerStore
 
     private int insertCommand(CommandRow command, long now, String result) {
         return jdbc.update(
-                "INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id, scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, actor_id, request_digest, schedule_id, state, result_json, gmt_create, gmt_modified) VALUES (?, 'AUTOMATION', ?, ?, 'TENANT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_id, scope_kind, scope_ref, scope_id, idempotency_key, idempotency_digest, actor_id, request_digest, schedule_id, state, result_json, gmt_create, gmt_modified) VALUES (?, 'AUTOMATION', ?, 'TENANT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 receiptKey(command.tenantId(), command.idempotencyKey()),
-                ManagedSchemaKeys.key(command.tenantId()),
                 command.tenantId(),
-                ManagedSchemaKeys.key("TENANT", command.tenantId()),
-                command.tenantId(),
+                ManagedSchemaKeys.identity(ManagedIdentityRefs.receiptScopeRef(command.tenantId(), command.tenantId())),
+                ManagedSchemaKeys.identity(command.tenantId()),
                 command.idempotencyKey(),
                 ManagedSchemaKeys.key(command.idempotencyKey()),
                 command.actorId(),

@@ -19,7 +19,10 @@ class ManagedChannelJdbcContractTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
                 .locations(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.FLYWAY_LOCATION).load().migrate();
+        // tenant_id is VARCHAR(36) and the contract appends suffixes up to
+        // "-delivery-pages" (15 chars), so the namespacing prefix must stay
+        // short enough that every tenant it builds fits the column budget.
         ManagedChannelJdbcContract.verify(dataSource,
-                "h2-" + UUID.randomUUID());
+                "h2-" + UUID.randomUUID().toString().substring(0, 8));
     }
 }

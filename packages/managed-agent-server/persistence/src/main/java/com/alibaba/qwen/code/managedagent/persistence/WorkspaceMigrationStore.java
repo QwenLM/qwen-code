@@ -8,10 +8,11 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -20,8 +21,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.sql.SQLException;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
@@ -31,7 +35,7 @@ import static com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoverySt
 
 /** Offline storage transition; public Session and journal evidence remain immutable. */
 public final class WorkspaceMigrationStore {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final RecoveryWorker worker;
 
@@ -124,11 +128,10 @@ public final class WorkspaceMigrationStore {
                     "request_json", request.toString(), "state", "RETIRING",
                     "source_registration_json", JSON.valueToTree(source).toString(),
                     "target_registration_id", UUID.randomUUID().toString()));
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+            jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
                     + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                     + " fence_operation_id = COALESCE(fence_operation_id, VALUES(fence_operation_id))",
-                    RuntimeAdmissionFences.storageAliasKey(tenant, storage),
                     tenant, storage, id);
             requireOwner();
         });
@@ -320,14 +323,14 @@ public final class WorkspaceMigrationStore {
                 }
                 check(!source.path("head").isNull(), "migration_member_uninitialized");
                 JsonNode transaction = reader.transaction(source, 1);
-                String genesis = new String(java.util.Base64.getDecoder().decode(text(transaction, "recordBytesBase64")),
+                String genesis = new String(Base64.getDecoder().decode(text(transaction, "recordBytesBase64")),
                         StandardCharsets.UTF_8);
                 String[] records = genesis.split("\n");
                 check(records.length == 2 && "session.create".equals(transaction.path("operation").asText()),
                         "migration_profile_unverified");
                 JsonNode header = parse(records[1]).path("managedSession");
                 JsonNode ref = header.path("definitionRef");
-                JsonNode definition = parse(java.util.Base64.getDecoder().decode(
+                JsonNode definition = parse(Base64.getDecoder().decode(
                         reader.resource(source, ref).path("bytesBase64").asText()));
                 check("managed".equals(definition.path("engine").asText())
                         && session.equals(definition.path("sessionId").asText())
@@ -352,14 +355,14 @@ public final class WorkspaceMigrationStore {
     // protect genesis and definition resources; locking Session/head rows on this connection
     // would reverse hot paths' Session-before-alias order.
     private void requireCommittedAdmissionState() {
-        try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+        try (var connection = Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
             connection.setAutoCommit(true);
             connection.setReadOnly(true);
             var current = new ManagedSchemaJdbcTemplate(
-                    new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true));
+                    new SingleConnectionDataSource(connection, true));
             requireIdle(current);
             requireFilesProfiles(current);
-        } catch (java.sql.SQLException error) {
+        } catch (SQLException error) {
             throw new IllegalStateException("Migration admission check is unavailable", error);
         }
     }
@@ -373,7 +376,7 @@ public final class WorkspaceMigrationStore {
         // hostage: its acceptance is unknown and its task may still use this
         // storage, so the move waits for the reconciler (D7-2).
         check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_operation o"
-                + " ON o.tenant_id = s.tenant_id AND o.session_id = s.session_id AND s.session_scope_key IS NOT NULL WHERE s.tenant_id = ?"
+                + " ON o.tenant_id = s.tenant_id AND o.session_id = s.session_id AND s.is_publication_retention_registered = 1 WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')"),
                 "migration_work_unsettled");
         check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_request_receipt c"
@@ -386,9 +389,9 @@ public final class WorkspaceMigrationStore {
         check(!existsIn(reader, "SELECT 1 FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT' AND tenant_id = ?"
                 + " AND storage_id = ? AND child_state NOT IN ('merged', 'discarded', 'failed', 'conflicted')"),
                 "migration_work_unsettled");
-        check(reader.queryForList("SELECT 1 FROM ma_session_worktree WHERE physical_key IN"
-                        + " (SELECT physical_key FROM ma_storage WHERE alias_key = ?) AND state <> 'REMOVED' LIMIT 1", Integer.class,
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage)).isEmpty(),
+        check(reader.queryForList("SELECT 1 FROM ma_session_worktree WHERE physical_id IN"
+                        + " (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?) AND state <> 'REMOVED' LIMIT 1", Integer.class,
+                tenant, storage).isEmpty(),
                 "migration_work_unsettled");
         long now = reader.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
@@ -408,7 +411,7 @@ public final class WorkspaceMigrationStore {
                 break;
             }
         }
-        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND s.session_scope_key IS NOT NULL WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")"),
+        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND s.is_publication_retention_registered = 1 WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")"),
                 "migration_writer_active");
     }
 
@@ -449,7 +452,7 @@ public final class WorkspaceMigrationStore {
     private void clearFence() {
         // The same index as owner(), which already locked this row.
         check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL"
-                + " WHERE alias_key = ? AND fence_operation_id = ?", RuntimeAdmissionFences.storageAliasKey(tenant, storage),
+                + " WHERE tenant_id = ? AND storage_id = ? AND fence_operation_id = ?", tenant, storage,
                 id) == 1, "migration_conflict");
     }
 
@@ -467,7 +470,7 @@ public final class WorkspaceMigrationStore {
         try {
             return JSON.treeToValue(parse((String) row.get("source_registration_json")),
                     WorkspaceStorageGuard.RecoveryRegistration.class);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw failure("migration_identity_conflict");
         }
     }

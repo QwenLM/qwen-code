@@ -117,7 +117,7 @@ class HostedChannelProcessCrashIT {
                 "fg7-cases", "crash");
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
-        String tenant = "hosted-channel-crash-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         for (String fault : cases) {
             try {
                 runCrashCase(tenant, fault, casesRoot);

@@ -10,8 +10,19 @@ import type {
   QuickJSRuntime,
   QuickJSWASMModule,
 } from 'quickjs-emscripten-core';
-import { MAX_STATE_BYTES } from './runtime-contract.js';
-import type { InputValues, UiEvent, UiPatch } from './runtime-contract.js';
+import {
+  DOWNLOAD_TYPES,
+  MAX_COPY_BYTES,
+  MAX_DOWNLOAD_BYTES,
+  MAX_FILENAME_LENGTH,
+  MAX_STATE_BYTES,
+} from './runtime-contract.js';
+import type {
+  InputValues,
+  UiEffect,
+  UiEvent,
+  UiPatch,
+} from './runtime-contract.js';
 
 const MAX_BATCH_SIZE = 16_000;
 const MAX_INPUT_VALUE = 2048;
@@ -37,6 +48,8 @@ const BRIDGE = `(() => {
   const mapSet = WeakMap.prototype.set;
   const apply = Reflect.apply;
   const charCodeAt = String.prototype.charCodeAt;
+  const indexOf = Array.prototype.indexOf;
+  const join = Array.prototype.join;
   const hasOwn = Object.prototype.hasOwnProperty;
   const ErrorType = Error;
   const TypeErrorType = TypeError;
@@ -53,6 +66,10 @@ const BRIDGE = `(() => {
   let failed = false;
   let state = 'null';
   let stateSet = false;
+  // True only while a click handler and its microtasks run.
+  let clicking = false;
+  let effect = '';
+  const downloadTypes = parse(${JSON.stringify(JSON.stringify(Object.keys(DOWNLOAD_TYPES)))});
   function fail() {
     failed = true;
     throw new ErrorType('Invalid UI operation or output limit exceeded.');
@@ -161,6 +178,35 @@ const BRIDGE = `(() => {
     stateSet = true;
   };
   ui.state = freeze(uiState);
+  function claimEffect(name) {
+    if (failed) fail();
+    if (!clicking)
+      throw new ErrorType(name + ' can only be called while handling a click.');
+    if (effect) throw new ErrorType('A click can copy or download only once.');
+  }
+  function effectText(name, text, limit, label) {
+    if (typeof text !== 'string' || text.length === 0)
+      throw new TypeErrorType(name + ' needs non-empty text.');
+    if (byteLength(text) > limit)
+      throw new RangeErrorType(name + ' text exceeds ' + label + '.');
+  }
+  ui.copy = function(text) {
+    claimEffect('ui.copy');
+    effectText('ui.copy', text, ${MAX_COPY_BYTES}, '16 KiB');
+    effect = '{"kind":"copy","text":' + stringify(text) + '}';
+  };
+  ui.download = function(filename, mimeType, text) {
+    claimEffect('ui.download');
+    if (typeof filename !== 'string' || filename.length === 0)
+      throw new TypeErrorType('ui.download needs a file name.');
+    if (filename.length > ${MAX_FILENAME_LENGTH})
+      throw new RangeErrorType('ui.download file name exceeds ${MAX_FILENAME_LENGTH} characters.');
+    if (typeof mimeType !== 'string' || apply(indexOf, downloadTypes, [mimeType]) < 0)
+      throw new TypeErrorType('ui.download supports ' + apply(join, downloadTypes, [', ']) + '.');
+    effectText('ui.download', text, ${MAX_DOWNLOAD_BYTES}, '64 KiB');
+    effect = '{"kind":"download","filename":' + stringify(filename) +
+      ',"mimeType":' + stringify(mimeType) + ',"text":' + stringify(text) + '}';
+  };
   Object.defineProperty(globalThis, 'ui', {value: freeze(ui)});
   return function(command, payload) {
     if (failed) fail();
@@ -175,6 +221,7 @@ const BRIDGE = `(() => {
       state = payload;
     } else if (command === 'event') {
       const event = parse(payload);
+      clicking = event.type === 'click';
       const handler = handlers[event.id + ':' + event.type];
       if (handler) {
         const result = handler(freeze(event));
@@ -186,11 +233,14 @@ const BRIDGE = `(() => {
       return false;
     } else {
       const result = '{"patches":' + output + ']' +
-        (stateSet ? ',"state":' + stringify(state) : '') + '}';
+        (stateSet ? ',"state":' + stringify(state) : '') +
+        (effect ? ',"effect":' + effect : '') + '}';
       output = '[';
       outputBytes = 2;
       count = 0;
       stateSet = false;
+      clicking = false;
+      effect = '';
       return result;
     }
   };
@@ -314,6 +364,7 @@ export interface RoundResult {
   patches: UiPatch[];
   /** JSON text of the state the round set, when it called ui.state.set. */
   state?: string;
+  effect?: UiEffect;
 }
 
 export class UiRuntime {

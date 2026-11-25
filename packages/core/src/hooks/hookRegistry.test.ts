@@ -13,6 +13,7 @@ import type {
 import { HookRegistry } from './hookRegistry.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookConfig, HookDefinition } from './types.js';
+import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 
 type HooksMap = Parameters<HookRegistry['addAgentHooks']>[0];
 interface Sources {
@@ -399,8 +400,125 @@ describe('HookRegistry', () => {
       expect(registry.getAllHooks()).toHaveLength(0);
       expect(mockFeedbackEmitter.emitFeedback).toHaveBeenCalledWith(
         'warning',
-        expect.stringContaining('Invalid hook event name'),
+        'Hook event "InvalidEventName" from user config is not supported and was skipped.',
       );
+    });
+
+    describe('unsupported configuration', () => {
+      const warnings = () =>
+        vi
+          .mocked(mockFeedbackEmitter.emitFeedback)
+          .mock.calls.map(([, message]) => message);
+      const register = (hooks: unknown[]) =>
+        init({ user: pre(hooks as HookConfig[]) }, mockFeedbackEmitter);
+
+      it('skips an unsupported type with a warning', async () => {
+        const registry = await register([
+          { type: 'mcp_tool', server: 'scanner', tool: 'scan' },
+          { type: 'agent', prompt: 'Verify the tests pass' },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(0);
+        expect(warnings()).toEqual([
+          'Hook #1 in entry #1 for PreToolUse from user config has a missing or unsupported "type" and was skipped.',
+          'Hook #2 in entry #1 for PreToolUse from user config has a missing or unsupported "type" and was skipped.',
+        ]);
+      });
+
+      it('skips a hook missing its required field with a warning', async () => {
+        const registry = await register([
+          { type: HookType.Http, name: 'audit' },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(0);
+        expect(warnings()).toEqual([
+          'Hook #1 in entry #1 for PreToolUse from user config has no "url" and was skipped.',
+        ]);
+      });
+
+      it('only skips command hooks with args other than an empty list', async () => {
+        const registry = await register([
+          { type: HookType.Command, command: 'node', args: ['check.js'] },
+          { type: HookType.Command, command: '/hooks/check.sh', args: [] },
+          {
+            type: HookType.Http,
+            url: 'https://audit.example',
+            args: ['extra'],
+          },
+          { type: HookType.Prompt, prompt: 'Review', args: ['extra'] },
+        ]);
+        expect(registry.getAllHooks().map((e) => e.config)).toMatchObject([
+          { command: '/hooks/check.sh' },
+          { url: 'https://audit.example' },
+          { prompt: 'Review' },
+        ]);
+        expect(warnings()).toEqual([
+          'Hook #1 in entry #1 for PreToolUse from user config uses "args", which Qwen Code does not support yet, and was skipped.',
+        ]);
+      });
+
+      it('keeps a hook whose unsupported fields are ignored, with a warning', async () => {
+        const registry = await register([
+          {
+            type: HookType.Command,
+            command: 'guard.sh',
+            if: 'Bash(rm *)',
+            onFailure: 'block',
+            once: true,
+          },
+          { type: HookType.Http, url: 'https://audit.example', once: true },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(2);
+        expect(warnings()).toEqual([
+          'Hook #1 in entry #1 for PreToolUse from user config sets "onFailure", "if", "once", which Qwen Code does not support yet; ignored.',
+        ]);
+      });
+
+      it('keeps resolved hook values out of warnings and debug diagnostics', async () => {
+        const secret = 'synthetic-hook-credential';
+        const hooks = resolveEnvVarsInObject(
+          [
+            {
+              type: HookType.Command,
+              command: 'audit ${AUDIT_AUTH}',
+              args: ['x'],
+            },
+            {
+              type: HookType.Http,
+              url: 'https://a.test/${AUDIT_AUTH}',
+              onFailure: 'block',
+            },
+            { type: '${AUDIT_AUTH}', name: '${AUDIT_AUTH}' },
+          ],
+          { AUDIT_AUTH: secret },
+        );
+        expect(hooks[0]?.command).toContain(secret);
+        await register(hooks);
+        expect(warnings()).toHaveLength(3);
+        expect(JSON.stringify(warnings())).not.toContain(secret);
+        expect(JSON.stringify(debugWarn.mock.calls)).not.toContain(secret);
+      });
+
+      it('accepts explicit no-op defaults without warning', async () => {
+        const registry = await register([
+          {
+            type: HookType.Command,
+            command: 'guard.sh',
+            asyncRewake: false,
+            if: '',
+            once: false,
+          },
+        ]);
+        expect(registry.getAllHooks()).toHaveLength(1);
+        expect(warnings()).toEqual([]);
+      });
+
+      it('sanitizes and bounds an unknown event name without splitting an emoji', async () => {
+        const prefix = `Unknown${'x'.repeat(52)}😀`;
+        const event = `\u0007${prefix}${'x'.repeat(80)}`;
+        await init({ user: { [event]: [] } as HooksMap }, mockFeedbackEmitter);
+        expect(warnings()).toEqual([
+          `Hook event "${prefix}..." from user config is not supported and was skipped.`,
+        ]);
+      });
     });
 
     it('should skip hooks config fields like enabled and disabled', async () => {

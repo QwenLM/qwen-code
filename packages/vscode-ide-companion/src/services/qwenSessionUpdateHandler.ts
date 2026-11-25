@@ -63,12 +63,17 @@ export class QwenSessionUpdateHandler {
       }
 
       case 'agent_message_chunk': {
-        const text = this.getTextContent(
-          (update as { content?: unknown }).content,
-        );
         const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
-        // When MessageRewriteMiddleware is active it emits a rewritten summary
-        // (_meta.rewritten === true) in addition to the original chunk, and
+        const stopReason =
+          meta?.source === 'stop_hook_notice' &&
+          typeof meta.stopReason === 'string'
+            ? meta.stopReason
+            : undefined;
+        const text =
+          stopReason ??
+          this.getTextContent((update as { content?: unknown }).content);
+        // An older CLI with MessageRewriteMiddleware active emits a rewritten
+        // summary (_meta.rewritten === true) in addition to the original chunk, and
         // both carry qwenDiscreteMessage. Persist only the original here so the
         // notification is not stored twice; the rewritten copy falls through to
         // onStreamChunk like any other streamed text.
@@ -96,7 +101,11 @@ export class QwenSessionUpdateHandler {
             ...(source ? { source } : {}),
             ...(sessionId ? { sessionId } : {}),
           });
-        } else if (text && this.callbacks.onStreamChunk) {
+        } else if (
+          text &&
+          stopReason === undefined &&
+          this.callbacks.onStreamChunk
+        ) {
           this.callbacks.onStreamChunk(text);
         }
         this.emitUsageMeta(meta);

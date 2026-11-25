@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.Prefix;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -8,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Objects;
@@ -30,16 +32,15 @@ final class SideQueryConversation {
     }
 
     static ObjectNode state(JdbcTemplate jdbc, String tenant, String session) {
-        String scope = scope(tenant, session);
         var rows = jdbc.query("SELECT options_json FROM ma_session_record WHERE tenant_id=? AND session_id=?"
-                        + " AND record_key=? AND record_kind='CONVERSATION' FOR UPDATE",
-                (row, index) -> row.getString(1), tenant, session, ManagedSchemaKeys.key(scope, DOMAIN));
+                        + " AND domain=? AND record_id=? AND record_kind='CONVERSATION' FOR UPDATE",
+                (row, index) -> row.getString(1), tenant, session, DOMAIN, DOMAIN);
         if (rows.isEmpty()) {
             return JSON.createObjectNode();
         }
         try {
             return (ObjectNode) JSON.readTree(rows.getFirst());
-        } catch (java.io.IOException | ClassCastException error) {
+        } catch (IOException | ClassCastException error) {
             throw corrupt();
         }
     }
@@ -99,11 +100,11 @@ final class SideQueryConversation {
                         throw corrupt();
                     }
                     scannedBytes += row.bytes().length;
-                    if (scannedBytes > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES) {
+                    if (scannedBytes > ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES) {
                         throw corrupt();
                     }
                     if (row.revision() != nextRevision++ || !JournalStoreRows.sha256(row.bytes()).equals(row.digest())
-                            || !java.util.Objects.equals(previous, row.previous())) {
+                            || !Objects.equals(previous, row.previous())) {
                         throw corrupt();
                     }
                     previous = row.commit();
@@ -111,7 +112,7 @@ final class SideQueryConversation {
                         JsonNode event;
                         try {
                             event = JSON.readTree(line);
-                        } catch (java.io.IOException error) {
+                        } catch (IOException error) {
                             throw corrupt();
                         }
                         if (event == null) {
@@ -144,7 +145,7 @@ final class SideQueryConversation {
                     after = row.revision();
                 }
             }
-            if (!java.util.Objects.equals(previous, digest)) {
+            if (!Objects.equals(previous, digest)) {
                 throw corrupt();
             }
             state.put("journalRevision", revision);
@@ -161,22 +162,16 @@ final class SideQueryConversation {
     }
 
     private static void save(JdbcTemplate jdbc, String tenant, String session, ObjectNode state) {
-        String scope = scope(tenant, session);
-        String key = ManagedSchemaKeys.key(scope, DOMAIN);
         int updated = jdbc.update("UPDATE ma_session_record SET options_json=?, revision=revision+1"
-                + " WHERE tenant_id=? AND session_id=? AND record_key=? AND record_kind='CONVERSATION'",
-                state.toString(), tenant, session, key);
+                + " WHERE tenant_id=? AND session_id=? AND domain=? AND record_id=? AND record_kind='CONVERSATION'",
+                state.toString(), tenant, session, DOMAIN, DOMAIN);
         if (updated == 0) {
             String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id=? AND session_id=?",
                     String.class, tenant, session);
-            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,workspace_id,domain,"
-                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,?)",
-                    key, tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
+            jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,workspace_id,domain,"
+                            + "record_id,revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,1,'CONVERSATION',?,?)",
+                    tenant, session, workspace, DOMAIN, DOMAIN, state.toString(), ToolPublicationRetentionStore.now(jdbc));
         }
-    }
-
-    static String scope(String tenant, String session) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
     }
 
     private static long admittedInputs(JdbcTemplate jdbc, String tenant, String session) {

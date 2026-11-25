@@ -10,7 +10,7 @@ import {
   type ViewState,
   type ViewStateHost,
 } from './controller.js';
-import type { UiWorkerResponse } from './runtime-contract.js';
+import type { UiEffect, UiWorkerResponse } from './runtime-contract.js';
 import type { ApplyOutcome } from './surface.js';
 
 const document = {
@@ -29,7 +29,7 @@ const event = {
 const inputs = { rate: { value: '7', checked: false } };
 const controllers: ViewController[] = [];
 
-function harness(stateHost?: ViewStateHost) {
+function harness(stateHost?: ViewStateHost, onEffect?: (e: UiEffect) => void) {
   const worker = {
     postMessage: vi.fn(),
     terminate: vi.fn(),
@@ -55,6 +55,7 @@ function harness(stateHost?: ViewStateHost) {
     vi.fn(),
     onStatus,
     stateHost,
+    onEffect,
   );
   controllers.push(controller);
   const reply = (data: UiWorkerResponse) => {
@@ -675,6 +676,91 @@ describe('current applied parameter snapshots', () => {
         state: 1 as unknown as string,
       });
       expect(save).not.toHaveBeenCalled();
+      expect(h.state().phase).toBe('error');
+    });
+  });
+
+  describe('copy and download', () => {
+    const copy: UiEffect = { kind: 'copy', text: 'Total: 14' };
+    const click = { ...event, type: 'click' as const };
+
+    it('performs a click effect applied to the current inputs, even without patches', async () => {
+      const onEffect = vi.fn();
+      const h = harness(undefined, onEffect);
+      await h.controller.receive(createShowResult(document));
+      h.complete();
+      h.controller.event(click);
+      h.reply({ sequence: 2, patches: [], execution: 'handled', effect: copy });
+      expect(onEffect).toHaveBeenCalledExactlyOnceWith(copy);
+      expect(h.state().effectDropped).toBeUndefined();
+    });
+
+    it.each(['applied', 'superseded'] as const)(
+      'drops the effect of a click whose %s round used earlier values',
+      async (kind) => {
+        const onEffect = vi.fn();
+        const h = harness(undefined, onEffect);
+        await h.controller.receive(createShowResult(document));
+        h.complete();
+        h.controller.event(click);
+        const newer = { rate: { value: '8', checked: false } };
+        h.surface.inputs.mockReturnValue(newer);
+        h.surface.apply.mockReturnValueOnce({ kind, inputs: newer });
+        h.reply({
+          sequence: 2,
+          patches: [],
+          execution: 'handled',
+          effect: copy,
+        });
+        expect(onEffect).not.toHaveBeenCalled();
+        expect(h.state().effectDropped).toBe(true);
+        h.controller.event(click);
+        h.reply({
+          sequence: 3,
+          patches: [],
+          execution: 'handled',
+          effect: copy,
+        });
+        expect(onEffect).toHaveBeenCalledExactlyOnceWith(copy);
+        expect(h.state().effectDropped).toBeUndefined();
+      },
+    );
+
+    it('ignores an effect the Worker reports for a round that was not a click', async () => {
+      const onEffect = vi.fn();
+      const h = harness(undefined, onEffect);
+      await h.controller.receive(createShowResult(document));
+      h.reply({
+        sequence: 1,
+        patches: [],
+        execution: 'initialized',
+        effect: copy,
+      });
+      h.controller.event(event);
+      h.reply({ sequence: 2, patches: [], execution: 'handled', effect: copy });
+      expect(onEffect).not.toHaveBeenCalled();
+      expect(h.state()).toMatchObject({ phase: 'ready' });
+    });
+
+    it.each([
+      { kind: 'copy', text: '' },
+      { kind: 'copy', text: 'x'.repeat(16 * 1024 + 1) },
+      { kind: 'download', filename: 'a', mimeType: 'text/html', text: 'a' },
+      { kind: 'download', filename: '', mimeType: 'text/csv', text: 'a' },
+      { kind: 'open', text: 'a' },
+    ])('rejects a malformed effect %j', async (effect) => {
+      const onEffect = vi.fn();
+      const h = harness(undefined, onEffect);
+      await h.controller.receive(createShowResult(document));
+      h.complete();
+      h.controller.event(click);
+      h.reply({
+        sequence: 2,
+        patches: [],
+        execution: 'handled',
+        effect: effect as UiEffect,
+      });
+      expect(onEffect).not.toHaveBeenCalled();
       expect(h.state().phase).toBe('error');
     });
   });

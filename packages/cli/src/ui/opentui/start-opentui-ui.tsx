@@ -21,6 +21,7 @@
 
 import { stat } from 'node:fs/promises';
 import { basename } from 'node:path';
+import { modsWanted } from '../../services/display-translation-mod.js';
 import {
   createElement,
   useCallback,
@@ -417,7 +418,7 @@ function OpenTuiEntryApp({
   });
 
   // --- seams handed to the shell ---------------------------------------------
-  const modsEnabled = settings.merged.experimental?.mods === true;
+  const modsEnabled = modsWanted(settings);
   const modRows = useMemo(
     () =>
       modsEnabled ? { config, sessionId: transcriptSessionId } : undefined,
