@@ -175,8 +175,8 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
         return new AgentDefinitionRequest(
                 input.modelId() == null ? null : Map.of("id", input.modelId()), input.instructions(),
                 List.of(Map.of("type", "hosted_profile", "profile", input.toolPolicy().profile())),
-                skills, null, null, Map.of("approval_mode", input.toolPolicy().approvalMode()),
-                null, metadata);
+                skills, null, null, input.toolPolicy().approvalMode() == null ? Map.of()
+                        : Map.of("approval_mode", input.toolPolicy().approvalMode()), null, metadata);
     }
 
     private static void requireInput(Command command, ManagedAgentDefinitionSource.Definition input) {
