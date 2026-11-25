@@ -731,21 +731,29 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
   });
 
   it('bridges loopback HTTP to IPv4 and allowlisted IPv6 ::1 listeners', async () => {
-    const hasIpv6 = await runAsync('python3', [
+    const runtimeIpv6Loopback = await runAsync('python3', [
       '-c',
-      'import socket; print(int(socket.has_ipv6))',
+      [
+        'import socket',
+        'try:',
+        '    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)',
+        '    s.bind(("::1", 0)); s.listen(1)',
+        '    c = socket.create_connection(s.getsockname()[:2], timeout=1)',
+        '    c.close(); s.close(); print(1)',
+        'except OSError:',
+        '    print(0)',
+      ].join('\n'),
     ]);
-    if (hasIpv6.stdout.trim() === '0') {
-      // The listener is allowed only where the kernel provides loopback IPv6.
-      return;
-    }
+    const ipv6Loopback = runtimeIpv6Loopback.stdout.trim() === '1';
 
     const root = mkdtempSync('/tmp/qc-bridge-v6-');
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     const proxySock = join(root, 'm.sock');
     const responseBody = 'synthetic-v6-nonce';
-    const upstream = net.createServer((sock) => {
+    let holdHealthResponse = false;
+    const upstream = net.createServer({ allowHalfOpen: true }, (sock) => {
       sock.once('data', () => {
+        if (holdHealthResponse) return;
         sock.end(
           `HTTP/1.1 200 OK\r\nContent-Length: ${responseBody.length}\r\nConnection: close\r\n\r\n${responseBody}`,
         );
@@ -755,12 +763,20 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
       upstream.once('error', reject);
       upstream.listen(proxySock, resolve);
     });
-    cleanups.push(() => upstream.close());
+    cleanups.push(() => {
+      upstream.closeAllConnections();
+      upstream.close();
+    });
 
     const httpHealth = async (host, port) =>
       new Promise((resolve, reject) => {
         const client = net.createConnection({ host, port }, () => {
           client.end('GET /__health HTTP/1.1\r\nConnection: close\r\n\r\n');
+        });
+        client.setTimeout(5_000, () => {
+          client.destroy(
+            new Error(`HTTP health timed out for ${host}:${port}`),
+          );
         });
         const chunks = [];
         client.on('data', (chunk) => chunks.push(chunk));
@@ -768,7 +784,14 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
         client.on('error', reject);
       });
 
-    for (const listen of ['127.0.0.1', '::1', 'localhost', '0.0.0.0']) {
+    for (const { listen, holdResponse = false } of [
+      { listen: '127.0.0.1' },
+      ...(ipv6Loopback ? [{ listen: '::1' }] : []),
+      { listen: 'localhost' },
+      { listen: '0.0.0.0' },
+      { listen: '127.0.0.1', holdResponse: true },
+    ]) {
+      holdHealthResponse = holdResponse;
       const bridge = spawn(
         'python3',
         [
@@ -808,10 +831,15 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
           }),
         ]);
         const readyInfo = JSON.parse(ready.toString('utf8').trim());
-        const health = await httpHealth(readyInfo.host, readyInfo.port);
-        expect(health).toContain('200 OK');
-        expect(health.endsWith(responseBody)).toBe(true);
-        expect(health).not.toContain('socket.gaierror');
+        const healthPromise = httpHealth(readyInfo.host, readyInfo.port);
+        if (holdResponse) {
+          await expect(healthPromise).rejects.toThrow('HTTP health timed out');
+        } else {
+          const health = await healthPromise;
+          expect(health).toContain('200 OK');
+          expect(health.endsWith(responseBody)).toBe(true);
+          expect(health).not.toContain('socket.gaierror');
+        }
       } finally {
         if (bridge.exitCode === null && bridge.signalCode === null) {
           const exited = once(bridge, 'exit');
