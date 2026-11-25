@@ -1356,6 +1356,7 @@ describe('qwen-triage tmux workflow', () => {
               TRIGGERED_AT: '2026-01-02T00:00:00Z',
               RUN_URL: 'https://example.invalid/run',
               FAKE_HEAD: head,
+              HAS_BOT_PAT: 'true',
             },
             encoding: 'utf8',
           });
@@ -1471,6 +1472,7 @@ describe('qwen-triage tmux workflow', () => {
               NUMBER: '1',
               TRIGGERED_AT: '2026-01-02T00:00:00Z',
               RUN_URL: 'https://example.invalid/run',
+              HAS_BOT_PAT: 'true',
             },
             encoding: 'utf8',
           });
