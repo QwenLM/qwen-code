@@ -541,6 +541,7 @@ export default {
   'Debug Keystroke Logging': 'Journalisation des frappes de débogage',
   'Language: UI': 'Langue : Interface',
   'Language: Model': 'Langue : Modèle',
+  'Language: Display Translation': "Langue : Traduction de l'affichage",
   'Output Format': 'Format de sortie',
   'Hide Window Title': 'Masquer le titre de la fenêtre',
   'Show Status in Title': 'Afficher le statut dans le titre',
@@ -1266,6 +1267,8 @@ export default {
     "Impossible de compresser l'historique du chat, car le résumé de compression a été tronqué.",
   'Could not compress chat history due to an API error.':
     "Impossible de compresser l'historique du chat en raison d'une erreur d'API.",
+  'Could not compress chat history because it is too large for the context window.':
+    "Impossible de compresser l'historique du chat : il est trop volumineux pour la fenêtre de contexte.",
   // ============================================================================
   // Commandes - Répertoire
   // ============================================================================

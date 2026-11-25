@@ -3065,6 +3065,10 @@ describe('createDaemonSessionActions', () => {
       expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith(
         'session-b',
         undefined,
+        expect.objectContaining({
+          sessionId: 'session-b',
+          updateMetadata: expect.any(Function),
+        }),
       );
       expect(attachSession).toHaveBeenCalledOnce();
       expect(submitPrompt).toHaveBeenCalledOnce();
@@ -3346,7 +3350,11 @@ describe('createDaemonSessionActions', () => {
     });
     expect(nextSession.detach).not.toHaveBeenCalled();
     expect(onSessionAllocated).toHaveBeenCalledWith('session-b');
-    expect(onSessionCreated).toHaveBeenCalledWith('session-b', nextSession);
+    expect(onSessionCreated).toHaveBeenCalledWith(
+      'session-b',
+      nextSession,
+      nextSession,
+    );
     expect(attachSession).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
     expect(sessionRef.current).toBeUndefined();
@@ -7811,6 +7819,39 @@ describe('createDaemonSessionActions', () => {
   });
 });
 
+describe('rateAssistantTurn', () => {
+  it('forwards the mark to the session client', async () => {
+    const session = createMockSession('session-a');
+    const h = createActionsHarness({ session });
+
+    await h.actions.rateAssistantTurn('prompt-1', 'up');
+
+    expect(session.rateSessionTurn).toHaveBeenCalledWith('prompt-1', 'up');
+  });
+
+  it('is a no-op without a live session', async () => {
+    const h = createActionsHarness();
+
+    await expect(
+      h.actions.rateAssistantTurn('prompt-1', 'up'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('swallows failures so the local mark never depends on telemetry', async () => {
+    const session = createMockSession('session-a');
+    session.rateSessionTurn.mockRejectedValue(new Error('daemon down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = createActionsHarness({ session });
+
+    await expect(
+      h.actions.rateAssistantTurn('prompt-1', 'down'),
+    ).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
 function createActionsHarness(
   opts: {
     activePrompts?: Map<string, ActivePrompt>;
@@ -8042,6 +8083,7 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    rateSessionTurn: vi.fn(async () => ({ recorded: true })),
     setConfigOption: vi.fn(async (_configId: string, value: string) => ({
       configOptions: reasoningConfigOptions(value),
       persisted: false,
@@ -9536,4 +9578,178 @@ describe('Workflow mode actions', () => {
       expect(h.session.context).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('sendPrompt idempotent admission auto-retry', () => {
+  it('retries transient admission errors silently with the same idempotencyKey and attachments', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      session.submitPrompt
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockRejectedValueOnce(
+          new DaemonHttpError(503, undefined, 'gateway unavailable'),
+        )
+        .mockResolvedValueOnce({
+          promptId: 'prompt-deduped',
+          lastEventId: 1,
+          deduplicated: true,
+        });
+      const onAdmissionStarted = vi.fn();
+      const { actions, activePromptsRef } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+      const onAdmitted = vi.fn(() => {
+        queueMicrotask(() => {
+          activePromptsRef.current
+            .get('session-a')
+            ?.resolve?.({ stopReason: 'end_turn' });
+        });
+      });
+
+      const pending = actions.sendPrompt('look', {
+        idempotencyKey: 'idem-key-1',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+        onAdmissionStarted,
+        onAdmitted,
+      });
+
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledTimes(1),
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledTimes(2),
+      );
+      await vi.advanceTimersByTimeAsync(1200);
+      await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(session.uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(session.removeAttachment).not.toHaveBeenCalled();
+      expect(onAdmissionStarted).toHaveBeenCalledTimes(1);
+      expect(onAdmitted).toHaveBeenCalledWith({ promptId: 'prompt-deduped' });
+      expect(session.submitPrompt).toHaveBeenCalledTimes(3);
+      for (const call of session.submitPrompt.mock.calls) {
+        expect(call[0]).toMatchObject({ idempotencyKey: 'idem-key-1' });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([400, 403, 413, 429])(
+    'does not retry definite HTTP %s rejection and removes uploaded attachments',
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        const session = createMockSession('session-a');
+        session.submitPrompt.mockRejectedValueOnce(
+          new DaemonHttpError(status, undefined, `HTTP ${status}`),
+        );
+        const { actions } = createActionsHarness({
+          session,
+          connection: {
+            status: 'connected',
+            workspaceCwd: '/workspace',
+            capabilities: {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['session_attachments'],
+              modelServices: [],
+            },
+          },
+        });
+
+        await expect(
+          actions.sendPrompt('look', {
+            idempotencyKey: 'idem-key-definite',
+            images: [{ data: 'AQID', mimeType: 'image/png' }],
+          }),
+        ).rejects.toThrow(`HTTP ${status}`);
+
+        expect(session.submitPrompt).toHaveBeenCalledTimes(1);
+        expect(session.removeAttachment).toHaveBeenCalledWith('image.png');
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('cancels retry backoff immediately when actions.cancel() is called', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      session.submitPrompt.mockRejectedValueOnce(
+        new TypeError('Failed to fetch'),
+      );
+      const { actions } = createActionsHarness({ session });
+
+      const pending = actions.sendPrompt('hello', {
+        idempotencyKey: 'idem-key-cancel',
+      });
+
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledTimes(1),
+      );
+      await actions.cancel();
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(session.submitPrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps uploaded attachments and appends local block when all retries fail', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      session.submitPrompt.mockRejectedValue(new TypeError('Failed to fetch'));
+      const { actions, store } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+
+      const pending = actions.sendPrompt('look', {
+        idempotencyKey: 'idem-key-exhaust',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      const rejection = pending.catch((error: unknown) => error);
+
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledTimes(1),
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledTimes(2),
+      );
+      await vi.advanceTimersByTimeAsync(1200);
+
+      expect(await rejection).toMatchObject({ message: 'Failed to fetch' });
+      expect(session.submitPrompt).toHaveBeenCalledTimes(3);
+      expect(session.removeAttachment).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

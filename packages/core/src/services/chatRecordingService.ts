@@ -22,7 +22,11 @@ import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import path from 'node:path';
 import fs from 'node:fs';
-import { isManagedExecutionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import {
+  isManagedExecutionTranscriptSync,
+  readManagedExecutionEvidenceSync,
+} from '../utils/sessionStorageUtils.js';
+import { withoutCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import {
   SessionExecutionEngineError,
   type SessionExecutionEngine,
@@ -1278,6 +1282,7 @@ export class ChatRecordingService {
   private lastRecordUuid: string | null = null;
   /** Bumped whenever the active branch is replaced (rewind, reset). */
   private branchGeneration = 0;
+  private branchCancellation?: AbortController;
   /** UUID of the last active-tail record confirmed written to disk. */
   private lastPersistedRecordUuid: string | null = null;
   /** Active chain mirrored in memory so end-of-turn validation is incremental. */
@@ -1520,6 +1525,59 @@ export class ChatRecordingService {
     return chatsDir;
   }
 
+  /** Resolve the existing local transcript without initializing a writer. */
+  async getExistingTranscriptPath(): Promise<string | undefined> {
+    try {
+      const sessionId = this.getSessionId();
+      const lease = this.binding?.lease;
+      if (
+        this.managedSink ||
+        this.config.getExecutionEnvironment?.() ||
+        this.config.getFileSystemService?.()?.textFileIo ||
+        this.state !== 'active' ||
+        !this.acceptingWrites ||
+        this.writeFailure ||
+        sessionId !== this.config.getSessionId() ||
+        (this.writerLeaseRequired && !lease) ||
+        lease?.isReleased
+      )
+        return undefined;
+      const filename = `${sessionId}.jsonl`;
+      // An exact grep glob must remain a literal basename, even if an SDK
+      // caller bypassed CLI session ID validation.
+      if (
+        !/^[a-zA-Z0-9._-]+$/.test(sessionId) ||
+        path.basename(filename) !== filename
+      ) {
+        return undefined;
+      }
+      const transcriptPath = path.join(
+        this.config.storage.getProjectDir(),
+        'chats',
+        filename,
+      );
+      if (
+        !path.isAbsolute(transcriptPath) ||
+        (lease && lease.transcriptPath !== transcriptPath) ||
+        (this.cachedConversationFile &&
+          this.cachedConversationFile !== transcriptPath)
+      )
+        return undefined;
+      const stat = fs.lstatSync(transcriptPath);
+      if (!stat.isFile() || stat.size === 0) return undefined;
+      await lease?.assertOwnedAndUnchanged();
+      if (sessionId !== this.config.getSessionId() || this.state !== 'active') {
+        return undefined;
+      }
+      return readManagedExecutionEvidenceSync(transcriptPath) === false
+        ? transcriptPath
+        : undefined;
+    } catch {
+      // The hint is optional; a missing or unreadable transcript is no error.
+      return undefined;
+    }
+  }
+
   private ensureConversationFile(): string {
     if (this.cachedConversationFile) return this.cachedConversationFile;
     const conversationFile = path.join(
@@ -1657,7 +1715,7 @@ export class ChatRecordingService {
     this.currentSessionWorkflowMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
-    this.branchGeneration += 1;
+    this.advanceBranch();
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
@@ -3736,7 +3794,7 @@ export class ChatRecordingService {
       if (!input.isCurrent()) return false;
       const rewindWrite = strict(rewind);
       committed = true;
-      this.branchGeneration += 1;
+      this.advanceBranch();
       projectTurns(retained);
       this.resetExternalRecordIndex();
       this.lastAttributionSnapshotJson = undefined;
@@ -3836,7 +3894,9 @@ export class ChatRecordingService {
     try {
       // Own the containers before hook rescue replaces parts on live entries;
       // spread preserves the symbol metadata used to derive prompt identities.
-      const compressedHistory = payload.compressedHistory.map((content) => ({
+      const compressedHistory = withoutCompactionTranscriptHint(
+        payload.compressedHistory,
+      ).map((content) => ({
         ...content,
         ...(content.parts ? { parts: [...content.parts] } : {}),
       }));
@@ -3992,7 +4052,7 @@ export class ChatRecordingService {
       this.pendingHookTurnParents.clear();
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
-      this.branchGeneration += 1;
+      this.advanceBranch();
       const projectionStart = Math.max(
         0,
         this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
@@ -4077,7 +4137,7 @@ export class ChatRecordingService {
     this.pendingHookTurnParents.clear();
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
-    this.branchGeneration += 1;
+    this.advanceBranch();
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
@@ -4164,10 +4224,28 @@ export class ChatRecordingService {
     customTitle: string,
     titleSource: TitleSource = 'manual',
   ): Promise<boolean> {
+    return this.persistExplicitTitle(customTitle, titleSource);
+  }
+
+  async recordInitialTitle(customTitle: string): Promise<boolean> {
+    if (this.currentCustomTitle || this.pendingTitleWrites > 0) return false;
+    const onDisk = this.config
+      .getSessionService()
+      .getSessionTitleInfo(this.getSessionId());
+    if (onDisk.title) return false;
+    // The daemon publishes after checking for a concurrent manual rename.
+    return this.persistExplicitTitle(customTitle, 'auto', false);
+  }
+
+  private async persistExplicitTitle(
+    customTitle: string,
+    titleSource: TitleSource,
+    notify = true,
+  ): Promise<boolean> {
     this.pendingExplicitTitleWrites++;
     this.autoTitleController?.abort();
     try {
-      return await this.persistCustomTitle(customTitle, titleSource);
+      return await this.persistCustomTitle(customTitle, titleSource, notify);
     } finally {
       this.pendingExplicitTitleWrites--;
     }
@@ -4176,6 +4254,7 @@ export class ChatRecordingService {
   private async persistCustomTitle(
     customTitle: string,
     titleSource: TitleSource,
+    notify = true,
   ): Promise<boolean> {
     this.pendingTitleWrites++;
     let persisted = false;
@@ -4196,14 +4275,16 @@ export class ChatRecordingService {
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       this.persistListTitle(customTitle, titleSource);
-      try {
-        this.titleRecordedCallback?.(
-          customTitle,
-          titleSource,
-          record.sessionId,
-        );
-      } catch {
-        // Observer errors must never break title recording.
+      if (notify) {
+        try {
+          this.titleRecordedCallback?.(
+            customTitle,
+            titleSource,
+            record.sessionId,
+          );
+        } catch {
+          // Observer errors must never break title recording.
+        }
       }
       persisted = true;
       return true;
@@ -4704,6 +4785,18 @@ export class ChatRecordingService {
   /** Identifies the current active branch; changes when it is replaced. */
   getBranchGeneration(): number {
     return this.branchGeneration;
+  }
+
+  /** Cancels work tied to the current branch when that branch is replaced. */
+  getBranchAbortSignal(): AbortSignal {
+    return (this.branchCancellation ??= new AbortController()).signal;
+  }
+
+  private advanceBranch(): void {
+    this.branchGeneration += 1;
+    const previous = this.branchCancellation;
+    this.branchCancellation = undefined;
+    previous?.abort();
   }
 
   /**

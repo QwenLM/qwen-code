@@ -80,7 +80,7 @@ class HostedWorkspaceConcurrencyIT {
         }
         var source = new DriverManagerDataSource(url, user, password);
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        String tenant = "w1-race-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Throwable failure = null;
         try {
             Path root = Files.createDirectory(temporary.resolve("workspace"));
@@ -128,7 +128,7 @@ class HostedWorkspaceConcurrencyIT {
                 second.command("fence", 1, operation, true);
                 var fenced = row(jdbc, tenant);
                 assertThat(fenced).containsEntry("mount_state", "FENCED").containsEntry("mount_revision", 1L);
-                for (String field : List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
+                for (String field : List.of("holder_id", "binding_id", "runtime_generation", "runtime_session_id")) {
                     assertThat(fenced.get(field)).as("%s", field).isNull();
                 }
                 first.resume();
@@ -151,7 +151,7 @@ class HostedWorkspaceConcurrencyIT {
                 first.reached();
                 var held = row(jdbc, tenant);
                 assertThat(held).containsEntry("mount_state", "READY").containsEntry("mount_revision", 2L);
-                assertThat(member(jdbc, runtime)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, runtime)).isEqualTo(held.get("physical_id"));
                 second.command("fence", 2, UUID.randomUUID().toString(), false);
                 assertThat(row(jdbc, tenant)).isEqualTo(held);
                 first.resume();
@@ -190,11 +190,11 @@ class HostedWorkspaceConcurrencyIT {
                 assertOk(second.acquire(secondSession, rival).get(20, TimeUnit.SECONDS));
                 var newer = row(jdbc, tenant);
                 assertThat(newer).containsEntry("mount_revision", 3L);
-                assertThat(member(jdbc, rival)).isEqualTo(newer.get("storage_key"));
+                assertThat(member(jdbc, rival)).isEqualTo(newer.get("physical_id"));
                 first.resume();
                 assertOk(pending.get(20, TimeUnit.SECONDS));
                 assertThat(row(jdbc, tenant)).as("duplicate old release preserves guard").isEqualTo(newer);
-                assertThat(member(jdbc, rival)).isEqualTo(newer.get("storage_key"));
+                assertThat(member(jdbc, rival)).isEqualTo(newer.get("physical_id"));
                 second.ok("/tool-sessions/" + rival + ":release", Map.of("harnessSessionId", secondSession));
 
                 if (LINUX) {
@@ -210,11 +210,11 @@ class HostedWorkspaceConcurrencyIT {
                     assertOk(second.acquire(secondSession, rival).get(20, TimeUnit.SECONDS));
                     newer = row(jdbc, tenant);
                     assertThat(newer).containsEntry("mount_revision", 4L);
-                    assertThat(member(jdbc, rival)).isEqualTo(newer.get("storage_key"));
+                    assertThat(member(jdbc, rival)).isEqualTo(newer.get("physical_id"));
                     first.resume();
                     first.commandResult(true);
                     assertThat(row(jdbc, tenant)).as("valid old LOST cleanup preserves guard").isEqualTo(newer);
-                    assertThat(member(jdbc, rival)).isEqualTo(newer.get("storage_key"));
+                    assertThat(member(jdbc, rival)).isEqualTo(newer.get("physical_id"));
                     second.ok("/tool-sessions/" + rival + ":release", Map.of("harnessSessionId", secondSession));
                 }
                 System.out.println("W1_TWO_BROKER_A4_OK physical=" + LINUX + " staleLost=" + LINUX);
@@ -245,7 +245,7 @@ class HostedWorkspaceConcurrencyIT {
         }
         var source = new DriverManagerDataSource(url, user, password);
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        String tenant = "w1-mount-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         Throwable failure = null;
         try {
             Path root = Files.createDirectory(temporary.resolve("workspace"));
@@ -285,10 +285,10 @@ class HostedWorkspaceConcurrencyIT {
                 String claim = UUID.randomUUID().toString();
                 assertOk(broker.acquire(firstSession, holderRuntime, claim).get(20, TimeUnit.SECONDS));
                 var held = row(jdbc, tenant);
-                assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("physical_id"));
                 String rival = UUID.randomUUID().toString();
                 assertOk(broker.acquire(secondSession, rival).get(20, TimeUnit.SECONDS));
-                assertThat(member(jdbc, rival)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, rival)).isEqualTo(held.get("physical_id"));
                 held = row(jdbc, tenant);
                 assertThat(held).containsEntry("member_count", 2L);
 
@@ -336,7 +336,7 @@ class HostedWorkspaceConcurrencyIT {
 
                 var freed = row(jdbc, tenant);
                 assertThat(freed).containsEntry("member_count", 1L);
-                for (String field : List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
+                for (String field : List.of("holder_id", "binding_id", "runtime_generation", "runtime_session_id")) {
                     assertThat(freed.get(field)).as("%s", field).isNull();
                 }
                 // The Runtime Session is untouched: READY, never RELEASED —
@@ -345,18 +345,18 @@ class HostedWorkspaceConcurrencyIT {
                         + " WHERE runtime_session_id = ?", String.class, holderRuntime)).isEqualTo("READY");
 
                 assertThat(member(jdbc, holderRuntime)).isNull();
-                assertThat(member(jdbc, rival)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, rival)).isEqualTo(held.get("physical_id"));
                 // The original READY identity rejoins while its neighbor remains acquired.
                 assertOk(broker.acquire(firstSession, holderRuntime, UUID.randomUUID().toString())
                         .get(20, TimeUnit.SECONDS));
-                assertThat(member(jdbc, rival)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, rival)).isEqualTo(held.get("physical_id"));
                 broker.ok("/tool-sessions/" + rival + ":release", Map.of("harnessSessionId", secondSession));
                 assertOk(broker.acquire(firstSession, holderRuntime, UUID.randomUUID().toString())
                         .get(20, TimeUnit.SECONDS));
-                assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("physical_id"));
                 assertOk(broker.postAsync("/tool-sessions/" + holderRuntime + ":release",
                         Map.of("harnessSessionId", firstSession)).get(20, TimeUnit.SECONDS));
-                assertThat(row(jdbc, tenant)).containsEntry("holder_key", null).containsEntry("member_count", 0L);
+                assertThat(row(jdbc, tenant)).containsEntry("holder_id", null).containsEntry("member_count", 0L);
                 assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session"
                         + " WHERE runtime_session_id = ?", String.class, holderRuntime)).isEqualTo("RELEASED");
                 // An unreconciled original identity keeps its member without excluding unrelated work.
@@ -376,9 +376,9 @@ class HostedWorkspaceConcurrencyIT {
                 assertThat(root.resolve("unknown.txt")).doesNotExist();
                 assertThat(executionStore.findByExecutionCallId(unknownCall).getState())
                         .isEqualTo(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord.State.UNKNOWN);
-                assertThat(member(jdbc, unknownRuntime)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, unknownRuntime)).isEqualTo(held.get("physical_id"));
                 broker.ok("/tool-sessions/" + independent + ":release", Map.of("harnessSessionId", secondSession));
-                assertThat(member(jdbc, unknownRuntime)).isEqualTo(held.get("storage_key"));
+                assertThat(member(jdbc, unknownRuntime)).isEqualTo(held.get("physical_id"));
                 System.out.println("WORKSPACE_SHARED_EXECUTION_OK physical=" + LINUX);
             }
         } catch (Exception | Error error) {
@@ -427,7 +427,7 @@ class HostedWorkspaceConcurrencyIT {
     }
 
     private static String member(JdbcTemplate jdbc, String runtimeSessionId) {
-        return jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
+        return jdbc.queryForObject("SELECT execution_storage_id FROM ma_runtime_session WHERE runtime_session_id = ?",
                 String.class, runtimeSessionId);
     }
 

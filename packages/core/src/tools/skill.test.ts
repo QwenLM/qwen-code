@@ -26,6 +26,7 @@ import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
 import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
+import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -1241,6 +1242,44 @@ describe('SkillTool', () => {
       expectLoadedContents();
       expect(await execText('code-review')).toContain(
         'Review code for quality and best practices.',
+      );
+    });
+
+    it('does not register a Code Mode skill that finishes loading after cancellation', async () => {
+      let releaseOldLoad!: (skill: SkillConfig) => void;
+      const oldLoad = new Promise<SkillConfig>((resolve) => {
+        releaseOldLoad = resolve;
+      });
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockReturnValueOnce(
+        oldLoad,
+      );
+      const controller = new AbortController();
+      const pending = runWithToolCallSource({ kind: 'code_mode' }, () =>
+        inv('code-review').execute(controller.signal),
+      );
+      controller.abort();
+      const current = await execText('code-review');
+      releaseOldLoad({ ...mockRuntimeConfig, body: 'obsolete skill body' });
+      await expect(pending).rejects.toThrow();
+
+      expectLoadedContents(current);
+      expect(await execText('code-review')).toBe(alreadyLoaded);
+    });
+
+    it('forgets only the new skill body when its Code Mode batch aborts', async () => {
+      const review = await execText('code-review');
+      loads(mockSkills[1]);
+      const controller = new AbortController();
+      const result = await runWithToolCallSource(
+        { kind: 'code_mode', signal: controller.signal },
+        () => inv('testing').execute(controller.signal),
+      );
+      expectLoadedContents(review, partToString(result.llmContent));
+      controller.abort();
+      expectLoadedNames('code-review');
+      expectLoadedContents(review);
+      expect(await execText('testing')).toContain(
+        'Help write comprehensive tests.',
       );
     });
 

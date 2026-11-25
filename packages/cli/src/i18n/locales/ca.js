@@ -534,6 +534,7 @@ export default {
   'Debug Keystroke Logging': 'Registre de tecles per a depuració',
   'Language: UI': 'Idioma: Interfície',
   'Language: Model': 'Idioma: Model',
+  'Language: Display Translation': 'Idioma: Traducció de la visualització',
   'Output Format': 'Format de sortida',
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
@@ -1278,6 +1279,8 @@ export default {
     "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
   'Could not compress chat history due to an API error.':
     "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
+  'Could not compress chat history because it is too large for the context window.':
+    "No s'ha pogut comprimir l'historial del xat perquè és massa gran per a la finestra de context.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================

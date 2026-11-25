@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendAutoMemoryContext,
   appendAutoMemorySnapshot,
+  EMPTY_AUTO_MEMORY_CATALOG,
   getAutoMemorySnapshot,
   withoutAutoMemorySnapshots,
 } from './request-context.js';
@@ -38,6 +39,23 @@ describe('retained memory snapshots', () => {
     expect(getAutoMemorySnapshot(history, 'A')).toEqual(first);
     expect(history[0].parts?.slice(-2)).toEqual([first, second]);
     expect(getAutoMemorySnapshot([user], 'A')).toEqual(first);
+  });
+
+  it('sends an empty legacy catalog only to supersede a previous snapshot', () => {
+    expect(
+      getAutoMemorySnapshot([], EMPTY_AUTO_MEMORY_CATALOG),
+    ).toBeUndefined();
+    const history: Content[] = [];
+    const populated = getAutoMemorySnapshot(history, catalog)!;
+    appendAutoMemorySnapshot(history, populated);
+    const empty = getAutoMemorySnapshot(history, EMPTY_AUTO_MEMORY_CATALOG)!;
+    expect(empty.text).toContain('supersedes all earlier memory catalogs');
+    appendAutoMemorySnapshot(history, empty);
+    expect(
+      getAutoMemorySnapshot(history, EMPTY_AUTO_MEMORY_CATALOG),
+    ).toBeUndefined();
+    expect(getAutoMemorySnapshot(history, catalog)).toEqual(populated);
+    expect(getAutoMemorySnapshot(history, '')).toBeUndefined();
   });
 
   it('filters only marked parts and removes snapshot-only entries without mutating history', () => {
@@ -78,6 +96,9 @@ describe('appendAutoMemoryContext', () => {
     ]);
     expect(appendAutoMemoryContext(contents, catalog)).toEqual(first);
     expect(appendAutoMemoryContext(contents, '')).toBe(contents);
+    expect(appendAutoMemoryContext(contents, EMPTY_AUTO_MEMORY_CATALOG)).toBe(
+      contents,
+    );
   });
 
   it('places catalog data after tool responses without changing the tool pair', () => {

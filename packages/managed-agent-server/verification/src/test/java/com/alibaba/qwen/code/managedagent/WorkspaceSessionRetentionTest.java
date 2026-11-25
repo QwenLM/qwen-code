@@ -20,14 +20,12 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegist
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -207,8 +205,11 @@ class WorkspaceSessionRetentionTest {
         archive(tenant, session, "archive-again");
         request(post(PUBLIC + session + "/unarchive"), tenant, "owner", "unarchive")
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("archived"));
+        // D3: the session was closed on files-v2, so a protocol-2 lifecycle
+        // operation exists and the claim gate names the fence
+        // (workspace_lifecycle_claim_fenced) ahead of the v1 admission-closed code.
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "b".repeat(43),
-                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
         assertThat(count(tenant, session, "session.archived")).isEqualTo(2);
         assertThat(count(tenant, session, "session.unarchived")).isEqualTo(1);
         assertThat(runtime.calls.get(session)).isEqualTo(1);
@@ -305,14 +306,11 @@ class WorkspaceSessionRetentionTest {
         // none. The recorded unarchive below keeps answering through it,
         // while the fresh key meets the same 404 every other read gets.
         String fence = UUID.randomUUID().toString();
-        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_key = ? AND storage_key = ?",
-                fence, RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey("storage")) == 0) {
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
-                            + " fence_operation_id) VALUES (?, ?, ?, ?, 'storage', ?)",
-                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"),
-                    RuntimeAdmissionFences.storageFenceKey(tenant),
-                    RuntimeAdmissionFences.storageFenceKey("storage"), tenant, fence);
+        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_id = ? AND storage_id = ?",
+                fence, tenant, "storage") == 0) {
+            jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id,"
+                            + " fence_operation_id) VALUES (?, 'storage', ?)",
+                    tenant, fence);
         }
         // Replay-first, like every other mutation path: the recorded
         // success answers its body with the Session as last visible
@@ -426,11 +424,14 @@ class WorkspaceSessionRetentionTest {
             }
         }
         jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant, session);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json, phase, tenant_id, session_id, operation_id, operation_kind,"
+        String blockedOperationId = "op_" + UUID.randomUUID();
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, target_kind, target_id, request_json, phase, tenant_id, session_id, operation_id, operation_kind,"
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
                 + " session_status_before, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'SESSION', ?, ?, '{}', 'RECOVERY_BLOCKED', ?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
-                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
+                + " VALUES (?, 'SESSION', ?, 'SESSION', ?, '{}', 'RECOVERY_BLOCKED', ?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
+                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)",
+                ManagedIdentityRefs.operationRef("CLOSE", tenant, "SESSION", session, session, blockedOperationId),
+                session, session, tenant, session, blockedOperationId, Long.MAX_VALUE);
         web("archive", tenant, session, "owner", "fresh").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("session_operation_active"));
         web("delete", tenant, session, "owner", "fresh").andExpect(status().isConflict())
@@ -494,7 +495,7 @@ class WorkspaceSessionRetentionTest {
     }
 
     private JsonNode json(ResultActions result) throws Exception { return mapper.readTree(result.andReturn().getResponse().getContentAsString()); }
-    private String tenant() { return "retention-" + UUID.randomUUID(); }
+    private String tenant() { return UUID.randomUUID().toString(); }
     private int count(String tenant, String session, String type) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ? AND event_type = ?",
                 Integer.class, tenant, session, type);

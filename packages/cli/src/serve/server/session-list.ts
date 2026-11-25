@@ -26,6 +26,10 @@ import {
   type SessionGroupCatalog,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  isPromptLedgerTerminalRecord,
+  readPromptLedgerRecords,
+} from '@qwen-code/acp-bridge/promptLedger';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -637,6 +641,74 @@ async function enrichGoalSidecars(
   }
 }
 
+/**
+ * Teardown flush codes: `flushPromptTerminals` publishes an `error` terminal
+ * with one of these codes for every still-pending prompt when the daemon
+ * shuts down, the agent channel exits, or the session is closed/killed. The
+ * turn was cut off by teardown, not by a model failure, so the session can
+ * offer "Continue execution" on its next load.
+ */
+const CONTINUATION_TEARDOWN_CODES = new Set([
+  'daemon_shutdown',
+  'channel_closed',
+  'session_closed',
+  'session_killed',
+]);
+
+/**
+ * Only the ledger's last record decides, so a small tail window suffices;
+ * the reader drops a torn final line and falls back to the previous record.
+ */
+const CONTINUATION_LEDGER_TAIL_BYTES = 4 * 1024;
+
+/**
+ * Enrich persisted summaries with prompt-ledger continuation evidence so the
+ * sidebar can mark sessions whose latest prompt was cut off mid-flight. Same
+ * pattern as {@link enrichPrSidecars}; active sessions only — the ledger path
+ * is the active one, and archived conversations are closed. Fail-closed: an
+ * unreadable ledger leaves the field absent.
+ */
+async function enrichPromptContinuation(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (archiveState !== 'active') return;
+  let scanned = 0;
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    // The ledger reads are synchronous; yield periodically so a large
+    // catalog scan does not stall the daemon's event loop (the async PR
+    // sidecar enrichment interleaves naturally).
+    if (++scanned % 64 === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      signal?.throwIfAborted();
+    }
+    let records: ReturnType<typeof readPromptLedgerRecords>;
+    try {
+      records = readPromptLedgerRecords(
+        sessionService.getPromptLedgerPath(sessionId),
+        { tailBytes: CONTINUATION_LEDGER_TAIL_BYTES },
+      );
+    } catch {
+      signal?.throwIfAborted();
+      continue;
+    }
+    const last = records[records.length - 1];
+    if (!last) continue;
+    const cutOff = !isPromptLedgerTerminalRecord(last)
+      ? true // dangling admission: no terminal ever landed
+      : last.terminal === 'interrupted' ||
+        (last.terminal === 'error' &&
+          last.code !== undefined &&
+          CONTINUATION_TEARDOWN_CODES.has(last.code));
+    if (cutOff) {
+      bySessionId.set(sessionId, { ...summary, needsContinuation: true });
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -699,6 +771,17 @@ function mergeLiveSessionSummary(
     hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
+  // Work in flight supersedes the persisted cut-off evidence: the running
+  // turn owns the transcript tail now, so a fresh catalog read of a running
+  // session must not carry the continuation hint.
+  if (
+    merged.hasActivePrompt ||
+    merged.activeWorkState === 'active' ||
+    merged.hasRunningBackgroundTasks ||
+    merged.backgroundTurn
+  ) {
+    delete merged.needsContinuation;
+  }
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history. The sidecar is
   // the append-only binding-time record (last = latest — the order the badge
@@ -871,6 +954,7 @@ function readPersistedSidecars(
       await enrichWorktreeSidecars(rows, service, archiveState, readSignal);
       await enrichPrSidecars(rows, service, archiveState, readSignal);
       await enrichArtifactSummaries(rows, service, archiveState, readSignal);
+      await enrichGoalSidecars(rows, service, archiveState, readSignal);
       readSignal.throwIfAborted();
       return rows.get(session.sessionId)!;
     };
@@ -938,6 +1022,7 @@ async function enrichCatalogPage(
     if (details.prs !== undefined) session.prs = details.prs;
     if (details.artifactCount !== undefined)
       session.artifactCount = details.artifactCount;
+    if (details.goal !== undefined) session.goal = details.goal;
   }
 }
 
@@ -953,6 +1038,7 @@ async function loadAllPersistedSummaries(
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
   let scanPages = 0;
+  let catalogReadFallbacks = 0;
   let cursor: number | string | undefined;
   do {
     scanPages += 1;
@@ -961,9 +1047,11 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
+      forCatalog: true,
       excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     });
     signal.throwIfAborted();
+    catalogReadFallbacks += page.catalogReadFallbacks ?? 0;
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
     sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
@@ -984,12 +1072,18 @@ async function loadAllPersistedSummaries(
   const bySessionId = new Map(
     sessions.map((session) => [session.sessionId, session]),
   );
-  await enrichGoalSidecars(bySessionId, sessionService, archiveState, signal);
+  await enrichPromptContinuation(
+    bySessionId,
+    sessionService,
+    archiveState,
+    signal,
+  );
   signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
     truncated,
     scanPages,
+    catalogReadFallbacks,
     scanDurationMs: Math.max(0, performance.now() - scanStartedAt),
   };
 }
@@ -1045,6 +1139,10 @@ async function listAllPersistedSummaries(
     addDaemonRequestAttribute(
       'qwen-code.daemon.session_list.scan_duration_ms',
       snapshot.scanDurationMs,
+    );
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.catalog_read_fallbacks',
+      snapshot.catalogReadFallbacks ?? 0,
     );
   }
   return snapshot;
@@ -1856,6 +1954,12 @@ async function listWorkspaceSessionsForResponseInRuntime(
     archiveState,
     readOptions.signal,
   );
+  await enrichPromptContinuation(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
   readOptions.signal?.throwIfAborted();
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
@@ -2043,6 +2147,12 @@ export async function searchWorkspaceSessionsForResponse(
       readOptions.signal,
     );
     await enrichGoalSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichPromptContinuation(
       bySessionId,
       sessionService,
       'active',

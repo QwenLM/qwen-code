@@ -480,6 +480,7 @@ export default {
   'Debug Keystroke Logging': 'Log de Depuração de Teclas',
   'Language: UI': 'Idioma: Interface',
   'Language: Model': 'Idioma: Modelo',
+  'Language: Display Translation': 'Idioma: Tradução da exibição',
   'Output Format': 'Formato de Saída',
   'Hide Window Title': 'Ocultar Título da Janela',
   'Show Status in Title': 'Mostrar Status no Título',
@@ -1150,6 +1151,8 @@ export default {
     'Não foi possível comprimir o histórico do chat porque o resumo da compressão foi truncado.',
   'Could not compress chat history due to an API error.':
     'Não foi possível comprimir o histórico do chat devido a um erro da API.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Não foi possível comprimir o histórico do chat porque ele é grande demais para a janela de contexto.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

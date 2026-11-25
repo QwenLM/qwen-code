@@ -28,8 +28,8 @@ class WakeRecoveryTest {
 
     @Test
     void aFailedLoadLeavesDurableRetryAndDoesNotStarveAnotherSession() {
-        var first = new Candidate("tenant", "workspace", "first", 1, 2, 0, null, null);
-        var second = new Candidate("tenant", "workspace", "second", 1, 2, 0, null, null);
+        var first = new Candidate("tenant", "workspace", "first", 1, 2, 0, null, null, false);
+        var second = new Candidate("tenant", "workspace", "second", 1, 2, 0, null, null, false);
         when(harness.isAvailable()).thenReturn(true);
         when(store.findPending("workspace", 8)).thenReturn(List.of(first, second));
         for (var row : List.of(first, second)) {
@@ -45,8 +45,8 @@ class WakeRecoveryTest {
 
     @Test
     void aPartialProofNeitherStampsNorLoadsAndLetsTheNextCandidateRecover() {
-        var first = new Candidate("tenant", "workspace", "first", 1000, 1000, 0, null, null);
-        var second = new Candidate("tenant", "workspace", "second", 1, 1, 0, null, null);
+        var first = new Candidate("tenant", "workspace", "first", 1000, 1000, 0, null, null, false);
+        var second = new Candidate("tenant", "workspace", "second", 1, 1, 0, null, null, false);
         when(harness.isAvailable()).thenReturn(true);
         when(store.findPending("workspace", 8)).thenReturn(List.of(first, second));
         when(store.claim(first)).thenReturn(true);
@@ -62,7 +62,7 @@ class WakeRecoveryTest {
 
     @Test
     void aStoppedChildDoesNotRestartItsPendingMessages() {
-        var child = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run");
+        var child = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run", false);
         when(harness.isAvailable()).thenReturn(true);
         when(store.findPending("workspace", 8)).thenReturn(List.of(child));
         when(store.claim(child)).thenReturn(true);
@@ -80,7 +80,7 @@ class WakeRecoveryTest {
     @ParameterizedTest
     @ValueSource(strings = {"settled", "failed", "cancelled", "running"})
     void onlyAnActiveChildRunCanRecover(String state) {
-        var child = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run");
+        var child = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run", false);
         when(harness.isAvailable()).thenReturn(true);
         when(store.findPending("workspace", 8)).thenReturn(List.of(child));
         when(store.claim(child)).thenReturn(true);
@@ -101,8 +101,34 @@ class WakeRecoveryTest {
     }
 
     @Test
+    void aStampedHeadLoadsWithoutReplayingItsJournal() {
+        var row = new Candidate("tenant", "workspace", "session", 40, 80, 0, null, null, true);
+        when(harness.isAvailable()).thenReturn(true);
+        when(store.findPending("workspace", 8)).thenReturn(List.of(row));
+        when(store.claim(row)).thenReturn(true);
+        recovery().scan();
+        verify(store, never()).hasPendingInput(any());
+        verify(store, never()).recordPending(any(), anyBoolean());
+        verify(harness).recoverForWake("tenant", "session");
+    }
+
+    @Test
+    void aStampedChildOfAStoppedRunIsClearedWithoutLoading() {
+        var child = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run", true);
+        when(harness.isAvailable()).thenReturn(true);
+        when(store.findPending("workspace", 8)).thenReturn(List.of(child));
+        when(store.claim(child)).thenReturn(true);
+        when(records.childRunBody("tenant", "parent", "run"))
+                .thenReturn(JsonNodeFactory.instance.objectNode().put("stopRequested", true));
+        recovery().scan();
+        verify(store, never()).hasPendingInput(any());
+        verify(store).recordPending(child, false);
+        verify(harness, never()).recoverForWake(anyString(), anyString());
+    }
+
+    @Test
     void aSettledPrefixClearsTheHintWithoutLoading() {
-        var row = new Candidate("tenant", "workspace", "session", 1, 2, 0, null, null);
+        var row = new Candidate("tenant", "workspace", "session", 1, 2, 0, null, null, false);
         when(harness.isAvailable()).thenReturn(true);
         when(store.findPending("workspace", 8)).thenReturn(List.of(row));
         when(store.claim(row)).thenReturn(true);
@@ -116,7 +142,7 @@ class WakeRecoveryTest {
 
     @Test
     void aRefusedProofStampNeverReadsTheParentOrLoadsWork() {
-        var row = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run");
+        var row = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run", false);
         when(harness.isAvailable()).thenReturn(true);
         when(store.findPending("workspace", 8)).thenReturn(List.of(row));
         when(store.claim(row)).thenReturn(true);
@@ -133,7 +159,7 @@ class WakeRecoveryTest {
         recovery().scan();
         verifyNoInteractions(store);
         when(harness.isAvailable()).thenReturn(true);
-        var row = new Candidate("tenant", "workspace", "session", 1, 2, 0, null, null);
+        var row = new Candidate("tenant", "workspace", "session", 1, 2, 0, null, null, false);
         when(store.findPending("workspace", 8)).thenReturn(List.of(row));
         recovery().scan();
         verify(store, never()).hasPendingInput(row);

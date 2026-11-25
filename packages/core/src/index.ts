@@ -215,6 +215,15 @@ export type {
   ShellToolInvocation,
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
+export {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  runWithTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+  type TurnSkillSnapshotLease,
+} from './skills/turn-skill-snapshot.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
 export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
@@ -504,6 +513,7 @@ export type {
   TokenUsageTotals,
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
+export * from './services/worktree-snapshot-service.js';
 export * from './services/session-pr-service.js';
 export * from './services/session-goal-sidecar.js';
 export {

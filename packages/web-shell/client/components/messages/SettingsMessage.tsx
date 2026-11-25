@@ -264,6 +264,7 @@ function scopeHintKey(
   setting: DaemonSettingDescriptor,
   scope: Scope,
 ): 'settings.modifiedIn' | 'settings.alsoModifiedIn' | undefined {
+  if (setting.key === 'general.displayLanguage') return undefined;
   const otherHasValue =
     scope === 'workspace'
       ? setting.values.user !== undefined
@@ -751,7 +752,8 @@ export function SettingsMessage({
     const visibleSettings = settings.filter(
       (setting) =>
         !HIDDEN_SETTING_KEYS.has(setting.key) &&
-        !LIVE_SETTING_KEYS.has(setting.key),
+        !LIVE_SETTING_KEYS.has(setting.key) &&
+        (scope === 'user' || setting.key !== 'general.displayLanguage'),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -1365,13 +1367,13 @@ export function SettingsMessage({
                           }
 
                           if (
-                            item.setting.key === LANGUAGE_SETTING_KEY &&
+                            (item.setting.key === LANGUAGE_SETTING_KEY ||
+                              item.setting.key === 'visionBridgeTimeoutMs') &&
                             scope === 'workspace' &&
                             !workspaceSettingsWritable
                           ) {
-                            // `/language ui --project` is refused in a
-                            // standalone session, so a workspace row here
-                            // could only fail after the user picked a value.
+                            // Standalone sessions can edit these settings at
+                            // user scope only.
                             return null;
                           }
 
