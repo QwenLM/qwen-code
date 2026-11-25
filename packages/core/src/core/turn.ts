@@ -277,6 +277,11 @@ export interface ToolCallResponseInfo {
   modelOverride?: string;
   terminateTurn?: boolean;
   /**
+   * A tool hook returned `continue: false` without blocking: the turn ends
+   * after this batch, and this is the reason shown to the user.
+   */
+  hookStopReason?: string;
+  /**
    * Set only when the call was denied because it needed user approval and the
    * session had no way to ask for it (non-interactive mode). Headless front
    * ends use it to suggest an approval mode; every other denial, such as a
@@ -636,6 +641,7 @@ export type ServerLlmCitationEvent = {
 export type ServerLlmHookSystemMessageEvent = {
   type: LlmEventType.HookSystemMessage;
   value: string;
+  isStopReason?: true;
 };
 
 export type ServerLlmGoalSettlementFailedEvent = {
@@ -813,6 +819,7 @@ export class Turn {
     private readonly isExplicitRetry?: boolean,
     private readonly isSessionTurn?: boolean,
     private readonly ledgerTurnKey?: string,
+    private readonly retractToolCallsOnRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -845,6 +852,9 @@ export class Turn {
         ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
         ...(this.retractDeliveredOutputOnRetry
           ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.retractToolCallsOnRetry
+          ? { retractToolCallsOnRetry: true }
           : {}),
         ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
         ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),

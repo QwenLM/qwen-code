@@ -313,7 +313,6 @@ const EN: Messages = {
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
-  'managed.question.title': 'Answer the questions',
   'managed.actions.title': 'Pending requests',
   'managed.actions.root': 'This session',
   'managed.actions.child': (v) => `Child session · ${v?.session}`,
@@ -1861,7 +1860,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.usage.dailyTokensTitle': 'tokens',
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
-  'daemon.usage.dailySessionsSub': 'active session counts per day',
+  'daemon.usage.dailySessionsSub': 'runs ended per day',
   'delete.cannotCurrent':
     'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
@@ -2858,11 +2857,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.restoreUnknown': 'Restore local copy',
-  'queue.discardUnknown': 'Discard local copy',
-  'queue.continueEditing': 'Continue editing',
-  'queue.continueEditingConfirm':
-    'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.commandGoalBlocked':
@@ -2884,7 +2878,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.sendNow': 'Send now',
   'queue.sendNowTip':
-    'Send queued messages now. Interrupts the model if it is responding or calling tools',
+    'Send queued messages now. May interrupt the current response or tools. Eligible shell commands continue in the background.',
   'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
@@ -4445,8 +4439,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
   'userMessage.automatic.title': 'Automatic trigger',
-  'userMessage.sendFailed': 'Failed to send',
-  'userMessage.retrySend': 'Retry sending message',
+  'userMessage.retrySend': 'Resend',
+  'userMessage.retryUncertain': 'May not have sent — click to resend',
+  'userMessage.deliveryUncertain':
+    'Message may not have sent. Click ! to resend.',
   'userMessage.edit': 'Edit message',
   'message.moreActions': 'More message actions',
   ...MESSAGE_DELETION_MESSAGES_EN,

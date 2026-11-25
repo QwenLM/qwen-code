@@ -699,6 +699,35 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('keeps Stop hook notices separate from assistant output', () => {
+    const answer = '{"ok":true}';
+    const stopReason = 'Model switched: verification still required';
+    expect(
+      transcriptBlocksToDaemonMessages([
+        textBlock('reply', 'assistant', answer, 1),
+        statusBlock('stop-notice', stopReason, 2, {
+          source: 'stop_hook_notice',
+        }),
+      ]),
+    ).toEqual([
+      {
+        id: 'reply',
+        role: 'assistant',
+        content: answer,
+        isStreaming: false,
+        timestamp: 1,
+      },
+      {
+        id: 'stop-notice',
+        role: 'system',
+        content: stopReason,
+        variant: 'info',
+        source: 'stop_hook_notice',
+        timestamp: 2,
+      },
+    ]);
+  });
+
   it('projects a compression result as a structured system row', () => {
     const result = {
       originalTokenCount: 263195,

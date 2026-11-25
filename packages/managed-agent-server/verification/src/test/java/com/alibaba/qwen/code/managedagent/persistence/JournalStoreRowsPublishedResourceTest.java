@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -41,7 +40,6 @@ class JournalStoreRowsPublishedResourceTest {
     private JdbcManagedSessionStore sessionStore;
     private JournalStoreRows storeRows;
     private String session;
-    private String scope;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -54,7 +52,6 @@ class JournalStoreRowsPublishedResourceTest {
         sessionStore = VerificationFixtures.managedSessionStore(jdbc);
         storeRows = new JournalStoreRows(jdbc, null);
         session = "sess-" + UUID.randomUUID();
-        scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
                 + " gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, session);
@@ -96,13 +93,13 @@ class JournalStoreRowsPublishedResourceTest {
         publish("man-1");
         publish("page-1");
         ManagedSessionStoreModels.StoredResource manifest = transaction.execute(
-                status -> storeRows.storedResource(scope, TENANT, WORKSPACE, session, "man-1"));
+                status -> storeRows.storedResource(TENANT, WORKSPACE, session, "man-1"));
         assertThat(manifest.kind()).isEqualTo("managed-tool-result-manifest");
         ManagedSessionStoreModels.StoredResource page = transaction.execute(
-                status -> storeRows.storedResource(scope, TENANT, WORKSPACE, session, "page-1"));
+                status -> storeRows.storedResource(TENANT, WORKSPACE, session, "page-1"));
         assertThat(page.kind()).isEqualTo("managed-tool-result-page");
         ManagedSessionStoreModels.StoredResource args = transaction.execute(
-                status -> storeRows.storedResource(scope, TENANT, WORKSPACE, session, "args-1"));
+                status -> storeRows.storedResource(TENANT, WORKSPACE, session, "args-1"));
         assertThat(args.kind()).isEqualTo("managed-tool-args");
     }
 
@@ -111,7 +108,7 @@ class JournalStoreRowsPublishedResourceTest {
         jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED'"
                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", TENANT, session, "outcome-1");
         assertThatThrownBy(() -> transaction.execute(
-                status -> storeRows.storedResource(scope, TENANT, WORKSPACE, session, "outcome-1")))
+                status -> storeRows.storedResource(TENANT, WORKSPACE, session, "outcome-1")))
                 .isInstanceOf(ManagedAgentException.class)
                 .satisfies(error -> {
                     assertThat(((ManagedAgentException) error).getStatus()).isEqualTo(409);
@@ -126,7 +123,7 @@ class JournalStoreRowsPublishedResourceTest {
         jdbc.update("UPDATE ma_resource SET object_key = NULL"
                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", TENANT, session, "man-1");
         assertThatThrownBy(() -> transaction.execute(
-                status -> storeRows.storedResource(scope, TENANT, WORKSPACE, session, "man-1")))
+                status -> storeRows.storedResource(TENANT, WORKSPACE, session, "man-1")))
                 .isInstanceOf(ManagedAgentException.class)
                 .satisfies(error ->
                         assertThat(((ManagedAgentException) error).getStatus()).isEqualTo(500));

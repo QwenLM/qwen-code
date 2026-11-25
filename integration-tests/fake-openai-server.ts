@@ -46,6 +46,8 @@ export type FakeOpenAIResponse = {
    * needs the CLI genuinely mid-stream has to stop the stream itself.
    */
   holdAfterChunks?: number;
+  /** Pause after the tool name delta and before its arguments are sent. */
+  holdAfterToolStart?: boolean;
   holdUntil?: Promise<void>;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
@@ -382,6 +384,7 @@ async function writeStreamed(
           ],
         }),
       );
+      if (message.holdAfterToolStart) await message.holdUntil;
       if (toolCall.function.arguments) {
         send(
           chunk(choice.index, {

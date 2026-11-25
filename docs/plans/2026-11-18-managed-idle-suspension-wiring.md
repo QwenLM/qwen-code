@@ -75,7 +75,7 @@ Done when an idle eligible Session suspends end-to-end and reloads cold, and eve
 
 ## 6. W5 — Integration tests
 
-New `hosted-session-suspension.integration.test.ts`, fixtures following `hosted-harness-session.test.ts` (register routes with a short `idleSuspendMs`):
+New `hosted-session-suspension.integration.test.ts`, fixtures following `hosted-harness-session.suspension.test.ts` (register routes with a short `idleSuspendMs`):
 
 1. Idle Session suspends after the period; a subsequent load cold-opens it (writer re-acquired, MCP/Hook re-connected, placement kept).
 2. An admitted prompt resets the timer; the Session stays resident a full period after the Turn settles.
@@ -94,7 +94,7 @@ Pin every row of the design's close-path audit table that suspension treats diff
 - `cd packages/cli && npx vitest run src/serve/hosted-session-suspension.test.ts src/serve/hosted-session-suspension.integration.test.ts` plus the collocated core assembly tests and monitor-loop tests.
 - `NODE_OPTIONS=--max-old-space-size=8192 npx tsc --build` in `packages/cli` (default heap OOMs; project references, not standalone `--noEmit`).
 - `npx eslint <changed files>` and `npx prettier --check <changed files>` in `packages/cli` (and `packages/core` for W1).
-- Full `hosted-harness-session.test.ts` and the Hosted/MySQL CI tiers are CI-owned; local budget stays focused. Real-process suspend→reopen acceptance runs after WP1 lands (coordinated upgrade, no config switch).
+- Full `hosted-harness-session*.test.ts` and the Hosted/MySQL CI tiers are CI-owned; local budget stays focused. Real-process suspend→reopen acceptance runs after WP1 lands (coordinated upgrade, no config switch).
 - Self-audit per AGENTS.md: read the full diff in open-ended presume-wrong passes; stop after two consecutive clean passes; a fix resets the count. Verify every green test asserts the right thing.
 - House rules: ESM, no `any`, core imports from defining modules, collocated tests, comments only for non-obvious why. No force-push on active PRs; this branch is local until the feature is complete.
 

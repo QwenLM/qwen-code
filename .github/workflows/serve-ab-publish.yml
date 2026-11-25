@@ -112,6 +112,20 @@ jobs:
           BODY_FILE="${ART}/body.md"
           MARKER='<!-- qwen:serve-ab -->'
 
+          # body.md was produced by the PR head's OWN script, so its text is
+          # untrusted even though this comment posts under the bot identity.
+          # Neutralize any triage marker it carries: qwen-triage-finalize acts
+          # on approve-on-green / lifecycle / CI-region markers found in
+          # bot-authored comments, and a fork PR must not be able to plant an
+          # approval instruction (or hijack a status/CI comment) through this
+          # lane. Breaking the `<!--` opener keeps the text visible as prose
+          # while making every fixed-string marker lookup miss.
+          if grep -qF 'qwen-triage' "${BODY_FILE}"; then
+            sed 's/<!-- qwen-triage/\&lt;!-- qwen-triage/g' "${BODY_FILE}" > "${BODY_FILE}.sanitized"
+            mv "${BODY_FILE}.sanitized" "${BODY_FILE}"
+            echo "::warning::Neutralized triage markers planted in the PR-generated serve-ab body."
+          fi
+
           # Dedup only against OUR prior comment (bot author + marker), and only
           # after a SUCCESSFUL listing (a failed list must not read as "none" and
           # post a duplicate).

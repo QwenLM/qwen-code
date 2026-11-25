@@ -1,0 +1,1400 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act } from 'react';
+import { render } from '../../test-utils/render.js';
+import { waitFor } from '../../test-utils/async.js';
+import {
+  useSelectionList,
+  type SelectionListItem,
+} from './useSelectionList.js';
+import {
+  useRegisterActionHandlers,
+  useRegisterFallbackHandler,
+} from '../contexts/ActionHandlerRegistry.js';
+
+import type { Key } from '../contexts/KeypressContext.js';
+
+vi.mock('../contexts/ActionHandlerRegistry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../contexts/ActionHandlerRegistry.js')
+    >();
+  return {
+    ...actual,
+    useRegisterActionHandlers: vi.fn(),
+    useRegisterFallbackHandler: vi.fn(),
+  };
+});
+vi.mock('../contexts/KeyboardContextRegistry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../contexts/KeyboardContextRegistry.js')
+    >();
+  return {
+    ...actual,
+    useRegisterKeyboardContext: vi.fn(),
+  };
+});
+
+let capturedActionHandlers: Record<string, (key: Key) => boolean | void> = {};
+let capturedFallbackHandler: ((key: Key) => boolean | void) | null = null;
+
+describe('useSelectionList', () => {
+  const mockOnSelect = vi.fn();
+  const mockOnHighlight = vi.fn();
+  const mockOnCancel = vi.fn();
+
+  const items: Array<SelectionListItem<string>> = [
+    { value: 'A', key: 'A' },
+    { value: 'B', disabled: true, key: 'B' },
+    { value: 'C', key: 'C' },
+    { value: 'D', key: 'D' },
+  ];
+
+  beforeEach(() => {
+    capturedActionHandlers = {};
+    capturedFallbackHandler = null;
+    vi.mocked(useRegisterActionHandlers).mockImplementation(
+      (
+        _context: string,
+        handlers: Record<string, (key: Key) => boolean | void>,
+        isActive?: boolean,
+      ) => {
+        if (isActive !== false) {
+          capturedActionHandlers = { ...capturedActionHandlers, ...handlers };
+        } else {
+          // When deactivated, remove these specific handlers
+          for (const key of Object.keys(handlers)) {
+            delete capturedActionHandlers[key];
+          }
+        }
+      },
+    );
+    vi.mocked(useRegisterFallbackHandler).mockImplementation(
+      (
+        _context: string,
+        handler: (key: Key) => boolean | void,
+        isActive?: boolean,
+      ) => {
+        if (isActive !== false) {
+          capturedFallbackHandler = handler;
+        } else {
+          capturedFallbackHandler = null;
+        }
+      },
+    );
+    mockOnSelect.mockClear();
+    mockOnHighlight.mockClear();
+    mockOnCancel.mockClear();
+  });
+
+  // Map key names to action handler names (context routing bindings)
+  // Note: j/k are NOT mapped here — they conflict with text/search input
+  const keyToAction: Record<string, string> = {
+    up: 'select:previous',
+    down: 'select:next',
+    return: 'select:accept',
+    enter: 'select:accept',
+    escape: 'select:cancel',
+  };
+
+  const pressKey = (
+    name: string,
+    sequence: string = name,
+    options: { shift?: boolean; ctrl?: boolean } = {},
+  ) => {
+    act(() => {
+      const key: Key = {
+        name,
+        sequence,
+        ctrl: options.ctrl ?? false,
+        cmd: false,
+        alt: false,
+        shift: options.shift ?? false,
+        insertable: false,
+      };
+
+      // First try action handlers (context routing path)
+      const actionName = keyToAction[name];
+      if (actionName && capturedActionHandlers[actionName] && !options.shift) {
+        capturedActionHandlers[actionName](key);
+        return;
+      }
+
+      // Ctrl+p/n also map to select actions
+      if (
+        options.ctrl &&
+        name === 'p' &&
+        capturedActionHandlers['select:previous']
+      ) {
+        capturedActionHandlers['select:previous'](key);
+        return;
+      }
+      if (
+        options.ctrl &&
+        name === 'n' &&
+        capturedActionHandlers['select:next']
+      ) {
+        capturedActionHandlers['select:next'](key);
+        return;
+      }
+
+      // Fall through to fallback handler (numeric selection, unbound keys)
+      if (capturedFallbackHandler) {
+        capturedFallbackHandler(key);
+      } else {
+        throw new Error(
+          `Test attempted to press key (${name}) but no handler is active. Ensure the hook is focused (isFocused=true) and the list is not empty.`,
+        );
+      }
+    });
+  };
+
+  const renderSelectionListHook = async (initialProps: {
+    items: Array<SelectionListItem<string>>;
+    onSelect: (item: string) => void;
+    onCancel?: () => void;
+    onHighlight?: (item: string) => void;
+    initialIndex?: number;
+    isFocused?: boolean;
+    showNumbers?: boolean;
+    wrapAround?: boolean;
+    focusKey?: string;
+    priority?: boolean;
+    orientation?: 'vertical' | 'horizontal';
+  }) => {
+    let hookResult: ReturnType<typeof useSelectionList>;
+    function TestComponent(props: typeof initialProps) {
+      hookResult = useSelectionList(props);
+      return null;
+    }
+    const { rerender, unmount, waitUntilReady } = await render(
+      <TestComponent {...initialProps} />,
+    );
+
+    return {
+      result: {
+        get current() {
+          return hookResult;
+        },
+      },
+      rerender: async (newProps: Partial<typeof initialProps>) => {
+        await act(async () => {
+          rerender(<TestComponent {...initialProps} {...newProps} />);
+        });
+        await waitUntilReady();
+      },
+      unmount: async () => {
+        unmount();
+      },
+      waitUntilReady,
+    };
+  };
+
+  it('navigates horizontal options with left/right, skips disabled entries and preserves confirm/cancel', async () => {
+    const { result, unmount } = await renderSelectionListHook({
+      items,
+      orientation: 'horizontal',
+      onSelect: mockOnSelect,
+      onCancel: mockOnCancel,
+    });
+    for (const [key, index] of [
+      ['right', 2],
+      ['right', 3],
+      ['right', 3],
+      ['left', 2],
+      ['left', 0],
+      ['left', 0],
+      ['down', 0],
+      ['up', 0],
+    ] as const) {
+      pressKey(key);
+      expect(result.current.activeIndex).toBe(index);
+    }
+    expect(mockOnSelect).not.toHaveBeenCalled();
+    pressKey('return');
+    expect(mockOnSelect).toHaveBeenCalledWith('A');
+    pressKey('escape');
+    expect(mockOnCancel).toHaveBeenCalledOnce();
+    await unmount();
+  });
+
+  describe('Initialization', () => {
+    it('should initialize with the default index (0) if enabled', async () => {
+      const { result } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should initialize with the provided initialIndex if enabled', async () => {
+      const { result } = await renderSelectionListHook({
+        items,
+        initialIndex: 2,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('should handle an empty list gracefully', async () => {
+      const { result } = await renderSelectionListHook({
+        items: [],
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should find the next enabled item (downwards) if initialIndex is disabled', async () => {
+      const { result } = await renderSelectionListHook({
+        items,
+        initialIndex: 1,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('should wrap around to find the next enabled item if initialIndex is disabled', async () => {
+      const wrappingItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+        { value: 'C', disabled: true, key: 'C' },
+      ];
+      const { result } = await renderSelectionListHook({
+        items: wrappingItems,
+        initialIndex: 2,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should default to 0 if initialIndex is out of bounds', async () => {
+      const { result } = await renderSelectionListHook({
+        items,
+        initialIndex: 10,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(0);
+
+      const { result: resultNeg } = await renderSelectionListHook({
+        items,
+        initialIndex: -1,
+        onSelect: mockOnSelect,
+      });
+      expect(resultNeg.current.activeIndex).toBe(0);
+    });
+
+    it('should stick to the initial index if all items are disabled', async () => {
+      const allDisabled = [
+        { value: 'A', disabled: true, key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+      ];
+      const { result } = await renderSelectionListHook({
+        items: allDisabled,
+        initialIndex: 1,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(1);
+    });
+  });
+
+  describe('Keyboard Navigation (Up/Down)', () => {
+    it('should call onCancel when escape is pressed and a cancel handler is provided', async () => {
+      await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+        onCancel: mockOnCancel,
+      });
+
+      pressKey('escape');
+
+      expect(mockOnCancel).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not consume escape when no cancel handler is provided', async () => {
+      await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+      });
+
+      const key: Key = {
+        name: 'escape',
+        sequence: '\u001B',
+        ctrl: false,
+        cmd: false,
+        alt: false,
+        shift: false,
+        insertable: false,
+      };
+
+      expect(capturedActionHandlers['select:cancel']?.(key)).toBe(false);
+    });
+
+    it('should move down with "down" key, skipping disabled items', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3);
+    });
+
+    it('should move up with "up" key, skipping disabled items', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        initialIndex: 3,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(3);
+      pressKey('up');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('up');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should not navigate on j/k keys (reserved for text input)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(0);
+
+      // j/k should NOT move selection (they conflict with search input)
+      pressKey('j');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('k');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should ignore navigation keys when shift is pressed', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        initialIndex: 2, // Start at middle item 'C'
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(2);
+
+      // Shift+Down should not move down
+      pressKey('down', undefined, { shift: true });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+
+      // Shift+Up should not move up
+      pressKey('up', undefined, { shift: true });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+
+      // Verify normal navigation still works
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3);
+    });
+
+    it('should not wrap by default (hard-stop)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        initialIndex: items.length - 1,
+        onSelect: mockOnSelect,
+      });
+      expect(result.current.activeIndex).toBe(3);
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3); // Stays at bottom
+
+      await renderSelectionListHook({
+        items,
+        initialIndex: 0,
+        onSelect: mockOnSelect,
+      });
+    });
+
+    it('should wrap navigation when wrapAround=true', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        initialIndex: items.length - 1,
+        onSelect: mockOnSelect,
+        wrapAround: true,
+      });
+      expect(result.current.activeIndex).toBe(3);
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+
+      pressKey('up');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3);
+    });
+
+    it('should call onHighlight when index changes', async () => {
+      const { waitUntilReady } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+      });
+      pressKey('down');
+      await waitUntilReady();
+      expect(mockOnHighlight).toHaveBeenCalledTimes(1);
+      expect(mockOnHighlight).toHaveBeenCalledWith('C');
+    });
+
+    it('should not move or call onHighlight if navigation results in the same index (e.g., single item)', async () => {
+      const singleItem = [{ value: 'A', key: 'A' }];
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: singleItem,
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+      });
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnHighlight).not.toHaveBeenCalled();
+    });
+
+    it('should not move or call onHighlight if all items are disabled', async () => {
+      const allDisabled = [
+        { value: 'A', disabled: true, key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+      ];
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: allDisabled,
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+      });
+      const initialIndex = result.current.activeIndex;
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(initialIndex);
+      expect(mockOnHighlight).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Wrapping (wrapAround)', () => {
+    it('should wrap when wrapAround=true', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        initialIndex: items.length - 1,
+        onSelect: mockOnSelect,
+        wrapAround: true,
+      });
+      expect(result.current.activeIndex).toBe(3);
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+
+      pressKey('up');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3);
+    });
+
+    it('should not wrap when wrapAround is false', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        initialIndex: items.length - 1,
+        onSelect: mockOnSelect,
+        wrapAround: false,
+      });
+      expect(result.current.activeIndex).toBe(3);
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3); // Should stay at bottom
+
+      act(() => result.current.setActiveIndex(0));
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('up');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0); // Should stay at top
+    });
+  });
+
+  describe('Selection (Enter)', () => {
+    it('should call onSelect when "return" is pressed on enabled item', async () => {
+      const { waitUntilReady } = await renderSelectionListHook({
+        items,
+        initialIndex: 2,
+        onSelect: mockOnSelect,
+      });
+      pressKey('enter');
+      await waitUntilReady();
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+      expect(mockOnSelect).toHaveBeenCalledWith('C');
+    });
+
+    it('should not call onSelect if the active item is disabled', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+      });
+
+      act(() => result.current.setActiveIndex(1));
+      await waitUntilReady();
+
+      pressKey('enter');
+      await waitUntilReady();
+      expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Keyboard Navigation Robustness (Rapid Input)', () => {
+    it('should handle rapid navigation and selection robustly (avoiding stale state)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items, // A, B(disabled), C, D. Initial index 0 (A).
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+      });
+
+      // Navigation and selection now go through action handlers (context routing)
+      const makeKey = (name: string): Key => ({
+        name,
+        sequence: name,
+        ctrl: false,
+        cmd: false,
+        alt: false,
+        shift: false,
+        insertable: false,
+      });
+
+      // 1. Press Down. Should move 0 (A) -> 2 (C).
+      act(() => {
+        capturedActionHandlers['select:next'](makeKey('down'));
+      });
+      await waitUntilReady();
+      // 2. Press Down again. Should move 2 (C) -> 3 (D).
+      act(() => {
+        capturedActionHandlers['select:next'](makeKey('down'));
+      });
+      await waitUntilReady();
+      // 3. Press Enter. Should select D.
+      act(() => {
+        capturedActionHandlers['select:accept'](makeKey('enter'));
+      });
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(3);
+
+      expect(mockOnHighlight).toHaveBeenCalledTimes(2);
+      expect(mockOnHighlight).toHaveBeenNthCalledWith(1, 'C');
+      expect(mockOnHighlight).toHaveBeenNthCalledWith(2, 'D');
+
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+      expect(mockOnSelect).toHaveBeenCalledWith('D');
+      expect(mockOnSelect).not.toHaveBeenCalledWith('A');
+    });
+
+    it('should handle ultra-rapid input (multiple presses in single act) without stale state', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items, // A, B(disabled), C, D. Initial index 0 (A).
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+      });
+
+      const makeKey = (name: string): Key => ({
+        name,
+        sequence: name,
+        ctrl: false,
+        cmd: false,
+        alt: false,
+        shift: false,
+        insertable: false,
+      });
+
+      // Simulate ultra-rapid inputs where all keypresses happen faster than React can re-render
+      // All presses happen in same render cycle - React batches the state updates
+      act(() => {
+        capturedActionHandlers['select:next'](makeKey('down')); // Should move 0 (A) -> 2 (C)
+        capturedActionHandlers['select:next'](makeKey('down')); // Should move 2 (C) -> 3 (D)
+        capturedActionHandlers['select:accept'](makeKey('enter')); // Should select D
+      });
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(3);
+
+      expect(mockOnHighlight).toHaveBeenCalledWith('D');
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+      expect(mockOnSelect).toHaveBeenCalledWith('D');
+    });
+  });
+
+  describe('Focus Management (isFocused)', () => {
+    it('should activate handlers when focused (default) and items exist', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+      });
+      expect(Object.keys(capturedActionHandlers).length).toBeGreaterThan(0);
+      expect(capturedFallbackHandler).not.toBeNull();
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('should not activate handlers when isFocused is false', async () => {
+      await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+        isFocused: false,
+      });
+      expect(Object.keys(capturedActionHandlers)).toHaveLength(0);
+      expect(capturedFallbackHandler).toBeNull();
+      expect(() => pressKey('down')).toThrow(/no handler is active/);
+    });
+
+    it('should not activate handlers when items list is empty', async () => {
+      await renderSelectionListHook({
+        items: [],
+        onSelect: mockOnSelect,
+        isFocused: true,
+      });
+      expect(Object.keys(capturedActionHandlers)).toHaveLength(0);
+      expect(capturedFallbackHandler).toBeNull();
+      expect(() => pressKey('down')).toThrow(/no handler is active/);
+    });
+
+    it('should activate/deactivate when isFocused prop changes', async () => {
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          items,
+          onSelect: mockOnSelect,
+          isFocused: false,
+        });
+
+      expect(Object.keys(capturedActionHandlers)).toHaveLength(0);
+      expect(capturedFallbackHandler).toBeNull();
+
+      await rerender({ isFocused: true });
+      expect(Object.keys(capturedActionHandlers).length).toBeGreaterThan(0);
+      expect(capturedFallbackHandler).not.toBeNull();
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+
+      await rerender({ isFocused: false });
+      expect(Object.keys(capturedActionHandlers)).toHaveLength(0);
+      expect(capturedFallbackHandler).toBeNull();
+      expect(() => pressKey('down')).toThrow(/no handler is active/);
+    });
+  });
+
+  describe('Numeric Quick Selection (showNumbers=true)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const shortList = items;
+    const longList: Array<SelectionListItem<string>> = Array.from(
+      { length: 15 },
+      (_, i) => ({ value: `Item ${i + 1}`, key: `Item ${i + 1}` }),
+    );
+
+    const pressNumber = (num: string) => pressKey(num, num);
+
+    it('should not respond to numbers if showNumbers is false (default)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: shortList,
+        onSelect: mockOnSelect,
+      });
+      pressNumber('1');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+
+    it('should select item immediately if the number cannot be extended (unambiguous)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: shortList,
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+        showNumbers: true,
+      });
+      pressNumber('3');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(2);
+      expect(mockOnHighlight).toHaveBeenCalledWith('C');
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+      expect(mockOnSelect).toHaveBeenCalledWith('C');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('should select coalesced numeric input with trailing enter', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: shortList,
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+        showNumbers: true,
+      });
+
+      pressKey('', '3\r');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(2);
+      expect(mockOnHighlight).toHaveBeenCalledWith('C');
+      expect(mockOnSelect).toHaveBeenCalledWith('C');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('should highlight and wait for timeout if the number can be extended (ambiguous)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        initialIndex: 1, // Start at index 1 so pressing "1" (index 0) causes a change
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+        showNumbers: true,
+      });
+
+      pressNumber('1');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnHighlight).toHaveBeenCalledWith('Item 1');
+
+      expect(mockOnSelect).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await waitUntilReady();
+
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+      expect(mockOnSelect).toHaveBeenCalledWith('Item 1');
+    });
+
+    it('should commit ambiguous coalesced numeric input when enter is included', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        initialIndex: 1,
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+        showNumbers: true,
+      });
+
+      pressKey('', '1\r');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnHighlight).toHaveBeenCalledWith('Item 1');
+      expect(mockOnSelect).toHaveBeenCalledWith('Item 1');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('should handle multi-digit input correctly', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressNumber('1');
+      await waitUntilReady();
+      expect(mockOnSelect).not.toHaveBeenCalled();
+
+      pressNumber('2');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(11);
+
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+      expect(mockOnSelect).toHaveBeenCalledWith('Item 12');
+    });
+
+    it('should handle multi-digit numeric input in one chunk', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressKey('', '12');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(11);
+      expect(mockOnSelect).toHaveBeenCalledWith('Item 12');
+    });
+
+    it('should reset buffer if input becomes invalid (out of bounds)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: shortList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressNumber('5');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnSelect).not.toHaveBeenCalled();
+
+      pressNumber('3');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+      expect(mockOnSelect).toHaveBeenCalledWith('C');
+    });
+
+    it('should allow "0" as subsequent digit, but ignore as first digit', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressNumber('0');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnSelect).not.toHaveBeenCalled();
+      // Timer should be running to clear the '0' input buffer
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Press '1', then '0' (Item 10, index 9)
+      pressNumber('1');
+      await waitUntilReady();
+      pressNumber('0');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(9);
+      expect(mockOnSelect).toHaveBeenCalledWith('Item 10');
+    });
+
+    it('should clear the initial "0" input after timeout', async () => {
+      const { waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressNumber('0');
+      await waitUntilReady();
+      await act(async () => vi.advanceTimersByTime(1000)); // Timeout the '0' input
+      await waitUntilReady();
+
+      pressNumber('1');
+      await waitUntilReady();
+      expect(mockOnSelect).not.toHaveBeenCalled(); // Should be waiting for second digit
+
+      await act(async () => vi.advanceTimersByTime(1000)); // Timeout '1'
+      await waitUntilReady();
+      expect(mockOnSelect).toHaveBeenCalledWith('Item 1');
+    });
+
+    it('should highlight but not select a disabled item (immediate selection case)', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: shortList, // B (index 1, number 2) is disabled
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+        showNumbers: true,
+      });
+
+      pressNumber('2');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(1);
+      expect(mockOnHighlight).toHaveBeenCalledWith('B');
+
+      // Should not select immediately, even though 20 > 4
+      expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+
+    it('should highlight but not select a disabled item (timeout case)', async () => {
+      // Create a list where the ambiguous prefix points to a disabled item
+      const disabledAmbiguousList = [
+        { value: 'Item 1 Disabled', disabled: true, key: 'Item 1 Disabled' },
+        ...longList.slice(1),
+      ];
+
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: disabledAmbiguousList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressNumber('1');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await waitUntilReady();
+
+      // Should not select after timeout
+      expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+
+    it('should clear the number buffer if a non-numeric key (e.g., navigation) is pressed', async () => {
+      const { result, waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressNumber('1');
+      await waitUntilReady();
+      expect(vi.getTimerCount()).toBe(1);
+
+      pressKey('down');
+      await waitUntilReady();
+
+      expect(result.current.activeIndex).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+
+      pressNumber('3');
+      await waitUntilReady();
+      // Should select '3', not '13'
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('should clear the number buffer if "return" is pressed', async () => {
+      const { waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressNumber('1');
+      await waitUntilReady();
+
+      pressKey('enter');
+      await waitUntilReady();
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+
+      expect(vi.getTimerCount()).toBe(0);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await waitUntilReady();
+      expect(mockOnSelect).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Programmatic Focus (focusKey)', () => {
+    it('should change the activeIndex when a valid focusKey is provided', async () => {
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          items,
+          onSelect: mockOnSelect,
+        });
+      expect(result.current.activeIndex).toBe(0);
+
+      await rerender({ focusKey: 'C' });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('should ignore a focusKey that does not exist', async () => {
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          items,
+          onSelect: mockOnSelect,
+        });
+      expect(result.current.activeIndex).toBe(0);
+
+      await rerender({ focusKey: 'UNKNOWN' });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should ignore a focusKey that points to a disabled item', async () => {
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          items, // B is disabled
+          onSelect: mockOnSelect,
+        });
+      expect(result.current.activeIndex).toBe(0);
+
+      await rerender({ focusKey: 'B' });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should remain at current index when focusKey is cleared', async () => {
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          items,
+          onSelect: mockOnSelect,
+          focusKey: 'C',
+        });
+      expect(result.current.activeIndex).toBe(2);
+
+      await rerender({ focusKey: undefined });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('should accept a new focusKey after clearing', async () => {
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          items,
+          onSelect: mockOnSelect,
+          focusKey: undefined,
+        });
+
+      await rerender({ focusKey: 'D' });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3);
+    });
+  });
+
+  describe('Reactivity (Dynamic Updates)', () => {
+    it('should update activeIndex when initialIndex prop changes', async () => {
+      const { result, rerender } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+        initialIndex: 0,
+      });
+
+      await rerender({ initialIndex: 2 });
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(2);
+      });
+    });
+
+    it('should respect a new initialIndex even after user interaction', async () => {
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          items,
+          onSelect: mockOnSelect,
+          initialIndex: 0,
+        });
+
+      // User navigates, changing the active index
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(2);
+
+      // The component re-renders with a new initial index
+      await rerender({ initialIndex: 3 });
+
+      // The hook should now respect the new initial index
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(3);
+      });
+    });
+
+    it('should validate index when initialIndex prop changes to a disabled item', async () => {
+      const { result, rerender } = await renderSelectionListHook({
+        items,
+        onSelect: mockOnSelect,
+        initialIndex: 0,
+      });
+
+      await rerender({ initialIndex: 1 });
+
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(2);
+      });
+    });
+
+    it('should adjust activeIndex if items change and the initialIndex is now out of bounds', async () => {
+      const { result, rerender } = await renderSelectionListHook({
+        onSelect: mockOnSelect,
+        initialIndex: 3,
+        items,
+      });
+
+      expect(result.current.activeIndex).toBe(3);
+
+      const shorterItems = [
+        { value: 'X', key: 'X' },
+        { value: 'Y', key: 'Y' },
+      ];
+      await rerender({ items: shorterItems }); // Length 2
+
+      // The useEffect syncs based on the initialIndex (3) which is now out of bounds. It defaults to 0.
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(0);
+      });
+    });
+
+    it('should adjust activeIndex if items change and the initialIndex becomes disabled', async () => {
+      const initialItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', key: 'B' },
+        { value: 'C', key: 'C' },
+      ];
+      const { result, rerender } = await renderSelectionListHook({
+        onSelect: mockOnSelect,
+        initialIndex: 1,
+        items: initialItems,
+      });
+
+      expect(result.current.activeIndex).toBe(1);
+
+      const newItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+        { value: 'C', key: 'C' },
+      ];
+      await rerender({ items: newItems });
+
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(2);
+      });
+    });
+
+    it('should reset to 0 if items change to an empty list', async () => {
+      const { result, rerender } = await renderSelectionListHook({
+        onSelect: mockOnSelect,
+        initialIndex: 2,
+        items,
+      });
+
+      await rerender({ items: [] });
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(0);
+      });
+    });
+
+    it('should not reset activeIndex when items are deeply equal', async () => {
+      const initialItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+        { value: 'C', key: 'C' },
+        { value: 'D', key: 'D' },
+      ];
+
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          onSelect: mockOnSelect,
+          onHighlight: mockOnHighlight,
+          initialIndex: 2,
+          items: initialItems,
+        });
+
+      expect(result.current.activeIndex).toBe(2);
+
+      await act(async () => {
+        result.current.setActiveIndex(3);
+      });
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(3);
+
+      mockOnHighlight.mockClear();
+
+      // Create new array with same content (deeply equal but not identical)
+      const newItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+        { value: 'C', key: 'C' },
+        { value: 'D', key: 'D' },
+      ];
+
+      await rerender({ items: newItems });
+
+      // Active index should remain the same since items are deeply equal
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(3);
+      });
+      // onHighlight should NOT be called since the index didn't change
+      expect(mockOnHighlight).not.toHaveBeenCalled();
+    });
+
+    it('should update activeIndex when items change structurally', async () => {
+      const initialItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+        { value: 'C', key: 'C' },
+        { value: 'D', key: 'D' },
+      ];
+
+      const { result, rerender } = await renderSelectionListHook({
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+        initialIndex: 3,
+        items: initialItems,
+      });
+
+      expect(result.current.activeIndex).toBe(3);
+      mockOnHighlight.mockClear();
+
+      // Change item values (not deeply equal)
+      const newItems = [
+        { value: 'X', key: 'X' },
+        { value: 'Y', key: 'Y' },
+        { value: 'Z', key: 'Z' },
+      ];
+
+      await rerender({ items: newItems });
+
+      // Active index should update based on initialIndex and new items
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(0);
+      });
+    });
+
+    it('should handle partial changes in items array', async () => {
+      const initialItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', key: 'B' },
+        { value: 'C', key: 'C' },
+      ];
+
+      const { result, rerender } = await renderSelectionListHook({
+        onSelect: mockOnSelect,
+        initialIndex: 1,
+        items: initialItems,
+      });
+
+      expect(result.current.activeIndex).toBe(1);
+
+      // Change only one item's disabled status
+      const newItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', disabled: true, key: 'B' },
+        { value: 'C', key: 'C' },
+      ];
+
+      await rerender({ items: newItems });
+
+      // Should find next valid index since current became disabled
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(2);
+      });
+    });
+
+    it('should update selection when a new item is added to the start of the list', async () => {
+      const initialItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', key: 'B' },
+        { value: 'C', key: 'C' },
+      ];
+
+      const { result, rerender, waitUntilReady } =
+        await renderSelectionListHook({
+          onSelect: mockOnSelect,
+          items: initialItems,
+        });
+
+      pressKey('down');
+      await waitUntilReady();
+      expect(result.current.activeIndex).toBe(1);
+
+      const newItems = [
+        { value: 'D', key: 'D' },
+        { value: 'A', key: 'A' },
+        { value: 'B', key: 'B' },
+        { value: 'C', key: 'C' },
+      ];
+
+      await rerender({ items: newItems });
+
+      await waitFor(() => {
+        expect(result.current.activeIndex).toBe(2);
+      });
+    });
+
+    it('should not re-initialize when items have identical keys but are different objects', async () => {
+      const initialItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', key: 'B' },
+      ];
+
+      let renderCount = 0;
+
+      const renderHookWithCount = async (initialProps: {
+        items: Array<SelectionListItem<string>>;
+      }) => {
+        function TestComponent(props: typeof initialProps) {
+          renderCount++;
+          useSelectionList({
+            onSelect: mockOnSelect,
+            onHighlight: mockOnHighlight,
+            items: props.items,
+          });
+          return null;
+        }
+        const { rerender, waitUntilReady } = await render(
+          <TestComponent {...initialProps} />,
+        );
+
+        return {
+          rerender: async (newProps: Partial<typeof initialProps>) => {
+            await act(async () => {
+              rerender(<TestComponent {...initialProps} {...newProps} />);
+            });
+            await waitUntilReady();
+          },
+        };
+      };
+
+      const { rerender } = await renderHookWithCount({ items: initialItems });
+
+      // Initial render
+      expect(renderCount).toBe(1);
+
+      // Create new items with the same keys but different object references
+      const newItems = [
+        { value: 'A', key: 'A' },
+        { value: 'B', key: 'B' },
+      ];
+
+      await rerender({ items: newItems });
+      expect(renderCount).toBe(2);
+    });
+  });
+
+  describe('Cleanup', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should clear timeout on unmount when timer is active', async () => {
+      const longList: Array<SelectionListItem<string>> = Array.from(
+        { length: 15 },
+        (_, i) => ({ value: `Item ${i + 1}`, key: `Item ${i + 1}` }),
+      );
+
+      const { unmount, waitUntilReady } = await renderSelectionListHook({
+        items: longList,
+        onSelect: mockOnSelect,
+        showNumbers: true,
+      });
+
+      pressKey('1', '1');
+      await waitUntilReady();
+
+      expect(vi.getTimerCount()).toBe(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      await waitUntilReady();
+      expect(mockOnSelect).not.toHaveBeenCalled();
+
+      const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
+      await unmount();
+
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      // No waitUntilReady here as component is unmounted
+      expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+  });
+});

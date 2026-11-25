@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.api.TerminalRelayHandler;
 import com.alibaba.qwen.code.managedagent.api.TerminalRelayHandshakeInterceptor;
 import com.alibaba.qwen.code.managedagent.api.TerminalTicketStore;
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
@@ -73,7 +74,7 @@ public class TerminalWebSocketConfig implements WebSocketConfigurer {
         // The intercepted @Bean call returns the singleton the ticket
         // controller also injects; mint and consume must share one store.
         registry.addHandler(new TerminalRelayHandler(broker),
-                        com.alibaba.qwen.code.managedagent.security.PublicSurface
+                        PublicSurface
                                 .TERMINAL_UPGRADE_PATH)
                 .addInterceptors(
                         new TerminalRelayHandshakeInterceptor(terminalTicketStore()));

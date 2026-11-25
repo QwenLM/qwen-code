@@ -1251,6 +1251,25 @@ export function toRpcError(err: unknown): {
           retryable: true,
         },
       };
+    case 'SystemOverloadedError': {
+      const loadErr = err as {
+        reason?: unknown;
+        loadRatio?: unknown;
+        eventLoopLagP99Ms?: unknown;
+      };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'system_overloaded',
+          httpStatus: 503,
+          retryable: true,
+          reason: loadErr.reason,
+          loadRatio: loadErr.loadRatio,
+          eventLoopLagP99Ms: loadErr.eventLoopLagP99Ms,
+        },
+      };
+    }
     case 'PromptQueueFullError': {
       const promptErr = err as {
         sessionId?: unknown;
@@ -6430,6 +6449,7 @@ export class AcpDispatcher {
         abort.signal,
         {
           ...this.sessionCtx(conn, sessionId, fromLoopback),
+          userPrompt: true,
           ...(typeof submittedPrompt === 'string' &&
           metadata?.[CHANNEL_PROMPT_META_KEY] === undefined &&
           metadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === undefined &&

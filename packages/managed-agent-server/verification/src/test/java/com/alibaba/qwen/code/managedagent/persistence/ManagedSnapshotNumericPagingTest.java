@@ -2,9 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.RowMapper;
@@ -77,7 +76,7 @@ class ManagedSnapshotNumericPagingTest {
                 fixture.jdbc.update("UPDATE ma_message SET item_status='retracted'"
                         + " WHERE tenant_id=? AND session_id=? AND item_id=?", "tenant", "session", id(203));
                 fixture.jdbc.update("UPDATE ma_event_stream SET projection_version=projection_version+1"
-                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
+                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=''",
                         "tenant", "session");
                 fixture.project();
             });
@@ -142,7 +141,7 @@ class ManagedSnapshotNumericPagingTest {
                 fixture.jdbc.update("UPDATE ma_message SET item_status='retracted' WHERE tenant_id=? AND session_id=? AND item_id=?",
                         "tenant", "session", id(203));
                 fixture.jdbc.update("UPDATE ma_event_stream SET projection_version=projection_version+1"
-                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", "tenant", "session");
+                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=''", "tenant", "session");
                 fixture.project();
             });
             var changed = fixture.forward(null, 201, 2);
@@ -207,14 +206,11 @@ class ManagedSnapshotNumericPagingTest {
                             new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             jdbc.update(
                     "INSERT INTO"
-                        + " ma_session(tenant_id,session_id,agent_id,gmt_create,gmt_modified,tenant_key,session_key,session_scope_key)"
-                        + " VALUES(?,?,?,0,0,?,?,?)",
+                        + " ma_session(tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                        + " VALUES(?,?,?,0,0)",
                     "tenant",
                     "session",
-                    "qwen-code",
-                    ManagedSchemaKeys.key("tenant"),
-                    ManagedSchemaKeys.key("session"),
-                    ManagedSessionStore.sessionScopeKey("tenant", "session"));
+                    "qwen-code");
             int sequence = ties ? count - 5 : count;
             jdbc.update(
                     "INSERT INTO"
@@ -236,16 +232,15 @@ class ManagedSnapshotNumericPagingTest {
                         + "first_sequence,last_sequence,gmt_create,gmt_modified,revision,parts_json)"
                         + " VALUES(?,?,?,?,'message','assistant','completed','{}',?,?,0,0,1,'[]')",
                     rows);
-            String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
             byte[] bytes = {91, 93};
             for (int index = Math.max(1, count - 3); index <= count; index++) {
                 String resourceId = "numeric-parts-" + index;
-                String resourceKey = ManagedSessionStore.resourceKey(scope, resourceId);
-                jdbc.update("INSERT INTO ma_resource(resource_key,tenant_id,session_id,"
+                jdbc.update("INSERT INTO ma_resource(tenant_id,session_id,"
                                 + "resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                                + " VALUES(?,'tenant','session',?,'managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0)",
-                        resourceKey, resourceId, WorkspaceEvidenceResources.digest(bytes), bytes);
-                jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE item_id=?", resourceKey, id(index));
+                                + " VALUES('tenant','session',?,'managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0)",
+                        resourceId, WorkspaceEvidenceResources.digest(bytes), bytes);
+                jdbc.update("UPDATE ma_message SET body_resource_ref=? WHERE item_id=?",
+                        ManagedIdentityRefs.resourceRef("tenant", "session", resourceId), id(index));
             }
             project();
         }

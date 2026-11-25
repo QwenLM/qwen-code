@@ -23,7 +23,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -331,7 +330,7 @@ class HostedWorkspaceToolTurnIT {
                     + mapper.writeValueAsString(cli.toString()) + ";\nawait import("
                     + mapper.writeValueAsString(cli.toUri().toString()) + ");\n");
         }
-        String tenant = "hosted-tools-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         List<Path> workspaces = new ArrayList<>();
         for (String name : cases) {
             workspaces.add(Files.createDirectory(temporary.resolve(name)));
@@ -701,13 +700,12 @@ class HostedWorkspaceToolTurnIT {
             }
         }
         String storageId = "storage-" + index;
-        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
-                + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
-                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
+        String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ?", String.class,
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
-                + " session_state, execution_storage_key, is_rewind_pending FROM ma_runtime_session"
+                + " session_state, execution_storage_id, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, session.get("sessionId"), report.path("promptId").asText());
         boolean released = storeFaults ? fault.equals("turn-reply")
@@ -722,7 +720,7 @@ class HostedWorkspaceToolTurnIT {
         // terminal drain (#16484), so release-before-forward ends RELEASED
         // like release; only the never-settled turns above stay READY.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
-        assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
+        assertThat(member.get("execution_storage_id")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
         assertThat(member.get("is_rewind_pending")).isEqualTo(false);
         if (retained) {
@@ -754,7 +752,7 @@ class HostedWorkspaceToolTurnIT {
                     + (fault.equals("await-runtime") ? "await_runtime" : "results_ready") + "')";
             default -> throw new IllegalArgumentException(fault);
         };
-        assertThat(tenant).matches("hosted-tools-[0-9a-f-]{36}");
+        assertThat(tenant).matches("[0-9a-f-]{36}");
         assertThat(session.get("sessionId").toString()).matches("[0-9a-f-]{36}");
         jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON " + table + " FOR EACH ROW BEGIN IF"
                 + " NEW.tenant_id = '" + tenant + "' AND NEW.session_id = '" + session.get("sessionId")

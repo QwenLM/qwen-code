@@ -1457,6 +1457,15 @@ export interface SessionMetadataUpdate {
   prs?: SessionPrInfo[];
 }
 
+export type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+import type {
+  SessionRetirementIdentity,
+  SessionRetirementReceipt,
+} from './session-retirement.js';
+
 export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
@@ -1478,12 +1487,17 @@ export interface CloseSessionOpts {
    */
   requireAgentClose?: boolean;
   /**
+   * Require a durable close acknowledgement before deleting session data.
+   * A timed-out caller leaves the close running on its original channel.
+   */
+  forDeletion?: boolean;
+  /**
    * Bound the agent-close round trip. The close notification is otherwise
    * unbounded (it only loses to transport close), which is correct for an
    * ordinary close but not when the caller already has reason to believe the
    * child cannot answer. A timeout lands in the same unknown-outcome recovery
-   * as any other non-definitive failure: the channel is killed, which is what
-   * unblocks callers waiting on the session to drain.
+   * as any other non-definitive failure. For deletion, it bounds the caller's
+   * wait while the pending close continues.
    */
   agentCloseTimeoutMs?: number;
 }
@@ -1511,6 +1525,8 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /** Set at a client-facing prompt admission boundary. */
+  userPrompt?: true;
   /**
    * Internal originator for a daemon-owned mid-turn message promoted into the
    * normal prompt FIFO. It was authenticated when the message was enqueued, so
@@ -1559,6 +1575,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** Server-owned child reservation, never taken from prompt metadata. */
+  turnSkillLease?: string;
   /** Original text explicitly declared by a supported submission producer. */
   submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
@@ -1615,6 +1633,10 @@ export interface BridgeClientRequestContext {
   deadlineMs?: number;
 }
 
+export const TURN_SKILL_LEASE_META_KEY = 'qwen.daemon.turnSkillLease';
+export const SESSION_RETIREMENT_RECEIPT_META_KEY =
+  'qwen.dev/sessionRetirementReceipt';
+export const TURN_SKILL_LEASE_METHOD = 'qwen/control/session/turnSkillLease';
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
   'qwen.daemon.expectedApprovalMode';
@@ -1668,6 +1690,7 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
+export const DAEMON_USER_PROMPT_META_KEY = 'qwen.daemon.userPrompt';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 export const IMAGE_ONLY_PROMPT_TEXT = '[image]';
@@ -2174,6 +2197,15 @@ export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
 }
 
 export interface AcpSessionBridge extends WorkspaceEventBridge {
+  retireSessionIfIdle?(
+    identity: SessionRetirementIdentity,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionRetirementReceipt>;
+  getSessionRetirement?(
+    sessionId: string,
+    operationId?: string,
+  ): SessionRetirementReceipt | undefined;
+
   /**
    * Immutable proof derived at construction: this bridge's frozen
    * child-environment overrides carry the exact Conversations provenance
@@ -2863,6 +2895,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context: { clientId: string },
   ): Promise<McpAppToolResult>;
 
+  readonly supportsTurnExtensionStoreLease?: true;
+  /** Reserve or release native skill files and optional extension generation before prompt admission. */
+  updateTurnSkillLease?(
+    sessionId: string,
+    key: string,
+    action: 'prepare' | 'release',
+    expectedDigest?: string,
+    expectedExtensionGeneration?: number,
+  ): Promise<{
+    digest?: string;
+    extensionGeneration?: number;
+    unsupportedExtensionComponent?: true;
+    sessionSkillEffectsCompatible?: boolean;
+  }>;
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,

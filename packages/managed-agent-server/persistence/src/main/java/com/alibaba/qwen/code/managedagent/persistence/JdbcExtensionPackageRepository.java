@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -28,10 +29,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
 
-@org.springframework.stereotype.Repository
+@Repository
 public class JdbcExtensionPackageRepository implements ExtensionPackageRepository {
     private static final TypeReference<Map<String, String>> SETTINGS = new TypeReference<>() { };
     private static final TypeReference<List<String>> KEYS = new TypeReference<>() { };
@@ -59,7 +61,7 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             if (existing != null) {
                 Package saved = publication(tenant, workspace, existing);
                 if (!digest.equals(existing.packageDigest()) || !decode(encodedManifest, Manifest.class).equals(saved.manifest())
-                        || !java.util.Objects.equals(source, saved.source())) {
+                        || !Objects.equals(source, saved.source())) {
                     throw new ManagedAgentException(409, "extension_source_changed", "The prepared extension no longer matches the original publication.");
                 }
                 return existing;
@@ -122,25 +124,26 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             String requestDigest, SourceImport command, Access access) {
         transaction.executeWithoutResult(status -> {
             lockWorkspace(tenant, actor, workspace, access);
-            var existing = jdbc.queryForList("SELECT request_digest FROM ma_extension_source_import WHERE import_key = ?",
-                    String.class, operationKey(tenant, workspace, operationId));
+            var existing = jdbc.queryForList("SELECT request_digest FROM ma_extension_source_import"
+                            + " WHERE tenant_id = ? AND workspace_id = ? AND operation_id = ?",
+                    String.class, tenant, workspace, operationId);
             if (!existing.isEmpty()) {
                 if (!requestDigest.equals(existing.getFirst())) {
                     throw new ManagedAgentException(409, "idempotency_conflict", "The source import key was used for another request.");
                 }
                 return;
             }
-            jdbc.update("INSERT INTO ma_extension_source_import (import_key, tenant_id, workspace_id, actor_key, operation_id,"
-                            + " request_digest, request_json, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                    operationKey(tenant, workspace, operationId), tenant, workspace, actorKey(tenant, actor), operationId,
-                    requestDigest, encode(command));
+            jdbc.update("INSERT INTO ma_extension_source_import (tenant_id, workspace_id, actor_id, operation_id,"
+                            + " request_digest, request_json, gmt_create) VALUES (?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                    tenant, workspace, actor, operationId, requestDigest, encode(command));
         });
     }
 
     public SourceImport sourceImport(String tenant, String actor, String workspace, String operationId, Access access) {
         access.require(false);
-        var rows = jdbc.queryForList("SELECT request_json FROM ma_extension_source_import WHERE import_key = ? AND actor_key = ?",
-                String.class, operationKey(tenant, workspace, operationId), actorKey(tenant, actor));
+        var rows = jdbc.queryForList("SELECT request_json FROM ma_extension_source_import"
+                        + " WHERE tenant_id = ? AND workspace_id = ? AND operation_id = ? AND actor_id = ?",
+                String.class, tenant, workspace, operationId, actor);
         if (rows.size() != 1) {
             throw missing();
         }
@@ -185,8 +188,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             jdbc.update("UPDATE ma_extension_package SET state = 'PUBLISHED', byte_length = ?"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND extension_id = ? AND package_revision = ?",
                     length, tenant, workspace, id, operation.revision());
-            jdbc.update("UPDATE ma_extension_operation SET state = 'settled' WHERE operation_key = ?",
-                    operationKey(tenant, workspace, operationId));
+            jdbc.update("UPDATE ma_extension_operation SET state = 'settled'"
+                            + " WHERE tenant_id = ? AND workspace_id = ? AND operation_id = ?",
+                    tenant, workspace, operationId);
             return new Operation(operationId, id, "publish", "settled", operation.revision(), digest);
         });
     }
@@ -230,9 +234,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     public Operation operation(String tenant, String actor, String workspace, String operationId, Access access) {
         access.require(false);
         var rows = jdbc.query("SELECT extension_id, operation_kind, state, revision, package_digest"
-                        + " FROM ma_extension_operation WHERE operation_key = ? AND actor_key = ?",
+                        + " FROM ma_extension_operation WHERE tenant_id = ? AND workspace_id = ? AND operation_id = ? AND actor_id = ?",
                 (row, index) -> new Operation(operationId, row.getString(1), row.getString(2), row.getString(3),
-                        row.getLong(4), row.getString(5)), operationKey(tenant, workspace, operationId), actorKey(tenant, actor));
+                        row.getLong(4), row.getString(5)), tenant, workspace, operationId, actor);
         if (rows.size() != 1) {
             throw missing();
         }
@@ -292,8 +296,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     }
 
     private Operation existingOperation(String tenant, String actor, String workspace, String operationId, String digest, Access access) {
-        var rows = jdbc.queryForList("SELECT request_digest FROM ma_extension_operation WHERE operation_key = ?",
-                String.class, operationKey(tenant, workspace, operationId));
+        var rows = jdbc.queryForList("SELECT request_digest FROM ma_extension_operation"
+                        + " WHERE tenant_id = ? AND workspace_id = ? AND operation_id = ?",
+                String.class, tenant, workspace, operationId);
         if (rows.isEmpty()) {
             return null;
         }
@@ -306,11 +311,10 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
 
     private void insertOperation(String tenant, String actor, String workspace, String operationId, String extensionId,
             String kind, long revision, String packageDigest, String requestDigest, String state) {
-        jdbc.update("INSERT INTO ma_extension_operation (operation_key, tenant_id, workspace_id, actor_key,"
+        jdbc.update("INSERT INTO ma_extension_operation (tenant_id, workspace_id, actor_id,"
                         + " operation_id, extension_id, operation_kind, revision, package_digest, request_digest, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                operationKey(tenant, workspace, operationId), tenant, workspace, actorKey(tenant, actor),
-                operationId, extensionId, kind, revision, packageDigest, requestDigest, state);
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                tenant, workspace, actor, operationId, extensionId, kind, revision, packageDigest, requestDigest, state);
     }
 
     private String encode(Object value) {
@@ -336,10 +340,6 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             throw new IllegalStateException("Invalid saved extension settings keys", error);
         }
     }
-
-    private static String actorKey(String tenant, String actor) { return ManagedSchemaKeys.key(tenant, actor); }
-
-    private static String operationKey(String tenant, String workspace, String id) { return ManagedSchemaKeys.key(tenant, workspace, id); }
 
     private static String settingsKey(String tenant, String workspace, String id, long revision) {
         return ManagedSchemaKeys.key("extension-settings", tenant, workspace, id, Long.toString(revision));

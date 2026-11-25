@@ -458,6 +458,7 @@ export default {
   'Debug Keystroke Logging': 'Debug-Protokollierung von Tastatureingaben',
   'Language: UI': 'Sprache: Benutzeroberfläche',
   'Language: Model': 'Sprache: Modell',
+  'Language: Display Translation': 'Sprache: Anzeigeübersetzung',
   'Output Format': 'Ausgabeformat',
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
@@ -768,6 +769,8 @@ export default {
   'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Ein Hook hat die Runde beendet: {{reason}}',
   'Loading hooks...': 'Hooks werden geladen...',
   'Error loading hooks:': 'Fehler beim Laden der Hooks:',
   'Press Escape to close': 'Escape zum Schließen drücken',
