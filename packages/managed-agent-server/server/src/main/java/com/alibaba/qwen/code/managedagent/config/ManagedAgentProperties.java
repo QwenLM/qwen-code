@@ -597,9 +597,13 @@ public class ManagedAgentProperties
     }
 
     public void validateRuntimeProvider() {
+        validateRuntimeProvider(com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies.NONE);
+    }
+
+    public void validateRuntimeProvider(com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies dependencies) {
         if (runtimeBroker.isEnabled()) {
             new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
-                    .validateSelected(this);
+                    .validateSelected(this, dependencies);
         }
     }
 

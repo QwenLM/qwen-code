@@ -2,12 +2,19 @@ package com.alibaba.qwen.code.runtimebroker.spi;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 
+import java.util.Optional;
+
 /** Shared application ports; providers borrow only the dependencies they need. */
 public interface RuntimeProviderDependencies {
     public RuntimeProviderDependencies NONE = new RuntimeProviderDependencies() { };
 
     public default RuntimeBindingRepository bindings() {
         throw new IllegalStateException("Runtime binding repository is unavailable");
+    }
+
+    /** Optional same-process placement port; absence retains the external HTTP transport. */
+    public default Optional<ExternalRuntimeClient> externalRuntime() {
+        return Optional.empty();
     }
 
     public default ExternalStorageRegistry externalStorage() {

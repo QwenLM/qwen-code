@@ -96,7 +96,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData) {
         this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, null, null, null);
+                workspaceExecutionStore, publications, publicationData, null, null, null, null);
     }
 
     public EmbeddedRuntimeBroker(SessionQueryStore store,
@@ -109,7 +109,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             ToolPublicationDataStore publicationData,
             SshWorkspaceService ssh) {
         this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, null, null, ssh);
+                workspaceExecutionStore, publications, publicationData, null, null, ssh, null);
     }
 
     public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
@@ -119,7 +119,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager) {
         this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, jdbc, manager, null);
+                workspaceExecutionStore, publications, publicationData, jdbc, manager, null, null);
     }
 
     public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
@@ -127,7 +127,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
             ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
-            org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh) {
+            org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh,
+            com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient externalRuntime) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -151,7 +152,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                 "Hosted Harness capability digest");
         var selection = RuntimeBackendSelection.from(properties);
         var registry = new RuntimeProviderRegistry();
-        registry.validateSelected(properties);
         boolean remote = selection.includes(RuntimeProviderKinds.SSH_PROCESS);
         if (remote && (ssh == null || !ssh.configured() || workspaceExecutionStore == null)) {
             throw new IllegalStateException("SSH Runtime requires configured Workspace services");
@@ -178,6 +178,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
 
             @Override
             public RuntimeBindingRepository bindings() { return bindingRepository; }
+
+            @Override
+            public java.util.Optional<com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient> externalRuntime() {
+                return java.util.Optional.ofNullable(externalRuntime);
+            }
 
             @Override
             public com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalStorage() {

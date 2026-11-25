@@ -54,6 +54,8 @@ The Managed catalog is distinct from the host business catalog. Its schema and a
 
 A host that wants no controllers uses the default Java surface. The standalone application retains its existing web assembly; the starter does not remove it.
 
+A host may provide one `ExternalRuntimeClient` bean for same-process external Runtime placement. `RuntimeProviderDependencies.externalRuntime()` exposes this optional port. `ExternalRuntimeProviderFactory` continues to create the established `ExternalRuntimeProvisioner` / `ExternalWorkspaceProvisioner` with their binding, attestation and reattachment semantics. An injected client replaces the external provider URL/token requirement; without one, URL/token validation and HTTP behavior are unchanged. Existing `RuntimeProviderFactory.validate(settings)` plugins remain valid, while a default overload receives host dependencies for configuration-only validation. Neither this SPI nor an injected client creates business identity, authorizes Workspace access, replaces the Managed database, or exposes host services as a servlet.
+
 
 ## Validation
 
