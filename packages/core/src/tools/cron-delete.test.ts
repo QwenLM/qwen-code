@@ -12,16 +12,31 @@ import {
 import { Storage } from '../config/storage.js';
 
 const readFailure = vi.hoisted(() => ({ current: null as Error | null }));
+const readGate = vi.hoisted(() => ({
+  pending: null as Promise<void> | null,
+  entered: null as (() => void) | null,
+}));
 vi.mock('../services/cronTasksFile.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../services/cronTasksFile.js')>();
   return {
     ...actual,
     readCronTasks: async (projectRoot: string) => {
+      const tasks = await actual.readCronTasks(projectRoot);
+      if (readGate.entered) {
+        const entered = readGate.entered;
+        readGate.entered = null;
+        entered();
+      }
+      if (readGate.pending) {
+        const pending = readGate.pending;
+        readGate.pending = null;
+        await pending;
+      }
       const failure = readFailure.current;
       readFailure.current = null;
       if (failure) throw failure;
-      return actual.readCronTasks(projectRoot);
+      return tasks;
     },
   };
 });
@@ -51,6 +66,9 @@ describe('CronDeleteTool', () => {
   });
 
   afterEach(async () => {
+    readGate.pending = null;
+    readGate.entered = null;
+    readFailure.current = null;
     config._scheduler.destroy();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
@@ -203,14 +221,141 @@ describe('CronDeleteTool', () => {
 
     const result = await running;
 
-    expect(result.error).toBeUndefined();
-    expect(config._scheduler.list().some((job) => job.id === stale.id)).toBe(
-      false,
+    expect(result.error?.message).toContain('not found');
+    expect(result.llmContent).not.toContain('Cancelled job');
+    expect(config._scheduler.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: stale.id, durable: true }),
+      ]),
     );
     expect(await fs.readFile(getCronFilePath(tmpDir), 'utf8')).toBe(
       bytesBeforeRelease,
     );
     expect(await readCronTasks(tmpDir)).toEqual([later]);
+  });
+
+  it('does not cancel a durable installed by a watcher after an empty read', async () => {
+    const stale = await config._scheduler.createDurable(
+      '* * * * *',
+      'stale unbound before empty read',
+      true,
+    );
+    const persistedStale = (await readCronTasks(tmpDir)).find(
+      (task) => task.id === stale.id,
+    )!;
+    await writeCronTasks(tmpDir, []);
+    const watcher = new CronScheduler(tmpDir);
+    await watcher.enableDurable('watching-owner');
+    const later = {
+      ...persistedStale,
+      prompt: 'new unbound installed by the watcher',
+    };
+    let notifyRead!: () => void;
+    let releaseRead!: () => void;
+    const deleteEntered = new Promise<void>((resolve) => {
+      notifyRead = resolve;
+    });
+    const beforeDelete = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    readGate.entered = notifyRead;
+    readGate.pending = beforeDelete;
+    const running = tool
+      .build({ id: stale.id })
+      .execute(new AbortController().signal);
+
+    try {
+      await deleteEntered;
+      await writeCronTasks(tmpDir, [later]);
+      await vi.waitFor(
+        () => {
+          expect(watcher.list()).toEqual([
+            expect.objectContaining({
+              id: stale.id,
+              prompt: later.prompt,
+              durable: true,
+            }),
+          ]);
+        },
+        { timeout: 5000, interval: 10 },
+      );
+      const bytesBeforeDelete = await fs.readFile(
+        getCronFilePath(tmpDir),
+        'utf8',
+      );
+      releaseRead();
+      const result = await running;
+
+      expect(result.error?.message).toContain('not found');
+      expect(result.llmContent).not.toContain('Cancelled job');
+      expect(watcher.list()).toEqual([
+        expect.objectContaining({
+          id: stale.id,
+          prompt: later.prompt,
+          durable: true,
+        }),
+      ]);
+      expect(await fs.readFile(getCronFilePath(tmpDir), 'utf8')).toBe(
+        bytesBeforeDelete,
+      );
+      expect(await readCronTasks(tmpDir)).toEqual([later]);
+
+      const normalDeletion = {
+        ...later,
+        prompt: 'ordinary explicit durable deletion',
+      };
+      await writeCronTasks(tmpDir, []);
+      const directDelete = config._scheduler.delete.bind(config._scheduler);
+      const deleteSpy = vi.spyOn(config._scheduler, 'delete');
+      deleteSpy.mockImplementation(async (id, expectedTaskSessionId) =>
+        directDelete(id, expectedTaskSessionId),
+      );
+      let notifySecond!: () => void;
+      let releaseSecond!: () => void;
+      const secondEntered = new Promise<void>((resolve) => {
+        notifySecond = resolve;
+      });
+      const secondBeforeDelete = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+      readGate.entered = notifySecond;
+      readGate.pending = secondBeforeDelete;
+      const ordinaryRunning = tool
+        .build({ id: stale.id })
+        .execute(new AbortController().signal);
+      try {
+        await secondEntered;
+        await writeCronTasks(tmpDir, [normalDeletion]);
+        await vi.waitFor(() => {
+          expect(watcher.list()).toEqual([
+            expect.objectContaining({
+              id: stale.id,
+              prompt: normalDeletion.prompt,
+              durable: true,
+            }),
+          ]);
+        });
+        releaseSecond();
+        const ordinary = await ordinaryRunning;
+        expect(deleteSpy).toHaveBeenCalledExactlyOnceWith(stale.id, undefined, {
+          runtimeOnly: true,
+        });
+        expect(ordinary.error).toBeUndefined();
+        expect(ordinary.llmContent).toBe(`Cancelled job ${stale.id}.`);
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+        await vi.waitFor(() => {
+          expect(watcher.list()).toEqual([]);
+        });
+      } finally {
+        releaseSecond();
+        await ordinaryRunning;
+        deleteSpy.mockRestore();
+      }
+    } finally {
+      releaseRead();
+      await running;
+      await watcher.stop();
+    }
   });
 
   it('returns error for non-existent job', async () => {

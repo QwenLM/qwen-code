@@ -687,7 +687,9 @@ export class CronScheduler {
   /**
    * Deletes a job by ID. Durable jobs are also removed from disk, unless
    * runtimeOnly is used by a caller whose file observation did not contain
-   * this job; that caller persists separate deletion intent. The removal is
+   * this job; in that case durable runtime entries are left for watcher
+   * reconciliation instead of risking a newly installed task. The caller
+   * persists separate deletion intent. The removal is
    * awaited — reporting success while the on-disk entry could
    * survive would let the task resurface in another session or after a
    * restart. On write failure the job is restored and the error rethrown.
@@ -699,6 +701,8 @@ export class CronScheduler {
     options?: { runtimeOnly?: boolean },
   ): Promise<boolean> {
     const [key, job] = this.#runtimeEntry(id, expectedTaskSessionId);
+    // A zero-match file observation must not cancel a newly installed durable.
+    if (options?.runtimeOnly && job?.durable) return false;
     // A gate still running for this job must deliver nothing afterwards:
     // delete takes effect immediately (safe-delete design).
     this.abortGate(key);
