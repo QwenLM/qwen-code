@@ -577,7 +577,7 @@ describe('release workflow', () => {
         'fetch-depth': 1,
         // A blob-less sparse checkout fetches missing blobs while checking
         // out, after the action's retryable fetch has already succeeded.
-        filter: 'none',
+        filter: 'tree:0',
         'persist-credentials': false,
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
