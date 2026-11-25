@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getTurnSkillSnapshot } from '../skills/turn-skill-snapshot.js';
 import type { LlmPreparedRequestCallback } from './llm-chat.js';
 import {
   resolveWorkflowIntent,
@@ -847,6 +848,7 @@ export class LlmClient {
   // suppressNextSkillListing / "don't re-inject on compact".
   private announcedSkillReminderKeys = new Set<string>();
   private skillRemindersInitialized = false;
+  private announcedTurnSkillView?: string;
   private announcedAgentReminderNames = new Set<string>();
   private agentRemindersInitialized = false;
 
@@ -2975,6 +2977,22 @@ export class LlmClient {
         error,
       );
       return;
+    }
+
+    const turnSkillView = getTurnSkillSnapshot();
+    if (
+      turnSkillView?.skills.length &&
+      this.announcedTurnSkillView !== turnSkillView.id
+    ) {
+      this.announcedTurnSkillView = turnSkillView.id;
+      this.getChat().addHistory({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>Skill bodies and base directories from earlier turns apply to those turns. Invoke the Skill tool in this turn before using a managed skill or its companion files.</system-reminder>',
+          },
+        ],
+      });
     }
 
     const currentKeys = new Set(entries.map(LlmClient.skillEntryKey));

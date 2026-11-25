@@ -30,6 +30,17 @@ vi.mock('node:crypto', () => ({
   })),
 }));
 vi.mock('../utils/jsonl-utils.js');
+// The transcript and its synthetic path are already mocked here; real archive
+// exclusion is covered by session-archive-write-fence.test.ts.
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  assertSessionArchiveGeneration: vi.fn(),
+  readSessionArchiveGeneration: vi.fn(),
+  withSessionArchiveWriteLockSync: vi.fn((_path, run) => run()),
+}));
 
 function resumedSessionWithTitle(
   title: string,
