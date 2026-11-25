@@ -1163,23 +1163,27 @@ jobs:
           scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
           echo "dir=$scratch" >> "$GITHUB_OUTPUT"
 
-      # Decide the execution-sandbox policy from what this runner can actually
-      # do, and say so. `required` is the point — a review that cannot contain
-      # the PR's own install/build/test reports no evidence rather than running
-      # it with this step's GH_TOKEN and OPENAI_API_KEY — but `required` on a
-      # host that cannot satisfy it is not a security win, it is a review that
-      # fails its own install (a contained command that fails is a
-      # PR-attributed failure, and a refused prebuild leaves the tree bare for
-      # every agent, #10108). Measured on the `ecs-review` pool 2026-11-16: the
-      # daemon answers, and `ghcr.io/qwenlm/qwen-code:<version>` does not pull
-      # (TLS handshake timeout to the blob CDN). So: `required` when both halves
-      # hold, `off` — today's behaviour — with a warning and a summary line
-      # when they do not, and containment turns on by itself once the pool can
-      # pull the image. On the persistent pool that fail-open fallback is for
-      # SAME-REPO heads only: a fork head that still reaches the pool is
-      # refused when containment cannot be `required` (see the guard below).
-      # The image resolves through the repo's resolver first, so an
-      # unpublished tag cannot be charged to the PR under review.
+      # Decide container sandbox readiness from what this runner can actually
+      # provide, and keep CI fail-closed on `tiered`. Under `tiered`
+      # (packages/cli/src/commands/review/lib/sandboxed-exec.ts):
+      # - trusted same-repo, low-risk PRs (`trusted-shared-kernel`) execute
+      #   install/build/test inside the hardened, digest-pinned container;
+      # - external/fork PRs and high-risk changed paths (`hardware-isolated`)
+      #   require a hardware-isolated backend (microVM bridge) and fail closed
+      #   to read-only static review when none is available — never downgrading
+      #   to a shared-kernel container or unsandboxed host execution;
+      # - host tmux subcommands (`drive`, `ab-drive`, `capture-tui`) are
+      #   refused fail-closed.
+      # When the container daemon or digest-pinned image is unavailable, CI
+      # NEVER falls back to `policy='off'`:
+      # - fork heads (or unreadable heads) on the persistent self-hosted pool
+      #   fail the job before the yolo agent starts, protecting CI credentials
+      #   and the shared host;
+      # - all other runs stay on `policy='tiered'` with `force_hardware='1'` so
+      #   the CLI never falls back to an unpinned local tag or blames an
+      #   image-pull outage on the PR under review — every execution phase
+      #   requires hardware isolation or refuses cleanly with structured
+      #   `executionBoundary` disclosure.
       - name: 'Resolve review sandbox'
         id: 'review_sandbox'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1200,40 +1204,50 @@ jobs:
           if [ -z "${HEAD_REPO:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
             HEAD_REPO="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.repo.full_name // ""' 2>/dev/null || true)"
           fi
-          policy='off'
+          policy='tiered'
+          container_ready='false'
+          force_hardware='1'
           # A daemon round trip, not presence on PATH: a client with no
           # reachable daemon is the shape that then refuses every reviewed
           # command deep inside the prebuild (cli lib/sandboxed-exec.ts).
           if ! "${SANDBOX_COMMAND}" info > /dev/null 2>&1; then
-            echo "::warning::no container daemon answered '${SANDBOX_COMMAND} info' on this review runner; the PR's own install/build/test run unsandboxed for this review."
+            echo "::warning::no container daemon answered '${SANDBOX_COMMAND} info' on this review runner; keeping policy='tiered' with force_hardware=1 (container tier disabled, fail-closed without host fallback)."
           elif ! node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"; then
-            echo "::warning::the review sandbox image is not available on this runner; the PR's own install/build/test run unsandboxed for this review."
+            echo "::warning::the review sandbox image is not available on this runner; keeping policy='tiered' with force_hardware=1 (container tier disabled so unpinned tags are never used, fail-closed without host fallback)."
           else
-            policy='required'
+            container_ready='true'
+            force_hardware=''
           fi
           # Fail closed for fork heads on the persistent pool (comment/
-          # dispatch shapes the runs-on routing cannot see): `off` there
-          # exposes this step's credentials AND the shared host — disabling
-          # only the prebuild would not contain the yolo agent's own shell
-          # probes. Hosted keeps fail-open: the disposable VM bounds it.
-          # Same-repo heads keep fail-open everywhere (authors hold write).
-          if [ "$policy" != 'required' ] && [ "${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
-            echo "::error::fork PR review refused: the execution sandbox is '$policy' on this runner, and an uncontained review would expose CI credentials to PR-controlled install/build scripts (the agent's own shell probes included). Re-run with MAINTAINER_ECS_RUNNER_DISABLED=true to review on the hosted lane."
+          # dispatch shapes the runs-on routing cannot see): without container
+          # readiness on the shared pool, abort before the yolo agent starts so
+          # neither CI credentials nor the shared host are exposed to PR-driven
+          # shell probes.
+          if [ "$container_ready" != 'true' ] && [ "${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::fork PR review refused: the container sandbox is unavailable (container_ready='$container_ready', policy='$policy') on this runner, and an uncontained review would expose CI credentials to PR-controlled install/build scripts (the agent's own shell probes included). Re-run with MAINTAINER_ECS_RUNNER_DISABLED=true to review on the hosted lane."
             {
               echo "### Review sandbox"
               echo "runtime: ${SANDBOX_COMMAND}"
+              echo "container_ready: $container_ready"
               echo "policy: $policy (fork head ${HEAD_REPO:-unknown}; review refused)"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           echo "sandbox_policy=$policy"
+          echo "sandbox_container_ready=$container_ready"
           {
             echo "### Review sandbox"
             echo "runtime: ${SANDBOX_COMMAND}"
+            echo "container_ready: $container_ready"
+            echo "force_hardware: ${force_hardware:-0}"
             echo "policy: $policy"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "policy=$policy" >> "$GITHUB_OUTPUT"
+          {
+            echo "policy=$policy"
+            echo "container_ready=$container_ready"
+            echo "force_hardware=$force_hardware"
+          } >> "$GITHUB_OUTPUT"
 
       - name: 'Run review'
         id: 'review'
@@ -1329,28 +1343,31 @@ jobs:
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
-          # The #9556 execution sandbox around the PR's own install/build/test.
-          # Without it those commands inherit this step's GH_TOKEN and
-          # OPENAI_API_KEY, and a `postinstall` reads both in one line.
-          # `required` only when the 'Resolve review sandbox' step above found a
-          # runtime AND an image; `off` (today's behaviour) with a warning and a
-          # summary line otherwise — and on the persistent pool that fallback
-          # only ever reaches a SAME-REPO head (fork payloads route hosted,
-          # see runs-on; the preflight refuses the rest). `required` on a host that cannot
-          # satisfy it would fail the PR's own install instead of containing
-          # it, and a silently refused prebuild leaves the tree bare for every
-          # agent (#10108) — so the policy follows what the runner can do,
-          # visibly, within that boundary.
-          # A contained command that fails for environmental reasons (no git in
-          # the mount, image toolchain gaps, egress) is a PR-attributed
-          # failure, not "unavailable". It does NOT contain the agent's own
-          # shell probes, so #9556 stays open. Mechanism: cli
-          # lib/sandboxed-exec.ts; the CI row of the design.
+          # The #9556 / tiered execution sandbox around the PR's own
+          # install/build/test and runtime probes. Without it those commands
+          # inherit this step's GH_TOKEN and OPENAI_API_KEY, and a `postinstall`
+          # reads both in one line.
+          # 'Resolve review sandbox' always sets `tiered` (never `off`):
+          # trusted same-repo, low-risk PRs run inside the hardened
+          # digest-pinned container when ready; external/fork PRs and high-risk
+          # paths require hardware isolation (microVM bridge) and fail closed
+          # cleanly to static review when unavailable. When the container
+          # runtime or digest-pinned image is unavailable, `force_hardware` is
+          # set to `1` so the CLI never falls back to an unpinned default image
+          # tag or blames an image outage on the PR under review (and fork heads
+          # on the self-hosted pool are refused by the preflight before this
+          # step starts). It does NOT contain the agent's own shell probes, so
+          # #9556 stays open. Mechanism: cli lib/sandboxed-exec.ts.
           QWEN_REVIEW_SANDBOX: '${{ steps.review_sandbox.outputs.policy }}'
+          # Step-output bound so $GITHUB_ENV cannot clear it: `'1'` whenever
+          # container readiness failed (preventing fallback to an unpinned tag),
+          # empty when a digest-pinned container image was resolved.
+          QWEN_REVIEW_FORCE_HARDWARE: '${{ steps.review_sandbox.outputs.force_hardware }}'
           # The digest-bound image the resolver pulled, through its step
           # OUTPUT: later steps can append $GITHUB_ENV, so only the expression
           # context is unsteerable (#9527). Empty when the resolver did not
-          # run; `policy` is `off` then, so it is not read.
+          # succeed; `QWEN_REVIEW_FORCE_HARDWARE=1` disables the container tier
+          # in that case, so an empty image is never handed to `docker run`.
           QWEN_SANDBOX_IMAGE: '${{ steps.review_sandbox.outputs.image }}'
           # Step env outranks an appended value, and the docker CLI skips an
           # empty one; DOCKER_CONTEXT pins the pool-shared context so neither

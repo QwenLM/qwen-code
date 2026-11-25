@@ -2,7 +2,7 @@
 
 [English](2026-11-24-review-tiered-sandbox.md) | [简体中文](2026-11-24-review-tiered-sandbox.zh-CN.md)
 
-**Status:** Phase 1 & Phase 2-B implemented (trust classification, hardened containers, tiered fail-closed backend selection & launch planners, `guest-exec-v1` UDS/vsock live microVM execution bridge with content-only workspace packing and identity-checked VMM worker teardown, bypass phase gates, structured boundary disclosure); CI workflow cutover (Phase 2-A) and cloud `provider-vm` HTTP/SDK data plane remain follow-up work.
+**Status:** Phase 1, Phase 2-B, and Phase 2-A implemented (trust classification, hardened containers, tiered fail-closed backend selection & launch planners, `guest-exec-v1` UDS/vsock live microVM execution bridge with content-only workspace packing and identity-checked VMM worker teardown, bypass phase gates, structured boundary disclosure, and CI workflow cutover to `QWEN_REVIEW_SANDBOX=tiered` with fail-closed `QWEN_REVIEW_FORCE_HARDWARE` handoff); cloud `provider-vm` HTTP/SDK data plane and optional microVM-wrapped `drive` remain follow-up work.
 **Date:** 2026-11-24
 **Related:** [Tiered MicroVM Isolation for `/verify-pr`](2026-11-23-verify-pr-tiered-microvm.md), [Review CPU for Tokens](review-cpu-for-tokens.md)
 
@@ -26,11 +26,10 @@
 - Gate `drive`, `ab-drive`, and `capture-tui` behind the same fail-closed sandbox policy so they never silently execute untrusted scripts on the host under `required`, `tiered`, or `QWEN_REVIEW_FORCE_HARDWARE=1`.
 - Attach structured `executionBoundary` metadata to execution reports and capture PR trust inputs (`isCrossRepository`, `authorAssociation`) in `fetch-pr` plans with zero extra GitHub API calls.
 
-### Non-Goals (Phase 1 / 2-B)
+### Non-Goals (Phase 1 / 2-A / 2-B)
 
 - Putting the entire `/review` orchestrator LLM agent inside a microVM (per `/verify-pr` §3.5, `/review` keeps its orchestrator, `working_dir`, fan-out, coverage ledger, and `--fix` host target unchanged, isolating only code-execution adapters).
-- Modifying `.github/workflows/qwen-code-pr-review.yml` or provisioning production cloud VM credentials in this change (Phase 2-A).
-- Shipping a cloud HTTP/SDK data plane for `provider-vm` (`fcsandbox` / `aliyun-ecs`) inside `packages/cli` (remains follow-up; local microVM backends `firecracker` and `vfkit` now execute live over the `guest-exec-v1` UDS/vsock bridge when prerequisites and `QWEN_REVIEW_VM_BRIDGE_SOCKET` are ready, and refuse fail-closed otherwise).
+- Provisioning production cloud VM credentials or shipping a cloud HTTP/SDK data plane for `provider-vm` (`fcsandbox` / `aliyun-ecs`) inside `packages/cli` (remains follow-up; local microVM backends `firecracker` and `vfkit` execute live over the `guest-exec-v1` UDS/vsock bridge when prerequisites and `QWEN_REVIEW_VM_BRIDGE_SOCKET` are ready, and refuse fail-closed otherwise).
 
 ## 3. Architecture and Design Decisions
 
@@ -117,6 +116,16 @@ Defines a clean adapter boundary aligned with `scripts/verify-pr-vm-runner.mjs`:
 
 **Read trust before executing.** The plan lives under the review temp dir the container mounts read-write, so reviewed code can rewrite it during a trusted run. Every phase therefore reads `ReviewTrustInput` once, before its first command, and reports that captured value; `build-test` in particular no longer re-reads the plan for its `executionBoundary` after the build. The gate invariant is not affected: a `hardware-isolated` plan is refused before any reviewed code runs, so no code it contains ever gets the chance to rewrite it; later phases of a trusted run may see a mutated plan, but only a PR that was already allowed to execute, and never to make a `hardware-isolated` run execute. An execution with no trust context at all is disclosed as `executionClass: 'unclassified'` rather than mislabelled `hardware-isolated`.
 
+### 3.7 CI Workflow Cutover (Phase 2-A: `.github/workflows/qwen-code-pr-review.yml`)
+
+The `Resolve review sandbox` preflight and `Run review` step enforce `tiered` unconditionally in CI with zero `policy='off'` fallback:
+
+- **Decoupled readiness vs. policy:** `Resolve review sandbox` probes `/usr/bin/docker info` and resolves the digest-pinned sandbox image via `.github/scripts/resolve-sandbox-image.mjs`, emitting `policy=tiered`, `container_ready=true|false`, and `force_hardware=''|1` through `$GITHUB_OUTPUT` (expression-context outputs rather than `$GITHUB_ENV`, so later steps cannot steer them).
+- **Container-ready path (`container_ready=true`, `force_hardware=''`):** `Run review` receives `QWEN_REVIEW_SANDBOX=tiered`, `QWEN_REVIEW_FORCE_HARDWARE=''`, and the digest-pinned `QWEN_SANDBOX_IMAGE`. Trusted same-repo low-risk PRs (`trusted-shared-kernel`) execute inside the hardened container; external/fork PRs and high-risk paths (`hardware-isolated`) require a hardware-isolated backend (microVM bridge) and fail closed to static review when none is available.
+- **Container-unavailable path (`container_ready=false`, `force_hardware=1`):**
+  - Fork heads (or unreadable `HEAD_REPO` on payload-less triggers) running on the persistent `self-hosted` pool exit `1` before emitting outputs or starting the yolo agent, protecting both CI credentials and the shared host.
+  - All remaining runs (hosted fork PRs and same-repo PRs) stay on `QWEN_REVIEW_SANDBOX=tiered` with `QWEN_REVIEW_FORCE_HARDWARE=1`. Setting `force_hardware=1` prevents the CLI from falling back to an unpinned default image tag when `docker info` succeeds but image pull fails, and avoids misattributing an image outage to the PR under review — every execution phase requires hardware isolation or refuses cleanly with structured `executionBoundary` disclosure.
+
 ## 4. Risks and Mitigations
 
 | Risk                                                                                                           | Mitigation                                                                                                                                                                                                    |
@@ -134,9 +143,9 @@ Defines a clean adapter boundary aligned with `scripts/verify-pr-vm-runner.mjs`:
    - `sandboxed-exec.test.ts`: covers `tiered` policy precedence, repo `.env` rejection for new env keys, hardened container flags (`--cap-drop=ALL`, `--security-opt=no-new-privileges:true`, `--pids-limit=512`), `reapContainer()` clean vs. failed verification, and `refuseHostExecutionPhase()`.
    - `build-test` / `test-efficacy` / `test-delta` / `drive` / `ab-drive` / `capture-tui` tests: verify `executionBoundary` attachment, plan-derived trust enforcement, and fail-closed refusal on bypass subcommands.
    - `guest-exec-bridge.test.ts`: covers `guest-exec-v1` frame encoding/decoding, UDS path length and symlink socket rejection, content-only workspace packing (refusing symlinks, non-regular files, and budget overruns), truncated/forged-digest rejection, identity-checked `reapVmWorker()` (refusing mismatched PIDs, killing live TERM-ignoring targets, preserving innocent canaries), and end-to-end real Unix domain socket child guest-agent execution through `runBuildTest` and `runTestDelta` under `tiered` + external fork PRs.
-2. **Build & static checks**: `npm run build && npm run typecheck` and targeted Vitest suites in `packages/cli`.
+   - `scripts/tests/qwen-pr-review-workflow.test.js`: verifies the Phase 2-A workflow cutover (`QWEN_REVIEW_SANDBOX`, `QWEN_REVIEW_FORCE_HARDWARE`, and `QWEN_SANDBOX_IMAGE` step-output wiring, removal of `policy='off'`, and live `/bin/bash` replay of `Resolve review sandbox` across ready, docker-down, image-pull-failure, self-hosted fork refusal, and payload-less `gh api` lookup scenarios).
+2. **Build & static checks**: `npm run build && npm run typecheck`, workflow lint/format checks, and targeted Vitest suites in `packages/cli` and `scripts/tests`.
 
 ## 6. Follow-up Work
 
-- Update `.github/workflows/qwen-code-pr-review.yml` (and workflow meta-tests) to remove the fallback to `policy=off` on external PRs when container/VM runtime is unavailable, switching CI to `QWEN_REVIEW_SANDBOX=tiered` (Phase 2-A).
 - Connect a cloud HTTP/SDK data plane for `provider-vm` (`fcsandbox` / `aliyun-ecs`) and optional microVM-wrapped `drive` execution.

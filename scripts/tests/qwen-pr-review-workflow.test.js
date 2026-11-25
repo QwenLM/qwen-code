@@ -3033,51 +3033,155 @@ describe('review worktree prebuild (issue #10108)', () => {
   });
 });
 
-describe('review execution sandbox opt-in (#9556)', () => {
-  // `required` opts the PR's own install/build/test into the #9556 execution
-  // sandbox, but only where the runner can honour it: the policy comes from
-  // the preflight's outputs. Read the key and the policy vocabulary out of the
-  // CLI source so a rename on either side reds this test instead of silently
-  // resolving to `off` (the default) with CI green — the failure mode the
-  // expression-length and unpullable-image incidents already taught us.
+describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
+  // CI always runs the PR's own install/build/test under `tiered` (never `off`)
+  // and pairs it with `QWEN_REVIEW_FORCE_HARDWARE` from the preflight output so
+  // a missing container daemon or unpullable digest-pinned image disables the
+  // container tier cleanly instead of falling back to an unpinned tag or host
+  // execution. Read the env keys and policy vocabulary out of the CLI source so
+  // a rename on either side reds this test instead of silently weakening CI.
   const doc = parse(workflow);
   const review = doc.jobs['review-pr'].steps.find(
     (s) => s.name === 'Run review',
+  );
+  const preflight = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Resolve review sandbox',
   );
   const source = readFileSync(
     'packages/cli/src/commands/review/lib/sandboxed-exec.ts',
     'utf8',
   );
+  const trustSource = readFileSync(
+    'packages/cli/src/commands/review/lib/sandbox-trust.ts',
+    'utf8',
+  );
   const envName = source.match(/env\['(QWEN_REVIEW_SANDBOX)'\]/)?.[1];
+  const forceHardwareEnvName = trustSource.match(
+    /env\['(QWEN_REVIEW_FORCE_HARDWARE)'\]/,
+  )?.[1];
   const policies = source
     .match(/const POLICIES[^=]*=\s*\[([^\]]+)\]/)?.[1]
     ?.split(',')
     .map((p) => p.trim().replace(/'/g, ''));
 
-  it('sets the policy the CLI reads on the Run review step', () => {
+  const runSandboxPreflight = ({
+    dockerOk = true,
+    imageOk = true,
+    resolvedImage = 'ghcr.io/qwenlm/qwen-code@sha256:1111111111111111111111111111111111111111111111111111111111111111',
+    headRepo = 'QwenLM/qwen-code',
+    ghHeadRepo = '',
+    ghOk = true,
+    prNumber = '42',
+    runnerEnvironment = 'github-hosted',
+    repository = 'QwenLM/qwen-code',
+  } = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-review-sandbox-preflight-'));
+    try {
+      const binDir = join(dir, 'bin');
+      const scriptsDir = join(dir, '.github', 'scripts');
+      mkdirSync(binDir, { recursive: true });
+      mkdirSync(scriptsDir, { recursive: true });
+      const dockerBin = join(binDir, 'docker');
+      writeFileSync(
+        dockerBin,
+        `#!/bin/sh\nif [ "$1" = "info" ]; then exit ${dockerOk ? 0 : 1}; fi\nexit 1\n`,
+      );
+      chmodSync(dockerBin, 0o755);
+
+      const ghBin = join(binDir, 'gh');
+      writeFileSync(
+        ghBin,
+        `#!/bin/sh\nif [ ${ghOk ? 1 : 0} -eq 1 ]; then printf '%s\\n' ${JSON.stringify(ghHeadRepo)}; exit 0; fi\nexit 1\n`,
+      );
+      chmodSync(ghBin, 0o755);
+
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          config: { sandboxImageUri: 'ghcr.io/qwenlm/qwen-code:0.0.0-test' },
+        }),
+      );
+      writeFileSync(
+        join(scriptsDir, 'resolve-sandbox-image.mjs'),
+        imageOk
+          ? `import { appendFileSync } from 'node:fs';\n` +
+              `if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'image=${resolvedImage}\\n');\n` +
+              `process.exit(0);\n`
+          : `process.exit(1);\n`,
+      );
+
+      const githubOutput = join(dir, 'github-output');
+      const githubSummary = join(dir, 'github-summary');
+      writeFileSync(githubOutput, '');
+      writeFileSync(githubSummary, '');
+
+      const res = spawnSync(
+        '/bin/bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', preflight.run],
+        {
+          cwd: dir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH ?? ''}`,
+            SANDBOX_COMMAND: dockerBin,
+            HEAD_REPO: headRepo,
+            PR_NUMBER: prNumber,
+            GH_TOKEN: 'dummy-token',
+            RUNNER_ENVIRONMENT: runnerEnvironment,
+            GITHUB_REPOSITORY: repository,
+            GITHUB_OUTPUT: githubOutput,
+            GITHUB_STEP_SUMMARY: githubSummary,
+          },
+        },
+      );
+      const outputs = Object.fromEntries(
+        readFileSync(githubOutput, 'utf8')
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => {
+            const idx = line.indexOf('=');
+            return [line.slice(0, idx), line.slice(idx + 1)];
+          }),
+      );
+      return {
+        status: res.status,
+        stdout: res.stdout ?? '',
+        stderr: res.stderr ?? '',
+        outputs,
+        summary: readFileSync(githubSummary, 'utf8'),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('sets the tiered policy and force-hardware outputs the CLI reads on the Run review step', () => {
     expect(envName).toBe('QWEN_REVIEW_SANDBOX');
-    // The literal is the preflight's output, not a constant: `required` on a
-    // runner that cannot satisfy it fails the PR's own install rather than
-    // containing it.
+    expect(forceHardwareEnvName).toBe('QWEN_REVIEW_FORCE_HARDWARE');
     expect(review.env[envName]).toBe(
       '${{ steps.review_sandbox.outputs.policy }}',
     );
-    expect(policies).toContain('required');
-    expect(policies).toContain('off');
+    expect(review.env[forceHardwareEnvName]).toBe(
+      '${{ steps.review_sandbox.outputs.force_hardware }}',
+    );
+    expect(policies).toContain('tiered');
   });
 
-  it('is opt-in from that step and nowhere else in the workflow', () => {
-    expect(doc.env?.[envName]).toBeUndefined();
-    for (const [jobName, job] of Object.entries(doc.jobs)) {
-      expect(job.env?.[envName]).toBeUndefined();
-      for (const step of job.steps ?? []) {
-        if (jobName === 'review-pr' && step.name === 'Run review') continue;
-        expect(step.env?.[envName]).toBeUndefined();
+  it('wires QWEN_REVIEW_SANDBOX and QWEN_REVIEW_FORCE_HARDWARE only on Run review', () => {
+    for (const key of [envName, forceHardwareEnvName]) {
+      expect(doc.env?.[key]).toBeUndefined();
+      for (const [jobName, job] of Object.entries(doc.jobs)) {
+        expect(job.env?.[key]).toBeUndefined();
+        for (const step of job.steps ?? []) {
+          if (jobName === 'review-pr' && step.name === 'Run review') continue;
+          expect(step.env?.[key]).toBeUndefined();
+        }
       }
     }
   });
 
-  it('decides the policy from a probe that runs before any reviewed command', () => {
+  it('probes container readiness before any reviewed command and never falls back to policy=off', () => {
     const steps = doc.jobs['review-pr'].steps;
     const preflightIndex = steps.findIndex(
       (s) => s.name === 'Resolve review sandbox',
@@ -3085,52 +3189,40 @@ describe('review execution sandbox opt-in (#9556)', () => {
     const reviewIndex = steps.findIndex((s) => s.name === 'Run review');
     expect(preflightIndex).toBeGreaterThan(-1);
     expect(preflightIndex).toBeLessThan(reviewIndex);
-    const preflight = steps[preflightIndex];
     expect(preflight.id).toBe('review_sandbox');
     expect(preflight['continue-on-error']).toBeUndefined();
-    // A daemon round trip, not presence on PATH: a client with no daemon is
-    // the shape that then refuses every reviewed command inside the prebuild.
     expect(preflight.run).toContain('info > /dev/null');
-    // The binary is pinned in step env, like the other sandboxed jobs: the
-    // export is derived from its stdout, so a PATH shadow must not steer it.
     expect(preflight.env.SANDBOX_COMMAND).toBe('/usr/bin/docker');
-    // The image resolves through the repo's resolver, so a tag that is not on
-    // GHCR is caught here instead of being reported as the PR's broken install.
     expect(preflight.run).toContain('resolve-sandbox-image.mjs');
     expect(preflight.run).toContain('sandboxImageUri');
-    // The decision is published, not implied: the output feeds `Run review`,
-    // and the summary line is how a run that ran uncontained says so.
-    expect(preflight.run).toContain('policy=$policy" >> "$GITHUB_OUTPUT"');
+    expect(preflight.run).toContain('echo "policy=$policy"');
+    expect(preflight.run).toContain('echo "force_hardware=$force_hardware"');
+    expect(preflight.run).toContain('>> "$GITHUB_OUTPUT"');
     expect(preflight.run).toContain('sandbox_policy=$policy');
     expect(preflight.run).toContain('::warning::');
-    // `off` is the default and the only fallback: a policy the CLI cannot
-    // parse resolves to `off` too, so anything else here would silently pick
-    // the wrong side.
-    expect(preflight.run).toMatch(/policy='off'/);
-    expect(preflight.run).toMatch(/policy='required'/);
+    // Phase 2-A invariant: CI always stays on `tiered`, never downgrading to
+    // `off` or single-tier `required`.
+    expect(preflight.run).toMatch(/policy='tiered'/);
+    expect(preflight.run).not.toMatch(/policy='off'/);
+    expect(preflight.run).not.toMatch(/policy='required'/);
+    expect(preflight.run).not.toContain('run unsandboxed');
   });
 
-  it('binds the resolved image through the step output, not $GITHUB_ENV', () => {
+  it('binds the resolved image and force-hardware flag through step outputs, not $GITHUB_ENV', () => {
     // Later steps can append $GITHUB_ENV; only the expression context is
-    // unsteerable, so the consumer must bind the resolver's OUTPUT and pin the
+    // unsteerable, so the consumer must bind the preflight OUTPUTs and pin the
     // endpoint the daemon resolves through (#9527).
     expect(review.env.QWEN_SANDBOX_IMAGE).toBe(
       '${{ steps.review_sandbox.outputs.image }}',
+    );
+    expect(review.env.QWEN_REVIEW_FORCE_HARDWARE).toBe(
+      '${{ steps.review_sandbox.outputs.force_hardware }}',
     );
     expect(review.env.DOCKER_HOST).toBe('');
     expect(review.env.DOCKER_CONTEXT).toBe('default');
   });
 
-  it('refuses a fork-head review when containment cannot be required', () => {
-    // `off` hands the PR's own install/build/test this step's GH_TOKEN and
-    // OPENAI_API_KEY. On the persistent pool a same-repo head keeps the
-    // documented fail-open behaviour; a cross-repository head (or an
-    // unreadable one — deleted fork, payload-less trigger) must fail closed
-    // instead. On a GitHub-hosted runner the disposable VM bounds the
-    // fallback, so the refusal is scoped to self-hosted.
-    const preflight = doc.jobs['review-pr'].steps.find(
-      (s) => s.name === 'Resolve review sandbox',
-    );
+  it('refuses a fork-head review on self-hosted runners when container readiness fails', () => {
     expect(preflight.env.HEAD_REPO).toBe(
       '${{ github.event.pull_request.head.repo.full_name }}',
     );
@@ -3142,7 +3234,7 @@ describe('review execution sandbox opt-in (#9556)', () => {
       'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"',
     );
     const refusalStart = preflight.run.indexOf(
-      `if [ "$policy" != 'required' ] && [ "\${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "\${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then`,
+      `if [ "$container_ready" != 'true' ] && [ "\${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "\${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then`,
     );
     expect(refusalStart).toBeGreaterThan(-1);
     const refusal = preflight.run.slice(
@@ -3151,11 +3243,112 @@ describe('review execution sandbox opt-in (#9556)', () => {
     );
     expect(refusal).toContain('exit 1');
     expect(refusal).toContain('::error::');
-    // The refusal precedes the policy output, so a refused run can never
-    // feed `off` into 'Run review'.
+    // The refusal precedes the policy output, so a refused run never emits
+    // outputs into 'Run review'.
     expect(refusalStart).toBeLessThan(
-      preflight.run.indexOf('echo "policy=$policy" >> "$GITHUB_OUTPUT"'),
+      preflight.run.indexOf('echo "policy=$policy"'),
     );
+  });
+
+  it('emits tiered + empty force_hardware + digest-pinned image when docker and image resolve (replayed)', () => {
+    const r = runSandboxPreflight({
+      dockerOk: true,
+      imageOk: true,
+      headRepo: 'QwenLM/qwen-code',
+      runnerEnvironment: 'self-hosted',
+    });
+    expect(r.status).toBe(0);
+    expect(r.outputs.policy).toBe('tiered');
+    expect(r.outputs.container_ready).toBe('true');
+    expect(r.outputs.force_hardware).toBe('');
+    expect(r.outputs.image).toMatch(
+      /^ghcr\.io\/qwenlm\/qwen-code@sha256:[0-9a-f]{64}$/,
+    );
+    expect(r.stdout).not.toContain('::warning::');
+    expect(r.stdout).not.toContain('::error::');
+    expect(r.summary).toContain('container_ready: true');
+    expect(r.summary).toContain('force_hardware: 0');
+    expect(r.summary).toContain('policy: tiered');
+  });
+
+  it('keeps hosted fork PRs on tiered + force_hardware=1 when docker is unavailable (never off, replayed)', () => {
+    const r = runSandboxPreflight({
+      dockerOk: false,
+      imageOk: true,
+      headRepo: 'external-contributor/qwen-code',
+      runnerEnvironment: 'github-hosted',
+    });
+    expect(r.status).toBe(0);
+    expect(r.outputs.policy).toBe('tiered');
+    expect(r.outputs.container_ready).toBe('false');
+    expect(r.outputs.force_hardware).toBe('1');
+    expect(r.outputs.image).toBeUndefined();
+    expect(r.stdout).toContain('::warning::');
+    expect(r.stdout).not.toContain('run unsandboxed');
+  });
+
+  it('disables the container tier via force_hardware=1 when image resolution fails on same-repo PRs (replayed)', () => {
+    for (const runnerEnvironment of ['github-hosted', 'self-hosted']) {
+      const r = runSandboxPreflight({
+        dockerOk: true,
+        imageOk: false,
+        headRepo: 'QwenLM/qwen-code',
+        runnerEnvironment,
+      });
+      expect(r.status).toBe(0);
+      expect(r.outputs.policy).toBe('tiered');
+      expect(r.outputs.container_ready).toBe('false');
+      expect(r.outputs.force_hardware).toBe('1');
+      expect(r.outputs.image).toBeUndefined();
+      expect(r.stdout).toContain('::warning::');
+      expect(r.summary).toContain('force_hardware: 1');
+    }
+  });
+
+  it('exits 1 before emitting outputs for fork or unreadable heads on self-hosted when container readiness fails (replayed)', () => {
+    const cases = [
+      {
+        dockerOk: false,
+        imageOk: true,
+        headRepo: 'external-contributor/qwen-code',
+      },
+      {
+        dockerOk: true,
+        imageOk: false,
+        headRepo: 'external-contributor/qwen-code',
+      },
+      {
+        dockerOk: true,
+        imageOk: false,
+        headRepo: '',
+        ghOk: false,
+      },
+    ];
+    for (const c of cases) {
+      const r = runSandboxPreflight({
+        ...c,
+        runnerEnvironment: 'self-hosted',
+      });
+      expect(r.status).toBe(1);
+      expect(r.outputs).toEqual({});
+      expect(r.stdout).toContain('::error::fork PR review refused');
+      expect(r.summary).toContain('review refused');
+    }
+  });
+
+  it('resolves payload-less same-repo head via gh api on self-hosted without falling back to off (replayed)', () => {
+    const r = runSandboxPreflight({
+      dockerOk: true,
+      imageOk: false,
+      headRepo: '',
+      ghHeadRepo: 'QwenLM/qwen-code',
+      ghOk: true,
+      runnerEnvironment: 'self-hosted',
+    });
+    expect(r.status).toBe(0);
+    expect(r.outputs.policy).toBe('tiered');
+    expect(r.outputs.container_ready).toBe('false');
+    expect(r.outputs.force_hardware).toBe('1');
   });
 });
 
