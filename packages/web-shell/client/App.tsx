@@ -13266,6 +13266,10 @@ export function App({
               SessionActionsWithCreate,
             modelId: startupConfig || useWorkspaceDefault ? undefined : modelId,
             startupConfig,
+            supportsSessionStartupConfig:
+              connectionRef.current.capabilities?.features?.includes(
+                'session_startup_config',
+              ),
             reasoningEffort,
             modeId,
             planMode,

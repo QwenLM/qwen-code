@@ -276,7 +276,10 @@ export interface CreateDaemonSessionActionsArgs {
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
-    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
+    overrides?: Pick<
+      CreateSessionRequest,
+      'approvalMode' | 'modelServiceId' | 'startupConfig'
+    >,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getClient?: () => DaemonClient | undefined;
@@ -2865,6 +2868,9 @@ export function createDaemonSessionActions({
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
                   : {}),
+                ...(options?.startupConfig
+                  ? { startupConfig: options.startupConfig }
+                  : {}),
               }),
               (created) => created.detach(),
             );
@@ -2902,6 +2908,9 @@ export function createDaemonSessionActions({
                   : {}),
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
+                  : {}),
+                ...(options?.startupConfig
+                  ? { startupConfig: options.startupConfig }
                   : {}),
               })
             : createDetachedSession(
