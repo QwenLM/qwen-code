@@ -2,7 +2,7 @@
 
 [English](2026-11-24-review-tiered-sandbox.md) | [简体中文](2026-11-24-review-tiered-sandbox.zh-CN.md)
 
-**状态：** Phase 1 已实现（信任分类与高风险强制升级、轻量容器硬化与可验证回收、分层 fail-closed 后端选路与启动计划器、旁路子命令门禁、结构化边界披露）；CI workflow 切换与实时 guest 执行桥接属于 Phase 2。
+**状态：** Phase 1 与 Phase 2-B 已实现（信任分类与高风险强制升级、轻量容器硬化与可验证回收、分层 fail-closed 后端选路与启动计划器、`guest-exec-v1` UDS/vsock 本地微虚机实时执行桥接含纯内容打包与身份核验 VMM 回收、旁路子命令门禁、结构化边界披露）；CI workflow 切换（Phase 2-A）与云端 `provider-vm` HTTP/SDK 数据面作为后续阶段。
 **日期：** 2026-11-24
 **关联文档：** [`/verify-pr` 分信任等级 microVM 隔离设计](2026-11-23-verify-pr-tiered-microvm.zh-CN.md)、[Review CPU for Tokens](review-cpu-for-tokens.md)
 
@@ -26,11 +26,11 @@
 - 为 `drive`、`ab-drive`、`capture-tui` 接入同一套 fail-closed 沙箱门禁，在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下绝不静默在宿主机跑待审脚本。
 - 在各执行子命令报告中附带结构化 `executionBoundary`，并在 `fetch-pr` 中以零额外 GitHub API 调用补齐 `authorAssociation` 与 `isCrossRepository` 供下游信任分类使用。
 
-### 非目标（Phase 1）
+### 非目标（Phase 1 / 2-B）
 
 - 不把整个 `/review` 编排器 LLM Agent 塞进 microVM（遵循 `/verify-pr` 设计 §3.5：保留现有 `working_dir`、fan-out、覆盖台账与 `--fix` 宿主机写入目标，仅隔离待审代码的执行适配器）。
-- 本次不修改 `.github/workflows/qwen-code-pr-review.yml`，也不配置生产云端 VM 凭据（留待 Phase 2）。
-- 本次不在 `packages/cli` 中内置实时 microVM guest RPC 命令流传输通道（Phase 2 基于本次落地的后端契约与计划器接入；在此之前，`hardware-isolated` 严格 fail-closed 拒绝，绝不静默降级）。
+- 本次不修改 `.github/workflows/qwen-code-pr-review.yml`，也不配置生产云端 VM 凭据（留待 Phase 2-A）。
+- 本次不在 `packages/cli` 中内置云端 `provider-vm`（`fcsandbox` / `aliyun-ecs`）的 HTTP/SDK 数据面；本地微虚机后端（`firecracker`、`vfkit`）在硬件前提与 `QWEN_REVIEW_VM_BRIDGE_SOCKET` 就绪时已可通过 `guest-exec-v1` UDS/vsock 实时执行，其余情况继续严格 fail-closed 拒绝，绝不静默降级。
 
 ## 3. 架构与设计决策
 
@@ -92,7 +92,12 @@
   1. 若 `QWEN_REVIEW_SANDBOX_BACKEND` 显式指定硬件后端（`firecracker`、`vfkit`、`provider-vm`），仅校验该后端（不可用或为 `hardware-isolated` 指定了 `container` 均 fail-closed 拒绝）。
   2. 否则按宿主原生优先级探测：`firecracker`（Linux）→ `vfkit`（macOS arm64）→ `provider-vm`（云端兜底）。
 - 每个硬件后端提供纯函数启动计划构造器（`buildReviewBackendPlan`），用于前置校验依赖而不直接执行不可信代码。
-- **Phase 1 fail-closed 保证：** 在 Phase 2 的实时 guest 命令流桥接落地前，`sandboxVerdict()` / `refuseUnsandboxedPhase()` 绝不会把 `hardware-isolated` 降级为 `container` 或 `direct`，而是返回结构化 `refused` 判定，明确列出 `prTrust`、`escalationReasons` 与硬件后端状态，保证安全边界可审计。
+- **本地 microVM `guest-exec-v1` 实时桥接（`lib/guest-exec-bridge.ts`，Phase 2-B）：**
+  - 当本地微虚机后端（`firecracker` 或 `vfkit`）满足全部宿主前提**且**操作者通过 `QWEN_REVIEW_VM_BRIDGE_SOCKET` 提供合法的非符号链接 Unix Domain Socket（经操作系统 `sun_path` 字节上限与 `lstatSync().isSocket()` 核验，且通过 `PROJECT_ENV_HARDCODED_EXCLUSIONS` 阻断仓库 `.env` 注入）时，`selectReviewSandboxBackend()` 返回 `kind: 'hardware-bridge'`，`sandboxVerdict()` 返回 `kind: 'microvm'`。
+  - **零宿主 RW 挂载（对齐 D5）与会话连续性：** `packWorkspaceFiles()` 按纯内容上传普通文件（`F`/`D`/`V` 帧），通过 `realpathSync` 核验子目录严格位于工作区根目录内并用 `O_NOFOLLOW` 打开文件，强制文件数、单文件与总字节预算上限，拒绝 symlink、FIFO、socket、设备节点与路径遍历。多命令阶段（`build-test` 的 `install` → `build` → `test`、`test-delta` 的 lockfile 安装 → baseline 测试重跑，以及 `test-efficacy` 变异探针）传递经校验的 `workspaceSessionId` 与 `workspaceMode`（`replace` / `sync` / `overlay` / `reuse`），使 guest 内安装的 `node_modules` 与编译产物在同一次 guest 会话中连续复用而不触碰宿主工作树，并通过 guest 侧真实完整性标记探测（`test -f node_modules/<marker>`）核验安装完成（绝不查宿主目录），阶段结束时通过显式 `C` 帧清理。`closeGuestSessionSync()` 仅在收到完整、会话绑定的 ACK 时才承认清理完成，ACK 必须匹配 `runId`、`workspaceSessionId`、`sessionSha256` 和进程退出状态；仅有 exit 0、缺失/截断 ACK 或错误发送者一律记为 `'partial'`，绝不谎报为已清理。由于该 ACK 形状比最初的「裸 session id」契约更严格，清理握手使用独立协议令牌 `guest-exec-close-v2`（命令执行仍为 `guest-exec-v1`）：回答不同协议令牌（例如 `A guest-exec-v1`）的 peer 会在握手处失败并返回明确点名协议偏差的 `reason`；回声 `H` 且返回未绑定 ACK 的 peer 报未绑定 ACK 原因（不重试）；接受 `H` 但拒绝 `C` 的 peer 报缺失 ACK 原因——以上所有情形都会由 `executionBoundary.note` 透出具体 `reason`，而不是给出无法解释的 `partial`。若 peer **显式拒绝**该版本令牌（回 `R`），客户端会用同一份 JSON `C` 载荷在 `guest-exec-v1` 上重试一次：已升级到 JSON 契约但仍按基础令牌校验 `H` 的 collector 因此能被正常清理，而不是每次都遗留会话（若重试后的 `guest-exec-v1` 交换仍失败，则返回包含具体失败原因的复合协议偏差 `reason`）。只有显式拒绝才触发重试——「回声但 ACK 未绑定」绝不重试，弱 peer 无法被抬举成假的 `clean`。安装失败会记录 `installError`，后续探针返回 `not-run`，不会跳过或重复安装。三个阶段（含 `test-efficacy`）都会在安装退出 0 后探测 guest 侧完整性标记，因此「退出 0 但没有生成 `node_modules`」会被判为 `not-run`，而不是浪费 N 次探针后报 `no-output`。
+  - **二进制帧协议与防截断：** 采用 `1B ASCII kind + 4B uint32 BE length + payload`（`H`/`A` 握手、`X` 命令请求并仅注入白名单 `guestCommandEnv()`、`C` 会话关闭、`O`/`E` 受限输出分片、`Z` 结束帧并由宿主独立重算 stdout/stderr SHA-256 比对、`R` 拒绝帧）。缺失 `Z` 帧、EOF 残留半帧、超帧长/总字节上限、非法 exitCode+signal 组合或摘要不匹配一律以 `EPROTO` fail-closed，绝不伪装成 exit 0。
+  - **同步适配与身份核验回收：** `executeViaGuestBridgeSync()` 通过极简原始字节泵子进程配合 `spawnSync` 硬超时为同步调用方（`build-test`、`test-efficacy`、`test-delta`）提供微虚机执行，所有协议语义与摘要校验留在父进程单一实现。超时或协议异常时，若配置了 `QWEN_REVIEW_VM_PID_FILE`，`reapVmWorker()` 先拒绝 symlink PID 文件及宿主自身 PID，并严格仅核验可执行名（`comm`、`argv[0]`、Linux `/proc/<pid>/exe`，忽略二进制替换后的 `(deleted)` 后缀，绝不匹配任意 `argv[1..]` 参数子串），再依次 `SIGTERM` → `SIGKILL` → 确认进程退出，返回可审计的 `teardownStatus`（`'clean' | 'partial' | 'failed'`）。
+  - **Fail-closed 兜底：** 若硬件前提缺失、`QWEN_REVIEW_VM_BRIDGE_SOCKET` 未配置或非法，或选定 `provider-vm` 尚无数据面连接，`sandboxVerdict()` / `refuseUnsandboxedPhase()` 仍严格 fail-closed 拒绝，绝不降级为共享内核容器或宿主机。
 
 ### 3.5 执行面覆盖与旁路封堵
 
@@ -128,9 +133,10 @@
    - `sandbox-backends.test.ts`：覆盖各平台后端选路顺序、`QWEN_REVIEW_SANDBOX_BACKEND` 显式覆盖、`hardware-isolated` 拒绝 `container`、前提缺失时 fail-closed 以及 `firecracker`/`vfkit`/`provider-vm`（`fcsandbox`/`aliyun-ecs`）启动计划校验。
    - `sandboxed-exec.test.ts`：覆盖 `tiered` 策略严格度优先级、仓库 `.env` 对新增变量的拦截、容器硬化参数（`--cap-drop=ALL`、`--security-opt=no-new-privileges:true`、`--pids-limit=512`）、`reapContainer()` 干净/失败校验以及 `refuseHostExecutionPhase()`。
    - `build-test` / `test-efficacy` / `test-delta` / `drive` / `ab-drive` / `capture-tui` 单测：验证 `executionBoundary` 字段、基于 plan 的信任分档执行与旁路子命令的 fail-closed 拒绝。
+   - `guest-exec-bridge.test.ts`：覆盖 `guest-exec-v1` 帧编解码、UDS 路径上限与 symlink socket 拒绝、纯内容工作区打包（拒绝 symlink、非普通文件与超预算）、截断/伪造摘要拦截、按身份核验的 `reapVmWorker()`（拒绝不匹配 PID、强杀抗 `SIGTERM` 存活目标并保留无辜 canary 进程），以及真实 Unix Domain Socket 独立子进程 guest-agent 在 `tiered` + 外部 fork PR 下驱动 `runBuildTest` 与 `runTestDelta` 的端到端闭环。
 2. **构建与静态检查**：`npm run build && npm run typecheck` 及 `packages/cli` 中所有受影响单测全部通过。
 
-## 6. 后续工作（Phase 2）
+## 6. 后续工作
 
-- 接入实时 guest 执行传输通道（vsock / 云沙箱 SDK），让 `build-test`、`test-efficacy`、`drive` 能在 `firecracker`、`vfkit`、`provider-vm`（`fcsandbox`）内部流式执行，彻底消除宿主 `.qwen/tmp` RW 挂载。
-- 更新 `.github/workflows/qwen-code-pr-review.yml`（及 workflow meta-tests），移除外部 PR 在容器/VM 不可用时回退到 `policy=off` 的降级逻辑，将 CI 切换为 `QWEN_REVIEW_SANDBOX=tiered`。
+- 更新 `.github/workflows/qwen-code-pr-review.yml`（及 workflow meta-tests），移除外部 PR 在容器/VM 不可用时回退到 `policy=off` 的降级逻辑，将 CI 切换为 `QWEN_REVIEW_SANDBOX=tiered`（Phase 2-A）。
+- 接入云端 `provider-vm`（`fcsandbox` / `aliyun-ecs`）的 HTTP/SDK 数据面，以及可选的微虚机化 `drive` 执行。

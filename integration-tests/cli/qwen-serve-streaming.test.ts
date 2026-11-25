@@ -363,6 +363,8 @@ beforeAll(async () => {
       // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
+      // Streaming contracts, not host-load admission, are under test
+      // here. Keep a shared runner's real load out of session creation.
       '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
