@@ -157,6 +157,14 @@ export interface Envelope {
   messageId?: string;
   isGroup: boolean;
   isMentioned: boolean;
+  /**
+   * The message text names the bot itself (an explicit mention), as opposed
+   * to `isMentioned`, which an adapter also sets for an implicitly directed
+   * event (a thread the account owns, an aggregate digest). Only an explicit
+   * mention proves a sender is waiting for an answer, so adapters gate a
+   * public failure receipt on this flag.
+   */
+  isExplicitMention?: boolean;
   isReplyToBot: boolean;
   /** Text of the message being replied to (quoted/referenced message). */
   referencedText?: string;
