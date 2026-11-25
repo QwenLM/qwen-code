@@ -11,7 +11,11 @@ import type {
   AgentLoopResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
-import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  getStructuredErrorCause,
+  type ToolCallRequestInfo,
+} from '@qwen-code/qwen-code-core/core/turn.js';
+import { StreamInactivityTimeoutError } from '@qwen-code/qwen-code-core/core/stream-guards.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -91,6 +95,17 @@ const queuedSteers = (...texts: string[]): QueuedMessage[] =>
   texts.map((text) => ({ text, key: text, deferUntilIdle: false }));
 
 // --- MOCKS ---
+vi.mock('@qwen-code/qwen-code-core/core/turn.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/core/turn.js')
+    >();
+  return {
+    ...actual,
+    getStructuredErrorCause: vi.fn(actual.getStructuredErrorCause),
+  };
+});
+
 const pendingToolPersistence = vi.hoisted(() => ({
   directory: '',
   wait: undefined as Promise<void> | undefined,
@@ -22528,6 +22543,39 @@ describe('useLlmStream', () => {
         expect(errorItem).toBeDefined();
         expect((errorItem as { hint?: string })?.hint).toContain('Ctrl+Y');
       });
+    });
+
+    it('uses the stream timeout cause to classify StopFailure', async () => {
+      const timeout = new StreamInactivityTimeoutError(
+        1000,
+        2,
+        1000,
+        'check_quota',
+      );
+      const error = { message: timeout.message };
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getHookSystem = vi.fn().mockReturnValue({
+        fireStopFailureEvent,
+      });
+      vi.mocked(getStructuredErrorCause).mockImplementationOnce((value) =>
+        value === error ? timeout : undefined,
+      );
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Error, value: { error } };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('Check model response');
+      });
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'unknown',
+        timeout.message,
+        expect.any(String),
+      );
     });
 
     it('omits the Ctrl+Y retry hint for stream errors during a Goal turn', async () => {

@@ -84,6 +84,7 @@ import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
+import { StreamInactivityTimeoutError } from './stream-guards.js';
 import {
   bindRetryWaitObserver,
   runWithRetryWaitObserver,
@@ -11687,6 +11688,104 @@ describe('LlmChat', async () => {
         // on `streamYieldedFunctionCall` it would log 'exhausted').
         expectWarned('Transport stream retry not taken', {
           retryDecision: 'skipped_after_content',
+        });
+      });
+
+      describe('inactivity timeout while tool-call arguments are open', () => {
+        const toolArgumentStall = (toolName = 'structured_output') =>
+          new StreamInactivityTimeoutError(180_000, 280, 190_000, toolName);
+
+        it.each([
+          { toolName: 'structured_output', expectedName: 'structured_output' },
+          { toolName: 'example HTTP_STATUS/429', expectedName: null },
+        ])(
+          'replays once, then propagates for $toolName',
+          async ({ toolName, expectedName }) => {
+            vi.useFakeTimers();
+            streamMock().mockImplementation(() =>
+              Promise.resolve(streamThenThrow([], toolArgumentStall(toolName))),
+            );
+            const { caughtError } = await drainTimed(
+              await send('test', 'prompt-tool-argument-stall-replay'),
+              30_000,
+            );
+            expect(caughtError).toBeInstanceOf(StreamInactivityTimeoutError);
+            expect(caughtError).toMatchObject({
+              openToolCallName: expectedName,
+            });
+            expectStreamCalls(2);
+            expectWarned('Transport stream retry not taken', {
+              retryDecision: 'tool_argument_stall_exhausted',
+            });
+          },
+        );
+
+        it('propagates a stall whose tool name resembles a context error', async () => {
+          vi.useFakeTimers();
+          const error = toolArgumentStall('context_length_exceeded');
+          const compress = mockCompressOnce(
+            noop(),
+            compressed(135_000, 40_000, [...summaryAck(), userText('test')]),
+          );
+          mockStreamsOnce(
+            streamThenThrow([], error),
+            streamThenThrow([], error),
+            streamOf(textChunk('unexpected retry', 'STOP')),
+          );
+
+          const { caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-context-name'),
+            30_000,
+          );
+
+          expectStreamCalls(2);
+          expect(compress).toHaveBeenCalledOnce();
+          expect(caughtError).toBe(error);
+        });
+
+        it('keeps an annotated timeout in the transport retry path with model fallback configured', async () => {
+          vi.useFakeTimers();
+          vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['backup']);
+          const error = Object.assign(toolArgumentStall(), { status: 429 });
+          streamMock().mockImplementation(() =>
+            Promise.resolve(streamThenThrow([], error)),
+          );
+
+          const { caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-fallback'),
+            30_000,
+          );
+
+          expectStreamCalls(2);
+          expect(caughtError).toBe(error);
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Fallback chain skipped: primary error is not fallback-eligible',
+            ),
+          );
+        });
+
+        it('continues once after delivered text, then propagates', async () => {
+          vi.useFakeTimers();
+          let call = 0;
+          streamMock().mockImplementation(() =>
+            Promise.resolve(
+              streamThenThrow(
+                [textChunk(`Writing the segment now ${call++}. `)],
+                toolArgumentStall(),
+              ),
+            ),
+          );
+          const { events, caughtError } = await drainTimed(
+            await send('test', 'prompt-tool-argument-stall-continue'),
+            30_000,
+          );
+          expect(caughtError).toBeInstanceOf(StreamInactivityTimeoutError);
+          expectStreamCalls(2);
+          expect(continuations(events)).toHaveLength(1);
+          expectWarned('Transport stream retry not taken', {
+            retryDecision: 'tool_argument_stall_exhausted',
+          });
         });
       });
 
