@@ -60,7 +60,13 @@ jobs:
           export GH_CONFIG_DIR="$bootstrap/gh"
           mkdir -p "$GH_CONFIG_DIR"
           for script in prepare-release-runner.sh check-disk-floor.sh; do
-            gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script"
+            for attempt in 1 2 3; do
+              if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+                break
+              fi
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 2
+            done
           done
           bash "$bootstrap/prepare-release-runner.sh"
           node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'

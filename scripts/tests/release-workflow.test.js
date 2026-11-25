@@ -392,7 +392,13 @@ trap 'rm -rf -- "$bootstrap"' EXIT
 export GH_CONFIG_DIR="$bootstrap/gh"
 mkdir -p "$GH_CONFIG_DIR"
 for script in prepare-release-runner.sh check-disk-floor.sh; do
-  gh api "repos/\${GITHUB_REPOSITORY}/contents/.github/scripts/\${script}?ref=\${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script"
+  for attempt in 1 2 3; do
+    if gh api "repos/\${GITHUB_REPOSITORY}/contents/.github/scripts/\${script}?ref=\${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+      break
+    fi
+    [ "$attempt" -lt 3 ] || exit 1
+    sleep 2
+  done
 done
 bash "$bootstrap/prepare-release-runner.sh"
 node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
@@ -484,12 +490,28 @@ describe('release workflow', () => {
       }
     }
     // Pool-routed jobs inherit root-owned leftovers whether or not they
-    // check out, so the exemption above must never extend to them.
+    // check out, so every one must run the same first-step inline preflight.
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
       if (!isPoolRouted(job)) {
         continue;
       }
       expect(wipesWorkspace(job), id).toBe(true);
+      const restoreIndex = (job.steps ?? []).findIndex(
+        (step) => step.name === 'Restore workspace ownership',
+      );
+      expect(restoreIndex, id).toBe(0);
+      const restoreStep = job.steps[restoreIndex];
+      expect(restoreStep?.if, id).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(restoreStep?.uses, id).toBeUndefined();
+      expect(restoreStep?.['working-directory'], id).toBe('${{ runner.temp }}');
+      expect(restoreStep?.shell, id).toBe('bash');
+      expect(restoreStep?.env, id).toEqual({
+        GH_TOKEN: '${{ github.token }}',
+        WORKFLOW_SHA: '${{ github.workflow_sha }}',
+      });
+      expect(restoreStep?.run, id).toBe(canonicalPreflightBootstrap);
       expect(['read', 'write'], id).toContain(job.permissions?.contents);
     }
   });
