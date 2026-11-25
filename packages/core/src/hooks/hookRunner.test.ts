@@ -426,6 +426,43 @@ describe('HookRunner', () => {
       expect(result.output?.hookSpecificOutput).toBeUndefined();
     });
 
+    describe.each([HookEventName.Stop, HookEventName.SubagentStop])(
+      '%s command hook exits',
+      (eventName) => {
+        it('preserves the exit code 2 block and structured stderr feedback', async () => {
+          const feedback = { continue: false, stopReason: 'Run checks again' };
+          const result = await runHook(
+            'exit 2',
+            2,
+            '',
+            JSON.stringify(feedback),
+            eventName,
+          );
+
+          expect(result.output).toEqual({ ...feedback, decision: 'deny' });
+        });
+
+        it('blocks on exit code 2 with empty stderr', async () => {
+          const result = await runHook('exit 2', 2, '', '', eventName);
+
+          expect(result.output).toEqual({ decision: 'deny' });
+        });
+
+        it('leaves a successful stop request non-blocking', async () => {
+          const feedback = { continue: false, stopReason: 'Done' };
+          const result = await runHook(
+            'echo json',
+            0,
+            JSON.stringify(feedback),
+            '',
+            eventName,
+          );
+
+          expect(result.output).toEqual(feedback);
+        });
+      },
+    );
+
     it('should handle exit code 1 as non-blocking warning', async () => {
       const result = await runHook('exit 1', 1, '', 'warning');
 

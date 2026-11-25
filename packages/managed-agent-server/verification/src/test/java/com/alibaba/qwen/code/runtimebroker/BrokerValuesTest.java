@@ -22,6 +22,187 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BrokerValuesTest {
     @Test
+    void bindingIdsUseThe128CharacterNoTrailingSpaceBudget() {
+        String binding = "b".repeat(128);
+        assertEquals(binding, BrokerValues.requireBindingId(binding, "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId("b".repeat(129), "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId("binding ", "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId("bind\ud800ng", "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId(null, "bindingId"));
+    }
+
+    @Test
+    void operationIdsUseThe128CharacterNoTrailingSpaceBudget() {
+        String operation = "o".repeat(128);
+        assertEquals(operation, BrokerValues.requireOperationId(operation, "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId("o".repeat(129), "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId("operation ", "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId("oper\ud800ation", "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId(null, "operationId"));
+    }
+
+    @Test
+    void childRunIdsUseThe256CharacterNoTrailingSpaceBudget() {
+        String run = "r".repeat(256);
+        assertEquals(run, BrokerValues.requireChildRunId(run, "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId("r".repeat(257), "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId("run ", "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId("r\ud800un", "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId(null, "childRunId"));
+    }
+
+    @Test
+    void toolCallIdsUseThe128CharacterNoTrailingSpaceBudget() {
+        String call = "c".repeat(128);
+        assertEquals(call, BrokerValues.requireToolCallId(call, "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId("c".repeat(129), "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId("call ", "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId("c\ud800all", "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId(null, "toolCallId"));
+    }
+
+    @Test
+    void runtimeIdentitiesUseThe128CharacterNoTrailingSpaceBudget() {
+        String instance = "i".repeat(128);
+        assertEquals(instance, BrokerValues.requireRuntimeIdentity(instance, "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity("i".repeat(129), "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity("instance ", "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity("inst\ud800ance", "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity(null, "runtimeInstanceId"));
+    }
+
+    @Test
+    void idempotencyKeysUseThe128CharacterNoTrailingSpaceBudgetAndAllowUnicode() {
+        String key = "k".repeat(128);
+        assertEquals(key, BrokerValues.requireIdempotencyKey(key, "idempotencyKey"));
+        // Queue keys are not forced to ASCII.
+        assertEquals("clé-𝄞-键", BrokerValues.requireIdempotencyKey("clé-𝄞-键", "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey("k".repeat(129), "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey("key ", "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey("k\ud800ey", "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey(null, "idempotencyKey"));
+    }
+
+    @Test
+    void workspaceIdsUseThe512CharacterNoTrailingSpaceBudget() {
+        String workspace = "w".repeat(512);
+        assertEquals(workspace, BrokerValues.requireWorkspaceId(workspace, "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId("w".repeat(513), "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId("workspace ", "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId("work\ud800space", "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId(null, "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new RuntimeScope("tenant", "workspace ", "1",
+                        "/workspace", "digest", "session"));
+    }
+
+    @Test
+    void storageIdsUseThe256CharacterNoTrailingSpaceBudget() {
+        String storage = "s".repeat(256);
+        assertEquals(storage, BrokerValues.requireStorageId(storage, "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId("s".repeat(257), "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId("storage ", "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId("stor\ud800age", "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId(null, "storageId"));
+    }
+
+    @Test
+    void shortIdsUseThe64CharacterNoTrailingSpaceBudget() {
+        String shortId = "s".repeat(64);
+        assertEquals(shortId, BrokerValues.requireShortId(shortId, "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId("s".repeat(65), "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId("short ", "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId("sh\ud800ort", "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId(null, "shortId"));
+    }
+
+    @Test
+    void instanceIdsUseThePoolEndpointCharsetBudget() {
+        String instance = "i".repeat(128);
+        assertEquals(instance, BrokerValues.requireInstanceId(instance, "instanceId"));
+        assertEquals("pool-1.a:b_c", BrokerValues.requireInstanceId("pool-1.a:b_c", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("i".repeat(129), "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("instance ", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("inst\u00e9ance", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId(null, "instanceId"));
+    }
+
+    @Test
+    void workerOwnersUseThe128CharacterNoTrailingSpaceBudget() {
+        String owner = "w".repeat(128);
+        assertEquals(owner, BrokerValues.requireWorkerOwner(owner, "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner("w".repeat(129), "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner("worker ", "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner("wor\ud800ker", "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner(null, "owner"));
+    }
+
+    @Test
+    void tenantIdsUseTheShared36CharacterBudget() {
+        String tenant = "t".repeat(36);
+        assertTrue(BrokerValues.isTenantId(tenant));
+        assertEquals(tenant, BrokerValues.requireTenantId(tenant, "tenantId"));
+        RuntimeScope scope = new RuntimeScope(tenant, "workspace", "1",
+                "/workspace", "digest", "session");
+        assertEquals(tenant, scope.getTenantId());
+        for (String invalid : new String[] {null, "", "tenant/a", "tenant a",
+                "é", "t".repeat(37)}) {
+            assertFalse(BrokerValues.isTenantId(invalid));
+            assertThrows(IllegalArgumentException.class,
+                    () -> BrokerValues.requireTenantId(invalid, "tenantId"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> new RuntimeScope(invalid, "workspace", "1",
+                            "/workspace", "digest", "session"));
+        }
+    }
+
+    @Test
     void wellFormedJsonFindsALoneSurrogateInAnyStringOrKey() {
         for (String lone : List.of("\ud800", "\udbff", "\udc00", "\udfff", "a\udc00\ud800b")) {
             for (Object value : List.of(lone, Map.of("k", lone), Map.of(lone, "v"),

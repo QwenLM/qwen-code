@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -97,7 +96,7 @@ final class AgentStoreRows {
             "ACCEPTED", "RUNNING", "CANCELLING");
 
     static final String SESSION_WITH_STREAM =
-            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
+            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = ''";
 
     final RowMapper<SessionRecord> sessionMapper;
 
@@ -147,13 +146,12 @@ final class AgentStoreRows {
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL', 'CONTEXT_COMPRESSION')";
 
     static String sessionOperationTarget(String sessionId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(sessionId);
+        return sessionId;
     }
 
     static String sessionOperationKey(String tenantId, String sessionId, OperationKind kind, String operationId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), operationId);
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.operationRef(
+                kind.name(), tenantId, "SESSION", sessionId, sessionId, operationId);
     }
 
     long lifecycleDatabaseTime() {
@@ -195,20 +193,7 @@ final class AgentStoreRows {
                         "The Session was not found."));
     }
 
-    void requireLegacyMutation(String tenantId, String sessionId) {
-    }
-
-    SessionRecord requireLegacySessionForUpdate(String tenantId, String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId);
-    }
-
-    SessionRecord requireSessionForUpdate(String tenantId,
-            String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId, false);
-    }
-
-    SessionRecord requireSessionForUpdate(
-            String tenantId, String sessionId, boolean legacyMutation) {
+    SessionRecord requireSessionForUpdate(String tenantId, String sessionId) {
         try {
             return jdbc.queryForObject(
                     "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session")
@@ -220,7 +205,7 @@ final class AgentStoreRows {
                         List<StreamCounters> streams = jdbc.query(
                                 "SELECT last_sequence, replay_floor_sequence, gmt_modified FROM ma_event_stream"
                                         + " WHERE tenant_id = ? AND session_id = ? AND stream_kind ="
-                                        + " 'SESSION' AND stream_id = X'' FOR UPDATE",
+                                        + " 'SESSION' AND stream_id = '' FOR UPDATE",
                                 (stream, index) -> new StreamCounters(stream.getLong("last_sequence"),
                                         stream.getLong("replay_floor_sequence"),
                                         nullableLong(stream, "gmt_modified")),
@@ -243,11 +228,6 @@ final class AgentStoreRows {
 
     LockedSessionTurn requireSessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
         return new LockedSessionTurn(requireSessionForUpdate(tenantId, sessionId),
-                requireTurnForUpdate(tenantId, sessionId, turnId));
-    }
-
-    LockedSessionTurn requireLegacySessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
-        return new LockedSessionTurn(requireLegacySessionForUpdate(tenantId, sessionId),
                 requireTurnForUpdate(tenantId, sessionId, turnId));
     }
 

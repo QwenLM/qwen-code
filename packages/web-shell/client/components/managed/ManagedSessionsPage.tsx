@@ -86,6 +86,8 @@ import {
 } from './ManagedArchivedSessions';
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
+import { ManagedArtifactLibraryPage } from './ManagedArtifactLibraryPage';
+import { ManagedSurfaceDecisionsDialog } from './ManagedSurfaceDecisionsDialog';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
@@ -682,6 +684,13 @@ function ManagedSessionsContent({
     if (detail.summary && !detail.summary.capabilities.artifacts)
       setOutputTarget(undefined);
   }, [detail.summary]);
+  // The library belongs to the workspace, not the open session: it survives
+  // session selection and clears only when the provider identity changes.
+  const [artifactLibraryWorkspace, setArtifactLibraryWorkspace] = useState<{
+    workspaceId: string;
+    label: string;
+  }>();
+  useEffect(() => setArtifactLibraryWorkspace(undefined), [provider]);
   const loadToolDetails = useMemo<ToolDetailsLoader | undefined>(() => {
     const reader = provider.toolDetails;
     if (!sessionId || !reader) return undefined;
@@ -2074,6 +2083,12 @@ function ManagedSessionsContent({
           onSelectWorkspace={onSelectWorkspace}
           onSelectSession={openSession}
           onWorkspacesChange={onWorkspacesChange}
+          onOpenArtifactLibrary={
+            interactive
+              ? (workspaceId, label) =>
+                  setArtifactLibraryWorkspace({ workspaceId, label })
+              : undefined
+          }
         />
       ) : (
         sessions
@@ -2253,8 +2268,13 @@ function ManagedSessionsContent({
           onClose={rename.close}
         />
       )}
+      {home && (
+        <div className="flex justify-end">
+          <ManagedSurfaceDecisionsDialog />
+        </div>
+      )}
       {!home && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <Button
             variant="outline"
             onClick={() => {
@@ -2266,9 +2286,12 @@ function ManagedSessionsContent({
           >
             {t('managed.new')}
           </Button>
-          <Button variant="ghost" onClick={refresh}>
-            {t('managed.refresh')}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <ManagedSurfaceDecisionsDialog />
+            <Button variant="ghost" onClick={refresh}>
+              {t('managed.refresh')}
+            </Button>
+          </div>
         </div>
       )}
       {pendingRestoreFailed && (
@@ -3403,6 +3426,21 @@ function ManagedSessionsContent({
                 clientId={clientId}
                 itemId={outputTarget.itemId}
                 onClose={() => setOutputTarget(undefined)}
+              />
+            )}
+          {interactive &&
+            artifactLibraryWorkspace &&
+            provider.workspaceArtifacts &&
+            provider.toolResults && (
+              <ManagedArtifactLibraryPage
+                key={`${provider.storageKey}:${artifactLibraryWorkspace.workspaceId}`}
+                library={provider.workspaceArtifacts}
+                reader={provider.toolResults}
+                workspaceId={artifactLibraryWorkspace.workspaceId}
+                workspaceLabel={artifactLibraryWorkspace.label}
+                clientId={clientId}
+                sessions={lifecycleSummaries}
+                onClose={() => setArtifactLibraryWorkspace(undefined)}
               />
             )}
         </section>

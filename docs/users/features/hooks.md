@@ -998,10 +998,10 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 **Output Options**:
 
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
-- `stopReason`: feedback to include in the stop response
-- `continue`: set to false to stop execution
+- Set `decision` to `"block"` or `"deny"` to keep Qwen working. A command hook can also keep Qwen working by exiting with code 2.
+- `reason`: the instruction Qwen continues with when the hook blocks
+- `continue`: `false` ends the turn. When the hook also blocks, the block wins and Qwen keeps working
+- When the hook blocks, `stopReason` takes precedence over `reason`. With `continue: false` and no block, the interactive CLI and non-interactive text mode show the reason as a notice. ACP sends the reason in `_meta.stopReason` on an empty `agent_message_chunk` with `_meta.source` set to `stop_hook_notice`.
 - `hookSpecificOutput.additionalContext`: additional context information
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
@@ -1125,8 +1125,10 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 **Output Options**:
 
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
+- Set `decision` to `"block"` or `"deny"` to keep the subagent working. A command hook can also keep it working by exiting with code 2.
+- `reason`: the instruction the subagent continues with when the hook blocks
+- `stopReason`: when the hook blocks, used instead of `reason`
+- `continue`: `false` without a block lets the subagent stop
 
 **Example Output**:
 
@@ -1263,7 +1265,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 - `hookSpecificOutput.decision`: structured object with permission decision details:
   - `behavior`: "allow" or "deny"
   - `updatedInput`: modified tool input (optional)
-  - `updatedPermissions`: modified permissions (optional)
+  - `updatedPermissions`: permission rules to add when the hook allows the call (optional, see below)
   - `message`: message to show to user (optional)
   - `interrupt`: whether to interrupt the workflow (optional)
 
@@ -1280,6 +1282,32 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
   }
 }
 ```
+
+**Adding permission rules**: when the hook allows the call, each `updatedPermissions` entry of type `addRules` adds rules the same way an "Always allow" choice does, so later matching calls are decided without asking again:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionRequest",
+    "decision": {
+      "behavior": "allow",
+      "updatedPermissions": [
+        {
+          "type": "addRules",
+          "rules": [{ "toolName": "Bash", "ruleContent": "npm test" }],
+          "behavior": "allow",
+          "destination": "session"
+        }
+      ]
+    }
+  }
+}
+```
+
+- `rules`: each `{ toolName, ruleContent }` becomes the permission rule `toolName(ruleContent)`, or `toolName` when `ruleContent` is omitted. If present, `ruleContent` must be a non-blank string. Tool names follow the same rules as `permissions` settings, so `Bash` and `run_shell_command` both work.
+- `behavior`: `"allow"`, `"deny"` or `"ask"`.
+- `destination`: `"session"` keeps the rules in memory for this session. `"projectSettings"` and `"localSettings"` write them to the project's `.qwen/settings.json`, and `"userSettings"` to `~/.qwen/settings.json`. Standalone sessions skip both project destinations.
+- Entries apply when the merged hook decision grants the final tool input and the call passes its pre-execution checks. A call that requires human approval does not apply hook permission updates. Unsupported entry types such as `setMode` or `replaceRules` are skipped.
 
 #### PermissionDenied
 
@@ -1617,7 +1645,7 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 **Features:**
 
 - Cannot return decision control (the event continues as soon as the hook starts)
-- Output is delivered to the model: when an async hook completes, its `additionalContext`, `systemMessage`, plain `stdout` and `stderr` are drained into the next request as a `<qwen:async-hook-context>` block, on sessions whose model round sends through the main client (headless, the TUIs, and ACP with the unified agent loop enabled). Hiding the block from the user-facing transcript projection and giving it resume provenance are follow-ups. The ACP default legacy session-chat path does not deliver it yet. The debug log also records that the hook started, completed or failed.
+- Output is delivered to the model: when an async hook completes, its `additionalContext`, `systemMessage`, plain `stdout` and `stderr` are drained into the next request as a `<qwen:async-hook-context>` block, on sessions whose model round sends through the main client (headless, the TUIs, and ACP with the unified agent loop enabled), and on the ACP default legacy round's own session-chat send. Hiding the block from the user-facing transcript projection and giving it resume provenance are follow-ups. The debug log also records that the hook started, completed or failed. The drained block is capped at 10,000 characters: notification messages (`systemMessage`, `stderr`, errors and warnings) are reserved first, and the `additionalContext` is truncated to the remaining budget — marked with a `[async hook context truncated]` notice. A message half that is itself too large is cut too, marked with a `[async hook message truncated]` notice, and a large message half can squeeze or even fully displace the context down to its notice. Output past the cap is discarded before the block is added to the request.
 - Suitable for side effects such as auditing, logging and background tests that write their results somewhere you can read them
 - Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default). While all 10 slots are in use, a new async hook is skipped
 

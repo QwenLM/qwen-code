@@ -1,4 +1,8 @@
 import { randomUUID } from './utils/random-uuid.js';
+import {
+  extractVisionTimeout,
+  parseVisionTimeoutMs,
+} from './vision-timeout-command.js';
 import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
 import {
   filterWorkspaceFileChanges,
@@ -53,6 +57,7 @@ import {
   parseWebPreviewUrl,
   type WebPreviewState,
 } from './components/preview/web-preview';
+import { visualViewportBottomInset } from './utils/visualViewportInset';
 import {
   forwardRef,
   memo,
@@ -187,7 +192,10 @@ import {
 } from './utils/taskActivity';
 import type { VoiceModelOption } from './voice/voiceModels';
 import {
+  QUALIFIED_CORE_FEATURE,
+  WORKSPACE_SETTINGS_FEATURE,
   loadVoiceStatus,
+  qualifiedWorkspaceClient,
   resolveVoiceWorkspaceTarget,
   setVoiceModelSetting,
   supportsVoiceModelSettings,
@@ -316,6 +324,7 @@ import {
   DaemonStatusDialog,
 } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { RestartRecoveryPanel } from './components/RestartRecoveryPanel';
 import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
@@ -363,7 +372,14 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
-import { artifactDisplayName } from './components/artifacts/artifactUtils';
+import {
+  artifactDisplayName,
+  resolvePendingArtifactJumpOpen,
+  runArtifactLibrarySessionJump,
+  type PendingArtifactJumpOpenRequest,
+} from './components/artifacts/artifactUtils';
+import { WorkspaceArtifactLibraryPage } from './components/artifacts/WorkspaceArtifactLibraryPage';
+import { WORKSPACE_ARTIFACT_LIBRARY_FEATURE } from './hooks/useWorkspaceArtifactLibrary';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -505,10 +521,11 @@ import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
-  getTranslator,
+  type getTranslator,
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
+  useTranslator,
   WEB_SHELL_LANGUAGES,
   type WebShellLanguage,
 } from './i18n';
@@ -575,6 +592,7 @@ import {
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
 import {
+  createPromptIdempotencyKey,
   isDefinitelyRejectedPromptAdmission,
   isMcpAppPromptAdmissionRejected,
   PromptDispatchCancelledError,
@@ -906,6 +924,7 @@ interface SendPromptOptionsWithRetry {
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
+  idempotencyKey?: string;
   beforeDispatch?: (clientId: string | undefined) => void;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
@@ -930,6 +949,8 @@ interface FailedPrompt {
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
+  idempotencyKey?: string;
+  reason?: 'failed' | 'uncertain';
   owner: CancelledRetryOwner;
 }
 
@@ -1011,6 +1032,7 @@ type CancelledRetryState =
       images?: PromptImage[];
       files?: PromptFile[];
       inputAnnotations?: DaemonInputAnnotation[];
+      idempotencyKey?: string;
       previousRetriedTurnErrorId: string | null;
       previousShowRetryHint: boolean;
     };
@@ -1065,16 +1087,6 @@ function mergeCancelledRetryEntries(
     },
     [...current],
   );
-}
-
-interface UnknownPromptAdmission {
-  sessionId: string;
-  messageId?: string;
-  text?: string;
-  images?: PromptImage[];
-  files?: PromptFile[];
-  inputAnnotations?: DaemonInputAnnotation[];
-  payloadAvailable: boolean;
 }
 
 function getLatestUserBlockId(
@@ -1629,6 +1641,8 @@ export interface WebShellProps {
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Composer presentation shared by the main chat, split panes, and side tasks. */
   composerVariant?: 'default' | 'simple';
+  /** Show the composer focus glow and typing animation. Defaults to true. */
+  composerGlowEnabled?: boolean;
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -1808,6 +1822,8 @@ export interface WebShellProps {
   markdownTableMode?: MarkdownTableMode;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
+  /** Extra transcript rows to render on each side of the viewport when virtualized. Defaults to 15. */
+  overscan?: number;
   /** 会话消息数超过此阈值时显示搜索入口，默认 10。 */
   conversationSearchThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
@@ -2054,6 +2070,7 @@ type MainView =
   | 'prWatches'
   | 'workflows'
   | 'goals'
+  | 'artifacts'
   | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -2340,6 +2357,10 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'artifacts' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
     >;
 
 function parsePersistedArtifactPanelTab(
@@ -2569,6 +2590,12 @@ function parsePersistedArtifactPanelTab(
         kind: 'workflow',
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
+    case 'artifacts':
+      return {
+        ...common,
+        kind: 'artifacts',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     default:
       return;
   }
@@ -2734,6 +2761,8 @@ function serializeArtifactPanelTabs(
             ]
           : [];
       case 'workflow':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'artifacts':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'change_overview':
         // Persist the identity like the neighbouring trajectory/workflow arms;
@@ -3695,6 +3724,12 @@ function readScopedModelSetting(
   return scope === 'user' ? setting.values.user : setting.values.workspace;
 }
 
+function isVisionBridgeSetting(
+  key: string,
+): key is 'visionModel' | 'visionBridgeTimeoutMs' {
+  return key === 'visionModel' || key === 'visionBridgeTimeoutMs';
+}
+
 export function App({
   onRefreshModels,
   askUserFreeTextLabel,
@@ -3780,6 +3815,7 @@ export function App({
   hostOwnsAddMenu = false,
   allowedApprovalModes: allowedApprovalModesProp,
   composerVariant = 'default',
+  composerGlowEnabled,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3797,6 +3833,7 @@ export function App({
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
+  overscan,
   conversationSearchThreshold = 10,
   markdown,
   loadingPhrases,
@@ -3883,7 +3920,7 @@ export function App({
         ? getInitialLanguage()
         : normalizeLanguage(providedLanguage),
   );
-  const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const t = useTranslator(selectedLanguage);
   const syncNotificationLanguage =
     useBrowserNotificationSettings()?.syncLanguage;
   useLayoutEffect(() => {
@@ -4015,7 +4052,7 @@ export function App({
       if (
         target instanceof Element &&
         target.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;
@@ -4041,15 +4078,12 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
-      // [data-web-shell-dialog] joins this allowlist because DialogShell
-      // portals outside the drawer subtree but stacks above it — without the
-      // exemption, a dialog opened over the drawer loses all touch scrolling
-      // on a phone. The exemption covers DialogShell only, not other
-      // portaled overlays.
+      // Dialogs and dropdown menus portal outside the drawer subtree but stack
+      // above it. They must keep native touch scrolling over the drawer.
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;
@@ -4118,6 +4152,41 @@ export function App({
 
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const hostOwnsArtifactPreview = Boolean(onRightPanelOpen);
+  const connection = useConnection();
+  const standalone = useContext(StandaloneContext);
+  const sessionActions = useActions();
+  // Standalone opt-in for the per-turn marks: the entry has no session
+  // client, so the app wires the telemetry notification itself, gated by
+  // the daemon capability. A host-provided option always wins.
+  const effectiveAssistantFeedback = useMemo<
+    WebShellAssistantFeedbackOptions | undefined
+  >(() => {
+    if (assistantFeedback !== undefined) return assistantFeedback;
+    if (!standalone) return undefined;
+    if (!connection.capabilities?.features.includes('session_turn_feedback'))
+      return undefined;
+    return {
+      onRate: (info) => {
+        if (info.rating === null) return;
+        // Split panes inherit this option but own a different session; a
+        // mark must never be recorded under a session that did not admit
+        // its turn. Pane marks stay local-only until dispatch can reach
+        // the pane's own session client.
+        if (
+          info.sessionId !== undefined &&
+          info.sessionId !== connection.sessionId
+        )
+          return;
+        void sessionActions.rateAssistantTurn(info.promptId, info.rating);
+      },
+    };
+  }, [
+    assistantFeedback,
+    standalone,
+    connection.capabilities,
+    connection.sessionId,
+    sessionActions,
+  ]);
   const customization = useMemo(
     () => ({
       onRefreshModels,
@@ -4129,6 +4198,7 @@ export function App({
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,
+      composerGlowEnabled,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -4143,7 +4213,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      assistantFeedback: effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4156,6 +4226,7 @@ export function App({
       compactThinking,
       collapseCompletedTurns,
       markdownTableMode,
+      overscan,
       markdown,
       loadingPhrases,
       fileUploadEnabled,
@@ -4172,6 +4243,7 @@ export function App({
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,
+      composerGlowEnabled,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -4186,7 +4258,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4199,6 +4271,7 @@ export function App({
       compactThinking,
       collapseCompletedTurns,
       markdownTableMode,
+      overscan,
       markdown,
       loadingPhrases,
       fileUploadEnabled,
@@ -4217,9 +4290,7 @@ export function App({
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot({
     structuralOnly: true,
   });
-  const connection = useConnection();
   const modelRefresh = useModelRefresh(onRefreshModels);
-  const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,
@@ -4382,6 +4453,31 @@ export function App({
   const ordinaryWorkspaces = useMemo(
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
+  );
+  const recoveryWorkspaceCwds = useMemo(
+    () =>
+      ordinaryWorkspaces
+        .filter(
+          (entry) => !lockedWorkspaceCwd || entry.cwd === lockedWorkspaceCwd,
+        )
+        .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+        .map((entry) => entry.cwd),
+    [lockedWorkspaceCwd, ordinaryWorkspaces],
+  );
+  const recoveryWorkspaceLabels = useMemo(
+    () =>
+      new Map(
+        disambiguateWorkspaceLabels(
+          recoveryWorkspaceCwds.map((cwd) => ({
+            cwd,
+            label: workspaceLabelForCwd(
+              cwd,
+              workspace.capabilities?.workspaces,
+            ),
+          })),
+        ).map(({ cwd, label }) => [cwd, label]),
+      ),
+    [recoveryWorkspaceCwds, workspace.capabilities?.workspaces],
   );
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive
@@ -4572,7 +4668,6 @@ export function App({
         : ordinaryWorkspaces,
     [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
-  const sessionActions = useActions();
   const {
     intent: capacityRecovery,
     offer: offerCapacityRecovery,
@@ -4725,6 +4820,10 @@ export function App({
   // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
   const prWatchesAvailable =
     workspace.capabilities?.features?.includes('autofix_pr_watches') === true;
+  const workspaceArtifactLibraryAvailable =
+    workspace.capabilities?.features?.includes(
+      WORKSPACE_ARTIFACT_LIBRARY_FEATURE,
+    ) === true;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -5188,16 +5287,6 @@ export function App({
   );
   const cancelledRetryAttemptRef = useRef(0);
   const [cancelledRetryRevision, setCancelledRetryRevision] = useState(0);
-  const [unknownPromptAdmission, setUnknownPromptAdmission] =
-    useState<UnknownPromptAdmission | null>(null);
-  const unknownPromptAdmissionRef = useRef<UnknownPromptAdmission | null>(null);
-  const updateUnknownPromptAdmission = useCallback(
-    (next: UnknownPromptAdmission | null) => {
-      unknownPromptAdmissionRef.current = next;
-      setUnknownPromptAdmission(next);
-    },
-    [],
-  );
   const updateFailedPrompt = useCallback((next: FailedPrompt | null) => {
     failedPromptRef.current = next;
     setFailedPrompt(next);
@@ -5228,13 +5317,11 @@ export function App({
     }
     updateFailedPrompt(null);
     setFailedPromptRetry(null);
-    updateUnknownPromptAdmission(null);
   }, [
     connection.sessionId,
     connection.workspaceCwd,
     sessionOwnerGuard,
     updateFailedPrompt,
-    updateUnknownPromptAdmission,
   ]);
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
     null,
@@ -5275,6 +5362,27 @@ export function App({
       return;
     }
     if (!failedBlock) return;
+    if (failedBlock.promptId) {
+      updateFailedPrompt(null);
+      return;
+    }
+    const failedBlockIndex = blocks.indexOf(failedBlock);
+    if (
+      failedBlockIndex >= 0 &&
+      blocks
+        .slice(failedBlockIndex + 1)
+        .some(
+          (block) =>
+            isDaemonRewindUserBlock(block) ||
+            (block.kind === 'assistant' &&
+              block.meta?.['source'] !== 'background_notification') ||
+            block.kind === 'thought' ||
+            block.kind === 'tool',
+        )
+    ) {
+      updateFailedPrompt(null);
+      return;
+    }
     const failedIndex = displayMessages.findIndex(
       (message) => message.id === failedBlock.id,
     );
@@ -5282,7 +5390,12 @@ export function App({
     if (
       displayMessages
         .slice(failedIndex + 1)
-        .some((message) => message.role === 'user')
+        .some(
+          (message) =>
+            message.role === 'user' ||
+            message.role === 'assistant' ||
+            message.role === 'tool_group',
+        )
     ) {
       updateFailedPrompt(null);
       return;
@@ -5305,12 +5418,6 @@ export function App({
     store,
     updateFailedPrompt,
   ]);
-  useEffect(() => {
-    const unknown = unknownPromptAdmissionRef.current;
-    if (unknown && unknown.sessionId !== connection.sessionId) {
-      updateUnknownPromptAdmission(null);
-    }
-  }, [connection.sessionId, updateUnknownPromptAdmission]);
   const {
     artifacts,
     loading: artifactsLoading,
@@ -7052,6 +7159,28 @@ export function App({
       openContextUsagePanel(sessionId, actions, true),
     [openContextUsagePanel],
   );
+  const openArtifactsListPanel = useCallback(
+    (sourceSessionId: string) => {
+      rememberArtifactPanelTrigger();
+      const tab: ArtifactPanelTab = {
+        id: `artifacts:${sourceSessionId}`,
+        kind: 'artifacts',
+        title: t('environment.artifacts'),
+        sessionId: sourceSessionId,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -8259,6 +8388,13 @@ export function App({
                       sessionAgentTraceSupported)
                     ? tab
                     : undefined;
+                case 'artifacts':
+                  // A stored tab outlives the host's opt-in, like the sibling
+                  // restore arms: a host that hides the artifacts header entry
+                  // must not get the list tab back through the browser profile.
+                  if (!artifactsHeaderItemVisible) return undefined;
+                  // Identity only; the list reads the live artifacts prop.
+                  return tab;
                 case 'change_overview':
                   // A stored tab outlives the host's opt-in, so a host that
                   // has stopped listing the item must not get the panel back
@@ -8368,6 +8504,7 @@ export function App({
       cancelled = true;
     };
   }, [
+    artifactsHeaderItemVisible,
     artifactsLoading,
     connection.sessionContext,
     connection.loadingTranscript,
@@ -8392,6 +8529,49 @@ export function App({
     connection.standaloneSession?.projectlessOutputDirectory,
     sessionWorktree?.path,
     workspace.client,
+  ]);
+  const [pendingJumpArtifactOpen, setPendingJumpArtifactOpenState] = useState<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const pendingJumpArtifactOpenRef = useRef<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const setPendingJumpArtifactOpen = useCallback(
+    (request: PendingArtifactJumpOpenRequest | undefined) => {
+      pendingJumpArtifactOpenRef.current = request;
+      setPendingJumpArtifactOpenState(request);
+    },
+    [],
+  );
+  useEffect(() => {
+    const decision = resolvePendingArtifactJumpOpen(pendingJumpArtifactOpen, {
+      currentSessionId: connection.sessionId,
+      switchingSessionId: sidebarSwitchingSessionId,
+      panelStateKey,
+      restoredSessionKey: artifactPanelRestoredSessionKeyRef.current,
+      panelRestoring: artifactPanelRestoring,
+      loadingTranscript: Boolean(connection.loadingTranscript),
+      artifactsLoading,
+      connected: connection.status === 'connected',
+    });
+    if (decision === 'cancel') {
+      setPendingJumpArtifactOpen(undefined);
+    } else if (decision === 'open' && pendingJumpArtifactOpen) {
+      const targetArtifactId = pendingJumpArtifactOpen.artifactId;
+      setPendingJumpArtifactOpen(undefined);
+      openArtifactPanel(targetArtifactId);
+    }
+  }, [
+    artifactPanelRestoring,
+    artifactsLoading,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    openArtifactPanel,
+    panelStateKey,
+    pendingJumpArtifactOpen,
+    setPendingJumpArtifactOpen,
+    sidebarSwitchingSessionId,
   ]);
   const openShellPanel = useCallback(
     (
@@ -9143,6 +9323,7 @@ export function App({
       : null
     : null;
   const pendingAskUserApprovalRef = useRef(pendingAskUserApproval);
+  const askUserOverlayRef = useRef<HTMLDivElement>(null);
   pendingAskUserApprovalRef.current = pendingAskUserApproval;
   const pendingToolApproval =
     pendingApproval && !isAskUserPermission(pendingApproval)
@@ -9882,6 +10063,7 @@ export function App({
     TranscriptTurnErrorIdentity | undefined
   >(undefined);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
+  const turnErrorRetryIdempotencyKeyRef = useRef<string | null>(null);
   const failedTurnErrorRetryRef = useRef<{
     errorId: string;
     text: string;
@@ -9901,6 +10083,7 @@ export function App({
     retryableTurnErrorIdRef.current = null;
     retryableTurnErrorIdentityRef.current = undefined;
     retriedTurnErrorIdRef.current = null;
+    turnErrorRetryIdempotencyKeyRef.current = null;
     failedTurnErrorRetryRef.current = null;
   }, []);
   const rearmFailedTurnErrorRetry = useCallback(
@@ -10018,6 +10201,7 @@ export function App({
     retryableTurnErrorIdRef.current = null;
     retryableTurnErrorIdentityRef.current = undefined;
     retriedTurnErrorIdRef.current = null;
+    turnErrorRetryIdempotencyKeyRef.current = null;
     failedTurnErrorRetryRef.current = null;
     setShowRetryHint(false);
   }, [
@@ -10112,6 +10296,7 @@ export function App({
       retryableTurnErrorIdRef.current = renderedTurnError.id;
       retryableTurnErrorIdentityRef.current = { block: renderedTurnError };
       retriedTurnErrorIdRef.current = state.previousRetriedTurnErrorId;
+      turnErrorRetryIdempotencyKeyRef.current = state.idempotencyKey ?? null;
       setShowRetryHint(state.previousShowRetryHint);
       setFailedPromptRetry(null);
       return 'restored';
@@ -10920,6 +11105,10 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   const splitClassificationGenerationRef = useRef(0);
+  const artifactLibraryJumpGenRef = useRef(0);
+  const artifactLibraryJumpDispatchingRef = useRef<string | undefined>(
+    undefined,
+  );
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
@@ -11134,6 +11323,7 @@ export function App({
         (mainView === 'scheduledTasks' ||
           mainView === 'prWatches' ||
           mainView === 'goals' ||
+          mainView === 'artifacts' ||
           mainView === 'split'))
     ) {
       setMainView('chat');
@@ -11240,6 +11430,27 @@ export function App({
       showChat();
     }
   }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
+  const openArtifacts = useCallback(() => {
+    if (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable) return;
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    if (!navigationRef.current) showChat();
+    setMainView('artifacts');
+    navigationRef.current?.openPage('artifacts');
+  }, [projectFeaturesAvailable, showChat, workspaceArtifactLibraryAvailable]);
+  useEffect(() => {
+    if (
+      mainView === 'artifacts' &&
+      (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable)
+    ) {
+      showChat();
+    }
+  }, [
+    mainView,
+    projectFeaturesAvailable,
+    showChat,
+    workspaceArtifactLibraryAvailable,
+  ]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -11258,6 +11469,7 @@ export function App({
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
+        if (item === 'artifacts') return workspaceArtifactLibraryAvailable;
         return true;
       }),
     );
@@ -11284,6 +11496,43 @@ export function App({
   // when an embedded container disagrees with the viewport.
   const compactShell =
     sidebarLayoutWidth !== undefined && sidebarLayoutWidth <= 760;
+  useLayoutEffect(() => {
+    const root = appRootRef.current;
+    const viewport = window.visualViewport;
+    if (!root) return;
+    if (!compactShell || !viewport) {
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
+      return;
+    }
+
+    const updateInset = () => {
+      const inset = visualViewportBottomInset(
+        root.getBoundingClientRect(),
+        viewport,
+      );
+      root.style.setProperty(
+        '--web-shell-visual-viewport-inset-bottom',
+        `${inset}px`,
+      );
+      // The compact welcome layout only anchors its group to the bottom of the
+      // reserved box while the keyboard actually occludes the viewport, so the
+      // unoccluded welcome state keeps its vertical centring.
+      root.toggleAttribute('data-visual-viewport-occluded', inset > 0);
+    };
+    updateInset();
+    viewport.addEventListener('resize', updateInset);
+    // Safari changes offsetTop while scrolling or revealing browser chrome.
+    viewport.addEventListener('scroll', updateInset);
+    window.addEventListener('resize', updateInset);
+    return () => {
+      viewport.removeEventListener('resize', updateInset);
+      viewport.removeEventListener('scroll', updateInset);
+      window.removeEventListener('resize', updateInset);
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
+    };
+  }, [compactShell]);
   const channelSidebarEnabled =
     sidebarOptions.enabled &&
     projectFeaturesAvailable &&
@@ -11435,7 +11684,9 @@ export function App({
           ? 'pr-watches'
           : mainView === 'goals'
             ? 'goals'
-            : undefined;
+            : mainView === 'artifacts'
+              ? 'artifacts'
+              : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -11461,6 +11712,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
           (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
@@ -11488,7 +11740,9 @@ export function App({
           ? 'prWatches'
           : nextPage === 'goals'
             ? 'goals'
-            : 'chat',
+            : nextPage === 'artifacts'
+              ? 'artifacts'
+              : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -11500,6 +11754,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    workspaceArtifactLibraryAvailable,
     channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
@@ -12259,6 +12514,7 @@ export function App({
           // `/clear` carry so the pane session's lineage never inherits the
           // cleared session's title.
           pendingManualTitleRef.current = undefined;
+          artifactLibraryJumpGenRef.current += 1;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -12370,7 +12626,8 @@ export function App({
       mainView === 'scheduledTasks' ||
       mainView === 'prWatches' ||
       mainView === 'workflows' ||
-      mainView === 'goals'
+      mainView === 'goals' ||
+      mainView === 'artifacts'
     ) {
       setMainView('chat');
     }
@@ -12550,21 +12807,32 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const workflowTaskDialogTargetRef = useRef<{
+    id: string;
+    toolUseId?: string;
+    hadToolMessage: boolean;
+  } | null>(null);
+  const tasksPanelRequestIdRef = useRef(0);
+  const closeTasksPanel = useCallback(() => {
+    tasksPanelRequestIdRef.current += 1;
+    workflowTaskDialogTargetRef.current = null;
+    setTasksDialogMessage(null);
+  }, []);
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openMonitorPanel(task);
     },
-    [openMonitorPanel],
+    [closeTasksPanel, openMonitorPanel],
   );
   const handleOpenShellDetails = useCallback(
     (task: DaemonSessionShellTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openShellPanel(task);
     },
-    [openShellPanel],
+    [closeTasksPanel, openShellPanel],
   );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
@@ -13014,7 +13282,11 @@ export function App({
                 ? { name: gitModeIntentRef.current.name }
                 : undefined,
             sessionSourceType: sessionSourceTypeRef.current,
-            onSessionCreated: async (sessionId, detachedSession) => {
+            onSessionCreated: async (
+              sessionId,
+              detachedSession,
+              createdSession,
+            ) => {
               // A detached creation never bound the connection: rename
               // through the created client, not the current-session action.
               const rename = (displayName: string) =>
@@ -13037,27 +13309,14 @@ export function App({
                 } catch {
                   pendingManualTitleRef.current = undefined;
                 }
-              } else if (initialTitle) {
-                // Name the new session from its first prompt before the row
-                // is first rendered, so it never shows the session-id
-                // fallback. Best-effort: on failure the daemon's first-prompt
-                // label still names it.
-                try {
-                  await rename(initialTitle);
-                  if (catalogWorkspaceCwd) {
-                    sessionCatalogController.renamed(
-                      catalogWorkspaceCwd,
-                      sessionId,
-                      initialTitle,
-                    );
-                  }
-                } catch {
-                  // Fall back to the first-prompt label.
-                }
+              } else if (initialTitle && createdSession.updateMetadata) {
+                // The catalog already has a provisional title. Reconcile
+                // through daemon events and reads, since a manual rename can
+                // land while this request is still in flight.
+                void createdSession
+                  .updateMetadata({ initialDisplayName: initialTitle })
+                  .catch(() => {});
               }
-              // Start the first catalog read only after the rename (or the
-              // carry) settled, so the row's first publish already carries
-              // the name instead of the session-id prefix.
               if (catalogWorkspaceCwd) {
                 sessionCatalogController.sessionCreated(
                   catalogWorkspaceCwd,
@@ -13442,6 +13701,7 @@ export function App({
         optimisticUserMessage?: boolean;
         bindBlockId?: string;
         retry?: boolean;
+        idempotencyKey?: string;
         // Skips prepareSubmit without daemon retry semantics; used
         // by the failed-prompt retry, whose user message was never
         // recorded.
@@ -13672,6 +13932,9 @@ export function App({
                   ? preparedInputAnnotations
                   : undefined,
               retry: opts?.retry,
+              ...(opts?.idempotencyKey
+                ? { idempotencyKey: opts.idempotencyKey }
+                : {}),
               onAdmissionStarted: () => {
                 opts?.onAdmissionStarted?.(detachedSessionId);
               },
@@ -13743,6 +14006,7 @@ export function App({
         retryableTurnErrorIdRef.current = null;
         retryableTurnErrorIdentityRef.current = undefined;
         retriedTurnErrorIdRef.current = null;
+        turnErrorRetryIdempotencyKeyRef.current = null;
         failedTurnErrorRetryRef.current = null;
         retryOwnerRef.current = {
           sessionId: sessionIdAfterEnsure,
@@ -13819,6 +14083,9 @@ export function App({
         optimisticUserMessage: opts?.optimisticUserMessage,
         ...(opts?.bindBlockId ? { bindBlockId: opts.bindBlockId } : {}),
         retry: opts?.retry,
+        ...(opts?.idempotencyKey
+          ? { idempotencyKey: opts.idempotencyKey }
+          : {}),
         ...(opts?.beforeDispatch
           ? { beforeDispatch: opts.beforeDispatch }
           : {}),
@@ -13867,13 +14134,19 @@ export function App({
         ) => ReturnType<typeof sessionActions.sendPrompt>
       )(preparedPrompt, promptOptions);
       trackInFlightPrompt();
-      if (
-        sessionIdAfterEnsure &&
-        opts?.optimisticUserMessage !== false &&
-        opts?.onOptimisticUserMessage
-      ) {
+      let optimisticUserMessageReported = false;
+      const reportOptimisticUserMessage = () => {
+        if (
+          optimisticUserMessageReported ||
+          !sessionIdAfterEnsure ||
+          opts?.optimisticUserMessage === false ||
+          !opts?.onOptimisticUserMessage
+        ) {
+          return;
+        }
         const message = getLatestUserBlock(store.getSnapshot().blocks);
         if (message && message !== previousUserMessage) {
+          optimisticUserMessageReported = true;
           opts.onOptimisticUserMessage({
             sessionId: sessionIdAfterEnsure,
             messageId: message.id,
@@ -13884,10 +14157,12 @@ export function App({
               : {}),
           });
         }
-      }
+      };
+      reportOptimisticUserMessage();
       try {
         return await resultPromise;
       } catch (error) {
+        reportOptimisticUserMessage();
         if (
           admissionStarted &&
           !admitted &&
@@ -14240,13 +14515,18 @@ export function App({
     (!mainVoiceTarget?.cwd || mainVoiceTarget.cwd === connection.workspaceCwd)
       ? workspaceEventSignals?.settingsVersion
       : undefined;
+  const qualifiedSettingsSupported = [
+    QUALIFIED_CORE_FEATURE,
+    WORKSPACE_SETTINGS_FEATURE,
+  ].every((feature) => workspace.capabilities?.features?.includes(feature));
   const {
     descriptor: qualifiedVoiceSetting,
-    reload: reloadQualifiedVoiceSettings,
+    status: qualifiedWorkspaceSettings,
+    reload: reloadQualifiedWorkspaceSettings,
   } = useVoiceWorkspaceSettings(
     workspace.client,
     mainVoiceTarget,
-    voiceModelSettingsSupported && mainView !== 'split',
+    qualifiedSettingsSupported && mainView !== 'split',
     JSON.stringify([
       voiceUserRevision,
       mainVoiceStatusRevision.workspace,
@@ -14323,11 +14603,14 @@ export function App({
     });
     let admitted = false;
     let admissionStarted = false;
+    const retryIdempotencyKey =
+      failed.idempotencyKey ?? createPromptIdempotencyKey();
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
       // The failed attempt appended this block but never got it bound.
       bindBlockId: failed.messageId,
       skipPrepareSubmit: true,
+      idempotencyKey: retryIdempotencyKey,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
         admissionStarted = true;
@@ -14347,40 +14630,36 @@ export function App({
         restoreOrDeferCancelledRetry(retryOwner, {
           kind: 'failed-prompt',
           attemptId: retryAttemptId,
-          failed,
+          failed: { ...failed, idempotencyKey: retryIdempotencyKey },
         });
       },
     })
       .catch((error: unknown) => {
         if (!retryOwnerIsCurrent(retryOwner)) return;
         const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-        if (admissionStarted && !admitted && !definitelyRejected) {
-          if (!retryTranscriptIsCurrent()) return;
-          updateUnknownPromptAdmission({
-            sessionId: failed.sessionId,
-            messageId: failed.messageId,
-            text: failed.text,
-            images: failed.images ? [...failed.images] : undefined,
-            files: failed.files ? [...failed.files] : undefined,
-            inputAnnotations: failed.inputAnnotations,
-            payloadAvailable: true,
-          });
-          pushToast('warning', t('queue.admissionUnknown'));
-          console.warn(
-            '[WebShell] prompt retry admission outcome is unknown',
-            error,
-          );
-          return;
-        }
+        const admissionUncertain =
+          admissionStarted && !admitted && !definitelyRejected;
         if (!admitted) {
           restoreOrDeferCancelledRetry(retryOwner, {
             kind: 'failed-prompt',
             attemptId: retryAttemptId,
-            failed,
+            failed: {
+              ...failed,
+              idempotencyKey: retryIdempotencyKey,
+              reason: admissionUncertain ? 'uncertain' : 'failed',
+            },
           });
         }
         if (retryTranscriptIsCurrent()) {
-          reportError(error, 'Failed to resend message');
+          if (admissionUncertain) {
+            pushToast('warning', t('userMessage.deliveryUncertain'));
+            console.warn(
+              '[WebShell] prompt retry admission outcome is unknown',
+              error,
+            );
+          } else {
+            reportError(error, 'Failed to resend message');
+          }
         }
       })
       .finally(() => {
@@ -14403,7 +14682,6 @@ export function App({
     store,
     t,
     updateFailedPrompt,
-    updateUnknownPromptAdmission,
   ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
@@ -14491,11 +14769,7 @@ export function App({
           current.standaloneSession?.errorCode !==
             'working_directory_missing' &&
           current.standaloneSession?.errorCode !==
-            'working_directory_compromised' &&
-          !(
-            unknownPromptAdmissionRef.current?.payloadAvailable &&
-            unknownPromptAdmissionRef.current.sessionId === sessionId
-          )
+            'working_directory_compromised'
         );
       };
       const assertCurrent = () => {
@@ -14793,9 +15067,9 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     lastRecapBlockCountRef.current = 0;
-  }, [connection.sessionId, connection.workspaceCwd]);
+  }, [closeTasksPanel, connection.sessionId, connection.workspaceCwd]);
 
   useEffect(() => {
     const scope = {
@@ -15444,43 +15718,89 @@ export function App({
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
-      await reloadQualifiedVoiceSettings();
+      await reloadQualifiedWorkspaceSettings();
     }
     return status;
   }, [
     mainVoiceTarget?.route,
-    reloadQualifiedVoiceSettings,
+    reloadQualifiedWorkspaceSettings,
     reloadWorkspaceSettings,
   ]);
   const targetedWorkspaceSettings = useMemo(() => {
-    const withoutVoice = workspaceSettings.filter(
-      (setting) => setting.key !== 'voiceModel',
-    );
-    if (mainView === 'split') return withoutVoice;
-    if (mainVoiceTarget?.route === 'legacy-primary') return workspaceSettings;
-    if (!voiceModelSettingsSupported || !qualifiedVoiceSetting) {
-      return withoutVoice;
+    if (mainView !== 'split' && mainVoiceTarget?.route === 'legacy-primary') {
+      return workspaceSettings;
     }
-    const voiceIndex = workspaceSettings.findIndex(
-      (setting) => setting.key === 'voiceModel',
+    const settings = workspaceSettings.filter(
+      (setting) =>
+        setting.key !== 'voiceModel' &&
+        (!isVisionBridgeSetting(setting.key) ||
+          (sessionIsStandalone && setting.key === 'visionModel')),
     );
-    if (voiceIndex < 0) {
-      return [...withoutVoice, qualifiedVoiceSetting];
+    if (mainView === 'split') return settings;
+    if (sessionIsStandalone) {
+      const timeout = workspaceSettings.find(
+        (setting) => setting.key === 'visionBridgeTimeoutMs',
+      );
+      if (timeout) {
+        const { user } = timeout.values;
+        settings.push({ ...timeout, values: { user, effective: user } });
+      }
+      return settings;
     }
-    return workspaceSettings.map((setting) =>
-      setting.key === 'voiceModel' ? qualifiedVoiceSetting : setting,
+    if (voiceModelSettingsSupported && qualifiedVoiceSetting) {
+      settings.push(qualifiedVoiceSetting);
+    }
+    settings.push(
+      ...(qualifiedWorkspaceSettings?.settings.filter((setting) =>
+        isVisionBridgeSetting(setting.key),
+      ) ?? []),
     );
+    return settings;
   }, [
     mainView,
     mainVoiceTarget?.route,
     qualifiedVoiceSetting,
+    qualifiedWorkspaceSettings,
+    sessionIsStandalone,
     voiceModelSettingsSupported,
     workspaceSettings,
   ]);
+  const writeVisionSetting = useCallback(
+    async (
+      scope: 'workspace' | 'user',
+      key: 'visionModel' | 'visionBridgeTimeoutMs',
+      value: unknown,
+    ) => {
+      if (
+        scope === 'user' ||
+        mainVoiceTarget?.route === 'legacy-primary' ||
+        // Standalone Settings exposes the primary's workspace model picker.
+        (sessionIsStandalone && key === 'visionModel')
+      ) {
+        return setWorkspaceSetting(scope, key, value);
+      }
+      const client =
+        mainVoiceTarget &&
+        qualifiedWorkspaceClient(workspace.client, mainVoiceTarget);
+      if (!client) throw new Error(t('session.workspaceActionUnavailable'));
+      return client.setWorkspaceSetting('workspace', key, value);
+    },
+    [
+      mainVoiceTarget,
+      sessionIsStandalone,
+      setWorkspaceSetting,
+      t,
+      workspace.client,
+    ],
+  );
   const targetedWorkspaceSettingsState = {
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
+    setValue: (scope: 'workspace' | 'user', key: string, value: unknown) =>
+      isVisionBridgeSetting(key)
+        ? writeVisionSetting(scope, key, value)
+        : setWorkspaceSetting(scope, key, value),
     liveSetup: liveSidebarEnabled ? undefined : liveSetup,
   };
   const themeSetting = workspaceSettings.find(
@@ -15502,7 +15822,9 @@ export function App({
   })();
   const currentVisionModel = (() => {
     const value = readScopedModelSetting(
-      workspaceSettings,
+      modelSettingScope === 'user'
+        ? workspaceSettings
+        : targetedWorkspaceSettings,
       modelSettingScope,
       'visionModel',
     );
@@ -15650,7 +15972,7 @@ export function App({
         if (target.route === 'legacy-primary') {
           await reloadWorkspaceSettings().catch(() => undefined);
         } else {
-          await reloadQualifiedVoiceSettings().catch(() => undefined);
+          await reloadQualifiedWorkspaceSettings().catch(() => undefined);
         }
         throw error;
       }
@@ -15658,13 +15980,13 @@ export function App({
       if (target.route === 'legacy-primary') {
         await reloadWorkspaceSettings().catch(() => undefined);
       } else {
-        await reloadQualifiedVoiceSettings().catch(() => undefined);
+        await reloadQualifiedWorkspaceSettings().catch(() => undefined);
       }
     },
     [
       bumpVoiceRevision,
       mainVoiceTarget,
-      reloadQualifiedVoiceSettings,
+      reloadQualifiedWorkspaceSettings,
       reloadWorkspaceSettings,
       setWorkspaceSetting,
       workspace.capabilities?.features,
@@ -16682,6 +17004,8 @@ export function App({
           sessionId,
           displayName,
         );
+      } else if (connection.sessionContext?.kind === 'standalone') {
+        setStandaloneSessionsReloadToken((value) => value + 1);
       }
     }
     dispatchSessionChangeRef.current?.({
@@ -17125,6 +17449,7 @@ export function App({
         ? { displayName: opts.carryManualTitle }
         : undefined;
       splitClassificationGenerationRef.current += 1;
+      artifactLibraryJumpGenRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
       let availableWorkspaces = workspacesRef.current;
@@ -18304,6 +18629,18 @@ export function App({
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
     ) => {
+      // Suppress the generation bump for the jump's own load so a rejection
+      // from `loadSidebarSession` stays current in `runArtifactLibrarySessionJump`'s
+      // catch block and still clears pending state and surfaces the error.
+      if (artifactLibraryJumpDispatchingRef.current !== sessionId) {
+        artifactLibraryJumpGenRef.current += 1;
+      }
+      if (
+        pendingJumpArtifactOpenRef.current &&
+        pendingJumpArtifactOpenRef.current.sessionId !== sessionId
+      ) {
+        setPendingJumpArtifactOpen(undefined);
+      }
       setManagedHome(false);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
@@ -18379,7 +18716,54 @@ export function App({
       closePanel,
       isKnownLiveWorkspaceCwd,
       sessionActions,
+      setPendingJumpArtifactOpen,
       setPendingSessionContext,
+    ],
+  );
+
+  const openSessionFromArtifactLibrary = useCallback(
+    (
+      sessionId: string,
+      archiveState: 'active' | 'archived',
+      artifactId?: string,
+    ) => {
+      const jumpGen = ++artifactLibraryJumpGenRef.current;
+      const targetCwd =
+        resolveWorkspaceMaintenanceTargetCwd() ??
+        workspace.capabilities?.workspaceCwd;
+      void runArtifactLibrarySessionJump({
+        sessionId,
+        archiveState,
+        artifactId,
+        targetCwd,
+        primaryCwd: workspace.capabilities?.workspaceCwd,
+        showChat,
+        unarchivePrimarySession: (id) => workspaceActions.unarchiveSession(id),
+        unarchiveWorkspaceSessions: (cwd, ids) =>
+          workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+        getPendingJumpArtifactOpen: () => pendingJumpArtifactOpenRef.current,
+        setPendingJumpArtifactOpen,
+        isCurrent: () => artifactLibraryJumpGenRef.current === jumpGen,
+        loadSidebarSession: (id, cwd) => {
+          artifactLibraryJumpDispatchingRef.current = id;
+          try {
+            return loadSidebarSession(id, cwd);
+          } finally {
+            artifactLibraryJumpDispatchingRef.current = undefined;
+          }
+        },
+        reportError,
+      });
+    },
+    [
+      loadSidebarSession,
+      reportError,
+      resolveWorkspaceMaintenanceTargetCwd,
+      setPendingJumpArtifactOpen,
+      showChat,
+      workspace.capabilities?.workspaceCwd,
+      workspace.client,
+      workspaceActions,
     ],
   );
 
@@ -19002,39 +19386,67 @@ export function App({
     tryFireBoundRun,
   ]);
 
-  const openTasksPanel = useCallback(() => {
-    if (!requireActiveSessionForLocalCommand()) return;
-    const owner = sessionOwnerGuard.capture();
-    const request = workflowsEnabled
-      ? sessionActions.getWorkflowTasks()
-      : sessionActions.getTasks();
-    request
-      .then((snapshot) => {
-        if (!owner.isCurrent()) return;
-        setTasksDialogMessage({ snapshot });
-      })
-      .catch((error: unknown) => {
-        if (!owner.isCurrent()) return;
-        if (isSessionDisconnectedError(error)) return;
-        reportError(error, 'Failed to load tasks');
-      });
-  }, [
-    reportError,
-    requireActiveSessionForLocalCommand,
-    sessionActions,
-    sessionOwnerGuard,
-    workflowsEnabled,
-  ]);
+  const openTasksPanel = useCallback(
+    (
+      workflowTaskId?: string,
+      workflowToolUseId?: string,
+      hadToolMessage = false,
+    ) => {
+      if (!requireActiveSessionForLocalCommand()) return;
+      const owner = sessionOwnerGuard.capture();
+      const requestId = ++tasksPanelRequestIdRef.current;
+      workflowTaskDialogTargetRef.current =
+        workflowTaskId === undefined
+          ? null
+          : {
+              id: workflowTaskId,
+              toolUseId: workflowToolUseId,
+              hadToolMessage,
+            };
+      const request = workflowsEnabled
+        ? sessionActions.getWorkflowTasks()
+        : sessionActions.getTasks();
+      request
+        .then((snapshot) => {
+          if (
+            !owner.isCurrent() ||
+            tasksPanelRequestIdRef.current !== requestId
+          ) {
+            return;
+          }
+          setTasksDialogMessage({ snapshot });
+        })
+        .catch((error: unknown) => {
+          if (
+            !owner.isCurrent() ||
+            tasksPanelRequestIdRef.current !== requestId
+          ) {
+            return;
+          }
+          workflowTaskDialogTargetRef.current = null;
+          if (isSessionDisconnectedError(error)) return;
+          reportError(error, 'Failed to load tasks');
+        });
+    },
+    [
+      reportError,
+      requireActiveSessionForLocalCommand,
+      sessionActions,
+      sessionOwnerGuard,
+      workflowsEnabled,
+    ],
+  );
   const openCockpit = useCallback((): boolean => {
     if (!sessionWorkflowEnabled || approvalOverlayActive) return false;
     if (!requireActiveSessionForLocalCommand()) return false;
     if (!cockpitViewRequested()) updateCockpitLocation(true);
     setActivePanel(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     setMainView('cockpit');
     return true;
   }, [
     approvalOverlayActive,
+    closeTasksPanel,
     requireActiveSessionForLocalCommand,
     sessionWorkflowEnabled,
   ]);
@@ -19203,6 +19615,53 @@ export function App({
     },
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
+  function findComposerTaskTab(
+    tabs: readonly ArtifactPanelTab[],
+    task: ComposerChipTask,
+    sourceSessionId?: string,
+    activeTabId?: string | null,
+  ): ArtifactPanelTab | undefined {
+    if (!sourceSessionId) return undefined;
+    let ids: string[];
+    switch (task.kind) {
+      case 'workflow':
+        return undefined;
+      case 'session':
+        ids = [`session:${task.sessionId}`];
+        break;
+      case 'shell':
+        ids = [`shell:${task.id}`, `background:${sourceSessionId}:${task.id}`];
+        break;
+      case 'monitor':
+        ids = [
+          `monitor:${task.id}`,
+          `background:${sourceSessionId}:${task.id}`,
+        ];
+        break;
+      case 'agent': {
+        ids = [
+          `subagent:${sourceSessionId}:${task.id}`,
+          `background:${sourceSessionId}:${task.id}`,
+        ];
+        if (task.toolUseId) {
+          ids.push(
+            `subagent:${sourceSessionId}:${task.toolUseId}`,
+            `background:${sourceSessionId}:${task.toolUseId}`,
+          );
+        }
+        break;
+      }
+    }
+    const taskTabKind = task.kind === 'agent' ? 'subagent' : task.kind;
+    return tabs.find(
+      (tab) =>
+        (activeTabId === undefined || tab.id === activeTabId) &&
+        (tab.kind === taskTabKind ||
+          (tab.kind === 'pending' && tab.targetKind === taskTabKind)) &&
+        ids.includes(tab.id),
+    );
+  }
+
   // A workflow chip scrolls the transcript to the call that started the run
   // and opens its inline view. A run with no row in this transcript (started
   // from the runs page, a rerun, or history that is not loaded) opens in the
@@ -19218,18 +19677,69 @@ export function App({
         if (messageListRef.current?.scrollToMessage(messageId, callId)) return;
         toolRevealStore.cancel(callId);
       }
-      openTasksPanel();
+      openTasksPanel(task.id, task.toolUseId, messageId !== undefined);
     },
     [messages, openTasksPanel, toolRevealStore],
   );
+  const isComposerTaskOpen = useCallback(
+    (task: ComposerChipTask): boolean => {
+      if (task.kind === 'workflow') {
+        const target = workflowTaskDialogTargetRef.current;
+        if (target?.id !== task.id || target.toolUseId !== task.toolUseId) {
+          return false;
+        }
+        return (
+          target.hadToolMessage ||
+          !task.toolUseId ||
+          findToolMessageId(messages, task.toolUseId) === undefined
+        );
+      }
+      if (!artifactPanelOpen) return false;
+      const tab = findComposerTaskTab(
+        artifactPanelTabs,
+        task,
+        connection.sessionId,
+        activeArtifactPanelTabId,
+      );
+      return tab !== undefined && tab.id === activeArtifactPanelTabId;
+    },
+    [
+      activeArtifactPanelTabId,
+      artifactPanelOpen,
+      artifactPanelTabs,
+      connection.sessionId,
+      messages,
+    ],
+  );
+
   const openComposerTask = useCallback(
-    (task: ComposerChipTask) => {
+    (task: ComposerChipTask, toggle = false) => {
+      const isOpen = isComposerTaskOpen(task);
+      if (toggle && isOpen) {
+        closeTasksPanel();
+        if (task.kind === 'workflow') return;
+        closeArtifactPanel();
+        return;
+      }
+      if (!toggle && isOpen && task.kind === 'workflow') return;
+      closeTasksPanel();
+      if (task.kind === 'workflow') {
+        locateWorkflowTask(task);
+        return;
+      }
+      const existingTab = findComposerTaskTab(
+        artifactPanelTabs,
+        task,
+        connection.sessionId,
+      );
+      if (existingTab) {
+        selectArtifactPanelTab(existingTab.id);
+        setArtifactPanelOpen(true);
+        return;
+      }
       switch (task.kind) {
         case 'session':
           openSessionPanel(task);
-          return;
-        case 'workflow':
-          locateWorkflowTask(task);
           return;
         case 'shell':
           handleOpenShellDetails(task);
@@ -19252,14 +19762,19 @@ export function App({
       }
     },
     [
+      artifactPanelTabs,
+      closeArtifactPanel,
+      closeTasksPanel,
       connection.sessionId,
       connection.workspaceCwd,
       handleOpenMonitorDetails,
       handleOpenShellDetails,
+      isComposerTaskOpen,
       locateWorkflowTask,
       messages,
       openSessionPanel,
       openSubagentPanelForSession,
+      selectArtifactPanelTab,
     ],
   );
 
@@ -19455,11 +19970,6 @@ export function App({
         return false;
       }
       const sessionId = connectionRef.current.sessionId;
-      if (
-        unknownPromptAdmissionRef.current?.payloadAvailable &&
-        unknownPromptAdmissionRef.current.sessionId === sessionId
-      )
-        return false;
       const original = getLatestUserBlock(store.getSnapshot().blocks);
       if (!sessionId || original?.kind !== 'user') return false;
       const images: PromptImage[] | undefined = original.images?.map(
@@ -19516,6 +20026,7 @@ export function App({
           throw new Error(t('userMessage.editStale'));
         }
       };
+      const editIdempotencyKey = createPromptIdempotencyKey();
       let preparedEdit: WebShellPreparedSubmit = {
         prompt: trimmed,
         inputAnnotations,
@@ -19529,6 +20040,7 @@ export function App({
         await sendPrompt(trimmed, images, files, {
           submittedPrompt: trimmed,
           inputAnnotations,
+          idempotencyKey: editIdempotencyKey,
           clearComposerOnPromptStart: false,
           onPreparedSubmit: (prepared) => {
             preparedEdit = prepared;
@@ -19602,17 +20114,11 @@ export function App({
           !isDefinitelyRejectedPromptAdmission(error)
         ) {
           admissionUnknown = true;
-          updateUnknownPromptAdmission({
-            sessionId,
-            text: preparedEdit.prompt,
-            images,
-            files,
-            inputAnnotations: preparedEdit.inputAnnotations
-              ? [...preparedEdit.inputAnnotations]
-              : undefined,
-            payloadAvailable: true,
-          });
-          pushToast('warning', t('queue.admissionUnknown'));
+          pushToast('warning', t('userMessage.deliveryUncertain'));
+          console.warn(
+            '[WebShell] edit prompt admission outcome is unknown',
+            error,
+          );
         } else if (!isAbortError(error) && !isAlreadyDispatched(error)) {
           reportError(
             error,
@@ -19620,7 +20126,7 @@ export function App({
           );
         }
       } finally {
-        if (rewindStarted && !admitted && !admissionUnknown && isCurrent()) {
+        if (rewindStarted && !admitted && isCurrent()) {
           const recover = () => {
             // Only create a replacement after the old turn has been removed.
             if (countUserTurns(store.getSnapshot().blocks) === turnIndex) {
@@ -19659,6 +20165,8 @@ export function App({
               inputAnnotations: preparedEdit.inputAnnotations
                 ? [...preparedEdit.inputAnnotations]
                 : undefined,
+              idempotencyKey: editIdempotencyKey,
+              reason: admissionUnknown ? 'uncertain' : 'failed',
             });
           };
           if (
@@ -19686,7 +20194,6 @@ export function App({
       sessionOwnerGuard,
       store,
       t,
-      updateUnknownPromptAdmission,
       updateFailedPrompt,
       getComposerWorkspaceCwd,
       logicalSessionKey,
@@ -19903,13 +20410,6 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
-      if (
-        unknownPromptAdmissionRef.current?.payloadAvailable &&
-        unknownPromptAdmissionRef.current.sessionId ===
-          connectionRef.current.sessionId
-      ) {
-        return false;
-      }
       // Account commands must pass login and model checks before host overrides.
       const subscriptionHandled = handleSubscriptionLogout(text);
       if (subscriptionHandled !== undefined) return subscriptionHandled;
@@ -19994,7 +20494,7 @@ export function App({
         let submittedInputAnnotations = sendOptions.inputAnnotations;
         let admitted = false;
         let admissionStarted = false;
-        let admissionSessionId: string | undefined;
+        const submissionIdempotencyKey = createPromptIdempotencyKey();
         const attempt = (
           recovering = false,
           onSessionAllocated?: (sessionId: string) => void,
@@ -20007,6 +20507,7 @@ export function App({
               submittedPrompt: text,
               ownerRef: admissionAttachment,
               ...sendOptions,
+              idempotencyKey: submissionIdempotencyKey,
               clearComposerOnPromptStart:
                 !recovering && clearComposerOnPromptStart,
               ...(recovering
@@ -20038,9 +20539,8 @@ export function App({
                 !recovering && clearComposerOnPromptStart
                   ? commitComposerAccepted
                   : undefined,
-              onAdmissionStarted: (sessionId) => {
+              onAdmissionStarted: () => {
                 admissionStarted = true;
-                admissionSessionId = sessionId;
               },
               onAdmitted: () => {
                 admitted = true;
@@ -20081,30 +20581,8 @@ export function App({
             const failedMessage = optimisticUserMessage;
             const definitelyRejected =
               isDefinitelyRejectedPromptAdmission(error);
-            if (admissionStarted && !admitted && !definitelyRejected) {
-              updateFailedPrompt(null);
-              const uncertainSessionId =
-                failedMessage?.sessionId ??
-                admissionSessionId ??
-                connectionRef.current.sessionId;
-              if (uncertainSessionId) {
-                updateUnknownPromptAdmission({
-                  sessionId: uncertainSessionId,
-                  messageId: failedMessage?.messageId,
-                  text: submittedPromptText,
-                  images: promptImages ? [...promptImages] : undefined,
-                  files: promptFiles ? [...promptFiles] : undefined,
-                  inputAnnotations: submittedInputAnnotations,
-                  payloadAvailable: true,
-                });
-              }
-              pushToast('warning', t('queue.admissionUnknown'));
-              console.warn(
-                '[WebShell] prompt admission outcome is unknown',
-                error,
-              );
-              return;
-            }
+            const admissionUncertain =
+              admissionStarted && !admitted && !definitelyRejected;
             if (
               trackSendFailure &&
               !admitted &&
@@ -20128,7 +20606,17 @@ export function App({
                 images: promptImages,
                 files: promptFiles,
                 inputAnnotations: submittedInputAnnotations,
+                idempotencyKey: submissionIdempotencyKey,
+                reason: admissionUncertain ? 'uncertain' : 'failed',
               });
+            }
+            if (admissionUncertain) {
+              pushToast('warning', t('userMessage.deliveryUncertain'));
+              console.warn(
+                '[WebShell] prompt admission outcome is unknown',
+                error,
+              );
+              return;
             }
             if (
               !admissionStarted &&
@@ -20405,7 +20893,18 @@ export function App({
             return true;
           }
           if (cmd === 'model') {
-            const modelArg = text.slice(match[0].length).trim();
+            const {
+              modelArg,
+              timeout: visionTimeout,
+              invalidOption,
+            } = extractVisionTimeout(text.slice(match[0].length).trim());
+            if (invalidOption) {
+              pushToast(
+                'error',
+                t('model.invalidOption', { option: invalidOption }),
+              );
+              return true;
+            }
             if (
               !workspaceContextActive &&
               /^(?:--fast|--voice|--vision)(?:\s|$)/.test(modelArg)
@@ -20444,21 +20943,66 @@ export function App({
               );
               return true;
             }
-            if (modelArg === '--vision') {
+            if (modelArg === '--vision' && visionTimeout === undefined) {
               if (settingsDialogKeyRef.current === 'visionModel') {
                 settingsDialogKeyRef.current = undefined;
               }
               setModelDialogMode('vision');
               return true;
             }
-            if (modelArg.startsWith('--vision ')) {
-              const visionModelId = modelArg.replace(/^--vision\s+/, '');
-              setWorkspaceSetting(
-                'workspace',
-                'visionModel',
-                visionModelId,
-              ).catch((error: unknown) =>
-                reportError(error, t('model.setVision')),
+            if (/^--vision(?:\s|$)/.test(modelArg)) {
+              const visionModelId = modelArg.replace(/^--vision\s*/, '').trim();
+              const timeoutMs =
+                visionTimeout === undefined
+                  ? undefined
+                  : parseVisionTimeoutMs(visionTimeout);
+              if (visionTimeout !== undefined && timeoutMs === undefined) {
+                pushToast(
+                  'error',
+                  t('model.invalidVisionTimeout', { value: visionTimeout }),
+                );
+                return true;
+              }
+              const update = async () => {
+                if (timeoutMs === undefined) {
+                  await writeVisionSetting(
+                    'workspace',
+                    'visionModel',
+                    visionModelId,
+                  );
+                } else if (!visionModelId) {
+                  await writeVisionSetting(
+                    'workspace',
+                    'visionBridgeTimeoutMs',
+                    timeoutMs,
+                  );
+                } else {
+                  const cwd = mainVoiceTarget?.cwd;
+                  if (!cwd)
+                    throw new Error(t('session.workspaceActionUnavailable'));
+                  const client =
+                    qualifiedWorkspaceClient(
+                      workspace.client,
+                      mainVoiceTarget,
+                    ) ?? workspace.client.workspaceByCwd(cwd);
+                  await client.setVisionBridgeSettings(
+                    visionModelId,
+                    timeoutMs,
+                  );
+                }
+                if (mainVoiceTarget?.route === 'workspace-qualified') {
+                  await reloadQualifiedWorkspaceSettings();
+                }
+              };
+              void update().catch((error: unknown) =>
+                reportError(
+                  error,
+                  t(
+                    timeoutMs === undefined
+                      ? 'model.setVision'
+                      : 'model.setVisionTimeout',
+                  ),
+                ),
               );
               return true;
             }
@@ -21347,9 +21891,11 @@ export function App({
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
-      setWorkspaceSetting,
       openVoiceModelPicker,
       writeVoiceModelForTarget,
+      writeVisionSetting,
+      mainVoiceTarget,
+      reloadQualifiedWorkspaceSettings,
       showContextUsage,
       t,
       workspaceActions,
@@ -21358,7 +21904,6 @@ export function App({
       composerAttachmentsEnabled,
       effectiveSessionContext,
       updateFailedPrompt,
-      updateUnknownPromptAdmission,
       isGoalGateBlocked,
     ],
   );
@@ -21654,50 +22199,6 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-  const discardUnknownPromptPayload = useCallback(() => {
-    const current = unknownPromptAdmissionRef.current;
-    if (
-      !current?.payloadAvailable ||
-      current.sessionId !== connectionRef.current.sessionId
-    ) {
-      return;
-    }
-    updateUnknownPromptAdmission({
-      sessionId: current.sessionId,
-      messageId: current.messageId,
-      payloadAvailable: false,
-    });
-  }, [updateUnknownPromptAdmission]);
-  const restoreUnknownPromptPayload = useCallback(() => {
-    const current = unknownPromptAdmissionRef.current;
-    const editor = editorRef.current;
-    if (
-      !current?.payloadAvailable ||
-      current.sessionId !== connectionRef.current.sessionId ||
-      !editor
-    ) {
-      return;
-    }
-    if (!window.confirm(t('queue.continueEditingConfirm'))) return;
-    const draft = editor.getText();
-    const restoredText = current.text?.trim()
-      ? draft.trim()
-        ? `${current.text}\n${draft}`
-        : current.text
-      : draft;
-    if (restoredText !== draft) editor.setText(restoredText);
-    if (current.images?.length) editor.restoreImages(current.images);
-    if (current.files?.length) editor.restoreFiles(current.files);
-    if (current.inputAnnotations?.length) {
-      editor.restoreInputAnnotations?.(current.inputAnnotations);
-    }
-    editor.focus();
-    updateUnknownPromptAdmission({
-      sessionId: current.sessionId,
-      messageId: current.messageId,
-      payloadAvailable: false,
-    });
-  }, [t, updateUnknownPromptAdmission]);
   const handleCanScrollToBottomChange = useCallback(
     (canScrollToBottom: boolean) => {
       setCanScrollMessageListToBottom(canScrollToBottom);
@@ -21783,15 +22284,20 @@ export function App({
       });
       let admissionStarted = false;
       let admitted = false;
+      const retryIdempotencyKey =
+        turnErrorRetryIdempotencyKeyRef.current ?? createPromptIdempotencyKey();
+      turnErrorRetryIdempotencyKeyRef.current = retryIdempotencyKey;
       sendPrompt(retryText, retryImages, retryFiles, {
         optimisticUserMessage: false,
         retry: true,
+        idempotencyKey: retryIdempotencyKey,
         inputAnnotations: retryInputAnnotations,
         onAdmissionStarted: () => {
           admissionStarted = true;
         },
         onAdmitted: () => {
           admitted = true;
+          turnErrorRetryIdempotencyKeyRef.current = null;
           if (!retryOwnerIsCurrent(retryOwner)) return;
           setFailedPromptRetry((current) =>
             current?.transcriptIdentity === retryTranscriptIdentity
@@ -21811,6 +22317,7 @@ export function App({
             images: retryImages,
             files: retryFiles,
             inputAnnotations: retryInputAnnotations,
+            idempotencyKey: retryIdempotencyKey,
             previousRetriedTurnErrorId,
             previousShowRetryHint,
           });
@@ -21819,18 +22326,24 @@ export function App({
         .catch((error: unknown) => {
           if (!retryOwnerIsCurrent(retryOwner)) return;
           const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-          if (admissionStarted && !admitted && !definitelyRejected) {
+          const admissionUncertain =
+            admissionStarted && !admitted && !definitelyRejected;
+          if (admissionUncertain) {
             if (!retryTranscriptIsCurrent()) return;
-            updateUnknownPromptAdmission({
-              sessionId: retrySessionId,
-              messageId: retryErrorId,
+            restoreOrDeferCancelledRetry(retryOwner, {
+              kind: 'turn-error',
+              attemptId: retryAttemptId,
+              errorId: retryErrorId,
+              identity: retryErrorIdentity,
               text: retryText,
-              images: retryImages ? [...retryImages] : undefined,
-              files: retryFiles ? [...retryFiles] : undefined,
+              images: retryImages,
+              files: retryFiles,
               inputAnnotations: retryInputAnnotations,
-              payloadAvailable: true,
+              idempotencyKey: retryIdempotencyKey,
+              previousRetriedTurnErrorId,
+              previousShowRetryHint,
             });
-            pushToast('warning', t('queue.admissionUnknown'));
+            pushToast('warning', t('userMessage.deliveryUncertain'));
             console.warn(
               '[WebShell] post-turn retry admission outcome is unknown',
               error,
@@ -21847,6 +22360,7 @@ export function App({
               images: retryImages,
               files: retryFiles,
               inputAnnotations: retryInputAnnotations,
+              idempotencyKey: retryIdempotencyKey,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
             });
@@ -21915,7 +22429,6 @@ export function App({
     sendPrompt,
     store,
     t,
-    updateUnknownPromptAdmission,
   ]);
 
   useEffect(() => {
@@ -22228,13 +22741,14 @@ export function App({
       standaloneDirectoryErrorCode === 'working_directory_missing' ||
       standaloneDirectoryErrorCode === 'working_directory_compromised',
   );
-  const isDisabled =
-    sessionWriteBlocked ||
+  const composerInputDisabled =
+    rewindSyncBlocked ||
     standaloneInteractionBlocked ||
     shouldDisableComposerInput({
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
+  const isDisabled = sessionWriteBlocked || composerInputDisabled;
   const retryableTurnErrorIdentity = retryableTurnErrorIdentityRef.current;
   const showCurrentRetryHint = Boolean(
     showRetryHint &&
@@ -22727,9 +23241,9 @@ export function App({
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
       const encoded = encodeVisionModelForSetting(modelId);
-      setWorkspaceSetting(modelSettingScope, 'visionModel', encoded)
+      writeVisionSetting(modelSettingScope, 'visionModel', encoded)
         .then(() => {
-          void reloadWorkspaceSettings().catch((error: unknown) => {
+          void reloadTargetedWorkspaceSettings().catch((error: unknown) => {
             console.warn(
               '[web-shell] failed to reload settings after vision-model save',
               error,
@@ -22741,8 +23255,8 @@ export function App({
     [
       modelSettingScope,
       reportError,
-      setWorkspaceSetting,
-      reloadWorkspaceSettings,
+      writeVisionSetting,
+      reloadTargetedWorkspaceSettings,
       t,
       projectFeaturesAvailable,
     ],
@@ -23226,6 +23740,7 @@ export function App({
   const submitAgentChat = agentChatEntry.submit;
   const submitComposerInput = useCallback(
     (...args: Parameters<typeof handleEditorSubmit>) => {
+      if (sessionWriteBlockedRef.current) return false;
       if (
         !collaborationAvailable ||
         (sendCommandAvailable && /^\/send(?:\s|$)/i.test(args[0]))
@@ -23355,6 +23870,43 @@ export function App({
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
+  const reserveQuestionSpaceForEnvironmentPanel =
+    environmentPanelVisible &&
+    !environmentPanelFits &&
+    !artifactPanelFullscreen &&
+    pendingAskUserApproval !== null;
+  // The floating panel and the question are in separate stacking contexts.
+  // Give the panel a real scroll boundary above the question, not a z-index
+  // that makes either surface cover the other.
+  useLayoutEffect(() => {
+    if (!reserveQuestionSpaceForEnvironmentPanel) return;
+    const body = contextBodyRef.current;
+    const footer = footerRef.current;
+    const question = askUserOverlayRef.current;
+    if (!body || !footer || !question) return;
+
+    const property = '--web-shell-environment-panel-bottom-inset';
+    const updateInset = () => {
+      const bounds = body.getBoundingClientRect();
+      if (!bounds.height) return;
+      // Convert viewport coordinates back to the panel's CSS pixels if an
+      // embedding host scaled the shell.
+      const inset =
+        ((bounds.bottom - question.getBoundingClientRect().top) *
+          body.offsetHeight) /
+        bounds.height;
+      body.style.setProperty(property, `${Math.max(0, Math.ceil(inset))}px`);
+    };
+    updateInset();
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(body);
+    observer.observe(footer);
+    observer.observe(question);
+    return () => {
+      observer.disconnect();
+      body.style.removeProperty(property);
+    };
+  }, [reserveQuestionSpaceForEnvironmentPanel]);
   const workspaceGitStatusEnabled =
     !managedMode &&
     !activePanel &&
@@ -23453,10 +24005,6 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
-  // Bumped when the header artifact entry opens the panel, so the panel
-  // expands its artifacts section even if the user had collapsed it (the
-  // panel hides rather than unmounts, so its local section state persists).
-  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -23473,20 +24021,25 @@ export function App({
   // The count and the opener are derived from one gate so an embedder never
   // receives a count it cannot act on: the built-in header additionally
   // requires both props, but the custom renderChatHeader contract does not.
+  // The entry toggles the right panel's artifacts list tab, independent of the
+  // environment panel.
+  const artifactsTabActive =
+    activeArtifactPanelTabId === `artifacts:${connection.sessionId}`;
   const artifactsHeaderEntry =
-    artifactsHeaderItemVisible &&
-    mainView === 'chat' &&
-    environmentPanelItems.includes('artifacts') &&
-    connection.sessionId
+    artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId
       ? {
           // The live list wins once present; before it lands, the click-time
           // hint from the session-list summary shows the count early. The
           // hook retires the hint when authoritative data arrives.
           artifactCount:
             artifacts.length > 0 ? artifacts.length : (artifactCountHint ?? 0),
+          artifactsTabActive,
           onOpenArtifacts: () => {
-            handleEnvironmentPanelOpenChange(true);
-            setArtifactsExpandSignal((value) => value + 1);
+            if (artifactPanelOpen) {
+              closeArtifactPanel();
+            } else {
+              openArtifactsListPanel(connection.sessionId!);
+            }
           },
         }
       : {};
@@ -23664,28 +24217,31 @@ export function App({
     const syncVariables = () => {
       frameId = null;
       const computedStyle = getComputedStyle(root);
-      const nextNames = new Set<string>();
+      const nextVariables = new Map<string, string>();
+      // Read the live computed style before any portal writes can invalidate it.
+      const propertyCount = computedStyle.length;
+      for (let index = 0; index < propertyCount; index += 1) {
+        const name = computedStyle[index];
+        if (!name.startsWith('--')) continue;
+        nextVariables.set(name, computedStyle.getPropertyValue(name));
+      }
       portalRoot.dataset.webShellShadcn = '';
       portalRoot.classList.toggle(
         'dark',
         selectedTheme === WebShellThemeId.Dark,
       );
       portalRoot.lang = selectedLanguage;
-      for (let index = 0; index < computedStyle.length; index += 1) {
-        const name = computedStyle[index];
-        if (!name.startsWith('--')) continue;
-        nextNames.add(name);
-        const value = computedStyle.getPropertyValue(name);
+      for (const [name, value] of nextVariables) {
         portalRoot.style.setProperty(name, value);
         portalHost?.style.setProperty(name, value);
       }
       for (const name of portalRootVariableNamesRef.current) {
-        if (!nextNames.has(name)) {
+        if (!nextVariables.has(name)) {
           portalRoot.style.removeProperty(name);
           portalHost?.style.removeProperty(name);
         }
       }
-      portalRootVariableNamesRef.current = nextNames;
+      portalRootVariableNamesRef.current = new Set(nextVariables.keys());
     };
     const scheduleSync = () => {
       if (frameId === null) frameId = requestAnimationFrame(syncVariables);
@@ -23726,10 +24282,7 @@ export function App({
     onBeforeCompress: prepareContextCompression,
     busy: streamingState !== 'idle' || sessionHasActivePrompt,
     writeBlocked:
-      isDisabled ||
-      isStartingNewSessionSuggestion ||
-      approvalOverlayActive ||
-      unknownPromptAdmission?.payloadAvailable === true,
+      isDisabled || isStartingNewSessionSuggestion || approvalOverlayActive,
   });
   const [paneContextControls, setPaneContextControls] = useState<
     Record<string, ContextUsageControls>
@@ -23863,6 +24416,8 @@ export function App({
   const artifactPanelSharedProps = {
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
+    sessionArtifacts: artifacts,
+    onOpenArtifact: openArtifactPanel,
     tabs: lockedWorkspaceCwd
       ? artifactPanelTabs.filter(
           (tab) =>
@@ -24196,7 +24751,7 @@ export function App({
                   : t('tasks.title')
               }
               size="auto"
-              onClose={() => setTasksDialogMessage(null)}
+              onClose={closeTasksPanel}
             >
               <TasksStatusMessage
                 message={tasksDialogMessage}
@@ -24206,13 +24761,13 @@ export function App({
                 onWorkflowRunStarted={() =>
                   setBackgroundTasksRefreshTrigger((value) => value + 1)
                 }
-                onClose={() => setTasksDialogMessage(null)}
+                onClose={closeTasksPanel}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
                 agentTools={
                   sessionWorkflowEnabled ? tasksDialogAgentTools : []
                 }
                 onOpenSubagent={(tool, parentSessionId) => {
-                  setTasksDialogMessage(null);
+                  closeTasksPanel();
                   openSubagentPanel(tool, parentSessionId);
                 }}
                 onOpenMonitor={handleOpenMonitorDetails}
@@ -24543,6 +25098,19 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
+                  sessionHeader={
+                    <RestartRecoveryPanel
+                      client={workspace.client}
+                      available={daemonAvailable}
+                      supported={
+                        connection.capabilities?.features?.includes(
+                          'restart_recovery',
+                        ) ?? false
+                      }
+                      workspaceCwds={recoveryWorkspaceCwds}
+                      workspaceLabels={recoveryWorkspaceLabels}
+                    />
+                  }
                   collapsed={sidebarCollapsedEffective}
                   layout={sidebarRailEnabled ? 'rail' : 'single'}
                   containerWidth={sidebarLayoutWidth}
@@ -24651,6 +25219,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  {...(workspaceArtifactLibraryAvailable
+                    ? {
+                        onOpenArtifacts: () => {
+                          closeMobileDrawer();
+                          openArtifacts();
+                        },
+                      }
+                    : {})}
                   {...(prWatchesAvailable
                     ? {
                         onOpenPrWatches: () => {
@@ -25955,6 +26531,68 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                workspaceArtifactLibraryAvailable &&
+                mainView === 'artifacts' && (
+                  <div
+                    className={styles.fullPage}
+                    data-testid="artifacts-library-page"
+                  >
+                    <div className={styles.fullPageHeader}>
+                      {!navigationRailVisible && (
+                        <button
+                          type="button"
+                          className={styles.fullPageBack}
+                          onClick={returnToChat}
+                          aria-label={t('common.back')}
+                          title={t('common.back')}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="18"
+                            height="18"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+                      )}
+                      <div className={styles.fullPageTitle}>
+                        {t('workspaceArtifactLibrary.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <WorkspaceArtifactLibraryPage
+                        workspaceCwd={
+                          resolveWorkspaceMaintenanceTargetCwd() ??
+                          workspace.capabilities?.workspaceCwd
+                        }
+                        onOpenSession={(sessionId, archiveState) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                          )
+                        }
+                        onJumpToSessionArtifact={(
+                          sessionId,
+                          artifactId,
+                          archiveState,
+                        ) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                            artifactId,
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
               {workspaceContextActive && mainView === 'cockpit' && (
                 <div className={styles.fullPage} data-testid="cockpit-page">
                   <SessionWorkflowCockpit
@@ -26295,6 +26933,14 @@ export function App({
                                     ? undefined
                                     : visibleFailedPromptBlock?.id
                                 }
+                                failedPromptStatus={
+                                  isPreparingPrompt ||
+                                  streamingState !== 'idle' ||
+                                  sessionHasActivePrompt ||
+                                  !visibleFailedPromptBlock
+                                    ? undefined
+                                    : failedPrompt?.reason
+                                }
                                 onRetryFailedPrompt={handleFailedPromptRetry}
                                 onEditUserMessage={
                                   userMessageEditing
@@ -26566,6 +27212,7 @@ export function App({
                         )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
+                          ref={askUserOverlayRef}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -26597,7 +27244,7 @@ export function App({
                               {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
                             </span>
                             <button type="button" className={styles.composerActionTipButton}
-                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                              onClick={() => { if (connection.sessionId) { artifactLibraryJumpGenRef.current += 1; void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); } }}>
                               {t('capacityChoice.resume')}
                             </button>
                           </div>
@@ -26824,45 +27471,6 @@ export function App({
                             {t('editor.escClearHint')}
                           </div>
                         ) : null}
-                        {unknownPromptAdmission &&
-                          unknownPromptAdmission.sessionId ===
-                            connection.sessionId && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="status"
-                            data-testid="prompt-admission-unknown"
-                          >
-                            <span
-                              className={styles.composerActionTipIcon}
-                              aria-hidden="true"
-                            >
-                              !
-                            </span>
-                            <span className={styles.composerActionTipText}>
-                              {t('queue.admissionUnknown')}
-                            </span>
-                            {unknownPromptAdmission.payloadAvailable && (
-                              <div
-                                className={styles.composerActionTipActions}
-                              >
-                                <button
-                                  type="button"
-                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                  onClick={restoreUnknownPromptPayload}
-                                >
-                                  {t('queue.restoreUnknown')}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={styles.composerActionTipButton}
-                                  onClick={discardUnknownPromptPayload}
-                                >
-                                  {t('queue.discardUnknown')}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
                         {!CustomFooter && (
                           <ComposerTaskChips
                             ref={composerTaskChipsRef}
@@ -26872,6 +27480,7 @@ export function App({
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            isTaskOpen={isComposerTaskOpen}
                             onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />
@@ -26917,10 +27526,7 @@ export function App({
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
                             <CustomComposerHeader
-                              disabled={
-                                isDisabled ||
-                                unknownPromptAdmission?.payloadAvailable === true
-                              }
+                              disabled={isDisabled}
                               isRunning={
                                 streamingState !== 'idle' ||
                                 sessionHasActivePrompt
@@ -26941,8 +27547,7 @@ export function App({
                             isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
-                            sessionHasActivePrompt ||
-                            unknownPromptAdmission?.payloadAvailable === true
+                            sessionHasActivePrompt
                           }
                         />
                         {sessionLimitReached && workspaceContextActive && (
@@ -26984,12 +27589,12 @@ export function App({
                           cancelArmed={cancelArmed}
                           disabled={
                             (collaborationAvailable && agentChatEntry.pending) ||
-                            isDisabled ||
+                            composerInputDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
-                            approvalOverlayActive ||
-                            unknownPromptAdmission?.payloadAvailable === true
+                            approvalOverlayActive
                           }
+                          submitDisabled={sessionWriteBlocked}
                           commands={commands}
                           skills={composerSkills}
                           onSkillsOpenChange={
@@ -27420,7 +28025,6 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
-                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

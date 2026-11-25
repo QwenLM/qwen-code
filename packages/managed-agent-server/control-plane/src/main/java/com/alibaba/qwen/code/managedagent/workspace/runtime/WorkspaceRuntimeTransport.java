@@ -87,6 +87,11 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+        return delegate.reclaimMcp(lease, session);
+    }
+
+    @Override
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
         RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
         if (current == null || current.getGeneration() != runtime.getGeneration()
@@ -385,14 +390,32 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
-    public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session,
-            Map<String, Object> publisher) {
+    public CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> publisher, Long writerGeneration) {
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
         Context context = requireLocalCapture(context(lease, session, true));
         assertHeld(context);
-        return delegate.installPublisherV3(lease, session, publisher);
+        return delegate.installPublisherV3(lease, session, publisher, writerGeneration);
+    }
+
+    @Override
+    public CompletionStage<Void> detachPublisher(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        requireLocalCapture(context(lease, session, false));
+        return delegate.detachPublisherV3(lease, session, writerGeneration);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> pullObservations(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        return delegate.pullObservationsV3(
+                lease, executionCallId, afterSeq, ackThrough, waitMs, maxEntries);
     }
 
     @Override

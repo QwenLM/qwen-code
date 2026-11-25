@@ -92,6 +92,7 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type BridgeModRowAnswer,
   type ServeSessionAgentsStatus,
   type ServeSessionAgentTrace,
   type ServeSessionStatsStatus,
@@ -233,6 +234,7 @@ import type {
   SessionPrInfo,
   BridgeTurnStatus,
   BridgeSessionCatalogVersion,
+  BridgeSessionFeedbackResult,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -292,6 +294,7 @@ import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import {
   BridgeClient,
+  clearGoalTurn,
   hasAvailableWorkflowApprovalClient,
   KNOWN_APPROVAL_MODES,
   type BridgeClientDeferredArtifactBatch,
@@ -705,6 +708,7 @@ interface ChannelInfo {
    * restore or creation lands on this channel afterwards is fenced too.
    */
   workspaceChangeFence?: number;
+  approvalModeReload: { generation: number; inFlight: number };
   /**
    * The user-language change last sent to this channel, settled either way,
    * so a session request on a new Managed channel waits for it rather than
@@ -787,6 +791,7 @@ interface SessionEntry {
   recordingDegraded: boolean;
   /** Set synchronously while agent-owned state and its writer lease close. */
   closing: boolean;
+  deleteCloseUnconfirmed?: boolean;
   /** Tail of cwd changes that direct shell commands must not overtake. */
   cwdChangeQueue: Promise<void>;
   /** Odd during a physical cd; advances again on settlement. */
@@ -901,6 +906,10 @@ interface SessionEntry {
    * normal prompt FIFO if it remains undrained at idle.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /** Drains that took messages and have not answered the child yet. */
+  midTurnDrainsAnswering?: number;
+  /** A send-now request held until those drains have answered. */
+  sendNowAfterDrains?: () => void;
   /**
    * Bounded ids either handed to the ACP child or explicitly deleted.
    */
@@ -996,6 +1005,8 @@ interface SessionEntry {
    * summaries because Goal turns never flip `promptActive`.
    */
   goalTurnActive?: boolean;
+  goalTurnId?: string;
+  retiringGoalTurnId?: string;
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   backgroundAdmissionEpoch?: number;
@@ -2194,6 +2205,27 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
+function validateSessionDisplayName(displayName: string): void {
+  if (
+    typeof displayName !== 'string' ||
+    displayName.length > MAX_DISPLAY_NAME_LENGTH
+  ) {
+    throw new InvalidSessionMetadataError(
+      'displayName',
+      `must be a string of at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
+    );
+  }
+  if (hasControlCharacter(displayName)) {
+    throw new InvalidSessionMetadataError(
+      'displayName',
+      'must not contain control characters',
+    );
+  }
+  if (displayName.trim() === '') {
+    throw new InvalidSessionMetadataError('displayName', 'must not be empty');
+  }
+}
+
 /**
  * Extract the full text content from prompt content blocks for the pending
  * prompt queue. Takes the first `text` block and falls back to an image
@@ -2421,6 +2453,9 @@ const DAEMON_CONFIRM_CANCELLATION_META_KEY = 'qwen.daemon.confirmCancellation';
  * disconnect cancellation in v1 (see server.ts route comment).
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
+// The child answers a row ask within 60 seconds; this backstop is for a
+// wedged channel.
+const SESSION_MOD_ROW_TIMEOUT_MS = 75_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
 const SESSION_BTW_STREAM_TIMEOUT_MS = 310_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
@@ -4013,13 +4048,24 @@ export function createSessionControlPlane(
     if (owner) drainQuarantinedChannel(owner);
   }
 
+  function assertSessionAdmitsSideRequest(entry: SessionEntry): void {
+    if (isClosingOrAuthorizingClose(entry)) {
+      throw new SessionNotFoundError(
+        entry.sessionId,
+        'The session is closing; retry after close completes',
+        'session_closing',
+      );
+    }
+    assertChannelAdmitsPrompts(entry);
+  }
+
   /**
    * Admit a request for a Session that is not a turn but still starts work in
    * the child, the way a prompt is admitted, and count it until it answers so
    * idle cleanup and quarantine drains do not close the Session under it.
    */
   function beginSideRequest(entry: SessionEntry): () => void {
-    assertChannelAdmitsPrompts(entry);
+    assertSessionAdmitsSideRequest(entry);
     entry.sideRequestCount += 1;
     let ended = false;
     return () => {
@@ -4220,6 +4266,21 @@ export function createSessionControlPlane(
 
   let workspaceChangeRevision = 0;
 
+  // Track ACP settlement rather than the public timeout: a late settings
+  // reload can still change the approval mode used by a queued delegation.
+  async function trackApprovalModeReload<T>(
+    ci: ChannelInfo,
+    request: Promise<T>,
+  ): Promise<T> {
+    ci.approvalModeReload.generation++;
+    ci.approvalModeReload.inFlight++;
+    try {
+      return await request;
+    } finally {
+      ci.approvalModeReload.inFlight--;
+    }
+  }
+
   /** Sends a change to every live channel of another engine; returns the ones that did not acknowledge it. */
   async function propagateWorkspaceChange(
     change: WorkspaceChange,
@@ -4267,8 +4328,11 @@ export function createSessionControlPlane(
           params,
         );
         try {
+          const pending = raceLongLived(request, getChannelClosedReject(ci));
           const response = await withTimeout(
-            raceLongLived(request, getChannelClosedReject(ci)),
+            change.kind === 'settings'
+              ? trackApprovalModeReload(ci, pending)
+              : pending,
             timeoutMs,
             SERVE_CONTROL_EXT_METHODS.workspaceChange,
           );
@@ -5194,6 +5258,7 @@ export function createSessionControlPlane(
       overdueAbandonedNewSessions: new Set(),
       newSessionSettlementTimers: new Map(),
       newSessionCleanupFailed: false,
+      approvalModeReload: { generation: 0, inFlight: 0 },
       isQuarantined: false,
     };
     infoRef.current = info;
@@ -8420,7 +8485,11 @@ export function createSessionControlPlane(
           entry.events.lastEventId === lastEventId &&
           entry.events.replayProjectionWatermark === projectionWatermark
         ) {
-          let compactedReplay = page.events;
+          const lifecycleSnapshot = entry.events.snapshotReplay();
+          let compactedReplay = withCompactedModLogs(
+            page.events,
+            lifecycleSnapshot?.compactedTurns ?? [],
+          );
           const turnErrorEvent = entry.turnErrorEvent;
           if (turnErrorEvent) {
             // Append only while no newer turn content was journaled after
@@ -8433,15 +8502,19 @@ export function createSessionControlPlane(
             // journal holds exactly the events published since the last
             // turn boundary (the terminal itself folds into the replay
             // window), so no history scan is needed.
-            const journal = entry.events.liveJournalSnapshot() ?? [];
+            const journal = lifecycleSnapshot?.liveJournal ?? [];
             const hasNewerTurnContent = journal.some(
               isRefreshAppendTurnContent,
             );
             if (!hasNewerTurnContent) {
-              compactedReplay = [...page.events, turnErrorEvent];
+              compactedReplay = [...compactedReplay, turnErrorEvent];
             }
           }
-          const lifecycleSnapshot = entry.events.snapshotReplay();
+          const liveJournal = (
+            liveReplayMode === 'summary'
+              ? entry.events.liveJournalSnapshot('summary')
+              : lifecycleSnapshot?.liveJournal
+          )?.filter((event) => event.type === 'mod_log');
           const lifecycleReplay: BridgeEvent[] = [];
           let lifecycleReplayIncomplete =
             lifecycleSnapshot === undefined ||
@@ -8492,7 +8565,7 @@ export function createSessionControlPlane(
           }
           return {
             compactedReplay,
-            liveJournal: [],
+            liveJournal: liveJournal ?? [],
             lifecycleReplay,
             lifecycleReplayIncomplete,
             lastEventId,
@@ -8540,6 +8613,77 @@ export function createSessionControlPlane(
       return undefined;
     const recordId = (meta as Record<string, unknown>)['qwen.session.recordId'];
     return typeof recordId === 'string' ? recordId : undefined;
+  }
+
+  function withCompactedModLogs(
+    pageEvents: BridgeEvent[],
+    compactedTurns: readonly BridgeEvent[],
+  ): BridgeEvent[] {
+    const logs = compactedTurns.filter((event) => event.type === 'mod_log');
+    if (logs.length === 0) return pageEvents;
+
+    const timestamps: number[] = [];
+    for (const log of logs) {
+      const timestamp = log._meta?.['serverTimestamp'];
+      if (
+        typeof timestamp !== 'number' ||
+        !Number.isFinite(timestamp) ||
+        timestamp < (timestamps.at(-1) ?? -Infinity)
+      ) {
+        return pageEvents.concat(logs);
+      }
+      timestamps.push(timestamp);
+    }
+
+    // Anchor to the start of each persisted main user record. A wall-clock
+    // timestamp alone can't place logs within a multi-frame reply safely.
+    const result: BridgeEvent[] = [];
+    let recordId: string | undefined;
+    let recordStart = 0;
+    let pageIndex = 0;
+    let logIndex = 0;
+    let lastPromptTimestamp = -Infinity;
+    for (const [index, event] of pageEvents.entries()) {
+      const id = transcriptEventRecordId(event);
+      if (id !== recordId) {
+        recordId = id;
+        recordStart = index;
+      }
+      const update = event.data;
+      if (
+        id === undefined ||
+        recordStart < pageIndex ||
+        !isRecord(update) ||
+        update['sessionUpdate'] !== 'user_message_chunk' ||
+        !isRecord(update['_meta']) ||
+        update['_meta']['source'] !== undefined ||
+        update['_meta']['qwenAgentMessage'] !== undefined
+      ) {
+        continue;
+      }
+      const rawTimestamp = update['timestamp'];
+      const timestamp =
+        typeof rawTimestamp === 'string'
+          ? Date.parse(rawTimestamp)
+          : rawTimestamp;
+      if (
+        typeof timestamp !== 'number' ||
+        !Number.isFinite(timestamp) ||
+        timestamp <= lastPromptTimestamp
+      ) {
+        return pageEvents.concat(logs);
+      }
+      lastPromptTimestamp = timestamp;
+      for (; pageIndex < recordStart; pageIndex++) {
+        result.push(pageEvents[pageIndex]!);
+      }
+      while (logIndex < logs.length && timestamps[logIndex]! < timestamp) {
+        result.push(logs[logIndex++]!);
+      }
+      pageIndex = recordStart + 1;
+      result.push(pageEvents[recordStart]!);
+    }
+    return result.concat(pageEvents.slice(pageIndex), logs.slice(logIndex));
   }
 
   /**
@@ -10004,7 +10148,8 @@ export function createSessionControlPlane(
       assertRuntimeNotStopping();
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
-    if (entry.closing) {
+    const forDeletion = closeOpts?.forDeletion === true;
+    if (entry.closing && !(forDeletion && entry.deleteCloseUnconfirmed)) {
       throw new SessionNotFoundError(
         sessionId,
         'The session is already closing',
@@ -10039,6 +10184,7 @@ export function createSessionControlPlane(
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
     }
     entry.closing = true;
+    delete entry.deleteCloseUnconfirmed;
     // DAEMON-005: remember the deferred-close stamp before clearing it. If the
     // child refuses the close, the session is still alive and may need the
     // grace window again once the prompt settles and no subscriber remains.
@@ -10091,19 +10237,19 @@ export function createSessionControlPlane(
         'closeSession',
         {
           throwOnFailure: true,
-          requireFlush: closeOpts?.requireAgentClose === true,
+          requireFlush: forDeletion || closeOpts?.requireAgentClose === true,
           onlyIfUnheld: requireIdle,
           cancelReason:
             closeOpts?.cause === 'workspace_runtime_stop'
               ? undefined
               : closeOpts?.cancelReason,
-          ...(closeOpts?.agentCloseTimeoutMs !== undefined
+          ...(!forDeletion && closeOpts?.agentCloseTimeoutMs !== undefined
             ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
             : {}),
         },
       );
       if (
-        closeOpts?.cause === 'workspace_runtime_stop' &&
+        (forDeletion || closeOpts?.cause === 'workspace_runtime_stop') &&
         !agentSessionClosed
       ) {
         throw new RequestError(
@@ -10129,6 +10275,8 @@ export function createSessionControlPlane(
         if (deferredCloseStamp !== null) {
           entry.promptSettledAt = deferredCloseStamp;
         }
+      } else if (forDeletion) {
+        entry.deleteCloseUnconfirmed = true;
       } else if (ci) {
         await harness.killChannelWithLog(
           ci.harness,
@@ -10656,6 +10804,7 @@ export function createSessionControlPlane(
   const settleMidTurnQueueAfterAutomaticTurn = (sessionId: string) => {
     const entry = byId.get(sessionId);
     if (!entry) return;
+    delete entry.sendNowAfterDrains;
     advanceTurnActivity(entry);
     entry.sessionLastSeenAt = Date.now();
     touchActivity(entry);
@@ -12137,6 +12286,9 @@ export function createSessionControlPlane(
                 // Resolving attachments can yield; a quarantine that began
                 // meanwhile still refuses the prompt before it is sent.
                 assertChannelAdmitsPrompts(entry);
+                if (isPromotedMidTurn && pendingEntry.removed) {
+                  throw new DOMException('Prompt aborted', 'AbortError');
+                }
                 dispatchSignal?.throwIfAborted();
                 context?.assertCanDispatch?.();
                 entry.events.setEventDetailMode(eventDetailMode);
@@ -12158,10 +12310,6 @@ export function createSessionControlPlane(
                   entry.activePromptTerminal.resolve();
                 }
                 entry.promptActive = true;
-                // The child serializes Goal turns against RPC prompts, so a
-                // still-set flag here means the goal end_turn signal was
-                // lost; self-heal rather than pin the session active.
-                entry.goalTurnActive = false;
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
@@ -12232,7 +12380,17 @@ export function createSessionControlPlane(
                     );
                   }
                 };
-                if (!guardedDispatch) pendingEntry.dispatched = true;
+                const markPromptDispatched = () => {
+                  pendingEntry.dispatched = true;
+                  // A guarded write can still be refused before this point.
+                  // Keep the Goal's ID for its terminal, retiring only its
+                  // permission ownership once the prompt starts writing.
+                  if (entry.goalTurnId !== undefined) {
+                    entry.retiringGoalTurnId = entry.goalTurnId;
+                  }
+                  clearGoalTurn(entry, permissionMediator);
+                };
+                if (!guardedDispatch) markPromptDispatched();
                 const promptPromise = forwardPrompt(
                   entry.connection,
                   promptRequest,
@@ -12256,7 +12414,7 @@ export function createSessionControlPlane(
                           context?.assertCanDispatch?.();
                         },
                         onWriteStarted() {
-                          pendingEntry.dispatched = true;
+                          markPromptDispatched();
                           notifyDispatchObserver(onWriteStarted);
                         },
                         onWritten() {
@@ -12310,6 +12468,11 @@ export function createSessionControlPlane(
                       getTransportClosedReject(entry),
                     );
 
+                const cancelDispatchedTurnApprovals = () => {
+                  if (pendingEntry.dispatched) {
+                    permissionMediator.cancelForTurnCancel(sessionId);
+                  }
+                };
                 // The user echo (`echoPromptToSessionBus`) was already published
                 // BEFORE the forward. If the forward itself fails (transport died,
                 // ACP child error) and it wasn't a user-initiated cancel that
@@ -12346,7 +12509,7 @@ export function createSessionControlPlane(
                         // already ends the turn visibly; a phantom
                         // forward-failure line and prompt_cancelled broadcast
                         // would misreport it.
-                        permissionMediator.cancelForTurnCancel(sessionId);
+                        cancelDispatchedTurnApprovals();
                         return;
                       }
                       writeStderrLine(
@@ -12359,7 +12522,7 @@ export function createSessionControlPlane(
                         originatorClientId,
                         'forward_failed',
                       );
-                      permissionMediator.cancelForTurnCancel(sessionId);
+                      cancelDispatchedTurnApprovals();
                     },
                   )
                   .catch(() => {});
@@ -12375,7 +12538,7 @@ export function createSessionControlPlane(
                     pendingEntry.promptId,
                     originatorClientId,
                   );
-                  permissionMediator.cancelForTurnCancel(sessionId);
+                  cancelDispatchedTurnApprovals();
                   if (
                     pendingEntry.dispatched &&
                     byId.get(sessionId) === entry
@@ -12492,7 +12655,10 @@ export function createSessionControlPlane(
               }
             }
           }
+          const goalOwnsQueue =
+            !pendingEntry.dispatched && entry.goalTurnActive === true;
           const shouldSettleMidTurnQueue =
+            !goalOwnsQueue &&
             entry.pendingPromptCount === 1 &&
             !entry.backgroundTurn &&
             !entry.closing &&
@@ -12500,6 +12666,18 @@ export function createSessionControlPlane(
           const undrainedMessages = shouldSettleMidTurnQueue
             ? entry.midTurnMessageQueue.splice(0)
             : [];
+          // A refused prompt never took ownership of the active Goal's
+          // queue or its held send-now request.
+          if (!goalOwnsQueue) delete entry.sendNowAfterDrains;
+          // An approval this turn asked for can no longer be answered: a
+          // send-now interrupt ends the turn from inside the child, which
+          // stops waiting on the request without the host's cancel path.
+          if (pendingEntry.dispatched) {
+            permissionMediator.cancelForPrompt(
+              sessionId,
+              pendingEntry.promptId,
+            );
+          }
           // Release the old turn before handing back queue-only messages. Its
           // caller synchronously reserves the next FIFO slot, then ordinary
           // promotions follow it without exposing the fallback as queued.
@@ -13623,7 +13801,16 @@ export function createSessionControlPlane(
     },
 
     async closeSession(sessionId, context, closeOpts) {
-      return closeSessionImpl(sessionId, context, closeOpts);
+      const close = closeSessionImpl(sessionId, context, closeOpts);
+      // Keep processing a late acknowledgement while blocking new work for
+      // this session. Deleting after a timeout requires a fresh request.
+      return closeOpts?.forDeletion
+        ? withTimeout(
+            close,
+            closeOpts.agentCloseTimeoutMs ?? initTimeoutMs,
+            'closeSession',
+          )
+        : close;
     },
 
     async ensureDefaultSessionPersisted(sessionId) {
@@ -13643,6 +13830,44 @@ export function createSessionControlPlane(
       if (result?.persisted !== true) {
         throw new Error(`Session '${sessionId}' could not be persisted`);
       }
+    },
+
+    initializeSessionTitle(sessionId, displayName, context) {
+      validateSessionDisplayName(displayName);
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      if (entry.displayName === undefined) {
+        // Keep the route's session lease free for admission and renames.
+        void entry.connection
+          .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+            sessionId,
+            initialDisplayName: displayName,
+          })
+          .then((result: unknown) => {
+            const outcome = result as { persisted?: boolean } | undefined;
+            if (outcome?.persisted !== true) return;
+            markSessionCatalogChanged();
+            // A manual rename can already be visible while its write queues
+            // behind the automatic title write.
+            if (
+              byId.get(sessionId) !== entry ||
+              entry.displayName !== undefined
+            ) {
+              return;
+            }
+            entry.events.publish({
+              type: 'session_metadata_updated',
+              data: { sessionId, displayName, titleSource: 'auto' },
+            });
+          })
+          .catch((error: unknown) => {
+            writeStderrLine(
+              `qwen serve: failed to initialize displayName for ${sessionId}: ${String(error)}`,
+            );
+          });
+      }
+      return { displayName: entry.displayName };
     },
 
     updateSessionMetadata(sessionId, metadata, context) {
@@ -13700,35 +13925,9 @@ export function createSessionControlPlane(
             'must be either `manual` or `auto`',
           );
         }
-        if (
-          typeof metadata.displayName !== 'string' ||
-          metadata.displayName.length > MAX_DISPLAY_NAME_LENGTH
-        ) {
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            `must be a string of at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
-          );
-        }
-        if (hasControlCharacter(metadata.displayName)) {
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not contain control characters',
-          );
-        }
-        // An empty name would only clear the live entry: the `sessionTitle`
-        // persist below runs for truthy names, so no tombstone reaches the
-        // transcript. The persisted manual record would then resurface
-        // through the session-list merge (`live.displayName ??
-        // existing.displayName`) and be carried into a `/clear` successor as
-        // if the clear never happened. Reject the clear instead of serving a
-        // name the catalog no longer backs. Mirrors the workspace-scoped
-        // metadata route, which rejects empty names for the same reason.
-        if (metadata.displayName.trim() === '') {
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not be empty',
-          );
-        }
+        // Empty names could clear the live entry without recording a
+        // tombstone, allowing the old title to reappear in the catalog.
+        validateSessionDisplayName(metadata.displayName);
         const nextDisplayName = metadata.displayName || undefined;
         const titleSource = metadata.titleSource ?? 'manual';
         if (entry.displayName !== nextDisplayName) {
@@ -14347,11 +14546,14 @@ export function createSessionControlPlane(
         method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan;
       const invoke = async (info: ChannelInfo) => {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
+        const pending = raceLongLived(
+          info.connection.extMethod(method, params ?? {}),
+          getChannelClosedReject(info),
+        );
         const response = await withTimeout(
-          raceLongLived(
-            info.connection.extMethod(method, params ?? {}),
-            getChannelClosedReject(info),
-          ),
+          method === SERVE_CONTROL_EXT_METHODS.workspaceReload
+            ? trackApprovalModeReload(info, pending)
+            : pending,
           timeout,
           method,
         );
@@ -14595,12 +14797,16 @@ export function createSessionControlPlane(
     captureSessionApprovalModeGuard(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const { approvalModeReload } = assertLivePromptEntry(sessionId, entry);
+      const reloadGeneration = approvalModeReload.generation;
       const generation = entry.approvalModePublishGeneration;
       const assertCurrent = () => {
         assertLivePromptEntry(sessionId, entry);
         if (
           entry.approvalModeRoundtripInFlight ||
-          entry.approvalModePublishGeneration !== generation
+          entry.approvalModePublishGeneration !== generation ||
+          approvalModeReload.inFlight > 0 ||
+          approvalModeReload.generation !== reloadGeneration
         ) {
           throw new Error(
             'The session approval mode changed during delegation. Retry the launch.',
@@ -14871,6 +15077,17 @@ export function createSessionControlPlane(
       if (!decision.accepted) {
         return decision;
       }
+      context?.assertCanContinue?.();
+      if (
+        context?.expectedInterruption !== undefined &&
+        context.expectedInterruption !== decision.interruption
+      ) {
+        return {
+          accepted: false,
+          interruption: decision.interruption,
+          reason: 'interruption_mismatch',
+        };
+      }
 
       // Accepted → drive the real turn through the normal prompt-admission path
       // (so pendingPromptCount / promptActive / originator are tracked and
@@ -14906,6 +15123,25 @@ export function createSessionControlPlane(
       // continuation was never queued. Only failures AFTER the turn is admitted
       // (it then runs async) reach the `.catch` below — those are logged, since
       // the ack already went out and the turn's terminal event covers clients.
+      let firstWrite: Promise<void> | undefined;
+      let rejectFirstWrite: ((error: unknown) => void) | undefined;
+      let onPromptWriteStarted = context?.onPromptWriteStarted;
+      if (context?.requireDispatchAck) {
+        let resolveFirstWrite!: () => void;
+        firstWrite = new Promise<void>((resolve, reject) => {
+          resolveFirstWrite = resolve;
+          rejectFirstWrite = reject;
+        });
+        const observer = onPromptWriteStarted;
+        onPromptWriteStarted = () => {
+          try {
+            observer?.();
+          } finally {
+            resolveFirstWrite();
+          }
+        };
+      }
+
       // No caller signal: a continuation is cancelled via the cancelSession
       // route (entry.connection.cancel), not a per-dispatch AbortController.
       const promptPromise = bridgeApi.sendPrompt(
@@ -14920,6 +15156,12 @@ export function createSessionControlPlane(
             : {}),
           ...(promptId !== undefined ? { promptId } : {}),
           continue: true,
+          ...(context?.assertCanDispatch !== undefined
+            ? { assertCanDispatch: context.assertCanDispatch }
+            : {}),
+          ...(onPromptWriteStarted !== undefined
+            ? { onPromptWriteStarted }
+            : {}),
           ...(typeof context?.confirmCancellation === 'string'
             ? { confirmCancellation: context.confirmCancellation }
             : {}),
@@ -14930,7 +15172,11 @@ export function createSessionControlPlane(
           `continueSession: continuation turn failed for ${sessionId}: ` +
             `${err instanceof Error ? err.message : String(err)}`,
         );
+        rejectFirstWrite?.(err);
       });
+      if (firstWrite !== undefined) {
+        await firstWrite;
+      }
 
       return {
         ...decision,
@@ -15441,6 +15687,28 @@ export function createSessionControlPlane(
       );
     },
 
+    async askSessionModRow(sessionId, row, _context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertAttachableSessionEntry(sessionId, entry);
+      const endSideRequest = beginSideRequest(entry);
+      try {
+        return (await raceLongLived(
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionModRow,
+              { sessionId, component: row.component, props: row.props },
+            ),
+            SESSION_MOD_ROW_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.sessionModRow,
+          ),
+          getTransportClosedReject(entry),
+        )) as BridgeModRowAnswer;
+      } finally {
+        endSideRequest();
+      }
+    },
+
     async generateSessionRecap(sessionId, _context) {
       // Thin pass-through to `qwen/control/session/
       // recap` — the ACP child runs `generateSessionRecap` against the
@@ -15488,6 +15756,17 @@ export function createSessionControlPlane(
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
       };
+    },
+
+    async rateSessionTurn(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await requestSessionStatus<BridgeSessionFeedbackResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        { promptId: req.promptId, rating: req.rating },
+      );
     },
 
     generateSessionContent(sessionId, prompt, signal, context) {
@@ -15980,18 +16259,54 @@ export function createSessionControlPlane(
       resolveTrustedClientId(entry, context?.clientId);
       // Only the user's own messages ask for this; queue-only steering keeps
       // its tool-boundary delivery unless user input travels with it.
-      if (!entry.midTurnMessageQueue.some((message) => !message.queueOnly)) {
+      const holdsUserInput = () =>
+        entry.midTurnMessageQueue.some((message) => !message.queueOnly);
+      if (!holdsUserInput()) {
         return { requested: false };
       }
-      // Best-effort: an agent without the method still drains the queue at its
-      // next tool boundary.
-      void entry.connection
-        .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
-        .catch((error: unknown) => {
-          writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
-          );
-        });
+      const turnOwner = () => {
+        const { activePromptId, goalTurnId, backgroundTurn } = entry;
+        // A guarded RPC claims prompt bookkeeping before the write, while
+        // the still-live Goal keeps owning its input queue.
+        if (
+          goalTurnId !== undefined &&
+          !entry.pendingPromptList.some(
+            (prompt) => prompt.promptId === activePromptId && prompt.dispatched,
+          )
+        ) {
+          return goalTurnId;
+        }
+        return activePromptId ?? goalTurnId ?? backgroundTurn?.turnId;
+      };
+      const owner = turnOwner();
+      const request = () => {
+        // A drain answered meanwhile may have taken the messages.
+        if (
+          !holdsUserInput() ||
+          byId.get(sessionId) !== entry ||
+          turnOwner() !== owner
+        ) {
+          return;
+        }
+        // Best-effort: an agent without the method still drains the queue at
+        // its next tool boundary.
+        void entry.connection
+          .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
+          .catch((error: unknown) => {
+            writeStderrLine(
+              `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+            );
+          });
+      };
+      // The child takes a request with no drain out as proof that the host
+      // still holds the input, so a drain that is still resolving attachments
+      // answers first.
+      if ((entry.midTurnDrainsAnswering ?? 0) > 0) {
+        entry.sendNowAfterDrains = request;
+      } else {
+        delete entry.sendNowAfterDrains;
+        request();
+      }
       return { requested: true };
     },
 
@@ -16288,8 +16603,7 @@ export function createSessionControlPlane(
       const endSideRequest = beginSideRequest(entry);
       return entry.promptQueue.then(async () => {
         try {
-          // A quarantine that began while this waited still refuses it.
-          assertChannelAdmitsPrompts(entry);
+          assertSessionAdmitsSideRequest(entry);
           return await launchForkAgent();
         } finally {
           endSideRequest();
@@ -16324,7 +16638,7 @@ export function createSessionControlPlane(
       // session is the checkout itself — the strongest writer vector on the
       // superseded session, not a workspace-cwd one.
       assertSessionResetNotPending(sessionId);
-      assertChannelAdmitsPrompts(entry);
+      assertSessionAdmitsSideRequest(entry);
 
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
@@ -16350,6 +16664,7 @@ export function createSessionControlPlane(
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
       }
+      assertSessionAdmitsSideRequest(entry);
       const cwd = entry.effectiveCwd;
 
       entry.events.publish({

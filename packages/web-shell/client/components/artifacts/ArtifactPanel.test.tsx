@@ -24,6 +24,22 @@ import type { TurnOutputScheduledTask } from './TurnOutputs';
 const mockDocxRender = vi.hoisted(() => vi.fn());
 vi.mock('docx-preview', () => ({ renderAsync: mockDocxRender }));
 
+vi.mock('./WorkspacePdfRangePreview', () => ({
+  default: function MockWorkspacePdfRangePreview({
+    initialStat,
+    onOpenFull,
+  }: {
+    initialStat: { sizeBytes: number };
+    onOpenFull: () => void;
+  }) {
+    return (
+      <button data-pdf-size={initialStat.sizeBytes} onClick={onOpenFull}>
+        Open full PDF
+      </button>
+    );
+  },
+}));
+
 const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
   URL,
   'createObjectURL',
@@ -575,6 +591,105 @@ describe('ArtifactPanel context usage tabs', () => {
     expect(
       container.querySelector('button[title="Context Usage"]'),
     ).not.toBeNull();
+  });
+});
+
+describe('ArtifactPanel artifacts list tab', () => {
+  function renderPanel(props: {
+    artifacts: readonly DaemonSessionArtifact[];
+    sessionArtifacts?: readonly DaemonSessionArtifact[];
+    onOpenArtifact?: (artifactId: string) => void;
+    loading?: boolean;
+  }) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={props.artifacts}
+            sessionArtifacts={props.sessionArtifacts}
+            onOpenArtifact={props.onOpenArtifact}
+            loading={props.loading}
+            tabs={[
+              {
+                id: 'artifacts:s1',
+                kind: 'artifacts',
+                title: 'Artifacts',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="artifacts:s1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  const artifact = {
+    id: 'a1',
+    kind: 'document',
+    title: 'Quarterly report',
+    workspacePath: 'reports/report.md',
+  } as unknown as DaemonSessionArtifact;
+
+  it('renders the session artifact list and opens a clicked artifact', () => {
+    const onOpenArtifact = vi.fn();
+    const container = renderPanel({ artifacts: [artifact], onOpenArtifact });
+
+    const list = container.querySelector('[data-testid="artifacts-list"]');
+    expect(list).not.toBeNull();
+    expect(container.textContent).toContain('report.md');
+    const row = list!.querySelector<HTMLButtonElement>('button');
+    act(() => row?.click());
+    expect(onOpenArtifact).toHaveBeenCalledWith('a1');
+  });
+
+  it('shows the empty state when the session has no artifacts', () => {
+    const container = renderPanel({ artifacts: [] });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows a skeleton while artifacts load', () => {
+    const container = renderPanel({ artifacts: [artifact], loading: true });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-skeleton"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows the package icon on the artifacts tab in the tab bar', () => {
+    const container = renderPanel({ artifacts: [artifact] });
+    const tab = container.querySelector('[role="tab"][title="Artifacts"]');
+    expect(tab).not.toBeNull();
+    expect(tab!.querySelector('.lucide-package')).not.toBeNull();
+  });
+
+  it('lists only the session artifacts, matching the header count, not pane extras', () => {
+    const paneExtra = {
+      ...artifact,
+      id: 'pane-extra',
+      workspacePath: 'pane.html',
+    };
+    const container = renderPanel({
+      artifacts: [artifact, paneExtra],
+      sessionArtifacts: [artifact],
+    });
+    expect(
+      container.querySelectorAll('[data-testid="artifacts-list"] li'),
+    ).toHaveLength(1);
+    expect(container.textContent).toContain('report.md');
+    expect(container.textContent).not.toContain('pane.html');
   });
 });
 
@@ -5894,9 +6009,82 @@ describe('ArtifactPanel binary document previews', () => {
       patch.workspacePath ?? 'reports/Report.PDF',
       { offset: 0, maxBytes: 256 * 1024 },
     );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(2);
     const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
     expect(blob.type).toBe('application/pdf');
     expect(Buffer.from(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('only loads a large PDF into the native viewer after it is requested', async () => {
+    const sizeBytes = 4 * 1024 * 1024;
+    const fixture = Buffer.alloc(sizeBytes);
+    bytes.copy(fixture);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readFileBytes.mockImplementation(
+      async (
+        _path: string,
+        { offset, maxBytes }: { offset: number; maxBytes: number },
+      ) => {
+        const chunk = fixture.subarray(offset, offset + maxBytes);
+        return {
+          contentBase64: chunk.toString('base64'),
+          offset,
+          returnedBytes: chunk.length,
+          sizeBytes,
+        };
+      },
+    );
+    const { root, container } = mountPdf();
+    const artifact = pdfArtifact();
+    act(() => root.render(artifactPanel(artifact)));
+    await vi.waitFor(async () => {
+      await flushPreview();
+      expect(container.querySelector('[data-pdf-size]')?.textContent).toBe(
+        'Open full PDF',
+      );
+    });
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(container.querySelector('iframe')).toBeNull();
+
+    const updatedHeader = '%PDF-1.6';
+    fixture.write(updatedHeader);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 2,
+    });
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[data-pdf-size]')!.click(),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).toBeNull();
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe(
+      'blob:pdf-preview',
+    );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(3);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(blob.size).toBe(sizeBytes);
+    expect(await blob.slice(0, updatedHeader.length).text()).toBe(
+      updatedHeader,
+    );
+
+    act(() =>
+      root.render(
+        artifactPanel({ ...artifact, updatedAt: '2026-10-20T00:00:00Z' }),
+      ),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).not.toBeNull();
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(4);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
   });
 
   it.each(['missing', 'expired'])(

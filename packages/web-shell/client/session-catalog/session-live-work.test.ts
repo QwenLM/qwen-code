@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { hasLiveWork } from './session-live-work';
+import { hasLiveWork, sessionBlocksDelete } from './session-live-work';
 
 function session(
   overrides: Partial<DaemonSessionSummary>,
@@ -44,5 +44,48 @@ describe('hasLiveWork', () => {
     ['finished background work', { hasRunningBackgroundTasks: false }],
   ])('does not count %s', (_label, overrides) => {
     expect(hasLiveWork(session(overrides))).toBe(false);
+  });
+});
+
+describe('sessionBlocksDelete', () => {
+  it.each([
+    [
+      'background work on the attached row',
+      { hasRunningBackgroundTasks: true },
+      true,
+    ],
+    [
+      'background work on another row',
+      { hasRunningBackgroundTasks: true },
+      false,
+    ],
+    ['a turn on the attached row', { hasActivePrompt: true }, true],
+    [
+      'other active work on the attached row',
+      { activeWorkState: 'active' as const },
+      true,
+    ],
+  ])('refuses %s', (_label, overrides, isCurrent) => {
+    expect(sessionBlocksDelete(session(overrides), isCurrent)).toBe(true);
+  });
+
+  it.each([
+    ['a turn on another row', { hasActivePrompt: true }, false],
+    [
+      'other active work on another row',
+      { activeWorkState: 'active' as const },
+      false,
+    ],
+    ['an idle attached row', { activeWorkState: 'idle' as const }, true],
+    ['an idle other row', { activeWorkState: 'idle' as const }, false],
+    // Cleared to undefined for rows missing from live-state; they stay deletable.
+    [
+      'a row with no live-state coverage',
+      { hasRunningBackgroundTasks: undefined },
+      false,
+    ],
+    ['finished background work', { hasRunningBackgroundTasks: false }, false],
+  ])('allows %s', (_label, overrides, isCurrent) => {
+    expect(sessionBlocksDelete(session(overrides), isCurrent)).toBe(false);
   });
 });

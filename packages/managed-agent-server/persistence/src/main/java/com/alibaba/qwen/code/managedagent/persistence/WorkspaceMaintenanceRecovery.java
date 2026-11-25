@@ -22,7 +22,7 @@ public final class WorkspaceMaintenanceRecovery {
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
     private static final String WORK_KIND = "RECOVERY_EVIDENCE";
-    private static final String[] MOUNT_FIELDS = {"storage_key", "physical_key", "mount_revision", "mount_root",
+    private static final String[] MOUNT_FIELDS = {"physical_id", "mount_revision", "mount_root",
             "mount_host_id", "mount_device", "mount_inode", "mount_birth_time", "mount_registration_id"};
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
@@ -58,16 +58,16 @@ public final class WorkspaceMaintenanceRecovery {
         Map<String, Object> identity = WorkspaceOperations.values("schemaVersion", 1, "kind", operationKind == WorkspaceOperations.Kind.CHILD_WORKSPACE ? "child-git-maintenance" : "session-git-maintenance",
                 "maintenanceId", maintenance, "generation", generation, "executionId", execution,
                 "tenantId", binding.getTenantId(), "workspaceId", binding.getWorkspaceId(),
-                "workspaceGeneration", binding.getWorkspaceGeneration(), "storageId", binding.getStorageId(), "holderKey", owner.get("holder_key"),
+                "workspaceGeneration", binding.getWorkspaceGeneration(), "storageId", binding.getStorageId(), "holderKey", owner.get("holder_id"),
                 "mount", mount(owner), "host", nativeHost());
         byte[] bytes = bytes(identity);
         String resource = WorkspaceEvidenceResources.publish(jdbc, binding.getTenantId(), binding.getWorkspaceId(), session, step, bytes);
-        operations.insertWork(operationKind, maintenance, WORK_KIND, step, maintenance + ":" + generation + ":" + execution, session,
-                WorkspaceOperations.values("execution_id", execution, "evidence_resource_key", resource,
+        operations.insertWork(operationKind, maintenance, WORK_KIND, step, session,
+                WorkspaceOperations.values("execution_id", execution, "evidence_resource_ref", resource,
                         "evidence_sha256", WorkspaceEvidenceResources.digest(bytes)), "EXECUTING");
         var pointer = WorkspaceOperations.values("execution_id", execution, "step_target", step);
         if (operations.findWork(operationKind, maintenance, WORK_KIND, slot, true) == null) {
-            operations.insertWork(operationKind, maintenance, WORK_KIND, slot, maintenance + ":" + generation, session, pointer, "INDEX");
+            operations.insertWork(operationKind, maintenance, WORK_KIND, slot, session, pointer, "INDEX");
         } else {
             operations.updateWork(operationKind, maintenance, WORK_KIND, slot, pointer);
         }
@@ -150,7 +150,7 @@ public final class WorkspaceMaintenanceRecovery {
             var held = owner(jdbc, binding, true);
             if (held == null || !maintenance.equals(held.get("maintenance_id"))
                     || !(held.get("maintenance_generation") instanceof Number saved) || saved.longValue() != generation
-                    || !original.get("holderKey").equals(held.get("holder_key"))
+                    || !original.get("holderKey").equals(held.get("holder_id"))
                     || !JSON.valueToTree(original.get("mount")).equals(JSON.valueToTree(mount(held)))) {
                 throw blocked();
             }
@@ -159,18 +159,18 @@ public final class WorkspaceMaintenanceRecovery {
             if (operation == null) {
                 throw blocked();
             }
-            String proofTarget = WorkspaceOperations.hash(stepTarget(maintenance, generation, executionId), "stopped");
+            String proofTarget = maintenance + ":" + generation + ":" + executionId + ":stopped";
             byte[] proof = bytes(WorkspaceOperations.values("schemaVersion", 1, "kind", "trusted-host-reboot",
                     "original", original, "observedHost", observedHost));
             String session = (String) work.get("session_id");
             String resource = WorkspaceEvidenceResources.publish(jdbc, binding.getTenantId(), binding.getWorkspaceId(), session, proofTarget, proof);
-            operations.insertWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, proofTarget, maintenance + ":" + generation + ":" + executionId + ":stopped", session,
-                    WorkspaceOperations.values("evidence_resource_key", resource, "evidence_sha256", WorkspaceEvidenceResources.digest(proof)), "STOPPED");
+            operations.insertWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, proofTarget, session,
+                    WorkspaceOperations.values("evidence_resource_ref", resource, "evidence_sha256", WorkspaceEvidenceResources.digest(proof)), "STOPPED");
             operations.updateWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, stepTarget(maintenance, generation, executionId), Map.of("state", "STOPPED"));
-            if (jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, maintenance_id = NULL, maintenance_generation = NULL"
-                            + " WHERE storage_key = ? AND maintenance_id = ? AND maintenance_generation = ? AND holder_key = ?",
+            if (jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL, maintenance_id = NULL, maintenance_generation = NULL"
+                            + " WHERE physical_id = ? AND maintenance_id = ? AND maintenance_generation = ? AND holder_id = ?",
                     JdbcWorkspaceExecutionStore.storageKey(jdbc, binding), maintenance, generation, original.get("holderKey")) != 1
-                    || jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL WHERE operation_key = ? AND claim_generation = ?", operations.key(kind(jdbc, binding, maintenance), maintenance), generation) != 1) {
+                    || jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL WHERE operation_ref = ? AND claim_generation = ?", operations.key(kind(jdbc, binding, maintenance), maintenance), generation) != 1) {
                 throw blocked();
             }
             return inspect(binding, maintenance, generation);
@@ -179,7 +179,7 @@ public final class WorkspaceMaintenanceRecovery {
 
     private Map<String, Object> identity(Map<String, Object> work) {
         try {
-            return JSON.readValue(WorkspaceEvidenceResources.read(jdbc, (String) work.get("evidence_resource_key"), (String) work.get("evidence_sha256")), new com.fasterxml.jackson.core.type.TypeReference<>() { });
+            return JSON.readValue(WorkspaceEvidenceResources.read(jdbc, (String) work.get("evidence_resource_ref"), (String) work.get("evidence_sha256")), new com.fasterxml.jackson.core.type.TypeReference<>() { });
         } catch (java.io.IOException exception) {
             throw blocked();
         }
@@ -209,7 +209,7 @@ public final class WorkspaceMaintenanceRecovery {
     }
 
     private static Map<String, Object> owner(JdbcTemplate jdbc, ContextBinding binding, boolean lock) {
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE physical_id = ? AND storage_kind = 'LOCAL'"
                 + (lock ? " FOR UPDATE" : ""), JdbcWorkspaceExecutionStore.storageKey(jdbc, binding));
         return rows.size() == 1 ? rows.getFirst() : null;
     }
@@ -247,11 +247,11 @@ public final class WorkspaceMaintenanceRecovery {
     }
 
     private static String stepTarget(String maintenance, long generation, String execution) {
-        return WorkspaceOperations.hash(target(maintenance, generation), execution);
+        return target(maintenance, generation) + ":" + execution;
     }
 
     private static String target(String maintenance, long generation) {
-        return WorkspaceOperations.hash("child-maintenance", maintenance, Long.toString(generation));
+        return maintenance + ":" + generation;
     }
 
     private static RuntimeBrokerException blocked() {

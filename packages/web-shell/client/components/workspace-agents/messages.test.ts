@@ -58,13 +58,15 @@ describe('collaboration messages', () => {
     expect(transcriptStub.COLLAB_MESSAGES_RU).toEqual({});
   });
 
-  it('are defined only here, not back in the main dictionary', () => {
-    // The transcript build embeds i18n.tsx; a collab key added there instead
-    // of here would ship to every exported document.
-    const dictionary = readFileSync(join(CLIENT_DIR, 'i18n.tsx'), 'utf8');
-    expect(dictionary).not.toMatch(/^ {2}'collab\./m);
-    expect(dictionary).not.toMatch(/^ {2}'agents\.description'/m);
-  });
+  // A collaboration key in these catalogs would ship to every exported document.
+  it.each(['i18n.tsx', 'i18n-zh-cn.ts'])(
+    'are defined outside the embedded catalog in %s',
+    (filename) => {
+      const dictionary = readFileSync(join(CLIENT_DIR, filename), 'utf8');
+      expect(dictionary).not.toMatch(/^ {2}'collab\./m);
+      expect(dictionary).not.toMatch(/^ {2}'agents\.description'/m);
+    },
+  );
 });
 
 describe('the join notices', () => {

@@ -54,6 +54,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
@@ -80,6 +82,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RateSessionTurnResult,
   SetModelResult,
   SessionMetadataResult,
   DaemonSessionPrInfo,
@@ -1032,6 +1035,23 @@ export class DaemonSessionClient {
     return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
   }
 
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Fire-and-forget callers should swallow failures: the mark is local UI
+   * state and never depends on this call's outcome.
+   */
+  rateSessionTurn(
+    promptId: string,
+    rating: 'up' | 'down',
+  ): Promise<RateSessionTurnResult> {
+    return this.client.rateSessionTurn(
+      this.sessionId,
+      promptId,
+      rating,
+      this.clientId,
+    );
+  }
+
   setConfigOption(
     configId: 'reasoning_effort',
     value: ReasoningSelection,
@@ -1122,6 +1142,17 @@ export class DaemonSessionClient {
    */
   recap(opts?: { signal?: AbortSignal }): Promise<DaemonSessionRecapResult> {
     return this.client.recapSession(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /** Ask this session's Mods for a row; see `DaemonClient.askSessionModRow`. */
+  askModRow(
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonModRowAnswer> {
+    return this.client.askSessionModRow(this.sessionId, row, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
@@ -1484,6 +1515,8 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    /** Best-effort initial title for a session without a custom title. */
+    initialDisplayName?: string;
     pr?: Omit<DaemonSessionPrInfo, 'issues'>;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(

@@ -300,7 +300,15 @@ documented as-is.
   default. Operators can raise or disable it with the existing flag.
 - **Reaper coverage unchanged.** A stalled writer on a non-REST surface still
   holds its slot until the client disconnects or the surface's own lifecycle
-  ends; the cap bounds how many such slots can exist at once.
+  ends; the cap bounds how many such slots can exist at once. Shutdown is
+  the backstop: the listener close force-closes remaining connections —
+  after the close timeout on the primary listener, immediately on the
+  pairing listeners — including upgraded sockets, which
+  `closeAllConnections()` alone does not reach — releasing their slots
+  (slot release is pinned by the primary listener's shutdown tests and by the
+  pairing-listener disable test; the local-control service test pins that
+  `disable()` settles over a non-answering upgraded peer; the remote-access
+  listener shares the same tracked-destroy release path).
 
 ## Files affected
 
@@ -326,7 +334,11 @@ documented as-is.
   the arriving listener's occupancy/governing-bound pair.
 - `packages/cli/src/serve/local-control/service.ts`,
   `packages/cli/src/serve/remote-access.ts` — share the pairing budget
-  constant.
+  constant; both track accepted sockets and destroy the survivors on close
+  so a non-answering upgraded peer cannot hang disable()/drain.
+- `packages/cli/src/serve/serve-app-lifecycle.ts` — track accepted sockets
+  from 'connection' and destroy the survivors in the close force timers,
+  reaching upgraded sockets that closeAllConnections() alone does not.
 - `packages/cli/src/serve/run-qwen-serve.ts` — bootstrap status field.
 - `packages/sdk-typescript/src/daemon/types.ts` — additive mirror.
 - Docs listed above; new behavior tests (red-first) in a collocated
@@ -387,6 +399,15 @@ documented as-is.
 
 - Follow-up 3 (Web Shell row) and follow-up 4 (deferred test pins) land as
   stacked PRs on top of this change.
-- Reaper coverage for non-REST surfaces and drain-wait coverage for the new
-  surfaces are candidates for a later issue; neither is required to close the
-  headroom gap this design addresses.
+- Resolved by #17712: reaper coverage stays REST-only by decision — the
+  non-REST surfaces have heterogeneous lifecycles (generator completion,
+  ACP idle-TTL, heartbeats), so a per-surface writer-stall reaper is a
+  separate design; the stalled non-reading peer bound is documented instead
+  (users guide scope note and Constraints above). The `remote-access`
+  pairing listener now carries the same end-to-end admission pin as
+  `local-control` (clamp, listener-scoped refusal, access-log attribution,
+  deep-health pair), and shutdown drain coverage is pinned for the
+  generation and ACP surfaces (open streams neither hang `handle.close()`
+  nor leak their slots, including an upgraded peer that never answers a
+  close frame); the remaining counted surfaces share the same release hook
+  but have no shutdown pin yet.

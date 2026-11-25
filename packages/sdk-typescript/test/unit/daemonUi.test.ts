@@ -266,6 +266,46 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('keeps slash-command output separate from model text in the same prompt', () => {
+    const chunks = [
+      { text: 'Earlier model text.' },
+      { text: 'Skill notice. ', source: 'slash_command' },
+      { text: 'Some skills omitted.', source: 'slash_command' },
+      { text: 'Model ' },
+      { text: 'reply.' },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      chunks.flatMap(({ text, source }) =>
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          promptId: 'prompt-1',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+              ...(source ? { _meta: { source } } : {}),
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'assistant', text: 'Earlier model text.', streaming: false },
+      {
+        kind: 'assistant',
+        text: 'Skill notice. Some skills omitted.',
+        meta: { source: 'slash_command' },
+        streaming: false,
+      },
+      { kind: 'assistant', text: 'Model reply.', streaming: true },
+    ]);
+    expect(state.blocks[0]).not.toHaveProperty('meta.source');
+    expect(state.blocks[2]).not.toHaveProperty('meta.source');
+  });
+
   it('attaches branchRecordId when the decorated chunk merges into an existing block', () => {
     // A checkpointed record replayed as 2+ chunks creates its block from
     // the first (undecorated) chunk; the decorated final chunk must merge
@@ -3964,6 +4004,132 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
       }),
     );
     expect(events).toEqual([]);
+  });
+
+  it("draws a Mod's log line below the reply it arrives during", () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...normalizeDaemonEvent(
+          envelopeOf('session_update', {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Hello ' },
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('mod_log', {
+            sessionId: 's1',
+            plugin: 'zh-display',
+            text: 'translated 1 row',
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('session_update', {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'world' },
+          }),
+        ),
+      ],
+    );
+    expect(
+      state.blocks.map((block) =>
+        'text' in block ? [block.kind, block.text] : [block.kind],
+      ),
+    ).toEqual([
+      ['assistant', 'Hello world'],
+      ['status', '[Mod zh-display] translated 1 row'],
+    ]);
+    expect(state.blocks[1]).toMatchObject({
+      source: 'mod_log',
+      data: { plugin: 'zh-display', text: 'translated 1 row' },
+    });
+    expect(
+      normalizeDaemonEvent(envelopeOf('mod_log', { sessionId: 's1' })),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it.each(['block count', 'byte budget'] as const)(
+    'trims Mod logs before persisted dialogue at the %s limit',
+    (limit) => {
+      const page: DaemonUiEvent[] = [
+        { type: 'user.text.delta', text: 'Prompt', sourceRecordIds: ['r-1'] },
+        {
+          type: 'assistant.text.delta',
+          text: 'Answer',
+          sourceRecordIds: ['r-2'],
+        },
+      ];
+      const logs = [1, 2].flatMap((id) =>
+        normalizeDaemonEvent(
+          envelopeOf(
+            'mod_log',
+            { sessionId: 's1', plugin: 'mod', text: `log ${id}` },
+            id,
+          ),
+        ),
+      );
+      const pageBytes = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        page,
+      ).retainedBytes;
+      const onTruncation = vi.fn();
+      const store = createDaemonTranscriptStore({
+        ...(limit === 'block count'
+          ? { maxBlocks: 2 }
+          : { maxRetainedBytes: pageBytes }),
+        onTruncation,
+      });
+      store.dispatch([...page, ...logs]);
+
+      const snapshot = store.getSnapshot();
+      expect(snapshot.blocks.map((block) => block.sourceRecordIds)).toEqual([
+        ['r-1'],
+        ['r-2'],
+      ]);
+      expect(snapshot.retainedBytes).toBe(pageBytes);
+      expect(snapshot.lastEventId).toBe(2);
+      expect(onTruncation).toHaveBeenCalledTimes(1);
+      expect(onTruncation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'blocks',
+          oldestRetainedRecordId: 'r-1',
+          evictedOldest: false,
+          blockCount: 2,
+        }),
+      );
+    },
+  );
+
+  it('keeps the newest Mod log in place when only one log must be evicted', () => {
+    const store = createDaemonTranscriptStore({ maxBlocks: 3 });
+    const log = (id: number) =>
+      normalizeDaemonEvent(
+        envelopeOf(
+          'mod_log',
+          { sessionId: 's1', plugin: 'mod', text: `log ${id}` },
+          id,
+        ),
+      );
+    store.dispatch([
+      ...log(1),
+      { type: 'user.text.delta', text: 'Prompt' },
+      ...log(2),
+      { type: 'assistant.text.delta', text: 'Answer' },
+    ]);
+
+    const { blocks, blockIndexById } = store.getSnapshot();
+    expect(blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'status',
+      'assistant',
+    ]);
+    expect(blocks[1]).toMatchObject({ eventId: 2 });
+    expect(blocks.map((block) => blockIndexById[block.id])).toEqual([0, 1, 2]);
   });
 
   it('stamps debugReason on unrecognized daemon events', () => {
@@ -11309,6 +11475,21 @@ describe('transcript timing frames', () => {
       model: 'qwen3.8-max',
     });
   });
+
+  it.each([2544, -1, 7000, '2544'])(
+    'validates the request first visible offset %s',
+    (firstVisibleOffsetMs) => {
+      const timing = extractTranscriptTiming({
+        _meta: {
+          timing: { ...TIMING_FRAME._meta.timing, firstVisibleOffsetMs },
+        },
+      });
+      expect(timing?.ttftMs).toBe(2344);
+      expect(timing?.firstVisibleOffsetMs).toBe(
+        firstVisibleOffsetMs === 2544 ? 2544 : undefined,
+      );
+    },
+  );
 
   it('reads a tool timing frame', () => {
     expect(

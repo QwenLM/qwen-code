@@ -64,7 +64,7 @@ describe('pr force-push reminder workflow', () => {
       "sender?.type === 'Bot' || KNOWN_AUTOMATION.has(sender?.login)",
     );
     for (const login of [
-      'qwen-code-ci-bot',
+      'qwen-code-review-bot',
       'qwen-code-dev-bot',
       'github-actions',
       'github-actions[bot]',
