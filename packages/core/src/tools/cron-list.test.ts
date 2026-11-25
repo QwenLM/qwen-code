@@ -202,6 +202,45 @@ describe('CronListTool', () => {
     expect(result.returnDisplay).toContain('[session-only, gated]');
   });
 
+  it('keeps live gate status scoped to each durable owner', async () => {
+    await writeCronTasks(tmpDir, [
+      makeDurableTask({
+        id: 'shared',
+        sessionId: 'session-a',
+        prompt: 'owner-a',
+        gate: './probe-a',
+      }),
+      makeDurableTask({
+        id: 'shared',
+        sessionId: 'session-b',
+        prompt: 'owner-b',
+        gate: './probe-b',
+      }),
+    ]);
+    await config._scheduler.enableDurable('session-a');
+    for (const [sessionId, count] of [
+      ['session-a', 2],
+      ['session-b', 9],
+    ] as const) {
+      const job = config._scheduler
+        .list()
+        .find((candidate) => candidate.boundSessionId === sessionId);
+      job!.gateStatus = {
+        lastAt: 1,
+        lastOutcome: 'quiet',
+        quietSinceDelivery: count,
+        consecutiveFailures: 0,
+      };
+    }
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain('owner-a\n    gate: ./probe-a');
+    expect(result.llmContent).toContain('quiet ×2');
+    expect(result.llmContent).toContain('owner-b\n    gate: ./probe-b');
+    expect(result.llmContent).toContain('quiet ×9');
+  });
+
   it('merges file-backed durable jobs with session-only jobs', async () => {
     await writeCronTasks(tmpDir, [makeDurableTask()]);
     config._scheduler.create('*/10 * * * *', 'session task', true);

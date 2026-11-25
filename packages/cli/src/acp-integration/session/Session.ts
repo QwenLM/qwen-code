@@ -2220,6 +2220,7 @@ function toAdmissibleNotification(
 interface CronFire {
   id?: string;
   boundSessionId?: string;
+  runId?: string;
   prompt: string;
   cronExpr?: string;
   recurring?: boolean;
@@ -2242,6 +2243,8 @@ interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
   taskId?: string;
+  taskSessionId?: string | null;
+  runId?: string;
   firedAt?: number;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
@@ -5516,6 +5519,8 @@ export class Session implements SessionContext {
       typeof options === 'boolean'
         ? options
         : options?.includeDisposed === true;
+    const includeScheduledTasks =
+      typeof options === 'object' && options.includeScheduledTasks === true;
     if (this.disposed && !includeDisposed) return [];
     const holds: ActiveWorkHoldV1[] = [];
     for (const agentId of this.config
@@ -5589,10 +5594,7 @@ export class Session implements SessionContext {
     }
     // Only conditional close needs this retention; idle/reload and active-work
     // snapshots must keep their existing meaning.
-    if (
-      options?.includeScheduledTasks === true &&
-      this.config.isCronEnabled?.() !== false
-    ) {
+    if (includeScheduledTasks && this.config.isCronEnabled?.() !== false) {
       const scheduler = this.config.getCronScheduler?.();
       const hasScheduledWork =
         this.cronQueue.length > 0 ||
@@ -13364,6 +13366,8 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        taskSessionId: job.boundSessionId ?? null,
+        ...(job.runId ? { runId: job.runId } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
         ...(job.delivery ? { delivery: job.delivery } : {}),
         ...(job.todoWorkChainId
@@ -13402,21 +13406,30 @@ export class Session implements SessionContext {
     // jobs-map entry on the next matching minute, so a spawn that outlasts one
     // interval would otherwise annotate the *next* fire's run record.
     const firedAt = job.lastFiredAt;
+    const runId = job.runId;
     const triggeredAt = firedAt ?? Date.now();
     const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
       if (!job.id || firedAt === undefined) return;
-      await scheduler
-        .annotateRunSession(
-          job.id,
-          firedAt,
-          outcome,
-          job.boundSessionId ?? null,
-        )
-        .catch((error) => {
-          debugLogger.warn(
-            `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
+      const annotation =
+        runId === undefined
+          ? scheduler.annotateRunSession(
+              job.id,
+              firedAt,
+              outcome,
+              job.boundSessionId ?? null,
+            )
+          : scheduler.annotateRunSession(
+              job.id,
+              firedAt,
+              outcome,
+              job.boundSessionId ?? null,
+              runId,
+            );
+      await annotation.catch((error) => {
+        debugLogger.warn(
+          `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     };
     const restoreOneShot = async (): Promise<void> => {
       if (job.recurring !== false || !job.id) return;
@@ -13517,6 +13530,8 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        taskSessionId: job.boundSessionId ?? null,
+        ...(job.runId ? { runId: job.runId } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
       });
       void this.#drainCronQueue();
@@ -13553,6 +13568,7 @@ export class Session implements SessionContext {
         const duplicateIndex = this.cronQueue.findIndex(
           (queued) =>
             queued.taskId === item.taskId &&
+            (queued.taskSessionId ?? null) === (item.taskSessionId ?? null) &&
             !this.#cronContinuesTodoStopGuardWorkChain(queued),
         );
         if (duplicateIndex >= 0) {

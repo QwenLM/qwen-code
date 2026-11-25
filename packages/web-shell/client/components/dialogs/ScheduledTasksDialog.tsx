@@ -193,6 +193,7 @@ interface ScheduledTasksDialogProps {
     workspaceId?: string;
     sessionId?: string | null;
   }) => void;
+  onTaskMutated?: () => void;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -211,12 +212,10 @@ function renderWorkspacePill(
   );
 }
 
-/** A stable per-card identity. Task ids are unique only WITHIN a workspace's
- * file, so the aggregated view keys on (workspace, id) — otherwise two
- * same-id tasks from different workspaces would collide in the React list and
- * in the busy/expanded per-card state. */
+/** Durable compatibility records may share an id within a workspace when they
+ * belong to different sessions. Keep their card state separate as well. */
 function taskKey(task: DaemonScheduledTask): string {
-  return `${task.workspaceId ?? ''}:${task.id}`;
+  return taskDeletionKey(task);
 }
 
 function taskDeletionKey(task: DaemonScheduledTask): string {
@@ -664,6 +663,7 @@ export function ScheduledTasksDialog({
   autofixPrWatchesAvailable = false,
   isTaskDeleted,
   onTaskDeleted,
+  onTaskMutated,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -1441,6 +1441,7 @@ export function ScheduledTasksDialog({
       if (!mountedRef.current) return;
       resetForm();
       await reload();
+      onTaskMutated?.();
     } catch (err) {
       if (!mountedRef.current) return;
       setFormError(err instanceof Error ? err.message : String(err));
@@ -1472,6 +1473,7 @@ export function ScheduledTasksDialog({
     newGroupName,
     prompt,
     reload,
+    onTaskMutated,
     resetForm,
     runDestination,
     t,
@@ -1488,13 +1490,14 @@ export function ScheduledTasksDialog({
           task.sessionId,
         );
         await reload();
+        onTaskMutated?.();
       } catch (err) {
         onError(err, t('scheduledTasks.error.toggleFailed'));
       } finally {
         if (mountedRef.current) setBusyId(null);
       }
     },
-    [actions, onError, reload, t],
+    [actions, onError, onTaskMutated, reload, t],
   );
 
   // Stopping a watch is the skill's: `/autofix-pr stop <n>` runs in the

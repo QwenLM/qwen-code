@@ -32,6 +32,7 @@ const sdkMock = vi.hoisted(() => ({
     listScheduledTasks: vi.fn(),
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
+    assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
     deleteScheduledTask: vi.fn(),
   },
 }));

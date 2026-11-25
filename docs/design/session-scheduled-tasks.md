@@ -48,9 +48,9 @@ The full-page task manager shares the current session's synchronous confirmation
 
 A server-confirmed session stop is stored in the same owner-scoped state used by Environment, with a read-only cancellation-ID set for details. The current detail and a later detail instance for that same owner both render a confirmed stopped snapshot rather than confusing it with natural expiry or an unavailable live snapshot. This confirmation is not borrowed by another source session. Stopping from inside the detail may restore focus to its stable detail group; Environment's stop is a separate focus transaction and must not be overridden by that local detail effect.
 
-An external enable/disable/prompt update or another read of the same task must not replace a draft the user is editing. A completed save must not be overwritten by an older live task merely because the editor closes. A confirmed deletion retires editing controls. Confirmed deletions from the environment and from the detail itself follow the same rule. Any pending read older than these newer facts is discarded.
+An external enable/disable, rename, or prompt update, or another read of the same task, must not replace a draft the user is editing. A completed save must not be overwritten by an older live task merely because the editor closes. A confirmed deletion retires editing controls. Confirmed deletions from the environment and from the detail itself follow the same rule. Any pending read older than these newer facts is discarded.
 
-A supported owner-scoped durable snapshot that no longer contains a previously loaded task invalidates that old live object and retires its controls, without claiming that it was explicitly deleted. An older daemon lacking that snapshot is not an authoritative absence, so it cannot invalidate an existing historical view in this way.
+A supported owner-scoped durable snapshot that no longer contains a previously loaded task invalidates that old live object and retires its controls, without claiming that it was explicitly deleted. An older daemon lacking that snapshot is not an authoritative absence, so it cannot invalidate an existing historical view in this way. A successful full-manager create, edit, or enable/pause mutation also invokes the selected session's owner-scoped refresh, so returning to chat does not leave the header or Environment waiting for unrelated cron activity.
 
 Deleting the primary occurrence of an ID is not sufficient evidence: natural consumption, expiry, another daemon's state, and an unsupported capability can all produce absence. A missing live status therefore keeps the creation snapshot rather than claiming cancellation or deletion. Stop feedback for an in-memory task requires an acknowledged cancellation. A durable deleted state requires acknowledged mutation evidence.
 
@@ -74,7 +74,7 @@ Persisted task ID, scope, source session, and workspace identity are used before
 
 Creation cards show `active` or `paused` only when an owner-matched live record supports that claim. They do not invent a historical `cancelled` badge. Details distinguish explicit stop deletion from unavailable live state while retaining the creation prompt and other original fields. Even a confirmed deleted task keeps those fields readable; its edit controls—not its history—are retired.
 
-Prompt truncation follows Unicode code points. Focus styling and layout remain CSS-module local. Environment transitions, public fields, cancellation failures, and the historical snapshot message have English, Simplified Chinese, Traditional Chinese, and Russian strings; plural counts use the existing Russian plural rule.
+Prompt truncation follows Unicode code points. Focus styling and layout remain CSS-module local; scheduled-task changes must not rewrite other section header rows. Environment transitions, public fields, cancellation failures, and the historical snapshot message have English, Simplified Chinese, Traditional Chinese, and Russian strings; plural counts use the existing Russian plural rule.
 
 ## 8. Verification strategy
 

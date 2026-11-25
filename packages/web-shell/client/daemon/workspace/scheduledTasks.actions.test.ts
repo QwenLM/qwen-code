@@ -8,9 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
 
 // Assert the native REST request sent by the SDK, including auth and bodies.
-function makeActions(token?: string) {
+function makeActions(
+  token?: string,
+  features: string[] = ['scheduled_task_owner_selection'],
+) {
   return createDaemonWorkspaceActions({
-    getClient: () => ({}) as never,
+    getClient: () => ({ capabilities: async () => ({ features }) }) as never,
     getWorkspaceCwd: () => '/ws',
     baseUrl: '',
     token,
@@ -178,6 +181,42 @@ describe('scheduled-tasks workspace actions', () => {
       expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks');
       expect(fetchMock.mock.calls[1][0]).toBe('/scheduled-tasks');
     });
+  });
+});
+
+describe('owner-selected scheduled-task mutations', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends an owner-selected mutation when the capability is advertised', async () => {
+    fetchMock.mockResolvedValue(ok({ id: 'child' }));
+    await makeActions().updateScheduledTask(
+      'child',
+      { enabled: false },
+      undefined,
+      'session-a',
+    );
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/scheduled-tasks/child?expectedSessionId=session-a',
+    );
+  });
+
+  it('rejects owner selection before HTTP when the daemon lacks the capability', async () => {
+    await expect(
+      makeActions(undefined, []).deleteScheduledTask(
+        'child',
+        undefined,
+        'session-a',
+      ),
+    ).rejects.toThrow('expectedSessionId');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

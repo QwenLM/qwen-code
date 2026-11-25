@@ -61,6 +61,7 @@ const { actions, useDaemonChannels } = vi.hoisted(() => ({
     createScheduledTask: vi.fn(),
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
+    assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
     deleteScheduledTask: vi.fn(),
     listAutofixPrWatches: vi.fn(),
     listSessionGroups: vi.fn(),
@@ -104,6 +105,7 @@ async function mount(
       workspaceId?: string;
       sessionId?: string | null;
     }) => void;
+    onTaskMutated?: () => void;
     currentSession?: {
       sessionId: string;
       workspaceCwd: string;
@@ -178,6 +180,7 @@ async function mount(
               lockedWorkspace={nextOpts.lockedWorkspace}
               isTaskDeleted={nextOpts.isTaskDeleted}
               onTaskDeleted={nextOpts.onTaskDeleted}
+              onTaskMutated={nextOpts.onTaskMutated}
               onError={nextOpts.onError ?? vi.fn()}
             />
           </I18nProvider>
@@ -1486,6 +1489,67 @@ describe('ScheduledTasksDialog run history', () => {
     // Newest first: the catch-up fire (later timestamp) leads and is tagged.
     expect(items[0]!.textContent).toContain('late');
     expect(items[1]!.textContent).not.toContain('late');
+  });
+
+  it('keeps same-id task history scoped to its session owner', async () => {
+    await mount([
+      baseTask({
+        id: 'shared',
+        sessionId: 'session-a',
+        sessionMode: 'per_run',
+        runs: [{ at: 1 }],
+      }),
+      baseTask({
+        id: 'shared',
+        sessionId: 'session-b',
+        sessionMode: 'per_run',
+        runs: [{ at: 2 }, { at: 3 }],
+      }),
+    ]);
+
+    const histories = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    );
+    expect(histories.map((button) => button.textContent)).toEqual([
+      'Run history (1)',
+      'Run history (2)',
+    ]);
+    click(histories[0]);
+
+    expect(
+      histories.map((button) => button.getAttribute('aria-expanded')),
+    ).toEqual(['true', 'false']);
+  });
+
+  it('keeps a same-id sibling interactive while another owner is pending', async () => {
+    const tasks = [
+      baseTask({ id: 'shared', sessionId: 'session-a' }),
+      baseTask({ id: 'shared', sessionId: 'session-b' }),
+    ];
+    const pending = deferred<MockTask>();
+    await mount(tasks);
+    actions.updateScheduledTask.mockReturnValueOnce(pending.promise);
+    const toggles = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button[role="switch"]'),
+    );
+    expect(toggles).toHaveLength(2);
+
+    click(toggles[0]);
+    expect(toggles.map((button) => button.disabled)).toEqual([true, false]);
+
+    pending.resolve({ ...tasks[0]!, enabled: false });
+    await flush();
+    expect(toggles.map((button) => button.disabled)).toEqual([false, false]);
+  });
+
+  it('notifies the shared session state after a successful mutation', async () => {
+    const onTaskMutated = vi.fn();
+    await mount([baseTask()], { onTaskMutated });
+
+    click(document.querySelector('button[role="switch"]'));
+    await flush();
+
+    expect(onTaskMutated).toHaveBeenCalledOnce();
   });
 
   it('shows no run-history toggle for a task that has never fired', async () => {

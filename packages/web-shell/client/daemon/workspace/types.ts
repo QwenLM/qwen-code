@@ -331,6 +331,8 @@ export interface DaemonChannelPairingActions {
 /** One recorded fire of a recurring scheduled task, newest last in
  * {@link DaemonScheduledTask.runs}. Mirrors the daemon's wire shape. */
 export interface DaemonScheduledTaskRun {
+  /** Distinguishes runs of the same task at the same timestamp. */
+  runId?: string;
   /** Fire time (epoch ms). */
   at: number;
   /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
@@ -810,6 +812,11 @@ export interface DaemonWorkspaceActions
     req: DaemonCreateScheduledTaskRequest,
     workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
+  /** Reject before executing a prompt or recording a run when this daemon
+   * cannot safely select the exact expected owner. */
+  assertScheduledTaskOwnerSelection(
+    expectedSessionId?: string | null,
+  ): Promise<void>;
   /** The optional expected owner disambiguates same-id records; null means
    * unbound, while omitting it retains compatibility for unique ids. */
   updateScheduledTask(

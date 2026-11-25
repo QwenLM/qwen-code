@@ -817,6 +817,7 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
     const run = entry as Record<string, unknown>;
     return (
       isFiniteTimestamp(run['at']) &&
+      (run['runId'] === undefined || typeof run['runId'] === 'string') &&
       (run['kind'] === undefined || typeof run['kind'] === 'string') &&
       (run['sessionId'] === undefined ||
         typeof run['sessionId'] === 'string') &&

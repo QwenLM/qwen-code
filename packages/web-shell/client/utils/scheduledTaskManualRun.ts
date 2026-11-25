@@ -51,7 +51,9 @@ export async function runScheduledTaskManually(
   task: DaemonScheduledTask,
   actions: Pick<
     DaemonWorkspaceActions,
-    'listScheduledTasks' | 'runScheduledTask'
+    | 'listScheduledTasks'
+    | 'runScheduledTask'
+    | 'assertScheduledTaskOwnerSelection'
   >,
   onRunPrompt: ScheduledTaskRunPrompt,
   t: TranslateFn,
@@ -81,6 +83,7 @@ export async function runScheduledTaskManually(
       );
       return;
     }
+    await actions.assertScheduledTaskOwnerSelection(fresh.sessionId);
     if (fresh.sessionMode === 'per_run') {
       // The daemon dispatches a fresh child session and records it on this
       // run. Never also enqueue the prompt into the controller session.

@@ -128,6 +128,18 @@ describe('cronTasksFile', () => {
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
 
+    it.each([42, null])('rejects a non-string runId: %j', async (runId) => {
+      await seedTask({ runs: [{ at: 1, runId }] });
+      await expectInvalidEntry();
+    });
+
+    it('accepts a string runId', async () => {
+      await seedTask({ runs: [{ at: 1, runId: 'natural-run' }] });
+      expect((await readCronTasks(tmpDir))[0]?.runs?.[0]?.runId).toBe(
+        'natural-run',
+      );
+    });
+
     // A file that exists but doesn't parse must throw, not read as an
     // empty schedule: [] would let a reload reconcile every loaded job
     // away and let the next write clobber the user's recoverable file.

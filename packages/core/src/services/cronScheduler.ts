@@ -29,7 +29,6 @@ import {
   generateCronTaskId,
   getCronFilePath,
   readCronTasks,
-  removeCronTasks,
   taskHasLegacyCondition,
   taskHasLegacyRunMode,
   updateCronTasks,
@@ -123,6 +122,8 @@ export interface CronJob {
    */
   taskPrompt?: string;
   delivery?: CronTaskDelivery;
+  /** Identifies one natural fire across persistence and session annotation. */
+  runId?: string;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
   todoWorkChainId?: string;
@@ -273,6 +274,14 @@ function wakeupToJob(wakeup: SessionWakeup): CronJob {
 
 function truncatePrompt(prompt: string): string {
   return prompt.length > 60 ? prompt.slice(0, 57) + '...' : prompt;
+}
+
+function durableTaskKey(id: string, sessionId?: string | null): string {
+  return JSON.stringify([sessionId ?? null, id]);
+}
+
+function runtimeJobKey(job: CronJob): string {
+  return job.durable ? durableTaskKey(job.id, job.boundSessionId) : job.id;
 }
 
 export class CronScheduler {
@@ -627,12 +636,14 @@ export class CronScheduler {
     const previousJobs = new Map(this.jobs);
     const job = this.create(cronExpr, prompt, recurring, gate);
     job.durable = true;
-    const incumbent = previousJobs.get(job.id);
+    this.jobs.delete(job.id);
+    this.jobs.set(runtimeJobKey(job), job);
+    const incumbent = previousJobs.get(runtimeJobKey(job));
     if (incumbent) {
-      this.jobs.set(job.id, incumbent);
+      this.jobs.set(runtimeJobKey(job), incumbent);
       throw new Error(`scheduled task id already exists: ${job.id}`);
     }
-    this.pendingAdd.add(job.id);
+    this.pendingAdd.add(runtimeJobKey(job));
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
       if (
@@ -640,15 +651,29 @@ export class CronScheduler {
         this.durableEnabled &&
         this.#shouldFireDurable(job)
       ) {
-        this.armedDurableOneShots.add(job.id);
+        this.armedDurableOneShots.add(runtimeJobKey(job));
       }
     } catch (error) {
-      this.jobs.delete(job.id);
+      this.jobs.delete(runtimeJobKey(job));
       throw error;
     } finally {
-      this.pendingAdd.delete(job.id);
+      this.pendingAdd.delete(runtimeJobKey(job));
     }
     return job;
+  }
+
+  #runtimeEntry(
+    id: string,
+    expectedSessionId: string | null,
+  ): [string, CronJob | undefined] {
+    const key = durableTaskKey(id, expectedSessionId);
+    const durable = this.jobs.get(key);
+    if (durable) return [key, durable];
+    if (expectedSessionId !== null) return [key, undefined];
+    const sessionJob = this.jobs.get(id);
+    return sessionJob && !sessionJob.durable
+      ? [id, sessionJob]
+      : [key, undefined];
   }
 
   /**
@@ -658,34 +683,46 @@ export class CronScheduler {
    * restart. On write failure the job is restored and the error rethrown.
    * Returns true if the job existed.
    */
-  async delete(id: string): Promise<boolean> {
+  async delete(
+    id: string,
+    expectedTaskSessionId: string | null = null,
+  ): Promise<boolean> {
+    const [key, job] = this.#runtimeEntry(id, expectedTaskSessionId);
     // A gate still running for this job must deliver nothing afterwards:
     // delete takes effect immediately (safe-delete design).
-    this.abortGate(id);
-    this.pendingGateApprovals.delete(id);
-    const job = this.jobs.get(id);
+    this.abortGate(key);
+    this.pendingGateApprovals.delete(key);
     if (!job) {
-      this.restorablePerRunOneShots.delete(id);
-      this.consumedPerRunOneShots.delete(id);
-      this.consumedPerRunRemovalGenerations.delete(id);
+      this.restorablePerRunOneShots.delete(key);
+      this.consumedPerRunOneShots.delete(key);
+      this.consumedPerRunRemovalGenerations.delete(key);
       return this.cancelWakeup(id);
     }
 
-    this.jobs.delete(id);
+    this.jobs.delete(key);
     if (job.durable && this.projectRoot) {
-      this.pendingRemoval.add(id);
+      this.pendingRemoval.add(key);
       try {
-        await removeCronTasks(this.projectRoot, [id]);
+        await updateCronTasks(
+          this.projectRoot,
+          (tasks) =>
+            tasks.filter(
+              (task) =>
+                task.id !== id ||
+                (task.sessionId ?? null) !== (job.boundSessionId ?? null),
+            ),
+          { deletionIds: [key] },
+        );
       } catch (error) {
-        this.pendingRemoval.delete(id);
-        this.jobs.set(id, job);
+        this.pendingRemoval.delete(key);
+        this.jobs.set(key, job);
         throw error;
       }
     }
-    this.restorablePerRunOneShots.delete(id);
-    this.consumedPerRunOneShots.delete(id);
-    this.consumedPerRunRemovalGenerations.delete(id);
-    this.armedDurableOneShots.delete(id);
+    this.restorablePerRunOneShots.delete(key);
+    this.consumedPerRunOneShots.delete(key);
+    this.consumedPerRunRemovalGenerations.delete(key);
+    this.armedDurableOneShots.delete(key);
     return true;
   }
 
@@ -722,7 +759,7 @@ export class CronScheduler {
     // A session-only one-shot or final fire leaves the map before its gate
     // runs; until that gate settles the fire is still this session's work.
     for (const { job } of this.gatesInFlight.values()) {
-      if (!job.durable && !this.jobs.has(job.id)) count++;
+      if (!job.durable && !this.jobs.has(runtimeJobKey(job))) count++;
     }
     return count;
   }
@@ -732,14 +769,20 @@ export class CronScheduler {
    * is a fire this process has already consumed — a durable catch-up's stamp
    * is on disk before its gate decides — so headless mode waits for it even
    * though durable jobs otherwise never pin the process.
-   * With an owner id, only bound durable gates belonging to that session count.
+   * Scoped reads also retain shared/unbound and session-only gates, which may
+   * belong to this controller rather than to another bound session.
    */
   hasGatesInFlight(ownerSessionId?: string): boolean {
     if (ownerSessionId === undefined) {
       return this.gatesInFlight.size > 0;
     }
     for (const { job } of this.gatesInFlight.values()) {
-      if (job.durable && job.boundSessionId === ownerSessionId) return true;
+      if (job.boundSessionId === ownerSessionId) return true;
+      if (job.durable && ownerSessionId !== this.sessionId) continue;
+      if (this.sessionId !== undefined && ownerSessionId !== this.sessionId) {
+        continue;
+      }
+      return true;
     }
     return false;
   }
@@ -971,9 +1014,10 @@ export class CronScheduler {
     // responsibility and skipped.
     {
       for (const t of tasks) {
+        const key = durableTaskKey(t.id, t.sessionId);
         // A task whose on-disk removal is already in flight (deleted via
         // cron_delete, or a just-delivered fire) is gone, not missed.
-        if (this.pendingRemoval.has(t.id)) continue;
+        if (this.pendingRemoval.has(key)) continue;
         const responsibleForMissed =
           typeof t.sessionId === 'string' && t.sessionId.length > 0
             ? t.sessionId === this.sessionId
@@ -986,7 +1030,7 @@ export class CronScheduler {
         // watcher) would otherwise read the stale disk lastFiredAt and fire the
         // same slot a second time. (A catch-up merely buffered then dropped is
         // NOT in this set, so it still re-detects from disk — intended recovery.)
-        if (this.firePersistPending.has(t.id)) continue;
+        if (this.firePersistPending.has(key)) continue;
         const jitter = computeJitter(t.id, t.cron, t.recurring);
         const anchor = t.recurring
           ? (t.lastFiredAt ?? t.createdAt)
@@ -999,7 +1043,7 @@ export class CronScheduler {
         if (
           !t.recurring &&
           this.timer !== null &&
-          this.armedDurableOneShots.has(t.id) &&
+          this.armedDurableOneShots.has(key) &&
           isCronSlotVisibleToTick(nextFire - jitter, now, jitter)
         )
           continue;
@@ -1034,7 +1078,7 @@ export class CronScheduler {
           // schedule (claw-code parity: "check my PRs every 30m"
           // restarted after lunch checks promptly instead of waiting
           // for the next aligned window).
-          catchUpIds.push(t.id);
+          catchUpIds.push(key);
         }
       }
       // The install loop below skips these via pendingRemoval. The
@@ -1043,20 +1087,23 @@ export class CronScheduler {
       // outright if stop() dropped the buffered fire before any onFire
       // existed.
       for (const t of [...missedOneShots, ...finalTasks]) {
-        this.pendingRemoval.add(t.id);
-        this.armedDurableOneShots.delete(t.id);
+        const key = durableTaskKey(t.id, t.sessionId);
+        this.pendingRemoval.add(key);
+        this.armedDurableOneShots.delete(key);
         // A prior non-owner load may have installed this task as a
         // live job — drop it, or the now-owning tick could fire it a
         // second time before the on-disk removal propagates back
         // through the watcher reload.
-        this.jobs.delete(t.id);
+        this.jobs.delete(key);
       }
     }
 
     // Reconcile disk state into the job map. lastFiredAt is carried
     // forward from the in-memory entry — an in-flight persist may not
     // have landed yet, and regressing it would double-fire.
-    const diskIds = new Set(tasks.map((t) => t.id));
+    const diskIds = new Set(
+      tasks.map((task) => durableTaskKey(task.id, task.sessionId)),
+    );
     // Jobs mid-createDurable are on their way to disk — treat them as
     // present so this reload doesn't delete the live job it can't see yet.
     for (const id of this.pendingAdd) diskIds.add(id);
@@ -1066,13 +1113,14 @@ export class CronScheduler {
       }
     }
     for (const job of this.jobs.values()) {
-      if (job.durable && !diskIds.has(job.id)) {
-        this.jobs.delete(job.id);
-        this.armedDurableOneShots.delete(job.id);
+      const key = runtimeJobKey(job);
+      if (job.durable && !diskIds.has(key)) {
+        this.jobs.delete(key);
+        this.armedDurableOneShots.delete(key);
         // Disabled or deleted through the file (another session, the
         // daemon's task controls): the running gate is cancelled like
         // delete() cancels it, not left to finish and be dropped.
-        this.abortGate(job.id);
+        this.abortGate(key);
       }
     }
     for (const id of this.pendingRemoval) {
@@ -1089,8 +1137,9 @@ export class CronScheduler {
     let durableJobCount = 0;
     for (const j of this.jobs.values()) if (j.durable) durableJobCount++;
     for (const task of tasks) {
-      if (this.pendingRemoval.has(task.id)) continue;
-      const existing = this.jobs.get(task.id);
+      const key = durableTaskKey(task.id, task.sessionId);
+      if (this.pendingRemoval.has(key)) continue;
+      const existing = this.jobs.get(key);
       if (!existing && durableJobCount >= MAX_JOBS) {
         debugLogger.warn(
           `Durable task ${task.id} skipped — durable cap (${MAX_JOBS}) reached.`,
@@ -1100,20 +1149,26 @@ export class CronScheduler {
       // The command changed under a running gate: its result would describe
       // a gate the task no longer has.
       if (existing?.gate && existing.gate !== task.gate) {
-        this.abortGate(task.id);
+        this.abortGate(key);
       }
       const job = durableTaskToJob(task, this.recurringMaxAgeMs, existing);
-      const approvedGate = this.pendingGateApprovals.get(task.id);
+      const approvedGate = this.pendingGateApprovals.get(key);
       if (approvedGate !== undefined) {
-        this.pendingGateApprovals.delete(task.id);
+        this.pendingGateApprovals.delete(key);
         if (approvedGate === job.gate) job.gateApproved = true;
       }
       if (existing?.lastFiredAt !== undefined) {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
-      this.jobs.set(task.id, job);
+      const inFlight = this.gatesInFlight.get(key);
+      if (inFlight && inFlight.job === existing) {
+        job.runId = inFlight.job.runId;
+        job.gateApproved = inFlight.job.gateApproved;
+        inFlight.job = job;
+      }
+      this.jobs.set(key, job);
       if (!task.recurring && task.sessionMode === 'per_run') {
-        this.restorablePerRunOneShots.set(task.id, {
+        this.restorablePerRunOneShots.set(key, {
           task,
           index: read.findIndex(
             (candidate) =>
@@ -1122,13 +1177,13 @@ export class CronScheduler {
           ),
         });
       } else {
-        this.restorablePerRunOneShots.delete(task.id);
-        this.consumedPerRunOneShots.delete(task.id);
+        this.restorablePerRunOneShots.delete(key);
+        this.consumedPerRunOneShots.delete(key);
       }
       if (!task.recurring && this.#shouldFireDurable(job)) {
-        this.armedDurableOneShots.add(task.id);
+        this.armedDurableOneShots.add(key);
       } else {
-        this.armedDurableOneShots.delete(task.id);
+        this.armedDurableOneShots.delete(key);
       }
       if (!existing) durableJobCount++;
     }
@@ -1200,7 +1255,7 @@ export class CronScheduler {
         // run). They are not notified and, critically, left on disk (not
         // in removeMissedFromDisk) so the owning interactive session still
         // surfaces and runs them instead of losing the task permanently.
-        const skipped: string[] = [];
+        const skipped: DurableCronTask[] = [];
         const runnable = pending.tasks.filter((t) => {
           const job = durableTaskToJob(t, this.recurringMaxAgeMs);
           // `job.durable &&` mirrors catch-up/final/tick — durableTaskToJob always
@@ -1210,7 +1265,7 @@ export class CronScheduler {
             debugLogger.debug(
               `Skipping durable job ${t.id} (missed): consumer cannot run it`,
             );
-            skipped.push(t.id);
+            skipped.push(t);
             return false;
           }
           return true;
@@ -1220,7 +1275,9 @@ export class CronScheduler {
         // would sit out of BOTH the job map and disk reconciliation forever;
         // cleared, the next loadFileTasks re-installs it (the intended
         // "defer to the owning session" path).
-        for (const id of skipped) this.pendingRemoval.delete(id);
+        for (const task of skipped) {
+          this.pendingRemoval.delete(durableTaskKey(task.id, task.sessionId));
+        }
         if (runnable.length > 0) {
           // The carrier is SYNTHETIC: its prompt is a notification about every
           // task in `runnable`, not the command of any one of them.
@@ -1234,7 +1291,7 @@ export class CronScheduler {
             missed: true,
             delivery: undefined,
           });
-          this.removeMissedFromDisk(runnable.map((t) => t.id));
+          this.removeMissedFromDisk(runnable);
         }
         break;
       }
@@ -1243,6 +1300,7 @@ export class CronScheduler {
         for (const id of pending.ids) {
           const job = this.jobs.get(id);
           if (!job) continue; // deleted while buffered
+          if (job.durable && !this.#shouldFireDurable(job)) continue;
           // Same skip as the tick loop (job.durable && …): a durable job this
           // consumer can't run is not fired and not stamped (left out of
           // persistCatchUpStamps), so its overdue schedule survives for the
@@ -1260,8 +1318,9 @@ export class CronScheduler {
         break;
       }
       case 'final': {
-        const fired: string[] = [];
+        const fired: Array<Pick<DurableCronTask, 'id' | 'sessionId'>> = [];
         for (const job of pending.jobs) {
+          if (job.durable && !this.#shouldFireDurable(job)) continue;
           // Same skip as the tick loop (job.durable && …): a skipped durable
           // job is left on disk (not in removeMissedFromDisk) so the owning
           // session still gets its one final fire + delete.
@@ -1271,11 +1330,11 @@ export class CronScheduler {
             );
             // Same limbo as the missed branch: a skipped final task stays on
             // disk, so clear its pendingRemoval guard rather than strand it.
-            this.pendingRemoval.delete(job.id);
+            this.pendingRemoval.delete(runtimeJobKey(job));
             continue;
           }
           this.fire(job, onFire);
-          fired.push(job.id);
+          fired.push({ id: job.id, sessionId: job.boundSessionId });
         }
         this.removeMissedFromDisk(fired);
         break;
@@ -1296,6 +1355,7 @@ export class CronScheduler {
   private persistCatchUpStamps(ids: string[]): void {
     if (!this.projectRoot || ids.length === 0) return;
     const stamps = new Map<string, number>();
+    const runIds = new Map<string, string>();
     // A gated catch-up has not reached a session yet: its stamp persists
     // now, its run is booked by the settlement — as 'catch-up', and only
     // when the gate delivers — the way a gated tick fire is.
@@ -1303,6 +1363,7 @@ export class CronScheduler {
     for (const id of ids) {
       const job = this.jobs.get(id);
       if (job?.lastFiredAt !== undefined) stamps.set(id, job.lastFiredAt);
+      if (job?.runId) runIds.set(id, job.runId);
       if (job?.gate) gated.add(id);
     }
     if (stamps.size === 0) return;
@@ -1315,7 +1376,8 @@ export class CronScheduler {
       updateCronTasks(this.projectRoot, (tasks) => {
         let changed = false;
         const next = tasks.map((t) => {
-          const stamp = stamps.get(t.id);
+          const key = durableTaskKey(t.id, t.sessionId);
+          const stamp = stamps.get(key);
           // Never regress lastFiredAt (`>=`, not just `===`): a NEWER stamp may
           // have landed after this catch-up was delivered — mainly a manual
           // POST /run in the daemon process writing lastFiredAt=now while this
@@ -1325,7 +1387,7 @@ export class CronScheduler {
           // Mirrors the tick persist's guard.
           if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) return t;
           changed = true;
-          if (gated.has(t.id)) return { ...t, lastFiredAt: stamp };
+          if (gated.has(key)) return { ...t, lastFiredAt: stamp };
           // Late fire (overdue while no session owned the schedule) — record it
           // as 'catch-up' so the history distinguishes it from an on-time fire.
           return {
@@ -1334,6 +1396,7 @@ export class CronScheduler {
             runs: appendCronRun(t.runs, {
               at: stamp,
               kind: 'catch-up',
+              runId: runIds.get(key),
               ...(t.sessionMode !== 'per_run' && this.sessionId
                 ? { sessionId: this.sessionId }
                 : {}),
@@ -1348,9 +1411,25 @@ export class CronScheduler {
   }
 
   /** Launches the on-disk removal of missed/final tasks just delivered. */
-  private removeMissedFromDisk(ids: string[]): void {
-    if (!this.projectRoot || ids.length === 0) return;
-    this.trackPersist(removeCronTasks(this.projectRoot, ids));
+  private removeMissedFromDisk(
+    delivered: Array<Pick<DurableCronTask, 'id' | 'sessionId'>>,
+  ): void {
+    if (!this.projectRoot || delivered.length === 0) return;
+    const selected = delivered.map(
+      (task) => [task.id, task.sessionId] as const,
+    );
+    this.trackPersist(
+      updateCronTasks(this.projectRoot, (tasks) =>
+        tasks.filter(
+          (task) =>
+            !selected.some(
+              ([id, sessionId]) =>
+                task.id === id &&
+                (task.sessionId ?? null) === (sessionId ?? null),
+            ),
+        ),
+      ),
+    );
   }
 
   /**
@@ -1432,9 +1511,24 @@ export class CronScheduler {
 
   /** Removes a durable task from disk whether or not this scheduler has
    * loaded it yet, as for a task another component just wrote. */
-  async removeDurable(id: string): Promise<void> {
-    await this.delete(id);
-    if (this.projectRoot) await removeCronTasks(this.projectRoot, [id]);
+  async removeDurable(
+    id: string,
+    expectedTaskSessionId: string | null = null,
+  ): Promise<void> {
+    await this.delete(id, expectedTaskSessionId);
+    if (this.projectRoot) {
+      const key = durableTaskKey(id, expectedTaskSessionId);
+      await updateCronTasks(
+        this.projectRoot,
+        (tasks) =>
+          tasks.filter(
+            (task) =>
+              task.id !== id ||
+              (task.sessionId ?? null) !== expectedTaskSessionId,
+          ),
+        { deletionIds: [key] },
+      );
+    }
   }
 
   /**
@@ -1444,10 +1538,14 @@ export class CronScheduler {
    * created itself. Applies at once when the job is loaded, otherwise on the
    * reload that installs it, and only while the task's gate is that command.
    */
-  approveGate(id: string, gate: string): void {
-    const job = this.jobs.get(id);
+  approveGate(
+    id: string,
+    gate: string,
+    expectedTaskSessionId: string | null = null,
+  ): void {
+    const [key, job] = this.#runtimeEntry(id, expectedTaskSessionId);
     if (!job) {
-      this.pendingGateApprovals.set(id, gate);
+      this.pendingGateApprovals.set(key, gate);
       return;
     }
     if (job.gate === gate) job.gateApproved = true;
@@ -1460,8 +1558,11 @@ export class CronScheduler {
    * otherwise. Primarily a test seam (see QWEN_CODE_TEST_CRON_FAST in
    * create()); also useful for manual debug triggers.
    */
-  forceFireJob(id: string): boolean {
-    const job = this.jobs.get(id);
+  forceFireJob(
+    id: string,
+    expectedTaskSessionId: string | null = null,
+  ): boolean {
+    const [, job] = this.#runtimeEntry(id, expectedTaskSessionId);
     if (!job || !this.onFire) return false;
     job.lastFiredAt = Date.now();
     debugLogger.debug(`forceFireJob: firing ${id} (${job.cronExpr})`);
@@ -1479,6 +1580,7 @@ export class CronScheduler {
     onFire: (job: CronJob) => void,
     kind: 'scheduled' | 'catch-up' = 'scheduled',
   ): void {
+    job.runId = job.durable ? generateId() : undefined;
     if (!job.gate) {
       onFire(job);
       return;
@@ -1490,9 +1592,9 @@ export class CronScheduler {
     // they deliver even though the job is gone. A recurring job that is gone
     // when the gate settles was deleted or disabled meanwhile and delivers
     // nothing.
-    const expectLive = this.jobs.get(job.id) === job;
+    const expectLive = this.jobs.get(runtimeJobKey(job)) === job;
     const ac = new AbortController();
-    this.gatesInFlight.set(job.id, { controller: ac, job });
+    this.gatesInFlight.set(runtimeJobKey(job), { controller: ac, job });
     const run: Promise<CronGateResult> = this.runGate
       ? this.runGate(job.gate, {
           signal: ac.signal,
@@ -1516,8 +1618,9 @@ export class CronScheduler {
         // deliver nothing. A delete or reload may have cancelled the last
         // running gate while nothing else is due, so the settlement is still
         // reported; stop() has already dropped the consumer and needs none.
-        const current = this.gatesInFlight.get(job.id)?.controller === ac;
-        if (current) this.gatesInFlight.delete(job.id);
+        const current =
+          this.gatesInFlight.get(runtimeJobKey(job))?.controller === ac;
+        if (current) this.gatesInFlight.delete(runtimeJobKey(job));
         if (!current || ac.signal.aborted) {
           if (this.onFire) this.gateSkippedListener?.();
           return;
@@ -1528,7 +1631,7 @@ export class CronScheduler {
         // output to that. Only stop() — which aborts the gate — ends the
         // subscription.
         const consumer = this.onFire;
-        const live = this.jobs.get(job.id);
+        const live = this.jobs.get(runtimeJobKey(job));
         let delivered = false;
         if (!consumer) {
           debugLogger.debug(`gate for ${job.id} settled with no consumer`);
@@ -1638,10 +1741,12 @@ export class CronScheduler {
   ): void {
     if (!this.projectRoot) return;
     const status = job.gateStatus;
+    const runId = job.runId;
     this.trackPersist(
       updateCronTasks(this.projectRoot, (tasks) =>
         tasks.map((t) =>
-          t.id !== job.id
+          t.id !== job.id ||
+          (t.sessionId ?? null) !== (job.boundSessionId ?? null)
             ? t
             : {
                 ...t,
@@ -1658,6 +1763,7 @@ export class CronScheduler {
                         at,
                         kind,
                         gate: run,
+                        ...(runId ? { runId } : {}),
                         ...(t.sessionMode !== 'per_run' && this.sessionId
                           ? { sessionId: this.sessionId }
                           : {}),
@@ -1684,16 +1790,18 @@ export class CronScheduler {
     firedAt: number,
     outcome: CronRunSessionOutcome,
     expectedTaskSessionId: string | null,
+    runId?: string,
   ): Promise<void> {
-    const snapshot = this.restorablePerRunOneShots.get(taskId);
+    const key = durableTaskKey(taskId, expectedTaskSessionId);
+    const snapshot = this.restorablePerRunOneShots.get(key);
     if (
       outcome.sessionId &&
-      this.consumedPerRunOneShots.has(taskId) &&
+      this.consumedPerRunOneShots.has(key) &&
       (!snapshot || (snapshot.task.sessionId ?? null) === expectedTaskSessionId)
     ) {
-      this.consumedPerRunOneShots.delete(taskId);
-      this.restorablePerRunOneShots.delete(taskId);
-      this.consumedPerRunRemovalGenerations.delete(taskId);
+      this.consumedPerRunOneShots.delete(key);
+      this.restorablePerRunOneShots.delete(key);
+      this.consumedPerRunRemovalGenerations.delete(key);
     }
     if (!this.projectRoot) return;
     // The onFire callback runs before tick() queues its run-history write.
@@ -1703,7 +1811,7 @@ export class CronScheduler {
     await updateCronTasks(this.projectRoot, (tasks) =>
       tasks.map((task) =>
         task.id === taskId && (task.sessionId ?? null) === expectedTaskSessionId
-          ? annotateCronRunSession(task, firedAt, outcome)
+          ? annotateCronRunSession(task, firedAt, outcome, runId)
           : task,
       ),
     );
@@ -1715,14 +1823,15 @@ export class CronScheduler {
     expectedTaskSessionId: string | null,
   ): Promise<boolean> {
     const projectRoot = this.projectRoot;
-    const snapshot = this.restorablePerRunOneShots.get(taskId);
+    const key = durableTaskKey(taskId, expectedTaskSessionId);
+    const snapshot = this.restorablePerRunOneShots.get(key);
     const firedAt = snapshot?.task.lastFiredAt;
     if (
       !projectRoot ||
       !snapshot ||
       (snapshot.task.sessionId ?? null) !== expectedTaskSessionId ||
       firedAt == null ||
-      !this.consumedPerRunOneShots.has(taskId)
+      !this.consumedPerRunOneShots.has(key)
     ) {
       return false;
     }
@@ -1732,17 +1841,18 @@ export class CronScheduler {
     // it lands.
     await Promise.resolve();
     await this.pendingPersist;
-    const removalGeneration = this.consumedPerRunRemovalGenerations.get(taskId);
+    const removalGeneration = this.consumedPerRunRemovalGenerations.get(key);
     if (
-      !this.consumedPerRunOneShots.has(taskId) ||
+      !this.consumedPerRunOneShots.has(key) ||
       removalGeneration === undefined
     ) {
-      this.restorablePerRunOneShots.delete(taskId);
-      this.consumedPerRunOneShots.delete(taskId);
-      this.consumedPerRunRemovalGenerations.delete(taskId);
+      this.restorablePerRunOneShots.delete(key);
+      this.consumedPerRunOneShots.delete(key);
+      this.consumedPerRunRemovalGenerations.delete(key);
+      // This consumed snapshot cannot be restored once its removal guard is lost.
       return false;
     }
-    this.armedDurableOneShots.delete(taskId);
+    this.armedDurableOneShots.delete(key);
     let restoreGenerations: ReadonlyMap<string, number> = new Map();
     let restored = false;
     try {
@@ -1792,9 +1902,9 @@ export class CronScheduler {
       // Symmetric with the !restored exit: release the consumed snapshot so
       // the retained state can't pin the reload GC for the rest of this
       // process's life. The re-fire guard (pendingRemoval) stays.
-      this.restorablePerRunOneShots.delete(taskId);
-      this.consumedPerRunOneShots.delete(taskId);
-      this.consumedPerRunRemovalGenerations.delete(taskId);
+      this.restorablePerRunOneShots.delete(key);
+      this.consumedPerRunOneShots.delete(key);
+      this.consumedPerRunRemovalGenerations.delete(key);
       // eslint-disable-next-line no-console -- operator-facing breadcrumb for a silently destroyed one-shot
       console.warn(
         `CronScheduler: could not restore scheduled one-shot task ${taskId} ` +
@@ -1804,15 +1914,15 @@ export class CronScheduler {
       throw error;
     }
     if (!restored) {
-      this.restorablePerRunOneShots.delete(taskId);
-      this.consumedPerRunOneShots.delete(taskId);
-      this.consumedPerRunRemovalGenerations.delete(taskId);
+      this.restorablePerRunOneShots.delete(key);
+      this.consumedPerRunOneShots.delete(key);
+      this.consumedPerRunRemovalGenerations.delete(key);
       return false;
     }
-    this.pendingRemoval.delete(taskId);
-    this.jobs.delete(taskId);
-    this.consumedPerRunOneShots.delete(taskId);
-    this.consumedPerRunRemovalGenerations.delete(taskId);
+    this.pendingRemoval.delete(key);
+    this.jobs.delete(key);
+    this.consumedPerRunOneShots.delete(key);
+    this.consumedPerRunRemovalGenerations.delete(key);
     return true;
   }
 
@@ -1902,9 +2012,13 @@ export class CronScheduler {
       // later enable re-detects the catch-up from disk.
       for (const pending of this.pendingFires) {
         if (pending.kind === 'missed') {
-          for (const t of pending.tasks) this.pendingRemoval.delete(t.id);
+          for (const task of pending.tasks) {
+            this.pendingRemoval.delete(durableTaskKey(task.id, task.sessionId));
+          }
         } else if (pending.kind === 'final') {
-          for (const j of pending.jobs) this.pendingRemoval.delete(j.id);
+          for (const job of pending.jobs) {
+            this.pendingRemoval.delete(runtimeJobKey(job));
+          }
         }
       }
       this.pendingFires.length = 0;
@@ -1981,6 +2095,7 @@ export class CronScheduler {
     const currentMs = currentDate.getTime();
 
     const firedAt = new Map<string, number>(); // durable recurring fires
+    const firedRunIds = new Map<string, string>();
     const removedIds: string[] = []; // durable one-shot fires / expiries
     const removedOneShotSessionIds = new Map<string, string | null>();
     // Gated recurring fires book their run when the gate settles, not here;
@@ -2011,15 +2126,17 @@ export class CronScheduler {
       const result = this.processJob(job, currentDate, currentMs);
       if (!job.durable || result === 'none') continue;
 
+      const key = runtimeJobKey(job);
+      if (job.runId) firedRunIds.set(key, job.runId);
       if (result === 'fired-final' || !job.recurring) {
-        removedIds.push(job.id);
+        removedIds.push(key);
         if (!job.recurring && job.sessionMode === 'per_run') {
-          removedOneShotSessionIds.set(job.id, job.boundSessionId ?? null);
+          removedOneShotSessionIds.set(key, job.boundSessionId ?? null);
         }
       } else {
-        firedAt.set(job.id, job.lastFiredAt!);
+        firedAt.set(key, job.lastFiredAt!);
         if (job.gate) {
-          gated.set(job.id, { gate: job.gate, status: job.gateStatus });
+          gated.set(key, { gate: job.gate, status: job.gateStatus });
         }
       }
     }
@@ -2041,20 +2158,27 @@ export class CronScheduler {
       const guarded = [...firedAt.keys()];
       this.markFirePersistPending(guarded);
       const recordRemovalGenerations = () => {
-        for (const id of removedByFire) {
-          const owner = removedOneShotSessionIds.get(id);
-          const deletionId = owner ? JSON.stringify([owner, id]) : id;
-          const generation = removalGenerations.get(deletionId);
-          if (generation !== undefined && this.consumedPerRunOneShots.has(id)) {
-            const observed = new Map([[deletionId, generation]]);
+        for (const key of removedByFire) {
+          const owner = removedOneShotSessionIds.get(key);
+          const generation = removalGenerations.get(key);
+          if (
+            generation !== undefined &&
+            this.consumedPerRunOneShots.has(key)
+          ) {
+            const observed = new Map([[key, generation]]);
+            const snapshot = this.restorablePerRunOneShots.get(key);
+            if (!snapshot) continue;
+            observed.set(
+              snapshot.task.id,
+              removalGenerations.get(snapshot.task.id)!,
+            );
             if (owner) {
-              observed.set(id, removalGenerations.get(id)!);
-              const key = cronTaskSessionDeletionId(owner);
-              const sessionGeneration = removalGenerations.get(key);
+              const deletionId = cronTaskSessionDeletionId(owner);
+              const sessionGeneration = removalGenerations.get(deletionId);
               if (sessionGeneration === undefined) continue;
-              observed.set(key, sessionGeneration);
+              observed.set(deletionId, sessionGeneration);
             }
-            this.consumedPerRunRemovalGenerations.set(id, observed);
+            this.consumedPerRunRemovalGenerations.set(key, observed);
           }
         }
       };
@@ -2064,15 +2188,10 @@ export class CronScheduler {
           (tasks) =>
             tasks
               .filter((t) => {
-                if (!removed.has(t.id)) return true;
-                if (
-                  removedOneShotSessionIds.has(t.id) &&
-                  (t.sessionId ?? null) !== removedOneShotSessionIds.get(t.id)
-                ) {
-                  return true;
-                }
-                removedByFire.add(t.id);
-                const snapshot = this.restorablePerRunOneShots.get(t.id);
+                const key = durableTaskKey(t.id, t.sessionId);
+                if (!removed.has(key)) return true;
+                removedByFire.add(key);
+                const snapshot = this.restorablePerRunOneShots.get(key);
                 if (snapshot) {
                   snapshot.task = {
                     ...t,
@@ -2085,15 +2204,17 @@ export class CronScheduler {
               // were routed to removedIds above and filtered out here, so they
               // never accrue history — they're deleted the moment they fire.
               .map((t) => {
-                const stamp = firedAt.get(t.id);
+                const key = durableTaskKey(t.id, t.sessionId);
+                const stamp = firedAt.get(key);
                 // Never regress lastFiredAt: a concurrent writer (a manual
                 // POST /run, or a catch-up persist) may have stamped a NEWER value
                 // between this tick's read and write; overwriting it with the older
                 // tick slot could re-open an already-covered slot. Mirrors the
                 // catch-up persist's equality guard.
-                if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
+                if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) {
                   return t;
-                const gate = gated.get(t.id);
+                }
+                const gate = gated.get(key);
                 if (gate) {
                   // A PATCH may have replaced the command (and dropped its
                   // status) since this session loaded the job: the old
@@ -2112,6 +2233,7 @@ export class CronScheduler {
                   runs: appendCronRun(t.runs, {
                     at: stamp,
                     kind: 'scheduled',
+                    runId: firedRunIds.get(key),
                     // The owner session that ran this fire — links the run back
                     // to its transcript. Set whenever a durable fire persists.
                     ...(t.sessionMode !== 'per_run' && this.sessionId
@@ -2124,11 +2246,16 @@ export class CronScheduler {
             observeDeletionIds: (tasks) => [
               ...removedIds,
               ...tasks.flatMap((task) => {
-                const owner = removedOneShotSessionIds.get(task.id);
-                if (!owner || (task.sessionId ?? null) !== owner) return [];
+                const owner = removedOneShotSessionIds.get(
+                  durableTaskKey(task.id, task.sessionId),
+                );
+                if (owner === undefined || (task.sessionId ?? null) !== owner) {
+                  return [];
+                }
                 return [
-                  JSON.stringify([owner, task.id]),
-                  cronTaskSessionDeletionId(owner),
+                  task.id,
+                  durableTaskKey(task.id, owner),
+                  ...(owner ? [cronTaskSessionDeletionId(owner)] : []),
                 ];
               }),
             ],
@@ -2203,7 +2330,7 @@ export class CronScheduler {
     // The previous gate run has not settled: it covers this slot. Consuming
     // the slot (stamped above) rather than deferring it keeps a slow probe
     // from firing twice in a row the moment it returns.
-    if (job.gate && this.gatesInFlight.has(job.id)) {
+    if (job.gate && this.gatesInFlight.has(runtimeJobKey(job))) {
       debugLogger.debug(`gate for ${job.id} still running; slot consumed`);
       return 'none';
     }
@@ -2216,12 +2343,13 @@ export class CronScheduler {
     const expired = job.recurring && currentMs >= job.expiresAt;
 
     if (!job.recurring || expired) {
-      this.jobs.delete(job.id);
+      this.jobs.delete(runtimeJobKey(job));
     }
 
     if (!job.recurring && job.durable && job.sessionMode === 'per_run') {
-      this.consumedPerRunOneShots.add(job.id);
-      const snapshot = this.restorablePerRunOneShots.get(job.id);
+      const key = runtimeJobKey(job);
+      this.consumedPerRunOneShots.add(key);
+      const snapshot = this.restorablePerRunOneShots.get(key);
       if (snapshot) {
         snapshot.task = { ...snapshot.task, lastFiredAt: matchedMinuteMs };
       }

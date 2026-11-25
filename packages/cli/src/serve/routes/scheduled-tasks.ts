@@ -562,10 +562,17 @@ async function restoreConsumedOneShot(
   const id = failedTask.id;
   const guardId = deletionGuardId ?? id;
   const guardIds = [
-    guardId,
-    ...(failedTask.sessionId
-      ? [cronTaskSessionDeletionId(failedTask.sessionId)]
-      : []),
+    ...new Set([
+      guardId,
+      scheduledTaskDeletionGuardId(id, {
+        provided: true,
+        sessionId: failedTask.sessionId ?? null,
+      }),
+      id,
+      ...(failedTask.sessionId
+        ? [cronTaskSessionDeletionId(failedTask.sessionId)]
+        : []),
+    ]),
   ];
   const index =
     before?.findIndex(
@@ -949,7 +956,7 @@ function scheduledTaskDeletionGuardId(
   id: string,
   expectedOwner: ExpectedScheduledTaskOwner,
 ): string {
-  return expectedOwner.provided && expectedOwner.sessionId
+  return expectedOwner.provided
     ? JSON.stringify([expectedOwner.sessionId, id])
     : id;
 }
@@ -2094,7 +2101,8 @@ function registerScheduledTaskCrudRoutes(
                 if (expectedOwner.provided && expectedOwner.sessionId) {
                   return [scheduledTaskDeletionGuardId(id, expectedOwner)];
                 }
-                return removed || !expectedOwner.provided ? [id] : [];
+                if (!expectedOwner.provided) return [id];
+                return [JSON.stringify([expectedOwner.sessionId ?? null, id])];
               },
             },
           );
@@ -2255,7 +2263,13 @@ function registerScheduledTaskCrudRoutes(
                 if (match.ambiguous || match.index < 0) return [];
                 const task = tasks[match.index]!;
                 const generationGuards = [
-                  scheduledTaskDeletionGuardId(id, expectedOwner),
+                  ...new Set([
+                    scheduledTaskDeletionGuardId(id, {
+                      provided: true,
+                      sessionId: task.sessionId ?? null,
+                    }),
+                    id,
+                  ]),
                 ];
                 if (task.sessionId) {
                   generationGuards.push(

@@ -306,6 +306,10 @@ describe('real daemon session scheduled tasks', () => {
     await runScheduledTaskManually(
       created,
       {
+        assertScheduledTaskOwnerSelection: async (ownerSessionId) => {
+          expect(ownerSessionId).toBe(sessionId);
+          order.push('assert-owner');
+        },
         listScheduledTasks: async (workspaceId) => {
           order.push('fresh');
           expect(workspaceId).toBeUndefined();
@@ -331,7 +335,7 @@ describe('real daemon session scheduled tasks', () => {
         },
       },
     );
-    expect(order).toEqual(['fresh', 'enqueue', 'record']);
+    expect(order).toEqual(['fresh', 'assert-owner', 'enqueue', 'record']);
 
     const transcript = await client.getSessionTranscriptPage(sessionId);
     expect(JSON.stringify(transcript)).toContain(

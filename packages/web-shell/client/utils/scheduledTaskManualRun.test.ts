@@ -35,6 +35,7 @@ describe('runScheduledTaskManually owner matching', () => {
     const actions = {
       listScheduledTasks: vi.fn().mockResolvedValue(tasks),
       runScheduledTask: vi.fn(),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
     };
     const onRunPrompt = vi.fn();
     const onError = vi.fn();
@@ -57,11 +58,40 @@ describe('runScheduledTaskManually owner matching', () => {
     expect(onError).toHaveBeenCalledOnce();
   });
 
+  it('checks owner selection before admitting a recurring prompt', async () => {
+    const task = makeTask();
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn(),
+      assertScheduledTaskOwnerSelection: vi
+        .fn()
+        .mockRejectedValue(new Error('owner selection unsupported')),
+    };
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    const onError = vi.fn();
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError,
+    });
+
+    expect(actions.assertScheduledTaskOwnerSelection).toHaveBeenCalledWith(
+      'session-a',
+    );
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'owner selection unsupported' }),
+      'scheduledTasks.error.runFailed',
+    );
+  });
+
   it('runs the unique task from the expected session', async () => {
     const task = makeTask();
     const actions = {
       listScheduledTasks: vi.fn().mockResolvedValue([task]),
       runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
     };
     const onRunPrompt = vi.fn().mockResolvedValue(undefined);
     const onError = vi.fn();

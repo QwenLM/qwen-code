@@ -90,6 +90,29 @@ describe('CronDeleteTool', () => {
     expect(await readCronTasks(tmpDir)).toEqual([]);
   });
 
+  it('refuses an ambiguous same-id durable delete', async () => {
+    const original = {
+      id: 'shared',
+      cron: '0 */2 * * *',
+      recurring: true,
+      createdAt: Date.now(),
+      lastFiredAt: null,
+    };
+    const tasks = [
+      { ...original, prompt: 'unbound' },
+      { ...original, prompt: 'owned', sessionId: 'session-a' },
+      { ...original, prompt: 'other owner', sessionId: 'session-b' },
+    ];
+    await writeCronTasks(tmpDir, tasks);
+
+    const result = await tool
+      .build({ id: 'shared' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('ambiguous');
+    expect(await readCronTasks(tmpDir)).toEqual(tasks);
+  });
+
   it('validates required params', () => {
     expect(() => tool.build({} as never)).toThrow();
   });

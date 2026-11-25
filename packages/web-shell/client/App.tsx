@@ -26607,6 +26607,7 @@ export function App({
                             scheduledTaskWorkspaceTarget.workspaceId,
                         })
                       }
+                      onTaskMutated={sessionScheduledTasks.refresh}
                       onTaskDeleted={(task) => {
                         if (!matchesCurrentScheduledTaskScope(task)) return;
                         sessionScheduledTasks.confirmDurableDeletion({

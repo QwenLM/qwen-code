@@ -234,6 +234,7 @@ test('@smoke surfaces durable and session-scoped scheduled tasks in header, comp
   const baseURL = testInfo.project.use.baseURL ?? 'http://127.0.0.1:5174';
   const now = Date.now();
   const { scenario, durableTasks, sessionTasks } = buildScenario(now);
+  scenario.capabilities.features.push('scheduled_task_owner_selection');
   const state = {
     durableTasks,
     sessionTasks,

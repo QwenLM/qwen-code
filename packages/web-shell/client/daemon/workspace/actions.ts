@@ -930,8 +930,18 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonScheduledTask;
     },
 
+    async assertScheduledTaskOwnerSelection(expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Scheduled task owner selection failed'),
+        expectedSessionId,
+      );
+    },
+
     async updateScheduledTask(id, patch, workspaceId, expectedSessionId) {
-      requireClient(getClient, 'Update scheduled task failed');
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Update scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
@@ -953,7 +963,10 @@ export function createDaemonWorkspaceActions({
     },
 
     async runScheduledTask(id, workspaceId, expectedSessionId) {
-      requireClient(getClient, 'Run scheduled task failed');
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Run scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}/run`,
@@ -974,7 +987,10 @@ export function createDaemonWorkspaceActions({
     },
 
     async deleteScheduledTask(id, workspaceId, expectedSessionId) {
-      requireClient(getClient, 'Delete scheduled task failed');
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Delete scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
@@ -1472,6 +1488,19 @@ function requireClient(
     throw new Error(`${action}: DaemonClient is not connected`);
   }
   return client;
+}
+
+async function requireScheduledOwnerSelection(
+  client: DaemonClient,
+  expectedSessionId: string | null | undefined,
+): Promise<void> {
+  if (expectedSessionId === undefined) return;
+  const capabilities = await client.capabilities();
+  if (!capabilities.features.includes('scheduled_task_owner_selection')) {
+    throw new Error(
+      'This daemon cannot safely select a scheduled task by owner. Upgrade it before using expectedSessionId.',
+    );
+  }
 }
 
 function requireWorkspaceCwd(
