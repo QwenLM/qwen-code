@@ -92,11 +92,13 @@ public interface ManagedAgentDefinitionSource {
 }
 ```
 
-`PreRegistered` 是 MA 应用入口的选择类型，携带既有完整 `AgentDefinitionRequest`，不会传给宿主 Source。SPI preparation 将 `modelId`、`instructions`、`toolPolicy` 和 inline Skill 映射到 native Definition 字段。Extension Skill 与 Suite 的选择作为非敏感来源/材料引用保存在 metadata；本切片不自动导入或应用它们。sealed Skill JSON 使用显式 `inline`/`extension` 类型标识，以便回放持久化回执。
+`PreRegistered` 是 MA 应用入口的选择类型，携带既有完整 `AgentDefinitionRequest`，不会传给宿主 Source。SPI preparation 允许缺省 `modelId`，此时 native Definition 不包含 `model` 字段；它将 `modelId`、`instructions`、`toolPolicy` 和 inline Skill 映射到 native Definition 字段。Extension Skill 与 Suite 的选择作为非敏感来源/材料引用保存在 metadata；本切片不自动导入或应用它们。sealed Skill JSON 使用显式 `inline`/`extension` 类型标识，以便回放持久化回执。
 
 新的 `Current` 在只有一个注册的 Definition provider 时可以隐式选择；存在多个 provider 时必须显式给出 `Exact` 引用。`projectionDigest` 是宿主提供的精确输入身份，MA 另行计算 command digest 和 native Definition digest。本切片没有独立的 MCP Source。
 
 已完成的 operation 回放使用保存的投影，不重新选择 current。新 operation 会重新对精确 Source 输入授权。已有 Session 创建仍针对具体准入的 sessionId 发布 instructions/静态 Skill refs，而不是提前发布为无作用域全局资源；该应用操作不属于 preparation。
+
+同一 `Current` operation key 的并发调用，以第一个持久化为 `RESOLVED` 的投影固定本次操作的版本；无论竞争方稍后读到的是 `RESOLVED` 还是 `PREPARED`，都收敛到该投影。更换发布必须使用新的 operation key。`Exact` 仍然拒绝同一精确引用下的不同内容。恢复 `RESOLVED` 时重新检查调用方截止时间；已受理的 `PREPARED` 回放则直接返回已存回执，不再执行 native 或 bundle preparation。
 
 ### 3.2 初始化包
 
@@ -325,5 +327,7 @@ sequenceDiagram
 - Q2：32 个聚焦测试，以及一个真实 MySQL 8.4 用例，协调两个 Java 服务并发调用收敛到同一 native 身份与 receipt。
 - Q3：76 个聚焦测试、1 个真实 MySQL preparation 用例，以及随后 28 个授权/下载/回放检查；重叠用例不计作独立覆盖量。
 - Q4 新增 20 个聚焦检查，其中 10 个真实 HTTPS bootstrap 用例覆盖复用、Source 授权撤销、摘要/长度/内容错误、超时、过期、重定向及协调后的缺包并发下载。另行 19 个检查包含同一 bootstrap 套件及 9 个嵌入式 Spring 用例，证明没有宿主 Source provider 时仍能创建 `ManagedAgentDefinitionPreparation`。嵌入环境特有的字符串到 Duration 转换问题已使用 Boot 3.5.16 的 `DurationStyle` 修复。这些代码路径的 Checkstyle 通过。
+
+`feature/managed-agent-definition-input-spi-clean` 上的评审后续修复覆盖了重复及空白 allowed-host 项归一化、无模型 Definition、resolve 竞态后的已结算回放、`Current` 采纳最先持久化投影、恢复时重新检查截止时间、body 读取超时分类及 deadline worker 关闭。后续的 27 个聚焦测试及 Checkstyle 通过。针对 `Current` 竞态的真实 MySQL 用例已补充，但其选定用例运行未在本地完成，不宣称通过。
 
 本切片未实现宿主产品适配、独立 MCP/凭据刷新、Extension Skill/Suite 引用自动导入/应用，以及 bootstrap 制品在 Runtime 生效。未执行真实 Node/Worker apply、真实 OSS 账号或生产宿主绑定；预注册 Session 准入回归不能冒充 SPI 的 Node 执行 E2E。完整 unit/H2、SpotBugs 及 hosted/OS-process profile 需在更广泛验收前由 CI 完成。支持本路径的自定义 archive backend 必须实现 `stat`。已有 Source 复用导入和 Session apply API 保留独立操作及回执，不新增第二套 Session/Turn 状态机。

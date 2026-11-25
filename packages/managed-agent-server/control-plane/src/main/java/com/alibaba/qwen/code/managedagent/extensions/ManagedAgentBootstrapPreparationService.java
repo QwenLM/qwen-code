@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.AgentBootstrapBun
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionArchiveStorage;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import jakarta.annotation.PreDestroy;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +27,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -34,6 +37,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public final class ManagedAgentBootstrapPreparationService implements ManagedAgentBootstrapPreparation {
@@ -53,7 +57,8 @@ public final class ManagedAgentBootstrapPreparationService implements ManagedAge
             @Value("${qwen.managed-agent.definition-input.download.max-concurrency:4}") int maxConcurrency,
             @Value("${qwen.managed-agent.definition-input.download.connect-timeout:10s}") String connectTimeout,
             @Value("${qwen.managed-agent.definition-input.download.request-timeout:120s}") String requestTimeout) {
-        this(providers, storage, new BootstrapDownloadSettings(Set.of(allowedHosts.split(",", -1)),
+        this(providers, storage, new BootstrapDownloadSettings(
+                new LinkedHashSet<>(Arrays.asList(allowedHosts.split(",", -1))),
                 maxBytes, maxConcurrency, DurationStyle.detectAndParse(connectTimeout),
                 DurationStyle.detectAndParse(requestTimeout)),
                 HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
@@ -73,6 +78,11 @@ public final class ManagedAgentBootstrapPreparationService implements ManagedAge
             thread.setDaemon(true);
             return thread;
         });
+    }
+
+    @PreDestroy
+    void shutdown() {
+        aborts.shutdownNow();
     }
 
     @Override
@@ -203,9 +213,11 @@ public final class ManagedAgentBootstrapPreparationService implements ManagedAge
         }
         Path staging = Files.createTempFile("managed-bootstrap-", ".archive");
         boolean complete = false;
+        var timedOut = new AtomicBoolean();
         try {
             try (var body = response.body(); var output = Files.newOutputStream(staging)) {
                 var abort = aborts.schedule(() -> {
+                    timedOut.set(true);
                     try {
                         body.close();
                     } catch (IOException ignored) {
@@ -214,6 +226,9 @@ public final class ManagedAgentBootstrapPreparationService implements ManagedAge
                 }, positiveDuration(deadline).toMillis(), TimeUnit.MILLISECONDS);
                 try {
                     copy(body, output, deadline, resolved.ref());
+                    if (timedOut.get() || !Instant.now().isBefore(deadline)) {
+                        throw deadline();
+                    }
                 } finally {
                     abort.cancel(false);
                 }
@@ -221,6 +236,9 @@ public final class ManagedAgentBootstrapPreparationService implements ManagedAge
             complete = true;
             return staging;
         } catch (IOException error) {
+            if (timedOut.get() || !Instant.now().isBefore(deadline)) {
+                throw deadline();
+            }
             throw unavailable("The bootstrap download ended before an archive was verified.", null);
         } finally {
             if (!complete) {

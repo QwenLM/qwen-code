@@ -30,6 +30,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,6 +41,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -216,6 +220,162 @@ class ManagedDefinitionPreparationTest {
         verify(source, never()).resolve(any(), any());
         assertThat(json.readTree(jdbc.queryForObject("SELECT result_json FROM ma_request_receipt"
                 + " WHERE namespace = 'SOURCE_DEFINITION_PREPARATION'", String.class)).has("input")).isFalse();
+    }
+
+    @Test
+    void preparesADefinitionWithoutAModel() throws Exception {
+        var input = new ManagedAgentDefinitionSource.Definition(fixture.ref(), null, "Review.",
+                new ManagedAgentDefinitionSource.ToolPolicy("hosted-workspace-files/1", "default"),
+                List.of(), List.of(), List.of());
+        org.mockito.Mockito.doReturn(input).when(source).resolve(any(), eq(new Current("agent-1")));
+
+        var first = service.prepare(command("operation-1", new Current("agent-1")));
+        var replay = service.prepare(command("operation-1", new Current("agent-1")));
+
+        assertThat(replay.definition()).isEqualTo(first.definition());
+        assertThat(json.readTree(jdbc.queryForObject("SELECT definition_json FROM ma_agent_definition",
+                String.class)).has("model")).isFalse();
+        verify(source, times(1)).resolve(any(), eq(new Current("agent-1")));
+    }
+
+    @Test
+    void settledPreparationAfterAResolveRaceDoesNotPrepareBundlesAgain() throws Exception {
+        var race = race(new Current("agent-1"), input(fixture.ref()), input(fixture.ref()));
+        var store = org.mockito.Mockito.spy(new JdbcDefinitionPreparationStore(jdbc, json));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            invocation.callRealMethod();
+            race.releaseFirst().countDown();
+            return null;
+        }).when(store).complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(),
+                any(com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition.class),
+                org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyLong());
+        usePreparations(store);
+        org.mockito.Mockito.doAnswer(invocation -> List.of(
+                new ManagedAgentBootstrapPreparation.PreparedBundle(fixture.bundle(),
+                        fixture.bundle().expectedDigest(), fixture.bundle().expectedLength(), true)))
+                .doThrow(new ManagedAgentException(403, "source_forbidden", "Source access was revoked."))
+                .when(bundles).prepare(any(), any());
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var losing = executor.submit(() -> service.prepare(command("operation-1", new Current("agent-1"))));
+            assertThat(race.firstEntered().await(10, TimeUnit.SECONDS)).isTrue();
+            var winner = executor.submit(() -> service.prepare(command("operation-1", new Current("agent-1"))));
+
+            assertThat(winner.get(30, TimeUnit.SECONDS).definition())
+                    .isEqualTo(losing.get(30, TimeUnit.SECONDS).definition());
+        } finally {
+            race.releaseFirst().countDown();
+        }
+        verify(bundles, times(1)).prepare(any(), any());
+    }
+
+    @Test
+    void concurrentCurrentSelectionsConvergeOnTheFirstSavedProjection() throws Exception {
+        var later = new ManagedAgentDefinitionSource.SourceRef("catalog", "agent-1", "release-2",
+                "c".repeat(64), "workspace");
+        var race = race(new Current("agent-1"), input(fixture.ref()), input(later));
+        var store = org.mockito.Mockito.spy(new JdbcDefinitionPreparationStore(jdbc, json));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            invocation.callRealMethod();
+            race.releaseFirst().countDown();
+            return null;
+        }).when(store).resolve(any(), any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        usePreparations(store);
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var losing = executor.submit(() -> service.prepare(command("operation-1", new Current("agent-1"))));
+            assertThat(race.firstEntered().await(10, TimeUnit.SECONDS)).isTrue();
+            var winner = executor.submit(() -> service.prepare(command("operation-1", new Current("agent-1"))));
+
+            assertThat(losing.get(30, TimeUnit.SECONDS).definition())
+                    .isEqualTo(winner.get(30, TimeUnit.SECONDS).definition());
+        } finally {
+            race.releaseFirst().countDown();
+        }
+        assertThat(jdbc.queryForObject("SELECT result_json FROM ma_request_receipt WHERE namespace = 'SOURCE_DEFINITION_PREPARATION'",
+                String.class)).contains("\"sourceRevision\":\"release-2\"");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_agent_definition", Integer.class)).isOne();
+    }
+
+    @Test
+    void concurrentExactSelectionsStillRejectChangedContent() throws Exception {
+        var first = input(fixture.ref());
+        var changed = new ManagedAgentDefinitionSource.Definition(fixture.ref(), "different-model",
+                "Changed.", new ManagedAgentDefinitionSource.ToolPolicy("hosted-workspace-files/1", "default"),
+                List.of(), List.of(), List.of());
+        var race = race(new Exact(fixture.ref()), first, changed);
+        var store = org.mockito.Mockito.spy(new JdbcDefinitionPreparationStore(jdbc, json));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            invocation.callRealMethod();
+            race.releaseFirst().countDown();
+            return null;
+        }).when(store).resolve(any(), any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        usePreparations(store);
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var losing = executor.submit(() -> service.prepare(command("operation-1", new Exact(fixture.ref()))));
+            assertThat(race.firstEntered().await(10, TimeUnit.SECONDS)).isTrue();
+            var winner = executor.submit(() -> service.prepare(command("operation-1", new Exact(fixture.ref()))));
+
+            assertThat(winner.get(30, TimeUnit.SECONDS).definition()).isNotNull();
+            assertThatThrownBy(() -> losing.get(30, TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(ManagedAgentException.class)
+                    .cause().extracting(error -> ((ManagedAgentException) error).getCode())
+                    .isEqualTo("definition_preparation_conflict");
+        } finally {
+            race.releaseFirst().countDown();
+        }
+    }
+
+    @Test
+    void resolvedPreparationCannotResumeAfterItsDeadline() {
+        org.mockito.Mockito.doThrow(new ManagedAgentException(503, "result_unavailable", "Connection lost."))
+                .doAnswer(invocation -> List.of(new ManagedAgentBootstrapPreparation.PreparedBundle(
+                        fixture.bundle(), fixture.bundle().expectedDigest(),
+                        fixture.bundle().expectedLength(), true)))
+                .when(bundles).prepare(any(), any());
+        assertThatThrownBy(() -> service.prepare(command("operation-1", new Current("agent-1"))))
+                .isInstanceOf(ManagedAgentException.class);
+        org.assertj.core.api.Assertions.assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE namespace = 'SOURCE_DEFINITION_PREPARATION'",
+                String.class)).isEqualTo("RESOLVED");
+        var expired = new Command(TENANT, "actor", "workspace", "workspace", "operation-1",
+                new Current("agent-1"), Instant.now().minusSeconds(1));
+
+        assertThatThrownBy(() -> service.prepare(expired))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
+                        .isEqualTo("definition_preparation_deadline_exceeded"));
+        verify(bundles, times(1)).prepare(any(), any());
+    }
+
+    private SourceRace race(ManagedAgentDefinitionSource.Selection selection,
+            ManagedAgentDefinitionSource.Definition first, ManagedAgentDefinitionSource.Definition second) {
+        var firstEntered = new CountDownLatch(1);
+        var releaseFirst = new CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            if (calls.incrementAndGet() == 1) {
+                firstEntered.countDown();
+                if (!releaseFirst.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Source race was not released");
+                }
+                return first;
+            }
+            return second;
+        }).when(source).resolve(any(), eq(selection));
+        return new SourceRace(firstEntered, releaseFirst);
+    }
+
+    private void usePreparations(JdbcDefinitionPreparationStore preparations) {
+        var definitions = new ManagedAgentDefinitionService(new JdbcManagedAgentDefinitionStore(jdbc,
+                new RequestDigests()), new RequestDigests(), json);
+        var providers = new ManagedDefinitionInputProviders("SPI", provider(List.of(source)),
+                provider(List.of()), workspaces);
+        service = new ManagedDefinitionPreparationService(definitions, preparations,
+                providers, new RequestDigests(), json, bundles);
+    }
+
+    private record SourceRace(CountDownLatch firstEntered, CountDownLatch releaseFirst) {
     }
 
     private Command command(String operation, ManagedAgentDefinitionSource.Selection selection) {

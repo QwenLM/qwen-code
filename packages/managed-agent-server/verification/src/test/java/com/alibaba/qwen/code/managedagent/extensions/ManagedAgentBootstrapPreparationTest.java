@@ -75,6 +75,18 @@ class ManagedAgentBootstrapPreparationTest {
                 exchange.close();
                 return;
             }
+            if (exchange.getRequestURI().getPath().endsWith("stalled")) {
+                exchange.getResponseHeaders().set("Content-Type", "application/zip");
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().flush();
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                exchange.close();
+                return;
+            }
             if (exchange.getRequestURI().getPath().endsWith("slow")) {
                 try {
                     Thread.sleep(1000);
@@ -83,8 +95,10 @@ class ManagedAgentBootstrapPreparationTest {
                 }
             }
             exchange.getResponseHeaders().set("Content-Type", "application/zip");
-            exchange.sendResponseHeaders(200, exchange.getRequestURI().getPath().endsWith("truncated")
-                    ? bytes.length + 3L : bytes.length);
+            long declared = exchange.getRequestURI().getPath().endsWith("truncated")
+                    ? bytes.length + 3L : bytes.length;
+            exchange.sendResponseHeaders(200,
+                    exchange.getRequestURI().getPath().endsWith("chunked") ? 0 : declared);
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
@@ -123,6 +137,7 @@ class ManagedAgentBootstrapPreparationTest {
 
     @AfterEach
     void stopServer() {
+        service.shutdown();
         if (server != null) {
             server.stop(0);
         }
@@ -194,6 +209,8 @@ class ManagedAgentBootstrapPreparationTest {
             assertThat(left.getFirst().digest()).isEqualTo(right.getFirst().digest());
             assertThat(left.getFirst().byteLength()).isEqualTo(right.getFirst().byteLength());
             assertThat(left.getFirst().source()).isEqualTo(right.getFirst().source());
+        } finally {
+            racing.shutdown();
         }
         assertThat(networkCalls.get()).isBetween(1, 2);
         try (var saved = storage.open(new ExtensionArchiveStorage.Key("tenant", "workspace",
@@ -219,6 +236,57 @@ class ManagedAgentBootstrapPreparationTest {
         assertFailure(bundle, "bootstrap_bundle_too_large");
         assertThat(storage.stat(new ExtensionArchiveStorage.Key("tenant", "workspace",
                 DigestUtils.sha256Hex(bytes)))).isEmpty();
+    }
+
+    @Test
+    void configuredHostsAllowDuplicatesAndBlankTokens() {
+        var configured = new ManagedAgentBootstrapPreparationService(providers, storage,
+                " LOCALHOST,localhost,,LOCALHOST,", 64 * 1024, 1, "2s", "3s");
+        try {
+            assertThat(configured).isNotNull();
+            assertThat(networkCalls).hasValue(0);
+        } finally {
+            configured.shutdown();
+        }
+    }
+
+    @Test
+    void rejectsUnapprovedDestinationsBeforeOpeningAConnection() {
+        for (URI target : List.of(
+                URI.create("http://localhost:" + server.getAddress().getPort() + "/bundle"),
+                URI.create("https://user:secret@localhost:" + server.getAddress().getPort() + "/bundle"),
+                URI.create("https://example.invalid/bundle"))) {
+            download = new Download(target, Instant.now().plusSeconds(30), "application/zip");
+            assertFailure(bundle(bytes, "forbidden"), "bootstrap_download_forbidden");
+        }
+
+        assertThat(networkCalls).hasValue(0);
+    }
+
+    @Test
+    void rejectsAnUnknownPinnedLengthWhenTheAdvertisedBodyIsOversized() throws Exception {
+        bytes = new byte[65 * 1024];
+        var bundle = new BundleRef("catalog", "large-header", "release-1", DigestUtils.sha256Hex(bytes), null);
+
+        assertFailure(bundle, "bootstrap_bundle_too_large");
+
+        assertThat(networkCalls).hasValue(1);
+        assertThat(storage.stat(new ExtensionArchiveStorage.Key("tenant", "workspace",
+                bundle.expectedDigest()))).isEmpty();
+    }
+
+    @Test
+    void rejectsAnUnknownPinnedLengthWhenTheStreamedBodyIsOversized() throws Exception {
+        bytes = new byte[65 * 1024];
+        download = new Download(URI.create(uri.toString().replace("/bundle", "/bundle/chunked")),
+                Instant.now().plusSeconds(30), "application/zip");
+        var bundle = new BundleRef("catalog", "large-chunked", "release-1", DigestUtils.sha256Hex(bytes), null);
+
+        assertFailure(bundle, "bootstrap_bundle_too_large");
+
+        assertThat(networkCalls).hasValue(1);
+        assertThat(storage.stat(new ExtensionArchiveStorage.Key("tenant", "workspace",
+                bundle.expectedDigest()))).isEmpty();
     }
 
     @Test
@@ -262,6 +330,41 @@ class ManagedAgentBootstrapPreparationTest {
                         error -> assertThat(error.getCode()).isEqualTo("bootstrap_download_deadline_exceeded"));
         assertThat(storage.stat(new ExtensionArchiveStorage.Key("tenant", "workspace",
                 bundle.expectedDigest()))).isEmpty();
+    }
+
+    @Test
+    void timesOutWhileReadingTheBodyAndStopsItsWorkerOnShutdown() throws Exception {
+        download = new Download(URI.create(uri.toString().replace("/bundle", "/bundle/stalled")),
+                Instant.now().plusSeconds(30), "application/zip");
+        var bundle = bundle(bytes, "body-stall");
+        var context = new Context("tenant", "actor", "workspace", "workspace", "body-timeout",
+                Instant.now().plusMillis(250));
+
+        assertThatThrownBy(() -> service.prepare(context, List.of(bundle)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("bootstrap_download_deadline_exceeded"));
+        assertThat(storage.stat(new ExtensionArchiveStorage.Key("tenant", "workspace",
+                bundle.expectedDigest()))).isEmpty();
+        service.shutdown();
+
+        assertThat(ManagedAgentBootstrapPreparationService.class.getDeclaredMethod("shutdown")
+                .getAnnotation(jakarta.annotation.PreDestroy.class)).isNotNull();
+        assertThat(deadlineWorkers()).noneMatch(Thread::isAlive);
+    }
+
+    private static java.util.Set<Thread> deadlineWorkers() throws InterruptedException {
+        var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        java.util.Set<Thread> threads;
+        do {
+            threads = Thread.getAllStackTraces().keySet().stream()
+                    .filter(thread -> thread.getName().equals("managed-bootstrap-download-deadline"))
+                    .filter(Thread::isAlive).collect(java.util.stream.Collectors.toSet());
+            if (threads.isEmpty()) {
+                return threads;
+            }
+            Thread.sleep(10);
+        } while (System.nanoTime() < deadline);
+        return threads;
     }
 
     private void assertFailure(BundleRef bundle, String code) {

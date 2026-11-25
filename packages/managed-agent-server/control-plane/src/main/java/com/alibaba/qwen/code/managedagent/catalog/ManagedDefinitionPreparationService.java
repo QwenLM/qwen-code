@@ -73,6 +73,9 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
             return complete(command, scope, previous, null, result.definition(), List.of());
         }
 
+        if (previous.state() == ManagedDefinitionPreparationStore.State.RESOLVED) {
+            requireDeadline(context);
+        }
         ManagedAgentDefinitionSource.Definition input = previous.input();
         if (previous.state() == ManagedDefinitionPreparationStore.State.PENDING) {
             requireDeadline(context);
@@ -87,8 +90,12 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
                 throw new IllegalArgumentException("The source definition cannot be saved", error);
             } catch (ManagedAgentException conflict) {
                 var saved = saved(command, scope, commandDigest);
-                if (saved.state() != ManagedDefinitionPreparationStore.State.PREPARED
-                        && !input.equals(saved.input())) {
+                if (saved.state() == ManagedDefinitionPreparationStore.State.PREPARED) {
+                    return new PrepareReceipt(new OperationRef(command.operationKey(), true),
+                            saved.definition(), saved.bundles());
+                }
+                if (saved.state() != ManagedDefinitionPreparationStore.State.RESOLVED
+                        || command.selection() instanceof Exact && !input.equals(saved.input())) {
                     throw conflict;
                 }
                 input = saved.input();
@@ -165,7 +172,8 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
                 .filter(ExtensionUse.class::isInstance).toList());
         metadata.put("suites", input.suites());
         metadata.put("bootstrapBundles", input.bootstrapBundles());
-        return new AgentDefinitionRequest(Map.of("id", input.modelId()), input.instructions(),
+        return new AgentDefinitionRequest(
+                input.modelId() == null ? null : Map.of("id", input.modelId()), input.instructions(),
                 List.of(Map.of("type", "hosted_profile", "profile", input.toolPolicy().profile())),
                 skills, null, null, Map.of("approval_mode", input.toolPolicy().approvalMode()),
                 null, metadata);

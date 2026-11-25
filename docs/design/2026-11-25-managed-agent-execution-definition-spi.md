@@ -92,11 +92,13 @@ public interface ManagedAgentDefinitionSource {
 }
 ```
 
-`PreRegistered` is an MA application-selection variant carrying the complete existing `AgentDefinitionRequest`; it is not passed to a host Source. Source preparation maps `modelId`, `instructions`, `toolPolicy` and inline Skills into native Definition fields. Extension Skill and Suite choices are preserved as non-secret source/material references in metadata; this slice does not automatically import or apply them. Sealed Skill JSON uses explicit `inline`/`extension` type tags for durable receipt replay.
+`PreRegistered` is an MA application-selection variant carrying the complete existing `AgentDefinitionRequest`; it is not passed to a host Source. An absent `modelId` is supported and omits the native `model` field. Source preparation maps `modelId`, `instructions`, `toolPolicy` and inline Skills into native Definition fields. Extension Skill and Suite choices are preserved as non-secret source/material references in metadata; this slice does not automatically import or apply them. Sealed Skill JSON uses explicit `inline`/`extension` type tags for durable receipt replay.
 
 For a new `Current`, a single registered Definition provider may be selected implicitly; multiple providers require an explicit `Exact` ref. The host provider owns the exact `projectionDigest` input identity. MA separately computes the command digest and native Definition digest. There is no independent MCP source in this slice.
 
 A settled operation replay uses its saved projection without re-evaluating current. A fresh operation re-authorizes its exact Source input. Existing Session creation still publishes instructions/static Skill refs for a particular admitted sessionId, not as unscoped global resources; that application operation is not included in preparation.
+
+For concurrent calls sharing one `Current` operation key, the first durably saved `RESOLVED` projection fixes that operation's version; competing callers converge on it whether it is still `RESOLVED` or already `PREPARED`. Changing a publication requires a new operation key. `Exact` continues to reject different content under the same precise ref. Resuming `RESOLVED` rechecks the caller deadline, whereas an admitted `PREPARED` replay returns its saved receipt before another native or bundle preparation.
 
 ### 3.2 Bootstrap bundles
 
@@ -325,5 +327,7 @@ Verification actually performed:
 - Q2: 32 focused tests, plus one real MySQL 8.4 case that coordinates two concurrent Java service calls into the same native identity and receipt.
 - Q3: 76 focused tests, one real MySQL preparation case, and a later 28-test authorization/download/replay selection; overlaps are not counted as unique coverage.
 - Q4 adds 20 focused checks, including ten real-HTTPS bootstrap cases for reuse, revoked source authorization, digest/length/content failures, timeout, expiry, redirects and coordinated concurrent missing downloads. A further 19 checks include the same bootstrap suite and nine embedded-Spring tests proving `ManagedAgentDefinitionPreparation` can be created without a host Source provider. An embedding-only string-to-Duration conversion issue was fixed using Boot 3.5.16's `DurationStyle`. Checkstyle passes on these code paths.
+
+Review follow-up on `feature/managed-agent-definition-input-spi-clean`: duplicate and blank allowed-host entries are normalized; model-less definitions, settled replay after a resolve race, first-persisted `Current` projection convergence, resumed deadline checks, body-read timeout classification and deadline-worker shutdown are covered. The follow-up's 27 focused tests and Checkstyle passed. A real MySQL case for the `Current` race was added, but its selected run did not complete locally and is not claimed as passing.
 
 This does not implement host-product adapters, independent MCP/credential refresh, automatic import/apply of Extension Skill/Suite refs, or Runtime activation of bootstrap artifacts. No actual Node/Worker apply, real OSS account or production host binding was exercised, and the pre-registered Admission regression is not claimed as an SPI Node execution E2E. Full unit/H2, SpotBugs and hosted/OS-process profiles belong to CI before broader acceptance. Custom storage backends supporting bootstrap lookup must provide `stat` when this path is used. Existing Source reuse/import and Session apply APIs retain their own operations and receipts; this slice does not create a second Session/Turn state machine.
