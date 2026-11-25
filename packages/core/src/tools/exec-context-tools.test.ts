@@ -207,6 +207,51 @@ describe('exec context tool results', () => {
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
   }, 40_000);
 
+  it('clears an interrupted skill at abort without clearing again when it settles', async () => {
+    const { run, dispatch, registry } = setup(
+      ToolNames.SKILL,
+      { executionStatus: 'cancelled' },
+      'skill body',
+    );
+    const clearLoadedSkills = vi.fn();
+    Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
+    let releaseSkill!: () => void;
+    const heldSkill = new Promise<void>((resolve) => {
+      releaseSkill = resolve;
+    });
+    let finishSkill!: () => void;
+    const skillSettled = new Promise<void>((resolve) => {
+      finishSkill = resolve;
+    });
+    const original = dispatch.getMockImplementation()!;
+    dispatch.mockImplementation(async (...args) => {
+      await heldSkill;
+      try {
+        return await original(...args);
+      } finally {
+        finishSkill();
+      }
+    });
+
+    const controller = new AbortController();
+    const pending = run(
+      "await tools.skill({skill: 'test'});",
+      controller.signal,
+    );
+    try {
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce(), {
+        timeout: 30_000,
+      });
+      controller.abort();
+      expect(clearLoadedSkills).toHaveBeenCalledOnce();
+      await expect(pending).rejects.toThrow();
+    } finally {
+      releaseSkill();
+      if (dispatch.mock.calls.length > 0) await skillSettled;
+    }
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+  }, 40_000);
+
   it('preserves concurrency for ordinary calls before a goal barrier', async () => {
     const { run, dispatch } = setup(
       ToolNames.UPDATE_GOAL,

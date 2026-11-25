@@ -29,6 +29,7 @@ import type { ChannelWorkerGroupSnapshot } from '../channel-worker-group.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { TotalSessionAdmissionSnapshot } from '../total-session-admission.js';
+import type { LoadAdmissionSnapshot } from '../load-admission.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 
@@ -58,6 +59,7 @@ interface RegisterDaemonStatusRoutesDeps {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getLoadAdmissionSnapshot?: () => LoadAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
   getCommittedAcpChildCount?: () => number;
   childAdmissionEnforced?: boolean;
@@ -104,6 +106,7 @@ export function registerDaemonStatusRoutes(
           getMetricsSeries: deps.getMetricsSeries,
           getTotalSessionAdmissionSnapshot:
             deps.getTotalSessionAdmissionSnapshot,
+          getLoadAdmissionSnapshot: deps.getLoadAdmissionSnapshot,
           getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
           getCommittedAcpChildCount: deps.getCommittedAcpChildCount,
           childAdmissionEnforced: deps.childAdmissionEnforced,
