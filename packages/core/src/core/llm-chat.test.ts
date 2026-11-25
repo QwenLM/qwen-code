@@ -11695,24 +11695,30 @@ describe('LlmChat', async () => {
         const toolArgumentStall = (toolName = 'structured_output') =>
           new StreamInactivityTimeoutError(180_000, 280, 190_000, toolName);
 
-        it('replays once, then propagates', async () => {
-          vi.useFakeTimers();
-          streamMock().mockImplementation(() =>
-            Promise.resolve(streamThenThrow([], toolArgumentStall())),
-          );
-          const { caughtError } = await drainTimed(
-            await send('test', 'prompt-tool-argument-stall-replay'),
-            30_000,
-          );
-          expect(caughtError).toBeInstanceOf(StreamInactivityTimeoutError);
-          expect(caughtError).toMatchObject({
-            openToolCallName: 'structured_output',
-          });
-          expectStreamCalls(2);
-          expectWarned('Transport stream retry not taken', {
-            retryDecision: 'tool_argument_stall_exhausted',
-          });
-        });
+        it.each([
+          { toolName: 'structured_output', expectedName: 'structured_output' },
+          { toolName: 'example HTTP_STATUS/429', expectedName: null },
+        ])(
+          'replays once, then propagates for $toolName',
+          async ({ toolName, expectedName }) => {
+            vi.useFakeTimers();
+            streamMock().mockImplementation(() =>
+              Promise.resolve(streamThenThrow([], toolArgumentStall(toolName))),
+            );
+            const { caughtError } = await drainTimed(
+              await send('test', 'prompt-tool-argument-stall-replay'),
+              30_000,
+            );
+            expect(caughtError).toBeInstanceOf(StreamInactivityTimeoutError);
+            expect(caughtError).toMatchObject({
+              openToolCallName: expectedName,
+            });
+            expectStreamCalls(2);
+            expectWarned('Transport stream retry not taken', {
+              retryDecision: 'tool_argument_stall_exhausted',
+            });
+          },
+        );
 
         it('propagates a stall whose tool name resembles a context error', async () => {
           vi.useFakeTimers();

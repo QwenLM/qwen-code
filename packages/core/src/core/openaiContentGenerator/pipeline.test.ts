@@ -60,11 +60,13 @@ import {
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { getErrorStatus } from '../../utils/errors.js';
 import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+const mockPipelineWarn = vi.hoisted(() => vi.fn());
 /** Span attribute writes made through the attempt handle, keyed as recorded. */
 const mockSpanAttributes = vi.hoisted(() => new Map<string, unknown>());
 
@@ -84,6 +86,19 @@ vi.mock('./converter.js', async (importOriginal) => {
   };
 });
 vi.mock('openai');
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => {
+      const logger = actual.createDebugLogger(tag);
+      return tag === 'OPENAI_PIPELINE'
+        ? { ...logger, warn: mockPipelineWarn }
+        : logger;
+    },
+  };
+});
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
 }));
@@ -5802,37 +5817,70 @@ describe('ContentGenerationPipeline', () => {
       expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
     });
 
-    it('names the tool call whose arguments were still open when the stream went silent', async () => {
-      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
-        (
-          _chunk: unknown,
-          context: { toolCallParser?: StreamingToolCallParser },
-        ) => {
-          context.toolCallParser?.addChunk(
-            0,
-            '{"segment": "s01", "docs": ',
-            'call_1',
-            'structured_output',
-          );
-          return new GenerateContentResponse();
+    it.each(
+      named({
+        'keeps a valid tool name': {
+          toolName: 'structured_output',
+          expectedName: 'structured_output',
         },
-      );
-      const { gated, run } = await drainGated(1000);
-      gated.push(chunk('x'));
-      await vi.advanceTimersByTimeAsync(1000);
-      const err = await run.done;
-      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
-      expect(err).toMatchObject({
-        code: 'ETIMEDOUT',
-        idleMs: 1000,
-        chunksReceived: 1,
-        openToolCallName: 'structured_output',
-      });
-      expect((err as Error).message).toContain(
-        'the arguments of tool call "structured_output" were still open',
-      );
-      expect(gated.wasReturned()).toBe(true);
-    });
+        'omits a status marker': {
+          toolName: 'example HTTP_STATUS/429',
+          expectedName: null,
+        },
+        'omits a multiline name': {
+          toolName: 'example\nname',
+          expectedName: null,
+        },
+        'omits an oversized name': {
+          toolName: 'x'.repeat(65),
+          expectedName: null,
+        },
+      }),
+    )(
+      '$name in tool argument timeout diagnostics',
+      async ({ toolName, expectedName }) => {
+        await withRealChunkConverter(async () => {
+          const { gated, run } = await drainGated(1000);
+          gated.push(
+            chunkOf({
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: toolName, arguments: '{"docs": [' },
+                },
+              ],
+            }),
+          );
+          await vi.advanceTimersByTimeAsync(1000);
+          const error = await run.done;
+          expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+          expect(getErrorStatus(error)).toBeUndefined();
+          expect(error).toMatchObject({
+            code: 'ETIMEDOUT',
+            idleMs: 1000,
+            chunksReceived: 1,
+            openToolCallName: expectedName,
+          });
+          const message = (error as Error).message;
+          const label = expectedName
+            ? `tool call "${expectedName}"`
+            : 'a tool call';
+          expect(message).toContain(
+            `the arguments of ${label} were still open`,
+          );
+          if (expectedName === null) {
+            expect(message).not.toContain(toolName);
+          }
+          expect(mockPipelineWarn).toHaveBeenCalledWith(
+            'OpenAI stream inactivity timeout',
+            expect.objectContaining({ openToolCallName: expectedName }),
+          );
+          expect(gated.wasReturned()).toBe(true);
+        });
+      },
+    );
 
     it('keeps an idle timeout after a length finish generic', async () => {
       await withRealChunkConverter(async () => {

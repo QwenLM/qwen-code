@@ -28,26 +28,33 @@ import {
  * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
  * transport error, identical to a real socket read timeout.
  *
- * `openToolCallName` names a tool call whose arguments were still unterminated
- * when the stream went silent. Some providers withhold tool-call arguments
- * until they are complete, so that silence usually means the model was still
- * generating them, and the same request tends to stall the same way again.
+ * `openToolCallName` is undefined for a generic timeout and null when the
+ * stream stalled inside tool arguments but the tool name is unsafe to display.
  */
 export class StreamInactivityTimeoutError extends Error {
   readonly code = 'ETIMEDOUT' as const;
+  readonly openToolCallName: string | null | undefined;
 
   constructor(
     readonly idleMs: number,
     readonly chunksReceived: number,
     readonly streamLifetimeMs: number,
-    readonly openToolCallName?: string,
+    openToolCallName?: string,
   ) {
+    const safeToolCallName =
+      openToolCallName === undefined ||
+      /^[A-Za-z0-9_-]{1,64}$/.test(openToolCallName)
+        ? openToolCallName
+        : null;
+    const toolCallLabel = safeToolCallName
+      ? `tool call "${safeToolCallName}"`
+      : 'a tool call';
     super(
       `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
         `(stream lifetime: ${streamLifetimeMs}ms). ` +
-        (openToolCallName
-          ? `The stream went silent while the arguments of tool call ` +
-            `"${openToolCallName}" were still open. Some providers withhold ` +
+        (safeToolCallName !== undefined
+          ? `The stream went silent while the arguments of ${toolCallLabel} ` +
+            `were still open. Some providers withhold ` +
             `tool-call arguments until they are complete, so the model was ` +
             `most likely still generating them; retrying the same request ` +
             `usually stalls the same way, and a longer idle timeout helps only ` +
@@ -63,6 +70,7 @@ export class StreamInactivityTimeoutError extends Error {
         `Set the active value to 0 to disable it.`,
     );
     this.name = 'StreamInactivityTimeoutError';
+    this.openToolCallName = safeToolCallName;
   }
 }
 
