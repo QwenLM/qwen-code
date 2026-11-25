@@ -1,0 +1,30 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
+    "composite": true,
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@qwen-code/core": ["./index.ts"],
+      "@qwen-code/core/sessions": ["./sessions.ts"],
+      "@qwen-code/core/process-guard": ["./process-guard.ts"],
+      "@qwen-code/resource": ["../resource/index.ts"]
+    }
+  },
+  "include": [
+    "index.ts",
+    "plugin-management.ts",
+    "sessions.ts",
+    "process-guard.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.json"
+  ],
+  "exclude": ["node_modules", "dist"],
+  "references": [
+    {
+      "path": "../resource"
+    }
+  ]
+}

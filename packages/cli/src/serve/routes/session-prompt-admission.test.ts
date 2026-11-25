@@ -15,6 +15,7 @@ import {
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -131,6 +132,7 @@ describe('classifyPromptRequest', () => {
           [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
           [SUBMITTED_PROMPT_META_KEY]: 'typed',
           [DAEMON_SUBMITTED_PROMPT_META_KEY]: 'typed',
+          [DAEMON_USER_PROMPT_META_KEY]: false,
           kept: 1,
         },
       },

@@ -1,0 +1,69 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`live theme boundaries > cancels a scrollbar fade holding old palette colors 1`] = `
+"scrollbar
+"
+`;
+
+exports[`live theme boundaries > recolors a cached question view without losing its typed answer 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────
+ Choose a language
+
+   1. TypeScript
+ ❯ 2. retained answer 
+
+ ──────────────────────────────────────────────────────────────────────────────
+   3. Chat about this
+
+ Enter submit · Ctrl+X edit response · Esc cancel
+"
+`;
+
+exports[`live theme boundaries > recolors memoized diff fallback content 1`] = `
+"No diff content.
+"
+`;
+
+exports[`live theme boundaries > recolors static history without rerendering its memoized parent 1`] = `
+"
+ ● Retained history warning
+"
+`;
+
+exports[`live theme boundaries > recolors static history without rerendering its memoized parent 3`] = `
+"
+ ● Retained history warning
+"
+`;
+
+exports[`live theme boundaries > recolors tool names while preserving the live pulse state 1`] = `
+"
+ ▪ RetainedTool Working without remounting
+"
+`;
+
+exports[`live theme boundaries > recolors tool names while preserving the live pulse state 3`] = `
+"
+ ▪ RetainedTool Working without remounting
+"
+`;
+
+exports[`live theme boundaries > refreshes a cached dialog element without losing its local input state 1`] = `
+"unsent draft
+"
+`;
+
+exports[`live theme boundaries > refreshes cached custom history content without remounting it 1`] = `
+"
+ expanded history
+"
+`;
+
+exports[`live theme boundaries > refreshes cached list rows without resetting scroll or expanded state 1`] = `
+"Row 2 expanded
+Row 3
+Row 4
+Row 5
+"
+`;

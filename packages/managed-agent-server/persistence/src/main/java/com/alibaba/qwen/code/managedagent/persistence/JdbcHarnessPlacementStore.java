@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -96,7 +97,7 @@ public class JdbcHarnessPlacementStore
 
     private Placement assign(String tenant, String session, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "harnessOwnerBootId");
+        BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (current.instanceId() != null) {
             return current;
@@ -137,7 +138,7 @@ public class JdbcHarnessPlacementStore
 
     private Placement takeover(String tenant, String session, Placement expected, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "harnessOwnerBootId");
+        BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (!sameOwner(current, expected)) {
             throw blocked("harness_placement_changed");
@@ -289,7 +290,7 @@ public class JdbcHarnessPlacementStore
     private static void identity(String id) {
         // The VARCHAR(128) column admits only the pool endpoint charset; a
         // PAD SPACE fold must never alias one instance's ownership to another.
-        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireInstanceId(id, "harnessInstanceId");
+        BrokerValues.requireInstanceId(id, "harnessInstanceId");
     }
 
     static ManagedAgentException blocked(String code) {
