@@ -54,7 +54,7 @@ const IS_WINDOWS = process.platform === 'win32';
 const GUEST_AGENT_CHILD_SCRIPT = `
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 
@@ -84,6 +84,18 @@ const server = createServer((sock) => {
       buf = buf.subarray(5 + len);
 
       if (kind === 'H') {
+        appendFileSync(join(scratchBase, 'handshakes.log'), payload.toString('utf8') + String.fromCharCode(10));
+        if (mode === 'close-r3-assert') {
+          // Updated to the JSON C contract, but still validates H against the
+          // base token: refuse the versioned token, accept the base one.
+          if (payload.toString('utf8') !== 'guest-exec-v1') {
+            sock.write(enc('R', 'unknown protocol'));
+            sock.end();
+            return;
+          }
+          sock.write(enc('A', 'guest-exec-v1'));
+          continue;
+        }
         if (mode === 'bad-ack') {
           sock.write(enc('A', 'wrong-protocol'));
           sock.end();
@@ -258,7 +270,8 @@ async function startGuestAgentChild(
     | 'close-truncated'
     | 'close-pretend-delete'
     | 'close-wrong-sender'
-    | 'close-old-peer' = 'normal',
+    | 'close-old-peer'
+    | 'close-r3-assert' = 'normal',
 ): Promise<ChildProcess> {
   const child = spawn(
     process.execPath,
@@ -647,6 +660,35 @@ describe('guest-exec-bridge protocol & safety invariants', () => {
       expect(closed.ok).toBe(false);
       expect(closed.reason).toContain('protocol skew');
       expect(closed.reason).toContain('guest-exec-close-v2');
+    },
+  );
+
+  it.skipIf(IS_WINDOWS)(
+    'opens the close exchange on the versioned token, and falls back to the base token only after an explicit refusal',
+    async () => {
+      const dir = mkdtempSync(join('/tmp', 'qvm-close-negotiate-'));
+      tmpDirs.push(dir);
+      const handshakes = (): string[] =>
+        readFileSync(join(dir, 'handshakes.log'), 'utf8').trim().split('\n');
+
+      // A current peer must be offered the versioned token first.
+      const okSock = join(dir, 'new.sock');
+      children.push(await startGuestAgentChild(okSock, dir, 'normal'));
+      expect(closeGuestSessionSync(okSock, 'session-negotiate-new').ok).toBe(
+        true,
+      );
+      expect(handshakes()).toEqual(['guest-exec-close-v2']);
+
+      // A round-3 collector that refuses v2 but speaks the JSON C contract on
+      // the base token must still be closed cleanly, not stranded.
+      rmSync(join(dir, 'handshakes.log'));
+      const r3Sock = join(dir, 'r3.sock');
+      children.push(await startGuestAgentChild(r3Sock, dir, 'close-r3-assert'));
+      expect(closeGuestSessionSync(r3Sock, 'session-negotiate-r3').ok).toBe(
+        true,
+      );
+      expect(handshakes()).toEqual(['guest-exec-close-v2', 'guest-exec-v1']);
+      expect(existsSync(join(dir, 'session-session-negotiate-r3'))).toBe(false);
     },
   );
 

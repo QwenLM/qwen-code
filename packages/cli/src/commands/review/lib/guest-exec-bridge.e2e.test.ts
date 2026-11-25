@@ -97,6 +97,13 @@ const server = createServer((sock) => {
       } else if (kind === 'C') {
         const closeRequest = JSON.parse(payload.toString('utf8'));
         const sid = closeRequest.workspaceSessionId;
+        if (mode === 'close-refuse') {
+          // Accept exec, refuse cleanup: the session survives and the client
+          // must surface WHY in executionBoundary.note.
+          sock.write(enc('R', 'cleanup refused by peer'));
+          sock.end();
+          return;
+        }
         rmSync(join(scratchBase, 'session-' + sid), { recursive: true, force: true });
         sock.write(enc('Z', JSON.stringify({
           runId: closeRequest.runId,
@@ -194,7 +201,11 @@ server.listen(socketPath, () => process.stdout.write('READY\\n'));
 async function startSessionGuestAgent(
   socketPath: string,
   scratchBase: string,
-  mode: 'normal' | 'fake-install-no-marker' | 'install-exit-1' = 'normal',
+  mode:
+    | 'normal'
+    | 'fake-install-no-marker'
+    | 'install-exit-1'
+    | 'close-refuse' = 'normal',
 ): Promise<ChildProcess> {
   const child = spawn(
     process.execPath,
@@ -506,6 +517,98 @@ describe.skipIf(IS_WINDOWS)(
         settingsGuard.dispose();
       }
     }, 30_000);
+
+    it('surfaces the close failure reason in the build-test and test-delta boundary notes', async () => {
+      const settingsGuard = isolateOperatorReviewSettings();
+      const dir = mkdtempSync(join('/tmp', 'qvm-close-note-'));
+      tmpDirs.push(dir);
+      try {
+        const scratch = join(dir, 'scratch');
+        const wt = join(dir, 'wt');
+        mkdirSync(scratch, { recursive: true });
+        createOfflineInstallableFixture(wt);
+        const sockPath = join(dir, 'refuse.sock');
+        children.push(
+          await startSessionGuestAgent(sockPath, scratch, 'close-refuse'),
+        );
+        probeOverride.current = {
+          platform: 'linux',
+          arch: 'x64',
+          hasKvm: true,
+          hasFirecracker: true,
+          hasJailer: true,
+          hasVfkit: false,
+          hasSandboxExec: false,
+          firecrackerKernel: '/opt/vm/vmlinux',
+          firecrackerRootfs: '/opt/vm/rootfs.ext4',
+          bridgeSocketPath: sockPath,
+        };
+        const planPath = join(dir, 'plan.json');
+        writeFileSync(
+          planPath,
+          JSON.stringify({
+            prNumber: '903',
+            isCrossRepository: true,
+            authorAssociation: 'NONE',
+            diffStat: { files: 1 },
+            files: [{ path: 'src/index.ts', binary: false }],
+          }),
+        );
+        vi.stubEnv('QWEN_REVIEW_SANDBOX', 'tiered');
+        const rep = runBuildTest({
+          plan: planPath,
+          worktree: wt,
+          out: join(dir, 'bt.json'),
+          timeout: 60,
+          install: true,
+          buildOnly: false,
+        });
+        expect(rep.executionBoundary?.teardownStatus).toBe('partial');
+        expect(rep.executionBoundary?.note).toContain(
+          'cleanup could not be fully verified',
+        );
+        expect(rep.executionBoundary?.note).toContain(
+          'no complete session-bound close ACK',
+        );
+
+        mkdirSync(join(wt, 'dist'), { recursive: true });
+        writeFileSync(
+          join(wt, 'dist', 'built.txt'),
+          'FROM_GUEST_INSTALLED_DEP',
+        );
+        const failedBt = join(dir, 'failed.json');
+        writeFileSync(
+          failedBt,
+          JSON.stringify({
+            ...rep,
+            ok: false,
+            test: [
+              {
+                ...rep.test[0]!,
+                exitCode: 1,
+                output: 'FAIL src/index.test.ts',
+                failingFiles: ['src/index.test.ts'],
+              },
+            ],
+          }),
+        );
+        const delta = runTestDelta({
+          report: failedBt,
+          baseline: wt,
+          plan: planPath,
+          timeout: 30,
+        });
+        expect(delta.executionBoundary?.teardownStatus).toBe('partial');
+        expect(delta.executionBoundary?.note).toContain(
+          'cleanup could not be verified',
+        );
+        expect(delta.executionBoundary?.note).toContain(
+          'no complete session-bound close ACK',
+        );
+      } finally {
+        settingsGuard.dispose();
+      }
+    }, 60_000);
 
     it('syncs (not overlays) the probe tree once the guest session holds installed dependencies', async () => {
       const settingsGuard = isolateOperatorReviewSettings();

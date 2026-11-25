@@ -1223,82 +1223,102 @@ export function closeGuestSessionSync(
   const endpoint = validateBridgeSocketEndpoint(socketPath);
   if (!endpoint.ok) return fail(endpoint.reason);
   const runId = `close-${randomBytes(6).toString('hex')}`;
-  const wire = Buffer.concat([
-    encodeFrame('H', GUEST_EXEC_CLOSE_PROTOCOL),
-    encodeFrame(
-      'C',
-      JSON.stringify({
-        runId,
-        workspaceSessionId,
-        sessionSha256: sha256Hex(workspaceSessionId),
-      }),
-    ),
-  ]);
-  const r = spawnSync(
-    process.execPath,
-    [
-      '--input-type=module',
-      '-e',
-      RAW_UDS_PUMP_SCRIPT,
-      socketPath,
-      String(DEFAULT_MAX_FRAME_BYTES),
-    ],
-    {
-      input: wire,
-      maxBuffer: DEFAULT_MAX_FRAME_BYTES + 65_536,
-      timeout: Math.max(1, Math.round(timeoutMs)),
-      killSignal: 'SIGKILL',
-    },
+  const closePayload = JSON.stringify({
+    runId,
+    workspaceSessionId,
+    sessionSha256: sha256Hex(workspaceSessionId),
+  });
+  const attempt = (
+    protocol: string,
+  ): GuestSessionCloseResult & { refused?: boolean } => {
+    const wire = Buffer.concat([
+      encodeFrame('H', protocol),
+      encodeFrame('C', closePayload),
+    ]);
+    const r = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        RAW_UDS_PUMP_SCRIPT,
+        socketPath,
+        String(DEFAULT_MAX_FRAME_BYTES),
+      ],
+      {
+        input: wire,
+        maxBuffer: DEFAULT_MAX_FRAME_BYTES + 65_536,
+        timeout: Math.max(1, Math.round(timeoutMs)),
+        killSignal: 'SIGKILL',
+      },
+    );
+    if (r.error || r.status !== 0) {
+      return fail(
+        `guest close exchange did not complete: ${r.error?.message ?? `pump exited ${String(r.status)}`}`,
+      );
+    }
+    const wireOut = Buffer.isBuffer(r.stdout)
+      ? r.stdout
+      : Buffer.from(String(r.stdout ?? ''), 'utf8');
+    const decoder = new GuestExecFrameDecoder();
+    const decoded = decoder.push(wireOut);
+    if (decoded.error || decoder.hasTrailingBytes()) {
+      return fail(decoded.error ?? 'truncated guest close acknowledgment');
+    }
+    const frames = decoded.frames;
+    if (frames[0]?.kind === 'R') {
+      return {
+        ok: false,
+        reason: `guest peer refused the "${protocol}" close handshake`,
+        refused: true,
+      };
+    }
+    const ackProtocol = frames[0]?.payload.toString('utf8');
+    if (frames[0]?.kind === 'A' && ackProtocol !== protocol) {
+      return fail(
+        `guest peer protocol skew: close requires "${protocol}", peer answered "${ackProtocol ?? ''}" — upgrade the guest collector`,
+      );
+    }
+    if (
+      frames.length !== 2 ||
+      frames[0]?.kind !== 'A' ||
+      frames[1]?.kind !== 'Z'
+    ) {
+      return fail('guest peer returned no complete session-bound close ACK');
+    }
+    try {
+      const ack = JSON.parse(frames[1].payload.toString('utf8')) as {
+        runId?: unknown;
+        workspaceSessionId?: unknown;
+        sessionSha256?: unknown;
+        exitCode?: unknown;
+        signal?: unknown;
+        timedOut?: unknown;
+      };
+      const bound =
+        ack.runId === runId &&
+        ack.workspaceSessionId === workspaceSessionId &&
+        ack.sessionSha256 === sha256Hex(workspaceSessionId) &&
+        ack.exitCode === 0 &&
+        ack.signal === null &&
+        ack.timedOut === false;
+      return bound
+        ? { ok: true }
+        : fail('guest close ACK is not bound to this session and run');
+    } catch {
+      return fail('malformed guest close ACK payload');
+    }
+  };
+
+  const first = attempt(GUEST_EXEC_CLOSE_PROTOCOL);
+  if (first.ok || !first.refused) return first;
+  // A collector updated to the JSON `C` contract may still validate `H` against
+  // the base token. Retry once there so upgrading the CLI does not strand every
+  // session on an otherwise-compatible peer.
+  const second = attempt(GUEST_EXEC_PROTOCOL);
+  if (second.ok) return second;
+  return fail(
+    `guest peer protocol skew: refused "${GUEST_EXEC_CLOSE_PROTOCOL}" and its "${GUEST_EXEC_PROTOCOL}" close ACK was unusable (${second.reason ?? 'unknown'}) — upgrade the guest collector`,
   );
-  if (r.error || r.status !== 0) {
-    return fail(
-      `guest close exchange did not complete: ${r.error?.message ?? `pump exited ${String(r.status)}`}`,
-    );
-  }
-  const wireOut = Buffer.isBuffer(r.stdout)
-    ? r.stdout
-    : Buffer.from(String(r.stdout ?? ''), 'utf8');
-  const decoder = new GuestExecFrameDecoder();
-  const decoded = decoder.push(wireOut);
-  if (decoded.error || decoder.hasTrailingBytes()) {
-    return fail(decoded.error ?? 'truncated guest close acknowledgment');
-  }
-  const frames = decoded.frames;
-  const ackProtocol = frames[0]?.payload.toString('utf8');
-  if (frames[0]?.kind === 'A' && ackProtocol !== GUEST_EXEC_CLOSE_PROTOCOL) {
-    return fail(
-      `guest peer protocol skew: close requires "${GUEST_EXEC_CLOSE_PROTOCOL}", peer answered "${ackProtocol ?? ''}" — upgrade the guest collector`,
-    );
-  }
-  if (
-    frames.length !== 2 ||
-    frames[0]?.kind !== 'A' ||
-    frames[1]?.kind !== 'Z'
-  ) {
-    return fail('guest peer returned no complete session-bound close ACK');
-  }
-  try {
-    const ack = JSON.parse(frames[1].payload.toString('utf8')) as {
-      runId?: unknown;
-      workspaceSessionId?: unknown;
-      sessionSha256?: unknown;
-      exitCode?: unknown;
-      signal?: unknown;
-      timedOut?: unknown;
-    };
-    const bound =
-      ack.runId === runId &&
-      ack.workspaceSessionId === workspaceSessionId &&
-      ack.sessionSha256 === sha256Hex(workspaceSessionId) &&
-      ack.exitCode === 0 &&
-      ack.signal === null &&
-      ack.timedOut === false;
-    return bound
-      ? { ok: true }
-      : fail('guest close ACK is not bound to this session and run');
-  } catch {
-    return fail('malformed guest close ACK payload');
-  }
 }
 
 /**
