@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation.PreparedBundle;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition;
 import com.alibaba.qwen.code.managedagent.repository.ManagedDefinitionPreparationStore;
@@ -8,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptN
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -15,11 +17,15 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.io.IOException;
+import java.util.List;
 import java.util.Optional;
 
 @Repository
-public final class JdbcDefinitionPreparationStore implements ManagedDefinitionPreparationStore {
+public class JdbcDefinitionPreparationStore implements ManagedDefinitionPreparationStore {
     private static final ReceiptNamespace NAMESPACE = ReceiptNamespace.SOURCE_DEFINITION_PREPARATION;
+    private static final TypeReference<List<PreparedBundle>> BUNDLES = new TypeReference<>() {
+    };
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
 
@@ -44,7 +50,7 @@ public final class JdbcDefinitionPreparationStore implements ManagedDefinitionPr
             return find(tenantId, scopeId, operationKey, requestDigest)
                     .orElseThrow(() -> conflict("definition_preparation_conflict", race));
         }
-        return new Preparation(State.PENDING, null, null);
+        return new Preparation(State.PENDING, null, null, List.of());
     }
 
     @Override
@@ -60,7 +66,7 @@ public final class JdbcDefinitionPreparationStore implements ManagedDefinitionPr
 
     @Override
     public void complete(String tenantId, String scopeId, String operationKey,
-            AgentDefinition definition, String resultJson, long now) {
+            AgentDefinition definition, List<PreparedBundle> bundles, String resultJson, long now) {
         int updated = jdbc.update("UPDATE ma_request_receipt SET state = ?, operation = ?,"
                 + " result_json = ?, agent_id = ?, agent_revision = ?, gmt_modified = ?"
                 + " WHERE receipt_key = ? AND namespace = ? AND state IN (?, ?)",
@@ -83,20 +89,30 @@ public final class JdbcDefinitionPreparationStore implements ManagedDefinitionPr
         }
         State state = State.valueOf(receipt.state());
         if (state == State.PENDING) {
-            return Optional.of(new Preparation(state, null, null));
+            return Optional.of(new Preparation(state, null, null, List.of()));
         }
         try {
             ManagedAgentDefinitionSource.Definition input = null;
             AgentDefinition definition = null;
+            List<PreparedBundle> bundles = null;
             var result = json.readTree(receipt.resultJson());
+            if (result == null || result.isNull()) {
+                throw new ManagedAgentException(409, "definition_preparation_incomplete",
+                        "The saved preparation result is missing.");
+            }
             if (state == State.RESOLVED || result.hasNonNull("input")) {
                 input = convert(result, "input", ManagedAgentDefinitionSource.Definition.class);
             }
             if (state == State.PREPARED) {
                 definition = convert(result, "definition", AgentDefinition.class);
+                bundles = json.readValue(json.treeAsTokens(result.get("bundles")), BUNDLES);
+                if (bundles == null) {
+                    throw new ManagedAgentException(409, "definition_preparation_incomplete",
+                            "The saved bundle plan is missing.");
+                }
             }
-            return Optional.of(new Preparation(state, input, definition));
-        } catch (JsonProcessingException error) {
+            return Optional.of(new Preparation(state, input, definition, bundles));
+        } catch (IOException error) {
             throw new IllegalStateException("The saved definition preparation is invalid", error);
         }
     }

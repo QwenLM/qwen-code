@@ -67,7 +67,9 @@ class ManagedDefinitionPreparationMySqlIT {
             var providers = new ManagedDefinitionInputProviders("SPI", provider(source), provider(), workspaces);
             var store = new JdbcDefinitionPreparationStore(jdbc, json);
             var racing = new RacingStore(store);
-            var service = new ManagedDefinitionPreparationService(definitions, racing, providers, digests, json);
+            var bootstraps = mock(com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation.class);
+            when(bootstraps.prepare(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenReturn(List.of());
+            var service = new ManagedDefinitionPreparationService(definitions, racing, providers, digests, json, bootstraps);
             var command = new Command("tenant", "actor", "workspace", "workspace", "prepare-1",
                     new Exact(reference), Instant.now().plusSeconds(30));
             try (var executor = Executors.newFixedThreadPool(2)) {
@@ -94,8 +96,8 @@ class ManagedDefinitionPreparationMySqlIT {
             ManagedAgentDefinitionService definitions, ManagedDefinitionPreparationStore store,
             ManagedDefinitionInputProviders providers, RequestDigests digests,
             ObjectMapper json, Command command) {
-        return new ManagedDefinitionPreparationService(definitions, store, providers, digests, json)
-                .prepare(command);
+        return new ManagedDefinitionPreparationService(definitions, store, providers, digests, json,
+                (context, bundles) -> List.of()).prepare(command);
     }
 
     @SuppressWarnings("unchecked")
@@ -134,8 +136,9 @@ class ManagedDefinitionPreparationMySqlIT {
         @Override
         public void complete(String tenantId, String scopeId, String operationKey,
                 com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition definition,
+                java.util.List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation.PreparedBundle> bundles,
                 String resultJson, long now) {
-            delegate.complete(tenantId, scopeId, operationKey, definition, resultJson, now);
+            delegate.complete(tenantId, scopeId, operationKey, definition, bundles, resultJson, now);
         }
 
         @Override

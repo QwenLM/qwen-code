@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefi
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource.InlineSkill;
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource.PreRegistered;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.AgentBootstrapBundleSource.BundleRef;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Target;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -46,6 +47,7 @@ class ManagedDefinitionPreparationTest {
     private final ObjectMapper json = new ObjectMapper();
     private final ManagedAgentDefinitionSource source = mock(ManagedAgentDefinitionSource.class);
     private final AtomicLong calls = new AtomicLong();
+    private final ManagedAgentBootstrapPreparation bundles = mock(ManagedAgentBootstrapPreparation.class);
     private JdbcTemplate jdbc;
     private ManagedDefinitionPreparationService service;
     private ManagedDefinitionSourceFixture fixture;
@@ -53,6 +55,10 @@ class ManagedDefinitionPreparationTest {
 
     @BeforeEach
     void setUp() throws Exception {
+        org.mockito.Mockito.doAnswer(invocation -> ((List<BundleRef>) invocation.getArgument(1))
+                .stream().map(bundle -> new ManagedAgentBootstrapPreparation.PreparedBundle(
+                        bundle, bundle.expectedDigest(), bundle.expectedLength(), true)).toList())
+                .when(bundles).prepare(any(), any());
         var dataSource = new DriverManagerDataSource("jdbc:h2:mem:definition-preparation-"
                 + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         ManagedSchema.initialize(dataSource);
@@ -67,7 +73,7 @@ class ManagedDefinitionPreparationTest {
                 provider(List.of(source)), provider(List.of()), workspaces);
         var preparations = new JdbcDefinitionPreparationStore(jdbc, json);
         service = new ManagedDefinitionPreparationService(definitions, preparations,
-                providers, new RequestDigests(), json);
+                providers, new RequestDigests(), json, bundles);
         ManagedAgentDefinitionSource.SourceRef ref = new ManagedAgentDefinitionSource.SourceRef(
                 "catalog", "agent-1", "release-1", "a".repeat(64), "workspace");
         fixture = new ManagedDefinitionSourceFixture(ref, new ExtensionUse(
@@ -174,13 +180,14 @@ class ManagedDefinitionPreparationTest {
         }).when(store).complete(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(),
                 any(com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition.class),
-                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyLong());
+                org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyLong());
         var providers = new ManagedDefinitionInputProviders("SPI", provider(List.of(source)),
                 provider(List.of()), workspaces);
         var definitions = new ManagedAgentDefinitionService(new JdbcManagedAgentDefinitionStore(jdbc,
                 new RequestDigests()), new RequestDigests(), json);
         service = new ManagedDefinitionPreparationService(definitions, store, providers,
-                new RequestDigests(), json);
+                new RequestDigests(), json, bundles);
 
         var result = service.prepare(command("operation-1", new Current("agent-1")));
 
@@ -195,7 +202,7 @@ class ManagedDefinitionPreparationTest {
         var definitions = new ManagedAgentDefinitionService(new JdbcManagedAgentDefinitionStore(jdbc,
                 new RequestDigests()), new RequestDigests(), json);
         service = new ManagedDefinitionPreparationService(definitions,
-                new JdbcDefinitionPreparationStore(jdbc, json), providers, new RequestDigests(), json);
+                new JdbcDefinitionPreparationStore(jdbc, json), providers, new RequestDigests(), json, bundles);
         var request = new AgentDefinitionRequest(Map.of("id", "qwen-test"), "Review.",
                 List.of(Map.of("name", "read_file")), null, null, null,
                 Map.of("approval_mode", "default"), null, null);

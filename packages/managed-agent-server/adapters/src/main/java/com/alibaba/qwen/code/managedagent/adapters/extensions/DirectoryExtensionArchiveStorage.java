@@ -16,6 +16,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Optional;
 
 public final class DirectoryExtensionArchiveStorage implements ExtensionArchiveStorage {
     private final ManagedAgentSettings properties;
@@ -60,6 +61,13 @@ public final class DirectoryExtensionArchiveStorage implements ExtensionArchiveS
         } finally {
             Files.deleteIfExists(temporary);
         }
+    }
+
+    @Override
+    public Optional<Info> stat(Key key) throws IOException {
+        Path target = path(key);
+        return Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)
+                ? Optional.of(new Info(Files.size(target))) : Optional.empty();
     }
 
     public InputStream open(Key key) throws IOException {

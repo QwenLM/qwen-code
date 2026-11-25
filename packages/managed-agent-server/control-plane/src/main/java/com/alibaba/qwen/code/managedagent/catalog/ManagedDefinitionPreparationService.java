@@ -8,6 +8,8 @@ import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefi
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource.InlineSkill;
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource.PreRegistered;
 import com.alibaba.qwen.code.managedagent.contracts.definitions.ManagedAgentDefinitionSource.SourceRef;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedAgentBootstrapPreparation.PreparedBundle;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -30,16 +32,19 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
     private final ManagedDefinitionInputProviders providers;
     private final RequestDigests digests;
     private final ObjectMapper json;
+    private final ManagedAgentBootstrapPreparation bootstraps;
 
     public ManagedDefinitionPreparationService(ManagedAgentDefinitionService definitions,
             ManagedDefinitionPreparationStore preparations,
             ManagedDefinitionInputProviders providers, RequestDigests digests,
-            @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
+            @Qualifier("managedAgentObjectMapper") ObjectMapper json,
+            ManagedAgentBootstrapPreparation bootstraps) {
         this.definitions = definitions;
         this.preparations = preparations;
         this.providers = providers;
         this.digests = digests;
         this.json = json;
+        this.bootstraps = bootstraps;
     }
 
     @Override
@@ -58,14 +63,14 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
                 commandDigest, actor, System.currentTimeMillis());
         if (previous.state() == ManagedDefinitionPreparationStore.State.PREPARED) {
             return new PrepareReceipt(new OperationRef(command.operationKey(), true),
-                    previous.definition());
+                    previous.definition(), previous.bundles());
         }
         if (command.selection() instanceof PreRegistered registered) {
             providers.requirePreRegistered();
             requireDeadline(context);
             var result = definitions.create(command.tenantId(), command.operationKey(),
                     registered.definition());
-            return complete(command, scope, previous, null, result.definition());
+            return complete(command, scope, previous, null, result.definition(), List.of());
         }
 
         ManagedAgentDefinitionSource.Definition input = previous.input();
@@ -97,23 +102,27 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
         String nativeId = nativeId(context.tenantId(), input.ref());
         var result = definitions.prepare(context.tenantId(), nativeId, "source-" + nativeId,
                 request(input));
-        return complete(command, scope, previous, input, result.definition());
+        var bundles = bootstraps.prepare(context, input.bootstrapBundles());
+        return complete(command, scope, previous, input, result.definition(), bundles);
     }
 
     private PrepareReceipt complete(Command command, String scope,
             ManagedDefinitionPreparationStore.Preparation previous,
             ManagedAgentDefinitionSource.Definition input,
-            com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition definition) {
+            com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition definition,
+            List<PreparedBundle> bundles) {
         Map<String, Object> result = new LinkedHashMap<>();
         if (input != null) {
             result.put("input", input);
         }
         result.put("definition", definition);
+        result.put("bundles", bundles);
         try {
             preparations.complete(command.tenantId(), scope, command.operationKey(), definition,
-                    json.writeValueAsString(result), System.currentTimeMillis());
+                    bundles, json.writeValueAsString(result), System.currentTimeMillis());
             return new PrepareReceipt(new OperationRef(command.operationKey(),
-                    previous.state() != ManagedDefinitionPreparationStore.State.PENDING), definition);
+                    previous.state() != ManagedDefinitionPreparationStore.State.PENDING),
+                    definition, bundles);
         } catch (JsonProcessingException error) {
             throw new IllegalStateException("The preparation result cannot be saved", error);
         } catch (ManagedAgentException conflict) {
@@ -126,7 +135,8 @@ public final class ManagedDefinitionPreparationService implements ManagedAgentDe
                     || !saved.definition().equals(definition)) {
                 throw conflict;
             }
-            return new PrepareReceipt(new OperationRef(command.operationKey(), true), saved.definition());
+            return new PrepareReceipt(new OperationRef(command.operationKey(), true),
+                    saved.definition(), saved.bundles());
         }
     }
 
