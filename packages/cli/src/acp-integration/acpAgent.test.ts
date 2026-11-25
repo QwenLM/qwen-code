@@ -4147,6 +4147,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       closed: true,
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalled();
+    expect(lastSessionMock?.collectActiveWorkHolds).toHaveBeenCalled();
+    for (const [options] of lastSessionMock!.collectActiveWorkHolds.mock
+      .calls) {
+      expect(options).toEqual({ includeScheduledTasks: true });
+    }
     expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
     expect(lastSessionMock?.cancelMcpAppCalls).toHaveBeenCalledOnce();
     expect(abort).toHaveBeenCalledOnce();

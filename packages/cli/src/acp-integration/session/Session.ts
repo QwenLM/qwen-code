@@ -2800,6 +2800,7 @@ export class Session implements SessionContext {
   // Cron scheduling state
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
+  private pendingCronChildren = 0;
   private cronAbortController: AbortController | null = null;
   // Resolves the `<<loop.md>>` / `<<loop.md-dynamic>>` sentinels at fire time.
   // Lazily created on the first loop tick; its content cache is reset on
@@ -5499,7 +5500,9 @@ export class Session implements SessionContext {
    * wider than anything reported from here (it covers prompts still waiting in
    * the FIFO, which the child cannot see).
    */
-  collectActiveWorkHolds(): ActiveWorkHoldV1[] {
+  collectActiveWorkHolds(options?: {
+    includeScheduledTasks?: boolean;
+  }): ActiveWorkHoldV1[] {
     if (this.disposed) return [];
     const holds: ActiveWorkHoldV1[] = [];
     for (const agentId of this.config
@@ -5558,6 +5561,7 @@ export class Session implements SessionContext {
       this.historyMutationActive ||
       this.goalProcessing ||
       this.cronProcessing ||
+      this.pendingCronChildren > 0 ||
       this.cronAbortController ||
       this.cronCompletion ||
       this.notificationQueue.some(
@@ -5569,6 +5573,28 @@ export class Session implements SessionContext {
         !this.currentShellNotificationActive)
     ) {
       holds.push({ category: 'session', id: 'session:active-turn' });
+    }
+    // Only conditional close needs this retention; idle/reload and active-work
+    // snapshots must keep their existing meaning.
+    if (
+      options?.includeScheduledTasks === true &&
+      this.config.isCronEnabled?.() !== false
+    ) {
+      const scheduler = this.config.getCronScheduler?.();
+      const hasScheduledWork =
+        this.cronQueue.length > 0 ||
+        this.pendingCronChildren > 0 ||
+        (scheduler !== undefined &&
+          scheduler.disabled !== true &&
+          (scheduler
+            .list?.()
+            .some(
+              (job) => job.durable && job.boundSessionId === this.sessionId,
+            ) ||
+            scheduler.hasGatesInFlight?.(this.sessionId)));
+      if (hasScheduledWork) {
+        holds.push({ category: 'session', id: 'scheduled-tasks' });
+      }
     }
     return holds;
   }
@@ -5597,6 +5623,7 @@ export class Session implements SessionContext {
         this.pendingPromptCompletion ||
         this.goalProcessing ||
         this.cronProcessing ||
+        this.pendingCronChildren > 0 ||
         this.cronAbortController ||
         this.cronCompletion ||
         this.notificationProcessing ||
@@ -7226,7 +7253,7 @@ export class Session implements SessionContext {
     const recovery = await this.getRecoveryStatusForClient();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
-      // ten `#hasActiveTurn()` members into one boolean and the only UI
+      // `#hasActiveTurn()` members into one boolean and the only UI
       // consumer renders nothing for it, so without this a leaked flag —
       // recovery disabled for the rest of the session — is indistinguishable
       // from a healthy automatic turn in flight. Logged here rather than in
@@ -7247,6 +7274,7 @@ export class Session implements SessionContext {
         ),
         cron: Boolean(
           this.cronProcessing ||
+            this.pendingCronChildren > 0 ||
             this.cronAbortController ||
             this.cronCompletion,
         ),
@@ -13291,6 +13319,19 @@ export class Session implements SessionContext {
    * marker alongside the session it actually ran in.
    */
   async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
+    // A consumed one-shot no longer has a future-work hold.
+    // Retain its owner until this handoff and any failure cleanup settle.
+    this.pendingCronChildren++;
+    this.#activeWorkChanged();
+    try {
+      await this.#dispatchCronToFreshSessionAndRecord(job);
+    } finally {
+      this.pendingCronChildren--;
+      this.#activeWorkChanged();
+    }
+  }
+
+  async #dispatchCronToFreshSessionAndRecord(job: CronFire): Promise<void> {
     const scheduler = this.config.getCronScheduler();
     const taskId = job.id ?? 'unknown';
     // Captured before the awaited RPC below: processJob re-stamps this very

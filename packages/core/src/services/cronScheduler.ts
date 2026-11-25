@@ -732,9 +732,16 @@ export class CronScheduler {
    * is a fire this process has already consumed — a durable catch-up's stamp
    * is on disk before its gate decides — so headless mode waits for it even
    * though durable jobs otherwise never pin the process.
+   * With an owner id, only bound durable gates belonging to that session count.
    */
-  hasGatesInFlight(): boolean {
-    return this.gatesInFlight.size > 0;
+  hasGatesInFlight(ownerSessionId?: string): boolean {
+    if (ownerSessionId === undefined) {
+      return this.gatesInFlight.size > 0;
+    }
+    for (const { job } of this.gatesInFlight.values()) {
+      if (job.durable && job.boundSessionId === ownerSessionId) return true;
+    }
+    return false;
   }
 
   /**

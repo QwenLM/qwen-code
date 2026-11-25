@@ -5080,7 +5080,9 @@ class QwenAgent implements Agent {
     // into a new hold while the drain below is in progress, so this early read
     // is an optimization rather than the final authorization.
     if (opts?.onlyIfUnheld) {
-      const holds = session.collectActiveWorkHolds();
+      const holds = session.collectActiveWorkHolds({
+        includeScheduledTasks: true,
+      });
       if (holds.length > 0) {
         cancelClose();
         return { closed: false, holds };
@@ -5097,7 +5099,9 @@ class QwenAgent implements Agent {
           drainTimeoutMs,
           'close',
         );
-        const holds = session.collectActiveWorkHolds();
+        const holds = session.collectActiveWorkHolds({
+          includeScheduledTasks: true,
+        });
         if (holds.length > 0) {
           return { closed: false, holds };
         }
@@ -5184,7 +5188,9 @@ class QwenAgent implements Agent {
           // every active turn has settled, while both the close gate and the
           // history-mutation gate still block destructive races.
           if (opts?.onlyIfUnheld) {
-            const holds = session.collectActiveWorkHolds();
+            const holds = session.collectActiveWorkHolds({
+              includeScheduledTasks: true,
+            });
             if (holds.length > 0) {
               return { closed: false, holds };
             }

@@ -2722,6 +2722,75 @@ describe('Session', () => {
         .map((hold) => hold.id);
     }
 
+    it('holds bound durable work for conditional close without blocking reload', () => {
+      createReportingSession();
+      const conditionalClose = { includeScheduledTasks: true };
+      const scheduledHold = {
+        category: 'session',
+        id: 'scheduled-tasks',
+      };
+      let jobs = [
+        { durable: true, boundSessionId: session.sessionId },
+        { durable: true, boundSessionId: 'other-owner' },
+        { durable: true },
+        { durable: false, boundSessionId: session.sessionId },
+      ];
+      let schedulerDisabled = false;
+      const hasGatesInFlight = vi.fn().mockReturnValue(false);
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue({
+        get disabled() {
+          return schedulerDisabled;
+        },
+        list: () => jobs,
+        hasGatesInFlight,
+        stop: vi.fn(),
+      });
+
+      expect(session.collectActiveWorkHolds(conditionalClose)).toContainEqual(
+        scheduledHold,
+      );
+      expect(session.collectActiveWorkHolds()).not.toContainEqual(
+        scheduledHold,
+      );
+      expect(session.isIdle()).toBe(true);
+
+      jobs = jobs.filter((job) => job.boundSessionId !== session.sessionId);
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+
+      jobs = [{ durable: true, boundSessionId: session.sessionId }];
+      schedulerDisabled = true;
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+
+      schedulerDisabled = false;
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(false);
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      jobs = [{ durable: false, boundSessionId: session.sessionId }];
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+
+      jobs = [];
+      hasGatesInFlight.mockReturnValue(true);
+      expect(session.collectActiveWorkHolds(conditionalClose)).toContainEqual(
+        scheduledHold,
+      );
+      expect(hasGatesInFlight).toHaveBeenCalledWith(session.sessionId);
+      hasGatesInFlight.mockReturnValue(false);
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+      session.dispose();
+    });
+
     it('derives agent holds from the registry, covering the cancel window', async () => {
       createReportingSession();
       expect(session.collectActiveWorkHolds()).toEqual([]);
@@ -10776,11 +10845,18 @@ describe('Session', () => {
     };
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
     mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
-      new Error('Method not found'),
-    );
+    let rejectSpawn!: (error: Error) => void;
+    const spawn = new Promise<never>((_, reject) => {
+      rejectSpawn = reject;
+    });
+    vi.mocked(mockClient.extMethod).mockImplementationOnce(() => spawn);
 
     session.startCronScheduler();
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalled();
+    });
+    const cancelClose = session.beginClose();
+    rejectSpawn(new Error('Method not found'));
 
     await vi.waitFor(() => {
       expect(mockClient.extMethod).toHaveBeenCalledWith(
@@ -10803,6 +10879,18 @@ describe('Session', () => {
         null,
       );
     });
+    await vi.waitFor(() => {
+      expect(
+        (session as unknown as { pendingCronChildren: number })
+          .pendingCronChildren,
+      ).toBe(0);
+    });
+    expect(
+      session.collectActiveWorkHolds({ includeScheduledTasks: true }),
+    ).toContainEqual({ category: 'session', id: 'scheduled-tasks' });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    cancelClose();
+
     await vi.waitFor(() => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
     });
@@ -11054,6 +11142,16 @@ describe('Session', () => {
     };
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
     mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    session.dispose();
+    const activeWorkChanged = vi.fn();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      activeWorkChanged,
+    );
     let releaseSpawn!: () => void;
     const spawned = new Promise<void>((resolve) => {
       releaseSpawn = resolve;
@@ -11070,6 +11168,12 @@ describe('Session', () => {
     await vi.waitFor(() => {
       expect(mockClient.extMethod).toHaveBeenCalled();
     });
+    expect(activeWorkChanged).toHaveBeenCalledTimes(1);
+    expect(session.collectActiveWorkHolds()).toContainEqual({
+      category: 'session',
+      id: 'session:active-turn',
+    });
+    expect(session.isIdle()).toBe(false);
     releaseSpawn();
 
     await vi.waitFor(() => {
@@ -11080,6 +11184,10 @@ describe('Session', () => {
         null,
       );
     });
+    await vi.waitFor(() => {
+      expect(session.isIdle()).toBe(true);
+    });
+    expect(activeWorkChanged).toHaveBeenCalledTimes(2);
   });
 
   it('does not resume automatic turns until an aborted prompt settles', async () => {

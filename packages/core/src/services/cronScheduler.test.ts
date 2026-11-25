@@ -20,6 +20,7 @@ import {
   type DurableCronTask,
 } from './cronTasksFile.js';
 import { Storage } from '../config/storage.js';
+import type { CronGateResult } from './cron-gate.js';
 
 // Gates for the pass-through mock below. readGate holds the startup read
 // while stop() runs, or fails it (a transient fs error). updateGate holds a
@@ -129,6 +130,61 @@ describe('CronScheduler', () => {
     scheduler.tick(when);
     return fired;
   };
+
+  it('attributes pending gate work to its owner without changing global accounting', async () => {
+    const pendingGates: Array<(result: CronGateResult) => void> = [];
+    scheduler = new CronScheduler(null, DAY, {
+      runGate: () =>
+        new Promise<CronGateResult>((resolve) => pendingGates.push(resolve)),
+    });
+    const fire = (job: CronJob) => {
+      (
+        scheduler as unknown as {
+          fire(job: CronJob, onFire: () => void): void;
+        }
+      ).fire(job, () => {});
+    };
+
+    fire({
+      id: 'owned-one-shot',
+      prompt: 'run in a child',
+      cronExpr: '* * * * *',
+      recurring: false,
+      sessionMode: 'per_run',
+      durable: true,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + DAY,
+      jitterMs: 0,
+      boundSessionId: 'owner-a',
+      gate: 'node gate.js',
+    });
+    await vi.waitFor(() => expect(pendingGates).toHaveLength(1));
+    expect(scheduler.hasGatesInFlight()).toBe(true);
+    expect(scheduler.hasGatesInFlight('owner-a')).toBe(true);
+    expect(scheduler.hasGatesInFlight('owner-b')).toBe(false);
+    pendingGates.shift()!({ kind: 'blocked', reason: 'held for assertion' });
+    await vi.waitFor(() =>
+      expect(scheduler.hasGatesInFlight('owner-a')).toBe(false),
+    );
+
+    fire({
+      id: 'unbound-one-shot',
+      prompt: 'do not pin an unrelated owner',
+      cronExpr: '* * * * *',
+      recurring: false,
+      sessionMode: 'per_run',
+      durable: true,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + DAY,
+      jitterMs: 0,
+      gate: 'node gate.js',
+    });
+    await vi.waitFor(() => expect(pendingGates).toHaveLength(1));
+    expect(scheduler.hasGatesInFlight()).toBe(true);
+    expect(scheduler.hasGatesInFlight('owner-a')).toBe(false);
+    pendingGates.shift()!({ kind: 'blocked', reason: 'held for assertion' });
+    await vi.waitFor(() => expect(scheduler.hasGatesInFlight()).toBe(false));
+  });
   const createJobs = (n: number, cron = '*/1 * * * *', label = 'job-') =>
     Array.from({ length: n }, (_, i) =>
       scheduler.create(cron, `${label}${i}`, true),
