@@ -779,9 +779,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         agentWait: { runs },
       });
       await this.commitHarnessCheckpoint(
-        managedCommandId(
-          `harness:await_agent:${this.activation.activationId}:${runs.map((run) => run.childRunId).join(',')}`,
-        ),
+        `harness:await_agent:${this.activation.activationId}:${runs.map((run) => run.childRunId).join(',')}`,
         checkpoint,
         HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -937,9 +935,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         },
       });
       await this.commitHarnessCheckpoint(
-        managedCommandId(
-          `harness:await_command:${this.activation.activationId}:${runs.map((run) => run.commandId).join(',')}`,
-        ),
+        `harness:await_command:${this.activation.activationId}:${runs.map((run) => run.commandId).join(',')}`,
         checkpoint,
         HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -1143,9 +1139,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       const advanced =
         checkpoint.continuation.phase === 'model_output_committed';
       await this.commitHarnessCheckpoint(
-        managedCommandId(
-          `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${commandId}`,
-        ),
+        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${commandId}`,
         checkpoint,
         advanced ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -1410,9 +1404,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           },
         });
         await this.commitHarnessCheckpoint(
-          managedCommandId(
-            `harness:await_runtime:${this.activation.activationId}:${pending.map((request) => request.executionCallId).join(',')}`,
-          ),
+          `harness:await_runtime:${this.activation.activationId}:${pending.map((request) => request.executionCallId).join(',')}`,
           checkpoint,
           HARNESS_DURABLE_WAIT_BOUNDARY,
         );
@@ -1454,9 +1446,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       });
       const resultsReady = checkpoint.continuation.phase === 'results_ready';
       await this.commitHarnessCheckpoint(
-        managedCommandId(
-          `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${executionCallId}`,
-        ),
+        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${executionCallId}`,
         checkpoint,
         resultsReady ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
       );

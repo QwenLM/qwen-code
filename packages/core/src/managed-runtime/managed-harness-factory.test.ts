@@ -123,6 +123,21 @@ function command(operation: string, commandId: string): ManagedSessionCommand {
   };
 }
 
+function checkpointCommandId(workspace: Workspace): string | undefined {
+  return fs.readFile(workspace.transcriptPath, 'utf8').then((content) => {
+    const records = content
+      .trim()
+      .split('\n')
+      .map(
+        (line) =>
+          JSON.parse(line) as { managedSession?: Record<string, unknown> },
+      );
+    return records.findLast(
+      (record) => record.managedSession?.['operation'] === 'commitCheckpoint',
+    )?.managedSession?.['commandId'] as string | undefined;
+  });
+}
+
 async function settleTurnComplete(
   session: ManagedSession,
   turnId = 'turn-1',
@@ -287,6 +302,42 @@ describe('managed harness factory', () => {
       first.identity.checkpointId,
     );
     await session.close();
+  });
+
+  it('bounds prepared adoption and wait command IDs from their full inputs', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    try {
+      const handle = createManagedHarnessHandle(session);
+      await handle.ensureRunnable();
+      const promptId = `arun_${'p'.repeat(64)}:input`;
+      await handle.adoptPreparedContinuation(promptId);
+      const adoptPrefix = `harness:prepared_adopt:${session.activation.activationId}:${promptId}`;
+      const coveredSequence =
+        session.authority.latestCheckpoint?.coveredSequence;
+      const expectedAdoptId = `${adoptPrefix.slice(0, 56)}:sha256:${createHash('sha256').update(`${adoptPrefix}:${coveredSequence}`).digest('hex')}`;
+      expect(await checkpointCommandId(workspace)).toBe(expectedAdoptId);
+
+      const childRunId = 'r'.repeat(128);
+      await handle.commitDurableWait(waitCommit(await waitRefs(session)), {
+        turnId: promptId,
+        promptId,
+      });
+      await decideAction(session);
+      await handle.resolveDurableWait();
+      await handle.commitAwaitAgent([agentWaitRun(childRunId)], {
+        turnId: promptId,
+        promptId,
+      });
+      const waitPrefix = `harness:await_agent:${session.activation.activationId}:${childRunId}`;
+      const expectedWaitId = `${waitPrefix.slice(0, 56)}:sha256:${createHash('sha256').update(`${waitPrefix}:${session.authority.latestCheckpoint?.coveredSequence}`).digest('hex')}`;
+      const waitCommandId = await checkpointCommandId(workspace);
+      expect(waitCommandId).toBe(expectedWaitId);
+      expect(waitCommandId).toHaveLength(128);
+      expect(waitCommandId).not.toBe(expectedAdoptId);
+    } finally {
+      await session.close();
+    }
   });
 
   it('blocks an opaque checkpoint instead of running the Agent', async () => {
