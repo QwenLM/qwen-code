@@ -2878,7 +2878,7 @@ describe('Hosted Harness model boundary', () => {
     ).toEqual([false]);
   });
 
-  it.each(['decision', 'continue'] as const)(
+  it.each(['decision', 'stopReason'] as const)(
     'uses durable model attempt identities and restores a Stop %s block chain across a tool restart',
     async (kind) => {
       const hooks = hostedHooks();
@@ -2898,7 +2898,7 @@ describe('Hosted Harness model boundary', () => {
         event === HookEventName.Stop
           ? kind === 'decision'
             ? { decision: 'block', reason: 'continue' }
-            : { continue: false, stopReason: 'continue' }
+            : { decision: 'block', continue: false, stopReason: 'continue' }
           : undefined,
       );
       const first = config([]);
@@ -3156,7 +3156,7 @@ describe('Hosted Harness model boundary', () => {
   );
 });
 
-it.each(['decision', 'continue'] as const)(
+it.each(['decision', 'stopReason'] as const)(
   'consumes recovered tool results before Stop %s continuation without consuming them twice',
   async (kind) => {
     const model = config([{ type: LlmEventType.Finished }]);
@@ -3173,7 +3173,7 @@ it.each(['decision', 'continue'] as const)(
       if (++stops === 1)
         return kind === 'decision'
           ? { decision: 'block', reason: 'Continue' }
-          : { continue: false, stopReason: 'Continue' };
+          : { decision: 'block', continue: false, stopReason: 'Continue' };
       return undefined;
     });
     const toolTurn = {
@@ -3212,6 +3212,22 @@ it.each(['decision', 'continue'] as const)(
     ).toEqual([false, true]);
   },
 );
+
+it('ends the turn when a Stop hook returns continue: false without a block', async () => {
+  const model = config([{ type: LlmEventType.Finished }]);
+  const hooks = hostedHooks();
+  let stops = 0;
+  hooks.fire.mockImplementation(async (event) =>
+    event === HookEventName.Stop && ++stops === 1
+      ? { continue: false, stopReason: 'Build is red.' }
+      : undefined,
+  );
+  await runHostedHarnessTextTurn({ ...input, hooks: hooks.session });
+  expect(model.sendMessageStream).toHaveBeenCalledOnce();
+  expect(
+    hooks.fire.mock.calls.filter(([event]) => event === HookEventName.Stop),
+  ).toHaveLength(1);
+});
 
 describe('Hosted Harness resume and retraction', () => {
   beforeEach(() => vi.clearAllMocks());

@@ -37,9 +37,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { type ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import * as approvalContinuation from './hosted-approval-continuation.js';
 import { isHostedDurableMcpOwner } from './hosted-mcp-session.js';
+import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
 import { ManagedExtensionRuntime } from './managed-extension-runtime.js';
@@ -2077,8 +2079,18 @@ describe('idle suspension', () => {
     captureBytes: 1024 * 1024,
     publicChildAgentsVersion: 1,
   };
+  // Without tool publication the definition pins no captureBytes, so the
+  // Session runs the older Shell lane: a deferred prepare, and output admitted
+  // through the Session's own publisher.
+  const publicShellLaneSession = {
+    toolProfile: 'hosted-workspace-shell/1',
+    publicChildAgentsVersion: 1,
+  };
 
-  async function mockPublicShellApproval(background = false) {
+  async function mockPublicShellApproval(
+    background = false,
+    shellLane = false,
+  ) {
     mockApprovalTurn();
     const prepareV3 = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'prepareV3')
@@ -2087,14 +2099,15 @@ describe('idle suspension', () => {
         runtimeBindingId: 'binding',
         bindingGeneration: '1',
       });
-    const manifest = await LocalManagedSessionResourceStore.create({
+    const resources = LocalManagedSessionResourceStore.create({
       runtimeBaseDir: state.root,
       sessionKey: {
         tenantId: 'tenant',
         workspaceId: 'workspace',
         sessionId: SESSION_ID,
       },
-    }).publish(
+    });
+    const manifest = await resources.publish(
       'managed-tool-result-manifest',
       Buffer.from(
         JSON.stringify({
@@ -2156,6 +2169,31 @@ describe('idle suspension', () => {
       HostedWorkspaceBroker.prototype,
       'acknowledgeV3',
     ).mockResolvedValue();
+    const prepare = vi.mocked(HostedWorkspaceBroker.prototype.prepare);
+    const execute = vi.mocked(HostedWorkspaceBroker.prototype.execute);
+    if (shellLane) {
+      prepare.mockResolvedValue('shell-execution');
+      execute.mockResolvedValue(envelope as never);
+      const outcomeRef = await resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}'),
+      );
+      vi.spyOn(HostedShellPublisher.prototype, 'receipt').mockResolvedValue({
+        executionCallId: 'shell-execution',
+        manifest,
+        deliveryStatus: 'committed',
+        historyRevision: 1,
+        outcomeRef,
+      });
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'acknowledge',
+      ).mockResolvedValue();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'registerPublisher',
+      ).mockResolvedValue('1');
+    }
     state.publicationRequest.mockImplementation(
       async (
         resourceStore: LocalManagedSessionResourceStore,
@@ -2219,20 +2257,21 @@ describe('idle suspension', () => {
       approvalContinuation,
       'findHostedApprovalContinuation',
     );
-    return { prepareV3, executeV3, saved };
+    return { prepareV3, executeV3, prepare, execute, saved };
   }
 
   async function promptPublicShellApproval(
     server: Server,
     approvalTimeoutMs = 60_000,
     definition: Record<string, unknown> = {},
+    session: Record<string, unknown> = publicShellSession,
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        ...publicShellSession,
+        ...session,
         ...definition,
         approvalMode: 'default',
         approvalTimeoutMs,
@@ -2253,13 +2292,15 @@ describe('idle suspension', () => {
 
   async function savedShellCall(
     saved: Awaited<ReturnType<typeof mockPublicShellApproval>>['saved'],
+    shellLane = false,
   ) {
     const continuation = (await saved.mock.results[0]!.value) as Awaited<
       ReturnType<typeof approvalContinuation.findHostedApprovalContinuation>
     >;
     const call = continuation!.plan.calls[0]!;
     expect(call.call.name).toBe('run_shell_command');
-    expect(call.publicationId).toEqual(expect.any(String));
+    // The Shell lane has no publication, and its plan says so explicitly.
+    expect(call.publicationId).toEqual(shellLane ? null : expect.any(String));
     return { call, input: continuation!.inputs[0]!.input };
   }
 
@@ -2275,15 +2316,19 @@ describe('idle suspension', () => {
     });
 
   it.each(
-    (['park', 'Harness death'] as const).flatMap((interruption) =>
-      (['allow', 'deny', 'expiry', 'mode change'] as const).map(
-        (outcome) => [outcome, interruption] as const,
+    (['publication', 'Shell'] as const).flatMap((lane) =>
+      (['park', 'Harness death'] as const).flatMap((interruption) =>
+        (['allow', 'deny', 'expiry', 'mode change'] as const).map(
+          (outcome) => [outcome, interruption, lane] as const,
+        ),
       ),
     ),
   )(
-    'settles a public-children Shell approval through %s after a %s',
-    async (outcome, interruption) => {
+    'settles a public-children Shell approval through %s after a %s on the %s lane',
+    async (outcome, interruption, lane) => {
       const parks = interruption === 'park';
+      const shellLane = lane === 'Shell';
+      const session = shellLane ? publicShellLaneSession : publicShellSession;
       state.wakeDispatch = parks;
       state.actionParking = parks;
       state.wakeStamps.length = 0;
@@ -2291,7 +2336,8 @@ describe('idle suspension', () => {
         mode: 'default',
         revision: 0,
       });
-      const { prepareV3, executeV3, saved } = await mockPublicShellApproval();
+      const { prepareV3, executeV3, prepare, execute, saved } =
+        await mockPublicShellApproval(false, shellLane);
       const wait = parks
         ? undefined
         : vi
@@ -2311,6 +2357,8 @@ describe('idle suspension', () => {
         const clientId = await promptPublicShellApproval(
           original,
           outcome === 'expiry' ? 1_500 : 60_000,
+          {},
+          session,
         );
         let server = original;
         if (parks) {
@@ -2354,7 +2402,7 @@ describe('idle suspension', () => {
         )
           .send({
             managedSessionStore: store(),
-            ...publicShellSession,
+            ...session,
             driveRuntimeRecovery: true,
           })
           .expect(200);
@@ -2389,7 +2437,18 @@ describe('idle suspension', () => {
 
         if (!parks) expect(state.wakeStamps).toEqual([]);
         const executes = outcome === 'allow' || outcome === 'mode change';
-        if (executes) {
+        if (executes && shellLane) {
+          const { call, input } = await savedShellCall(saved, true);
+          expect(prepareV3).not.toHaveBeenCalled();
+          expect(prepare).toHaveBeenCalledOnce();
+          expect(prepare).toHaveBeenCalledWith(
+            call.runtimeCallId,
+            call.requestDigest,
+            managedToolDigest(input),
+            PROMPT_ID,
+          );
+          expect(execute).toHaveBeenCalledOnce();
+        } else if (executes) {
           const { call } = await savedShellCall(saved);
           expect(prepareV3).toHaveBeenCalledOnce();
           expect(prepareV3).toHaveBeenCalledWith(
@@ -2403,6 +2462,8 @@ describe('idle suspension', () => {
         } else {
           expect(prepareV3).not.toHaveBeenCalled();
           expect(executeV3).not.toHaveBeenCalled();
+          expect(prepare).not.toHaveBeenCalled();
+          expect(execute).not.toHaveBeenCalled();
         }
         const journal = await readSessionJournal();
         const requested = journal.events.filter(

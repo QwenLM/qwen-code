@@ -621,6 +621,40 @@ describe('SettingsMessage UI language scope', () => {
 });
 
 describe('SettingsMessage user-scope editing', () => {
+  it('offers display translation only on the User tab', () => {
+    const displayLanguage: DaemonSettingDescriptor = {
+      key: 'general.displayLanguage',
+      type: 'enum',
+      label: 'Language: Display Translation',
+      category: 'General',
+      requiresRestart: true,
+      default: 'off',
+      options: [
+        { value: 'off', label: 'Off' },
+        { value: 'zh-CN', label: 'Simplified Chinese' },
+      ],
+      values: { effective: 'off', user: 'off', workspace: 'zh-CN' },
+    };
+    const container = renderPanel(
+      makeState([boolSetting(), displayLanguage], vi.fn()),
+    );
+    const trigger = () =>
+      container.querySelector(
+        'button[aria-label="Language: Display Translation"]',
+      );
+    expect(trigger()).toBeNull();
+
+    const userTab =
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]')[1];
+    act(() => {
+      userTab?.focus();
+      userTab?.click();
+    });
+
+    expect(trigger()?.textContent).toContain('Off');
+    expect(container.textContent).not.toContain('Also modified in Workspace');
+  });
+
   it('shows the timeout only on the User tab for a standalone session', () => {
     const container = renderPanel(
       makeState(

@@ -1924,4 +1924,33 @@ describe('ChatSurface', () => {
     expect(s1Commit).toHaveBeenCalledTimes(1);
     expect(captured.editor?.submitDisabled).toBe(false);
   });
+
+  it('defaults host-context integrations closed and forwards opt-in flags and approvalDisabled to AskUserQuestion', () => {
+    const question = permissionRequest('q-disabled');
+    const controller = fakeController({
+      pendingQuestions: [{ id: 'q-disabled', request: question }],
+    });
+    const container = mountReact(
+      <ChatSurface controller={controller} approvalDisabled />,
+    );
+    expect(captured.transcript?.sessionViewportEnabled).toBe(false);
+    expect(captured.editor?.workspaceFeaturesEnabled).toBe(false);
+    expect(captured.editor?.visibleToolbarActions).toEqual([]);
+    expect(captured.question?.disabled).toBe(true);
+
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={controller}
+        approvalDisabled={false}
+        sessionViewportEnabled
+        workspaceFeaturesEnabled
+        visibleToolbarActions={['model', 'voice']}
+      />,
+    );
+    expect(captured.transcript?.sessionViewportEnabled).toBe(true);
+    expect(captured.editor?.workspaceFeaturesEnabled).toBe(true);
+    expect(captured.editor?.visibleToolbarActions).toEqual(['model', 'voice']);
+    expect(captured.question?.disabled).toBe(false);
+  });
 });

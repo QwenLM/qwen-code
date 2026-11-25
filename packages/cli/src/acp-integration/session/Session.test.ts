@@ -135,6 +135,7 @@ import {
   REPEATED_TOOL_FAILURE_STOP_MESSAGE,
 } from './repeated-tool-failure-guard.js';
 import type { DaemonTodoStopGuard } from './daemon-todo-stop-guard.js';
+import { AcpModSession } from './acp-mod-session.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const readActualSettingsSnapshot = settingsModule.readSettingsSnapshot;
@@ -6791,6 +6792,34 @@ describe('Session', () => {
       ]);
     });
 
+    it('emits a shared Stop hook reason outside the assistant reply', async () => {
+      const answer = '{"ok":true}';
+      const stopReason = 'Build is red.';
+      const send = useSharedRounds([
+        text(answer),
+        finished(),
+        {
+          type: core.LlmEventType.HookSystemMessage,
+          value: stopReason,
+          isStopReason: true,
+        },
+      ]);
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(agentText()).toEqual([answer]);
+      expect(updates()).toContainEqual({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'stop_hook_notice',
+          qwenDiscreteMessage: true,
+          stopReason,
+        },
+      });
+    });
+
     it.each([false, true])(
       'runs completion memory work when the client ends at the Stop hook cap (channel turn: %s)',
       async (channel) => {
@@ -11481,7 +11510,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { isSessionTurn: true, promptId },
+          { isSessionTurn: true, retractToolCallsOnRetry: true, promptId },
         );
         expect(
           mockChatRecordingService.recordUserMessage,
@@ -11715,7 +11744,10 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toEqual({ isSessionTurn: true });
+      expect(sendOptions).toEqual({
+        isSessionTurn: true,
+        retractToolCallsOnRetry: true,
+      });
     });
 
     it('does not re-lend an id that is still live after a retry strips only a continuation', async () => {
@@ -11755,7 +11787,10 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toEqual({ isSessionTurn: true });
+      expect(sendOptions).toEqual({
+        isSessionTurn: true,
+        retractToolCallsOnRetry: true,
+      });
     });
 
     it('re-lends the newest stripped id when a retry strips two orphans', async () => {
@@ -11791,6 +11826,7 @@ describe('Session', () => {
         .calls[0][4];
       expect(sendOptions).toEqual({
         isSessionTurn: true,
+        retractToolCallsOnRetry: true,
         promptId: 'test-session-id########7',
       });
     });
@@ -21990,7 +22026,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        { isSessionTurn: false },
+        { isSessionTurn: false, retractToolCallsOnRetry: true },
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -25469,7 +25505,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        { isSessionTurn: false },
+        { isSessionTurn: false, retractToolCallsOnRetry: true },
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -26640,7 +26676,11 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { isSessionTurn: true, promptId: 'test-session-id########1' },
+        {
+          isSessionTurn: true,
+          retractToolCallsOnRetry: true,
+          promptId: 'test-session-id########1',
+        },
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
@@ -26648,7 +26688,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { isSessionTurn: true },
+        { isSessionTurn: true, retractToolCallsOnRetry: true },
       );
       expect(resolveForModel).toHaveBeenCalledWith(
         'vision-agent\0https://vision.example.com/v1',
@@ -26672,7 +26712,11 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { isSessionTurn: true, promptId: 'test-session-id########2' },
+        {
+          isSessionTurn: true,
+          retractToolCallsOnRetry: true,
+          promptId: 'test-session-id########2',
+        },
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -30681,7 +30725,11 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
       });
 
@@ -30801,7 +30849,11 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
       });
 
@@ -31137,7 +31189,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -31253,7 +31309,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { isSessionTurn: true, promptId: expect.any(String) },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: expect.any(String),
+          },
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
 
@@ -43004,6 +43064,59 @@ describe('Session', () => {
         ).toMatchObject({ goal: { goalId: 'goal-2' } });
       });
 
+      it('cancels old Mod work when /clear switches sessions', async () => {
+        const invalidateTools = vi.fn();
+        const syncSession = vi.fn().mockResolvedValue(undefined);
+        const createMods = vi.spyOn(AcpModSession, 'create').mockReturnValue({
+          admit: vi.fn().mockResolvedValue(undefined),
+          invalidateTools,
+          syncSession,
+          close: vi.fn().mockResolvedValue(undefined),
+        } as unknown as AcpModSession);
+        session.installMods();
+        createMods.mockRestore();
+
+        let finishSwitch!: () => void;
+        const switched = new Promise<void>((resolve) => {
+          finishSwitch = resolve;
+        });
+        let finishReset!: () => void;
+        const reset = new Promise<void>((resolve) => {
+          finishReset = resolve;
+        });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(
+          async (_query, _abort, _config, _settings, hooks) => {
+            vi.mocked(mockConfig.getSessionId).mockReturnValue(
+              'new-session-id',
+            );
+            hooks?.startNewSession?.('new-session-id');
+            finishSwitch();
+            await reset;
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Cleared.',
+            };
+          },
+        );
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/clear' }],
+        });
+        try {
+          await Promise.race([switched, prompt]);
+          expect(invalidateTools).toHaveBeenCalledOnce();
+          expect(syncSession).not.toHaveBeenCalled();
+        } finally {
+          finishReset();
+          await prompt;
+        }
+        expect(syncSession).toHaveBeenCalledOnce();
+      });
+
       // R20-9: `/clear` swaps in a fresh recorder inside its action, so its
       // user-turn record must land BEFORE the action runs — otherwise the
       // deferred record is written into the NEW session's transcript.
@@ -43453,7 +43566,7 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
-          { isSessionTurn: true },
+          { isSessionTurn: true, retractToolCallsOnRetry: true },
         );
         expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
           'goal-runtime:turn-1',
@@ -45876,7 +45989,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          { isSessionTurn: true },
+          { isSessionTurn: true, retractToolCallsOnRetry: true },
         );
       });
 
@@ -45993,7 +46106,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          { isSessionTurn: true, promptId: 'test-session-id########1' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########1',
+          },
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
@@ -46108,7 +46225,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { isSessionTurn: true, promptId: 'test-session-id########2' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########2',
+          },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -46360,7 +46481,11 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { isSessionTurn: true, promptId: 'test-session-id########2' },
+          {
+            isSessionTurn: true,
+            retractToolCallsOnRetry: true,
+            promptId: 'test-session-id########2',
+          },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });
@@ -48189,14 +48314,143 @@ describe('Session', () => {
       );
     });
 
+    it.each(['ordinary', 'standalone'] as const)(
+      'adds permitted rules from a PermissionRequest hook in a %s session',
+      async (sourceType) => {
+        if (sourceType === 'standalone') {
+          session.dispose();
+          vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+            'standalone',
+          );
+          vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+          const expectation = {
+            canonicalSessionId: 'test-session-id',
+            root: { canonicalPath: '/managed', device: 1, inode: 2 },
+            child: {
+              name: 'child',
+              canonicalPath: '/managed/child',
+              device: 1,
+              inode: 3,
+            },
+          };
+          session.installPendingManagedConversationBinding(
+            expectation,
+            vi.fn().mockResolvedValue(undefined),
+          );
+          await session.commitManagedConversationBinding(expectation);
+          await session.releaseManagedConversationBinding(expectation);
+        }
+        const hookSpy = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: true,
+            updatedPermissions: [
+              'projectSettings',
+              'localSettings',
+              'userSettings',
+            ].map((destination) => ({
+              type: 'addRules',
+              rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+              behavior: 'allow',
+              destination,
+            })),
+          });
+        const persistRule = vi.fn().mockResolvedValue(undefined);
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        const invocation = {
+          params: { command: 'npm test' },
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: 'npm test',
+            rootCommand: 'npm',
+            onConfirm: vi.fn().mockResolvedValue(undefined),
+          }),
+          getDescription: vi.fn().mockReturnValue('npm test'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.SHELL,
+          kind: core.Kind.Execute,
+          build: vi.fn().mockReturnValue(invocation),
+        });
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-hook-permission-updates',
+                    name: core.ToolNames.SHELL,
+                    args: { command: 'npm test' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'run the tests' }],
+          });
+        } finally {
+          hookSpy.mockRestore();
+        }
+
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(persistRule.mock.calls).toEqual(
+          sourceType === 'standalone'
+            ? [['user', 'allow', 'Bash(npm test)']]
+            : [
+                ['project', 'allow', 'Bash(npm test)'],
+                ['project', 'allow', 'Bash(npm test)'],
+                ['user', 'allow', 'Bash(npm test)'],
+              ],
+        );
+        expect(executeSpy).toHaveBeenCalledOnce();
+      },
+    );
+
     it('rejects permission-hook rewrites of unknown Plan shell commands', async () => {
       const rawCommand = "python -c 'print(1)'";
+      const persistRule = vi.fn().mockResolvedValue(undefined);
       const hookSpy = vi
         .spyOn(core, 'firePermissionRequestHook')
         .mockResolvedValue({
           hasDecision: true,
           shouldAllow: true,
           updatedInput: { command: 'touch changed.txt' },
+          updatedPermissions: [
+            {
+              type: 'addRules',
+              rules: [{ toolName: 'WebFetch' }],
+              behavior: 'allow',
+              destination: 'userSettings',
+            },
+          ],
         });
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const executeSpy = vi.fn();
@@ -48222,6 +48476,7 @@ describe('Session', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
@@ -48258,6 +48513,7 @@ describe('Session', () => {
         }),
       );
       expect(executeSpy).not.toHaveBeenCalled();
+      expect(persistRule).not.toHaveBeenCalled();
     });
 
     it('rejects ACP shell args mutated while building the invocation', async () => {
@@ -51091,6 +51347,56 @@ describe('Session', () => {
           ]);
         });
 
+        it('ends the turn and emits stopReason separately from the assistant reply', async () => {
+          const answer = '{"ok":true}';
+          const stopReason = 'Build is red.';
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { continue: false, stopReason },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([{ role: 'model', parts: [{ text: answer }] }]);
+          mockChat.getLastModelMessageText = vi.fn().mockReturnValue(answer);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: answer }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(agentMessageChunks().filter(Boolean)).toEqual([answer]);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                source: 'stop_hook_notice',
+                qwenDiscreteMessage: true,
+                stopReason,
+              },
+            },
+          });
+        });
+
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
           const messageBus = {
             request: vi.fn().mockImplementation(async (request) => ({
@@ -51643,6 +51949,29 @@ describe('Session', () => {
           });
 
           describe('from a PermissionRequest hook', () => {
+            const replacementInput = { path: '/tmp/c.txt' };
+
+            function mockHookPermissionUpdates(
+              updatedInput?: Record<string, unknown>,
+            ) {
+              const persistRule = vi.fn().mockResolvedValue(undefined);
+              mockConfig.getOnPersistPermissionRule = vi.fn(() => persistRule);
+              vi.mocked(core.firePermissionRequestHook).mockResolvedValue({
+                hasDecision: true,
+                shouldAllow: true,
+                updatedInput,
+                updatedPermissions: [
+                  {
+                    type: 'addRules',
+                    rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+                    behavior: 'allow',
+                    destination: 'userSettings',
+                  },
+                ],
+              });
+              return persistRule;
+            }
+
             beforeEach(() => {
               vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
                 shouldProceed: true,
@@ -51650,11 +51979,12 @@ describe('Session', () => {
               vi.spyOn(core, 'firePermissionRequestHook').mockResolvedValue({
                 hasDecision: true,
                 shouldAllow: true,
-                updatedInput: { path: '/tmp/c.txt' },
+                updatedInput: replacementInput,
               });
             });
 
             it('runs a valid replacement with its own confirmation', async () => {
+              const persistRule = mockHookPermissionUpdates(replacementInput);
               const { tool, executed, confirmed } = writeTool();
               await promptWith({ path: '/tmp/a.txt' });
 
@@ -51663,9 +51993,78 @@ describe('Session', () => {
                 ['/tmp/c.txt', core.ToolConfirmationOutcome.ProceedOnce],
               ]);
               expect(executed).toEqual(['/tmp/c.txt']);
+              expect(persistRule).toHaveBeenCalledExactlyOnceWith(
+                'user',
+                'allow',
+                'Bash(npm test)',
+              );
               expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
               expect(mockClient.requestPermission).not.toHaveBeenCalled();
             });
+
+            it.each(['tool policy', 'YOLO'])(
+              'skips rule updates when %s allows the replacement',
+              async (allowedBy) => {
+                const persistRule = mockHookPermissionUpdates(replacementInput);
+                const { executed, confirmed } = writeTool((params) => ({
+                  getDefaultPermission: async () => {
+                    if (params['path'] !== replacementInput.path) return 'ask';
+                    if (allowedBy === 'YOLO') {
+                      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+                        ApprovalMode.YOLO,
+                      );
+                      return 'ask';
+                    }
+                    return 'allow';
+                  },
+                }));
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual([replacementInput.path]);
+                expect(confirmed).toEqual([
+                  [
+                    replacementInput.path,
+                    core.ToolConfirmationOutcome.ProceedOnce,
+                  ],
+                ]);
+                expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+                expect(mockClient.requestPermission).not.toHaveBeenCalled();
+                expect(persistRule).not.toHaveBeenCalled();
+              },
+            );
+
+            it.each([false, true])(
+              'skips rule updates when AUTO_EDIT allows the final input (replacement: %s)',
+              async (replaceInput) => {
+                const originalInput = { path: '/tmp/a.txt' };
+                const persistRule = mockHookPermissionUpdates(
+                  replaceInput ? replacementInput : undefined,
+                );
+                if (replaceInput) {
+                  mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+                    isToolEnabled: vi.fn().mockResolvedValue(true),
+                    hasRelevantRules: () => true,
+                    hasMatchingAskRule: (ctx: { filePath?: string }) =>
+                      ctx.filePath === originalInput.path,
+                    evaluate: async (ctx: { filePath?: string }) =>
+                      ctx.filePath === originalInput.path ? 'ask' : 'default',
+                  });
+                }
+                const { executed, confirmed } = writeTool();
+                const finalInput = replaceInput
+                  ? replacementInput
+                  : originalInput;
+                await promptWith(originalInput, ApprovalMode.AUTO_EDIT);
+
+                expect(executed).toEqual([finalInput.path]);
+                expect(confirmed).toEqual([
+                  [finalInput.path, core.ToolConfirmationOutcome.ProceedOnce],
+                ]);
+                expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+                expect(mockClient.requestPermission).not.toHaveBeenCalled();
+                expect(persistRule).not.toHaveBeenCalled();
+              },
+            );
 
             it('denies a replacement that a permission rule denies', async () => {
               mockConfig.getPermissionManager = vi.fn().mockReturnValue({
@@ -51697,20 +52096,23 @@ describe('Session', () => {
             });
 
             it.each([
-              ['blocked', { shouldBlock: true, unavailable: false }, []],
+              ['blocked', { shouldBlock: true, unavailable: false }, [], 0],
               [
                 'approved',
                 { shouldBlock: false, unavailable: false },
                 ['/tmp/c.txt'],
+                0,
               ],
               [
                 'unavailable',
                 { shouldBlock: true, unavailable: true },
                 ['/tmp/c.txt'],
+                1,
               ],
             ])(
               'classifies a replacement in AUTO mode (%s) before its one-time allow',
-              async (_label, verdict, expectedExecuted) => {
+              async (_label, verdict, expectedExecuted, expectedWrites) => {
+                const persistRule = mockHookPermissionUpdates(replacementInput);
                 let denialState: core.AutoModeDenialState = {
                   consecutiveBlock: 0,
                   consecutiveUnavailable: 0,
@@ -51753,6 +52155,7 @@ describe('Session', () => {
                 expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
                 expect(core.firePreToolUseHook).toHaveBeenCalledOnce();
                 expect(executed).toEqual(expectedExecuted);
+                expect(persistRule).toHaveBeenCalledTimes(expectedWrites);
                 if (expectedExecuted.length === 0) {
                   recordedError('test decision');
                 }
@@ -71006,6 +71409,126 @@ describe('Session', () => {
 
       await session.cancelPendingPrompt();
       expect(capturedSignal!.aborted).toBe(true);
+    });
+  });
+
+  describe('transport failure cause and tool-call retry options', () => {
+    it('passes retractToolCallsOnRetry to chat.sendMessageStream', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Object),
+        expect.any(String),
+        undefined,
+        expect.objectContaining({
+          isSessionTurn: true,
+          retractToolCallsOnRetry: true,
+        }),
+      );
+    });
+
+    it('preserves error.cause in RequestError and recorded turn_result on transport failure', async () => {
+      const socketErr = Object.assign(new Error('other side closed'), {
+        code: 'UND_ERR_SOCKET',
+      });
+      const terminatedErr = Object.assign(new TypeError('terminated'), {
+        cause: socketErr,
+      });
+      mockChat.sendMessageStream = vi.fn().mockRejectedValue(terminatedErr);
+
+      let rejection: unknown;
+      try {
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'prompt-cause-1',
+            originatorClientId: 'client-1',
+          },
+        );
+      } catch (err) {
+        rejection = err;
+      }
+
+      expect(rejection).toBeInstanceOf(RequestError);
+      const rpcErr = rejection as RequestError;
+      expect(rpcErr.code).toBe(-32603);
+      expect(rpcErr.message).toBe(
+        'terminated (cause: UND_ERR_SOCKET: other side closed)',
+      );
+      expect(rpcErr.data).toEqual({
+        details: 'terminated (cause: UND_ERR_SOCKET: other side closed)',
+      });
+      expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          promptId: 'prompt-cause-1',
+          state: 'error',
+          error: {
+            code: '-32603',
+            message: 'terminated (cause: UND_ERR_SOCKET: other side closed)',
+          },
+        }),
+        expect.stringContaining('test-session-id########'),
+      );
+    });
+
+    it('passes retractToolCallsOnRetry on the unified agent loop path', async () => {
+      const sendSpy = vi.fn(async function* () {
+        yield {
+          type: core.LlmEventType.Finished,
+          value: { reason: FinishReason.STOP },
+        };
+        return {};
+      });
+      Object.assign(mockLlmClient, {
+        admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+        sendMessageStream: sendSpy,
+      });
+      mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello unified' }],
+      });
+
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          toolCallPreparations: true,
+          retractToolCallsOnRetry: true,
+        }),
+      );
+    });
+
+    it('does not wrap a cause-less long Error into RequestError solely due to truncation', async () => {
+      const longErr = new Error('x'.repeat(1200));
+      mockChat.sendMessageStream = vi.fn().mockRejectedValue(longErr);
+
+      let rejection: unknown;
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+      } catch (err) {
+        rejection = err;
+      }
+
+      expect(rejection).toBe(longErr);
     });
   });
 });

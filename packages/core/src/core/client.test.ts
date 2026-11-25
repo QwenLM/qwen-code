@@ -13701,6 +13701,34 @@ Other open files:
         );
       });
 
+      it('passes retractToolCallsOnRetry to the Turn constructor and preserves it across stop-policy continuations', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        let turnCall = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          turnCall += 1;
+          return textTurn(turnCall === 1 ? 'first' : 'continued');
+        });
+        let policyCalls = 0;
+        const stopPolicy = {
+          continueAt: vi.fn(async () => {
+            policyCalls += 1;
+            return policyCalls === 1 ? [{ text: 'keep going' }] : undefined;
+          }),
+        };
+
+        await run([{ text: 'acp turn' }], 'session########8', {
+          type: SendMessageType.UserQuery,
+          retractToolCallsOnRetry: true,
+          stopPolicies: [stopPolicy],
+        });
+
+        expect(mockTurnConstructorFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnConstructorFn.mock.calls[0]?.[12]).toBe(true);
+        expect(mockTurnConstructorFn.mock.calls[1]?.[12]).toBe(true);
+      });
+
       it('excludes a concurrent side query and its unflagged continuation', async () => {
         retryChat({
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
@@ -14336,6 +14364,42 @@ Other open files:
             'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
         });
       });
+
+      it.each([false, true])(
+        'ends the turn and shows stopReason when a Stop hook returns continue: false without a block (goal permit: %s)',
+        async (withGoal) => {
+          const goal = withGoal ? installGoalRuntime() : undefined;
+          installMessageBus(
+            vi.fn().mockResolvedValue({
+              output: { continue: false, stopReason: 'Build is red.' },
+              stopHookCount: 1,
+            }),
+            'Stop',
+          );
+          notDoneChat();
+          mockTurnRunFn.mockReturnValue(textTurn('not done'));
+
+          const events = await run(
+            [{ text: 'Hi' }],
+            'prompt-stop-continue-false',
+            goal
+              ? {
+                  type: SendMessageType.UserQuery,
+                  goalPermit: goal.permit,
+                  goalTurnKey: 'goal-runtime:turn-1',
+                }
+              : undefined,
+          );
+
+          expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
+          expect(events).not.toContainEqual(stopHookLoop);
+          expect(events).toContainEqual({
+            type: LlmEventType.HookSystemMessage,
+            value: 'Build is red.',
+            isStopReason: true,
+          });
+        },
+      );
 
       it('gives a blocking Stop hook continuation a fresh per-turn tool-call budget', async () => {
         // First Stop check blocks (like a /goal "not met" verdict); the

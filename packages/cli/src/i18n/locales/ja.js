@@ -1632,6 +1632,7 @@ export default {
   'Auto-connect to IDE': 'IDE に自動接続',
   'Language: UI': '言語: UI',
   'Language: Model': '言語: モデル',
+  'Language: Display Translation': '言語: 表示翻訳',
   'Show Line Numbers in Code': 'コードの行番号を表示',
   'Show Welcome Back Dialog': 'おかえりダイアログを表示',
   'Enable User Feedback': 'ユーザーフィードバックを有効化',

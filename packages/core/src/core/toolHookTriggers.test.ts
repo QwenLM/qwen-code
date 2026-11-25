@@ -425,6 +425,18 @@ describe('toolHookTriggers', () => {
       );
     });
 
+    it('returns the permission updates of an allow, not of a deny', async () => {
+      const updatedPermissions = [
+        { type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'allow' },
+      ];
+      expect(
+        await permission({ behavior: 'allow', updatedPermissions }),
+      ).toEqual({ hasDecision: true, shouldAllow: true, updatedPermissions });
+      expect(
+        await permission({ behavior: 'deny', updatedPermissions }),
+      ).not.toHaveProperty('updatedPermissions');
+    });
+
     it.each([null, false, 0, '', ['a']])(
       'denies an invalid replacement %j',
       async (updatedInput) => {
