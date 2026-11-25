@@ -22,12 +22,11 @@ import java.nio.charset.StandardCharsets;
  */
 public record SessionPrincipal(String tenantId, String userId,
         String actorSubjectId) {
-    // One contract with the tenant filter: WorkspaceValues.requireText
-    // admits 512 code points, and their worst case is 2048 UTF-8 bytes
-    // (512 supplementary code points). A narrower principal bound would
-    // admit an actor on every other route and then reject its own Session
-    // creation as invalid_actor. The ownership columns hold 2048 bytes each.
-    private static final int MAX_COMPONENT_BYTES = 2048;
+    // Bounded to match ma_session_principal VARCHAR(255) columns and
+    // ma_request_receipt.actor_id VARCHAR(515) (user + NUL + flag + NUL + subject).
+    // Every filter-admitted actor (WorkspaceValues 36 UTF-16 units) stays well
+    // inside this ceiling.
+    private static final int MAX_COMPONENT_CHARS = 255;
 
     public SessionPrincipal {
         if (tenantId == null || tenantId.isBlank()
@@ -126,8 +125,7 @@ public record SessionPrincipal(String tenantId, String userId,
                         "The " + name + " must not contain control characters.");
             }
         }
-        if (value.getBytes(StandardCharsets.UTF_8).length
-                > MAX_COMPONENT_BYTES) {
+        if (value.length() > MAX_COMPONENT_CHARS) {
             throw new ManagedAgentException(400,
                     "invalid_actor",
                     "The " + name + " is too long.");

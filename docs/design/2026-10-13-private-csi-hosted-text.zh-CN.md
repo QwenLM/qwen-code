@@ -2,6 +2,8 @@
 
 [English](2026-10-13-private-csi-hosted-text.md) | [简体中文](2026-10-13-private-csi-hosted-text.zh-CN.md)
 
+> **已归档。** 服务端私有 CSI 后端已由 [#17415](https://github.com/QwenLM/qwen-code/pull/17415) 冷归档；[#17427](https://github.com/QwenLM/qwen-code/issues/17427) 退役了本文描述的 TypeScript 客户端（`hosted-csi-*` 会话路由、工具轮次与批量恢复），并移除 `QWEN_HOSTED_CSI_SESSION_STORE_URL` 接入选项。本文作为历史设计记录保留。
+
 ## 状态与来源
 
 这是从 #13526 拆出的可独立评审 feature。当前目标为 main，基线提交

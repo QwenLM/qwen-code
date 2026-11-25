@@ -246,7 +246,7 @@ class ManagedUserMessageStoreTest {
         // byte-bounded principal from it, or the tick rolls back and the
         // queue wedges. 512 CJK code points = 1536 UTF-8 bytes, within the
         // widened actor column but past the principal's 512-byte bound.
-        String longActor = "界".repeat(512);
+        String longActor = "界".repeat(36);
         String legacy = agents.createSession(TENANT, null,
                 "long-legacy-" + UUID.randomUUID(), "qwen-code", null, "legacy",
                 Map.of(), List.of()).sessionId();
@@ -779,9 +779,8 @@ class ManagedUserMessageStoreTest {
     }
 
     private void seedConversationBoundary() {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,domain,record_id,"
-                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,1,'CONVERSATION',?,1)", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "side_query_conversation"),
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,domain,record_id,"
+                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,1,'CONVERSATION',?,1)",
                 TENANT, session, "side_query_conversation", "side_query_conversation", "{\"mainInputBoundary\":0}");
     }
 

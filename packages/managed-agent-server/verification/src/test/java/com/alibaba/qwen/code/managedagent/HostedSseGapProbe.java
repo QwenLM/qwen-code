@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -137,15 +136,14 @@ final class HostedSseGapProbe implements AutoCloseable {
         }
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
         String storage = "storage-0";
-        var member = jdbc.queryForMap("SELECT m.execution_storage_key, m.is_rewind_pending, s.physical_key"
+        var member = jdbc.queryForMap("SELECT m.execution_storage_id, m.is_rewind_pending, s.physical_id"
                 + " FROM ma_runtime_session m JOIN ma_storage s ON s.tenant_id = m.tenant_id"
-                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?"
+                + " WHERE s.tenant_id = ? AND s.storage_id = ?"
                 + " AND m.harness_session_id = ? AND m.binding_id = ?"
                 + " AND m.runtime_generation = ? AND m.runtime_session_id = ?",
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage),
                 tenant, storage, session, execution.get("binding_id"), execution.get("runtime_generation"), promptId);
-        assertThat(member.get("physical_key")).isNotNull();
-        assertThat(member.get("execution_storage_key")).isEqualTo(finished ? null : member.get("physical_key"));
+        assertThat(member.get("physical_id")).isNotNull();
+        assertThat(member.get("execution_storage_id")).isEqualTo(finished ? null : member.get("physical_id"));
         assertThat(member.get("is_rewind_pending")).isEqualTo(false);
         assertThat(execution.get("turn_id")).isEqualTo(promptId);
         assertThat(execution.get("runtime_session_id")).isEqualTo(promptId);

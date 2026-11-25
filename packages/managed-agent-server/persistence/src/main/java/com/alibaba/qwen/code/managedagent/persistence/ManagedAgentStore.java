@@ -68,6 +68,7 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     private final AgentLifecycleOperations lifecycleOperations;
     private final AgentSessionAdmissions sessionAdmissions;
     private final AgentTurnExecution turnExecution;
+    private final AgentActionParking actionParking;
     private final AgentExecutionOperations executionOperations;
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper, Clock clock,
@@ -132,6 +133,7 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
         this.lifecycleOperations = assembly.lifecycleOperations();
         this.sessionAdmissions = assembly.sessionAdmissions();
         this.turnExecution = assembly.turnExecution();
+        this.actionParking = assembly.actionParking();
         this.executionOperations = assembly.executionOperations();
     }
 
@@ -872,6 +874,13 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             String sessionId, String turnId, String owner, String message,
             long retryAfter) {
         return turnExecution.parkTurnForRuntimeRecovery(tenantId, sessionId, turnId, owner, message, retryAfter);
+    }
+
+    @Override
+    @Transactional
+    public boolean parkTurnForAction(String tenantId, String sessionId,
+            String turnId, String owner) {
+        return actionParking.parkTurnForAction(tenantId, sessionId, turnId, owner);
     }
 
     @Override

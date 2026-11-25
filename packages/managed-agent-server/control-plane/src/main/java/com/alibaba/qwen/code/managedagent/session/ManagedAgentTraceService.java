@@ -80,7 +80,7 @@ public class ManagedAgentTraceService {
             item.set("settledAt", json.valueToTree(projection.settledAt()));
             Optional<TaskTarget> target;
             try {
-                target = records.findTaskTarget(tenant, sessionId, task.taskId());
+                target = records.findTaskTargetByRecord(tenant, sessionId, task.domain(), task.recordId());
             } catch (ManagedAgentException error) {
                 if (error.getStatus() != 409) {
                     throw error;
@@ -102,7 +102,7 @@ public class ManagedAgentTraceService {
                 String previousTask = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.taskId(
                         com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", predecessor));
                 try {
-                    var previous = records.findTaskTarget(tenant, sessionId, previousTask);
+                    var previous = records.findTaskTargetByRecord(tenant, sessionId, "child_run", predecessor);
                     if (previous.isPresent() && "child_agent".equals(previous.get().kind())) {
                         item.put("predecessorTaskId", previousTask);
                     }

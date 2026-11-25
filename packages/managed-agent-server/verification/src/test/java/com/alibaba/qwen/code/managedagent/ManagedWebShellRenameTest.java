@@ -256,7 +256,7 @@ class ManagedWebShellRenameTest {
     }
 
     private static String tenant() {
-        return "tenant-web-rename-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 
     private static com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor tenantActor(String tenant) {

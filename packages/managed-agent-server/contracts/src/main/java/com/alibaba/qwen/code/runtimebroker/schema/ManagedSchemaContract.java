@@ -42,6 +42,7 @@ public final class ManagedSchemaContract {
                     "ma_runtime_binding",
                     "ma_runtime_session",
                     "ma_tool_execution",
+                    "ma_runtime_stage",
                     "ma_tenant_guard",
                     "ma_storage_owner",
                     "ma_read_lease",
@@ -133,7 +134,8 @@ public final class ManagedSchemaContract {
         OPERATION_WORK,
         RECOVERY,
         HOSTED_CLEANUP,
-        SIDE_QUERY
+        SIDE_QUERY,
+        RUNTIME_STAGE
     }
 
     public enum DeliveryKind {

@@ -2759,7 +2759,9 @@ describe('qwen-triage verify scratch isolation (#17037)', () => {
     expect(run).toContain(
       "VERIFY_SCRATCH: '${{ steps.verify_scratch.outputs.dir }}'",
     );
-    expect(run).toContain('"TMPDIR=$VERIFY_SCRATCH"');
+    expect(run).toContain(
+      '"TMPDIR=${VERIFY_SCRATCH:?verify scratch directory was not prepared}"',
+    );
     expect(run).toContain(
       'Store all temporary verification clones, A/B worktrees, install trees, and test files under TMPDIR=${VERIFY_SCRATCH}.',
     );
@@ -2774,6 +2776,57 @@ describe('qwen-triage verify scratch isolation (#17037)', () => {
     expect(stepIn('verify', 'Clean up runner workspace')).toContain(
       '"$WS_ABS"/tmp/*) git worktree remove --force',
     );
+  });
+
+  it('pins the producer id and the ownership hand-off the run step depends on', () => {
+    const prepare = stepIn('verify', 'Prepare verify scratch directory');
+    const run = stepIn('verify', 'Run verification agent');
+
+    // GitHub evaluates an unknown `steps.<id>.outputs.*` to the empty string
+    // instead of failing, so the id the run step reads is the only runtime
+    // link between the two steps; renaming it on the producer leaves the
+    // reference intact and silently hands the agent an empty TMPDIR.
+    expect(prepare).toContain("id: 'verify_scratch'");
+    expect(run).toContain('steps.verify_scratch.outputs.dir');
+
+    // `mktemp -d` mints a root-owned 0700 directory while the agent runs as
+    // `node`; this chown is the only thing that makes the scratch writable,
+    // and nothing later in the run step re-chowns it.
+    expect(prepare).toContain('chown node:node "$scratch"');
+  });
+
+  it('refuses to start the agent with an empty VERIFY_SCRATCH', () => {
+    // Executes the literal the workflow uses, not a copy of it: set -u alone
+    // does not catch this, because the step-level `env:` supplies an empty
+    // string rather than an unset variable.
+    const literal = stepIn('verify', 'Run verification agent')
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('"TMPDIR=${VERIFY_SCRATCH'));
+    expect(literal, 'guarded TMPDIR assignment').toBeDefined();
+    const script = [
+      'set -u',
+      `QWEN_ENV=(${literal})`,
+      'printf "%s" "${QWEN_ENV[0]}"',
+    ].join('\n');
+    const empty = spawnSync(
+      'bash',
+      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+      { encoding: 'utf8', env: { ...process.env, VERIFY_SCRATCH: '' } },
+    );
+    expect(empty.status).not.toBe(0);
+    expect(empty.stderr).toContain('verify scratch directory was not prepared');
+
+    const set = spawnSync(
+      'bash',
+      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, VERIFY_SCRATCH: '/tmp/qwen-scratch' },
+      },
+    );
+    expect(set.status, set.stderr).toBe(0);
+    expect(set.stdout).toBe('TMPDIR=/tmp/qwen-scratch');
   });
 
   it('reclaims prior and current scratch directories without touching neighbors', () => {

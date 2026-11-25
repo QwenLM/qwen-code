@@ -15,7 +15,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Command;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -139,14 +138,12 @@ class SessionPrincipalOwnershipTest {
     void legacyActorlessSessionStaysReadableByAFilterCeilingActor() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {
-            // `TenantContextFilter` admits up to 512 code points; R9-1 made
-            // the principal byte bound admit that same ceiling (512 CJK
-            // characters are 1536 bytes). A legacy Session with no ownership
-            // row must stay readable for that actor.
+            // `TenantContextFilter` admits up to 36 UTF-16 units (de-hash #18058).
+            // A legacy Session with no ownership row must stay readable for that actor.
             String legacy = f.service.createSession("tenant", null,
                     "legacy", "qwen-code", null, "shared", Map.of(), List.of())
                     .sessionId();
-            String longActor = "界".repeat(512);
+            String longActor = "界".repeat(36);
             assertThat(f.service.getPublicSession("tenant", longActor, legacy).id())
                     .isEqualTo(legacy);
             // The bound side keeps its existing behaviour: the same actor
@@ -295,31 +292,29 @@ class SessionPrincipalOwnershipTest {
 
     // R9-1 (fix-induced): the widest principal the tenant filter admits can
     // create a Session, and its submit/cancel must also reach the operation
-    // ledger. The 4099-byte receipt stamp does not fit ma_operation.actor_key
-    // (VARBINARY(2048) inside the unique request index), so the ledger keys an
-    // over-wide stamp by its SHA-256 digest while the receipt keeps the full
-    // stamp for the byte-for-byte replay comparison.
+    // ledger. Under de-hash (#18058), the filter ceiling is 36 UTF-16 units
+    // (18 supplementary code points); ma_request_receipt.actor_id keeps the
+    // full NUL-delimited stamp while ma_operation.actor_id (VARCHAR(36))
+    // records the owning user id.
     @Test
     void filterCeilingPrincipalSubmitsAndCancelsThroughTheOperationLedger() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {
-            String widest = "𝄞".repeat(512);
+            String widest = "𝄞".repeat(18);
             var principal = SessionPrincipal.of("tenant", widest, widest);
             String id = f.create(principal, "ceiling-create");
             var input = List.of(new com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock("text", "hello"));
             var turn = f.service.submitTurn(principal, "ceiling-submit", id, input);
             assertThat(f.service.submitTurn(principal, "ceiling-submit", id, input).replayed()).isTrue();
             f.service.cancelTurn(principal, "ceiling-cancel", id, turn.turnId());
-            byte[] stamp = principal.receiptActorKey();
-            assertThat(stamp).hasSize(4099);
+            String stamp = new String(principal.receiptActorKey(), StandardCharsets.UTF_8);
             assertThat(f.jdbc.queryForObject(
                     "SELECT actor_id FROM ma_request_receipt WHERE operation='SUBMIT_TURN'",
-                    byte[].class)).isEqualTo(stamp);
-            byte[] ledgerKey = DigestUtils.sha256Hex(stamp).getBytes(StandardCharsets.UTF_8);
+                    String.class)).isEqualTo(stamp);
             for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
                 assertThat(f.jdbc.queryForObject(
-                        "SELECT actor_key FROM ma_operation WHERE operation_kind=?",
-                        byte[].class, kind)).isEqualTo(ledgerKey);
+                        "SELECT actor_id FROM ma_operation WHERE operation_kind=?",
+                        String.class, kind)).isEqualTo(widest);
             }
         });
     }
@@ -657,7 +652,7 @@ class SessionPrincipalOwnershipTest {
         // renaming a genuine legacy row-less Session; the raw arms keep the
         // raw actor, and the stored operation digest stays the
         // pre-ownership {actorId} shape rather than a principal stamp.
-        String longActor = "界".repeat(512);
+        String longActor = "界".repeat(36);
         var f = new Fixture();
         var digests = new RequestDigests();
         var lifecycle = new SessionLifecycleService(f.store, f.service, digests,

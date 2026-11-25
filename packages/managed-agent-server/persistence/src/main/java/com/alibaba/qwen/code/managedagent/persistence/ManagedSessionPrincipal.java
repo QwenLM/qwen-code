@@ -2,10 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
 
@@ -17,9 +15,6 @@ import java.util.Objects;
 public final class ManagedSessionPrincipal {
     /** The only row layout this build writes or trusts. */
     public static final int VERSION = 1;
-
-    /** Width of {@code ma_operation.actor_key}, which rides the unique request index. */
-    private static final int OPERATION_ACTOR_KEY_MAX_BYTES = 2048;
 
     private ManagedSessionPrincipal() {
     }
@@ -80,23 +75,6 @@ public final class ManagedSessionPrincipal {
             return new byte[0];
         }
         return principal.receiptActorKey();
-    }
-
-    /**
-     * The operation-ledger key for a receipt stamp. {@code ma_operation.actor_key}
-     * is {@code VARBINARY(2048)} and rides the unique request index, whose MySQL
-     * key budget (3072 bytes) cannot carry a wider column, while the principal
-     * stamp reaches 4099 bytes. A stamp wider than the column is keyed by its
-     * SHA-256 hex digest instead; the full stamp stays on
-     * {@code ma_request_receipt.actor_id} for the byte-for-byte replay
-     * comparison. Every stamp carries NUL separators and the hex digest does
-     * not, so the two encodings never collide in the unique index.
-     */
-    public static byte[] operationActorKey(byte[] actorKey) {
-        if (actorKey == null || actorKey.length <= OPERATION_ACTOR_KEY_MAX_BYTES) {
-            return actorKey;
-        }
-        return DigestUtils.sha256Hex(actorKey).getBytes(StandardCharsets.UTF_8);
     }
 
     /**
@@ -205,17 +183,17 @@ public final class ManagedSessionPrincipal {
         // left-joined with the legacy-creation mark. A present row is the
         // sole authority; only a row-less Session consults the mark, so the
         // hot unbound read no longer pays a second round trip.
-        // The receipt predicate binds the hashed tenant_key so the lookup
-        // seeks idx_ma_receipt_session (namespace, tenant_key, session_id)
-        // instead of range-scanning the SESSION_COMMAND partition, and reads
-        // the Session columns from the outer row rather than re-joining
+        // The receipt predicate binds the raw tenant_id so the lookup seeks
+        // idx_ma_receipt_session (namespace, tenant_id, session_id) instead
+        // of range-scanning the SESSION_COMMAND partition, and reads the
+        // Session columns from the outer row rather than re-joining
         // ma_session.
         List<AuthorityRow> rows = jdbc.query(
                 "SELECT p.version, p.user_id, p.actor_present,"
                         + " p.actor_subject_id, (SELECT COUNT(*) FROM"
                         + " ma_request_receipt r WHERE"
                         + " r.namespace = 'SESSION_COMMAND' AND"
-                        + " r.tenant_key = ? AND r.tenant_id = ? AND"
+                        + " r.tenant_id = ? AND"
                         + " r.session_id = ? AND r.operation ="
                         + " 'CREATE_SESSION' AND ms.workspace_id IS NULL"
                         + " AND r.actor_id IS NOT NULL AND"
@@ -233,7 +211,6 @@ public final class ManagedSessionPrincipal {
                                         result.getBoolean(3),
                                         result.getString(4)),
                         result.getInt(5)),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenantId),
                 tenantId, sessionId, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
     }

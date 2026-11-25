@@ -526,8 +526,9 @@ jobs:
     # Forks of this repo fall back to ubuntu-latest as before.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Read-only by construction: the agent's GH_TOKEN is this job's
-    # GITHUB_TOKEN. Every write goes through publish-triage's PAT. The
-    # pre-agent reaction step uses the PAT explicitly (reactions need write).
+    # GITHUB_TOKEN. Every write goes through publish-triage's write token
+    # (PAT preferred, else its write-scoped GITHUB_TOKEN). The pre-agent
+    # reaction step uses the PAT explicitly (reactions need write).
     permissions:
       contents: 'read'
       issues: 'read'
@@ -712,6 +713,7 @@ jobs:
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
+          # PAT-only: the job's GITHUB_TOKEN is read-only.
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           NUMBER: '${{ steps.resolve.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
@@ -794,16 +796,19 @@ jobs:
       - name: 'Prepare agent context'
         id: 'context'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
         run: |-
           set -euo pipefail
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           mkdir -p "$QWEN_HOME"
-          # Under the read-only GITHUB_TOKEN the agent will run with,
-          # `gh api user` returns github-actions[bot]; the skill's duplicate
-          # guard, reopen guard, and review dedup filter on the PAT's bot
-          # login, so resolve it here and pass it in.
-          BOT_LOGIN="$(gh api user --jq '.login')"
+          # GITHUB_TOKEN returns 403 on GET /user; query API only with a PAT
+          # (no-PAT uses github-actions[bot]; finalize skips without a PAT).
+          if [ "$HAS_BOT_PAT" = 'true' ]; then
+            BOT_LOGIN="$(gh api user --jq '.login')"
+          else
+            BOT_LOGIN='github-actions[bot]'
+          fi
           if [ -z "$BOT_LOGIN" ]; then
             echo "::error::Cannot resolve the bot identity; refusing to run the agent without it."
             exit 1
@@ -1572,8 +1577,11 @@ jobs:
     # no agent-provided code runs here. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # No-PAT fallback needs write scopes; only trusted base scripts run here.
     permissions:
       contents: 'read'
+      issues: 'write'
+      pull-requests: 'write'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1588,7 +1596,7 @@ jobs:
 
       # The pool reuses workspaces: an earlier agent run owned this directory
       # and could have planted .git hooks/config that checkout's git commands
-      # would execute — in the job that then publishes with the write PAT.
+      # would execute — in the job that then publishes with the write token.
       # Drop the metadata first, exactly as the triage/tmux/verify jobs do
       # before their checkouts (pinned by
       # qwen-runner-checkout-workflow.test.js).
@@ -1619,7 +1627,8 @@ jobs:
 
       - name: 'Publish triage drafts'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIAGE_RESULT: '${{ needs.triage.result }}'
           QWEN_MAINTAINER_HANDLE: '${{ vars.QWEN_MAINTAINER_HANDLE }}'
@@ -1637,6 +1646,9 @@ jobs:
             echo "::warning::The triage run ended before writing drafts; nothing to publish."
             exit 0
           fi
+          if [ "$HAS_BOT_PAT" != 'true' ]; then
+            export BOT_LOGIN='github-actions[bot]'
+          fi
           node .github/scripts/triage-publish.mjs \
             --drafts triage-drafts \
             --repo "$GITHUB_REPOSITORY" \
@@ -1653,7 +1665,8 @@ jobs:
           startsWith(github.event.comment.body, '@qwen-code /triage')
         shell: 'bash'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIGGERED_AT: '${{ github.event.comment.created_at }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
@@ -1684,7 +1697,12 @@ jobs:
           HEAD_SHA=''
           # unknown until both the review list and the head SHA are readable
           STANDING=unknown
-          if BOT_LOGIN="$(gh api user --jq '.login')" &&
+          if [ "$HAS_BOT_PAT" = 'true' ]; then
+            BOT_LOGIN="$(gh api user --jq '.login' || true)"
+          else
+            BOT_LOGIN='github-actions[bot]'
+          fi
+          if [ -n "$BOT_LOGIN" ] &&
              REVIEWS="$(
                gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
                  --method GET \
@@ -5334,7 +5352,7 @@ jobs:
             "CI=${CI:-true}"
             "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
             "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
-            "TMPDIR=$VERIFY_SCRATCH"
+            "TMPDIR=${VERIFY_SCRATCH:?verify scratch directory was not prepared}"
             "GITHUB_TOKEN="
             "GH_TOKEN="
             "OPENAI_API_KEY=$PROXY_TOKEN"

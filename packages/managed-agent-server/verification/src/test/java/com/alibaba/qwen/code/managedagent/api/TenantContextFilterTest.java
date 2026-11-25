@@ -39,15 +39,8 @@ class TenantContextFilterTest {
 
     @Test
     void acceptsTrustedActorIdsAtTheUnicodeBoundary() throws Exception {
-        // The gate counts code points as WorkspaceValues.requireText does:
-        // a 512-code-point actor passes, including 257-512 astral code
-        // points that exceed 512 UTF-16 units. The principal byte bound
-        // matches this admission ceiling (512 supplementary code points are
-        // 2048 bytes), so every admitted actor can also be built into a
-        // principal.
-        for (String actorId : new String[] {"alice@example.com",
-                "a".repeat(512), "𝄞".repeat(128), "𝄞".repeat(300),
-                "𝄞".repeat(512)}) {
+        for (String actorId : new String[] {"alice@example.com", "a",
+                "𝄞".repeat(18)}) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor("tenant-a", actorId));
             MockHttpServletResponse response = new MockHttpServletResponse();
@@ -81,12 +74,8 @@ class TenantContextFilterTest {
             throws ServletException, IOException {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
-                // 513 code points exceed the Workspace contract itself
-                // (WorkspaceValues.requireText), so the gate refuses them;
-                // 512 astral code points (2048 bytes) are the widest the
-                // filter admits, and the principal bound admits them too.
-                actor("tenant-a", "𝄞".repeat(513)),
-                actor("tenant-a", "a".repeat(513)),
+                actor("tenant-a", "𝄞".repeat(19)),
+                actor("tenant-a", "𝄞".repeat(37)),
                 actor("tenant-a", " "),
                 actor("tenant-a", null, "subject-a")
         }) {
@@ -98,6 +87,19 @@ class TenantContextFilterTest {
             assertThat(response.getStatus()).isEqualTo(403);
             assertThat(response.getContentAsString())
                     .contains("actor_scope_mismatch");
+            assertThat(chain.getRequest()).isNull();
+        }
+    }
+
+    @Test
+    void rejectsInvalidTenantHeaders() throws Exception {
+        for (String tenant : new String[] {"tenant a", "tenant/a", "é",
+                "t".repeat(37)}) {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            MockFilterChain chain = new MockFilterChain();
+            filter.doFilter(request(tenant), response, chain);
+            assertThat(response.getStatus()).isEqualTo(400);
+            assertThat(response.getContentAsString()).contains("invalid_tenant");
             assertThat(chain.getRequest()).isNull();
         }
     }

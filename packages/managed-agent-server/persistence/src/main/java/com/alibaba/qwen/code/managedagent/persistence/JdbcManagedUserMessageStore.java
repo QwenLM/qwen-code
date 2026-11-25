@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -75,9 +74,8 @@ public class JdbcManagedUserMessageStore
             String key, Command command) {
         agents.authorizeUserMessageActor(tenant, actor, session);
         // A String actor never carries a business-actor subject, so the
-        // pre-ownership receipt key is the exact compatible identity.
-        return commandInternal(tenant, actor, session,
-                DigestUtils.sha256Hex(actor + "\n" + key), key, command,
+        // pre-ownership receipt identity is the exact compatible one.
+        return commandInternal(tenant, actor, session, key, command,
                 () -> agents.authorizeUserMessages(tenant, actor, session));
     }
 
@@ -86,14 +84,19 @@ public class JdbcManagedUserMessageStore
             String key, Command command) {
         agents.authorizeUserMessageActor(principal, session);
         return commandInternal(principal.tenantId(), principal.userId(),
-                session, commandKey(principal, key), key, command,
+                session, key, command,
                 () -> agents.authorizeUserMessages(principal, session));
     }
 
     private Snapshot commandInternal(String tenant, String actor,
-            String session, String commandKey, String key, Command command,
+            String session, String key, Command command,
             Runnable authorizeMessages) {
-        if (key == null || key.isBlank() || key.length() > 128) {
+        if (key == null || key.isBlank()) {
+            throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
+        }
+        try {
+            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireIdempotencyKey(key, "Idempotency-Key");
+        } catch (IllegalArgumentException invalid) {
             throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
         }
         lockSession(tenant, session);
@@ -102,8 +105,10 @@ public class JdbcManagedUserMessageStore
         }
         String digest = digests.digest(command);
         var replay = jdbc.query("SELECT request_digest, result_json FROM ma_user_message_command"
-                        + " WHERE tenant_id = ? AND session_id = ? AND command_key = ?",
-                (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session, commandKey);
+                        + " WHERE tenant_id = ? AND session_id = ? AND actor_id = ? AND idempotency_key = ?",
+                (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session,
+                actor,
+                key);
         if (!replay.isEmpty()) {
             if (!digest.equals(replay.getFirst().getKey())) {
                 throw conflict("idempotency_conflict");
@@ -177,8 +182,10 @@ public class JdbcManagedUserMessageStore
             default -> throw refusal("invalid_request", "Unknown user message action.");
         }
         Snapshot result = snapshot(tenant, session);
-        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, command_key, actor_id, request_digest, result_json)"
-                + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session, commandKey, actor, digest, encode(result));
+        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, idempotency_key, actor_id, request_digest, result_json)"
+                + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session,
+                key,
+                actor, digest, encode(result));
         return result;
     }
 
@@ -352,17 +359,6 @@ public class JdbcManagedUserMessageStore
         return status.getFirst();
     }
 
-    private static String commandKey(SessionPrincipal principal, String key) {
-        if (!principal.actorPresent()) {
-            // Preserve the pre-ownership receipt keys for callers whose
-            // verified context carries no business actor.
-            return DigestUtils.sha256Hex(principal.userId() + "\n" + key);
-        }
-        return DigestUtils.sha256Hex("session-principal-v1\0"
-                + principal.userId() + "\0" + principal.actorSubjectId()
-                + "\0" + key);
-    }
-
     // A bound Session's queued actor dispatches raw: rebuilding a principal
     // from the filter-admitted actor would 400 a byte-long non-ASCII actor
     // whose queue this dispatcher drained before (R7-1). An unbound
@@ -371,16 +367,17 @@ public class JdbcManagedUserMessageStore
 
     private QueuedIdentity queuedIdentity(String tenant, String session,
             String messageId) {
-        record QueuedActor(String actorId, boolean unbound) { }
+        record QueuedActor(String actorId, boolean unbound, boolean owned) { }
         QueuedActor owner = jdbc.queryForObject(
-                "SELECT m.actor_id, s.workspace_id IS NULL"
+                "SELECT m.actor_id, s.workspace_id IS NULL,"
+                        + " s.creator_actor_key IS NOT NULL AND s.creator_actor_key = m.actor_id"
                         + " FROM ma_user_message m JOIN ma_session s"
                         + " ON s.tenant_id = m.tenant_id"
                         + " AND s.session_id = m.session_id"
                         + " WHERE m.tenant_id = ? AND m.session_id = ?"
                         + " AND m.message_id = ?",
                 (result, index) -> new QueuedActor(result.getString(1),
-                        result.getBoolean(2)),
+                        result.getBoolean(2), result.getBoolean(3)),
                 tenant, session, messageId);
         if (owner == null || owner.actorId() == null) {
             throw new ManagedAgentException(404, "session_not_found",
@@ -411,6 +408,9 @@ public class JdbcManagedUserMessageStore
                 ? SessionPrincipal.of(tenant, row.userId(),
                         row.actorSubjectId())
                 : SessionPrincipal.ofUser(tenant, row.userId());
+        if (owner.owned()) {
+            return new QueuedIdentity(owner.actorId(), durable);
+        }
         return new QueuedIdentity(row.userId(), durable);
     }
 

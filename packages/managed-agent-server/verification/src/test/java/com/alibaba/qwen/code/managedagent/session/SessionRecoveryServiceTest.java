@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
@@ -61,19 +62,22 @@ class SessionRecoveryServiceTest {
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
                 + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
                 + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT,"
-                + " wake_seal_revision BIGINT)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null);
+                + " wake_seal_revision BIGINT, wake_seal_background INT, wake_seal_parked_owner VARCHAR)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0,
+                null);
         // The obligation projections the sealed-head proof reads. Empty by
         // default: a cleanly suspended Session owes nothing.
-        jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR,"
+                + " is_submission_attempted BOOLEAN, harness_event_epoch VARCHAR)");
         // The record and ref arms are keyed by (tenant_id, session_id), the
         // prefix every index on those tables leads with.
         jdbc.execute("CREATE TABLE ma_session_record (tenant_id VARCHAR, session_id VARCHAR,"
                 + " record_kind VARCHAR, runtime_state VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_resource_ref (resource_key VARCHAR,"
+        jdbc.execute("CREATE TABLE ma_resource_ref (resource_id VARCHAR,"
                 + " tenant_id VARCHAR, session_id VARCHAR, owner_kind VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_resource (resource_key VARCHAR, state VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_resource (tenant_id VARCHAR, session_id VARCHAR,"
+                + " resource_id VARCHAR, state VARCHAR)");
         jdbc.execute("CREATE TABLE ma_public_event (tenant_id VARCHAR, session_id VARCHAR,"
                 + " turn_id VARCHAR, stream_kind VARCHAR, is_terminal INT, source_key VARCHAR)");
         when(sessions.requireReadableSession("tenant", ACTOR, "session")).thenReturn(session);
@@ -132,6 +136,24 @@ class SessionRecoveryServiceTest {
         verifyNoInteractions(harness, coordinator);
     }
 
+    // A parked Turn reads as running whether its seal certificate is current
+    // or a later writer acquisition has already cleared it.
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anActionParkedTurnReportsItsActiveTurnWithoutHarnessEvidence(boolean certified) {
+        sealCleanly();
+        jdbc.update(certified ? "UPDATE ma_session_head SET wake_seal_revision = 5"
+                : "UPDATE ma_session_head SET state = 'ACTIVE', activation_phase = 'active'");
+        turn("RUNNING", TurnExecutionStore.HARNESS_ACTION_PARKED);
+
+        var recovery = service.query("tenant", "actor", "session");
+
+        assertThat(recovery.state()).isEqualTo("recovering");
+        assertThat(recovery.reasonCode()).isEqualTo("turn_active");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        verifyNoInteractions(harness, coordinator);
+    }
+
     @Test
     void aSealedHeadWhoseWakeProjectionStillOwesProofIsNotReady() {
         sealCleanly();
@@ -185,10 +207,10 @@ class SessionRecoveryServiceTest {
     void aSealedHeadThatStillOwesDurableWorkIsNotReady(String obligation) {
         sealCleanly();
         switch (obligation) {
-            case "turn" -> jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'RUNNING')");
+            case "turn" -> jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, status) VALUES ('tenant', 'session', 'RUNNING')");
             case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', 'ready')");
             default -> {
-                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
                 jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
             }
         }
@@ -197,13 +219,79 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
     }
 
+    // Phase 3b §4.8: the writer that ran the per-run background evidence check
+    // certifies it at the sealed revision, so the control plane may call a
+    // Session ready while its certified background run and cleanup debt are
+    // still unsettled. Without the certificate the same rows still block.
+    private void oweBackgroundWork() {
+        jdbc.update("INSERT INTO ma_session_record VALUES ('tenant', 'session', 'DOMAIN', 'ready')");
+        jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
+        jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
+    }
+
+    @Test
+    void aBackgroundCertifiedSealIsReadyWhileItsRunAndDebtAreUnsettled() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 5, wake_seal_background = 1");
+        oweBackgroundWork();
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    // S4 (#18149): a parked wake-started Turn has no Turn row, and the wake
+    // scan resumes it at its due time; its own owed cleanup is certified work.
+    @Test
+    void aWakeParkedSealIsReadyWhileItsTurnOwesCleanup() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_revision = 5,"
+                + " wake_seal_parked_owner = 'wake'");
+        oweBackgroundWork();
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        verifyNoInteractions(harness, coordinator);
+
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 4");
+        assertThat(service.query("tenant", "actor", "session").nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void anUncertifiedSealStillBlocksOnTheSameBackgroundWork() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 5, wake_seal_background = 0");
+        oweBackgroundWork();
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+    }
+
+    @Test
+    void aBackgroundCertificateForAnOlderRevisionDoesNotApply() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 4, wake_seal_background = 1");
+        oweBackgroundWork();
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void aBackgroundCertificateNeverExcusesAnUnsettledTurn() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 5, wake_seal_background = 1");
+        oweBackgroundWork();
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, status) VALUES ('tenant', 'session', 'RUNNING')");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
     @Test
     void aSettledRecordAndAConfirmedDebtDoNotBlockTheSealedHeadProof() {
         sealCleanly();
         // A terminal run projects a null runtime_state, and a confirmed debt
         // drops its REFERENCED ref: neither is owed work any more.
         jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', NULL)");
-        jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'RELEASED')");
+        jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'RELEASED')");
         jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
@@ -288,10 +376,10 @@ class SessionRecoveryServiceTest {
         turn("COMPLETED", null);
         terminalEvent("boot:epoch:7");
         switch (obligation) {
-            case "turn" -> jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'RUNNING')");
+            case "turn" -> jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, status) VALUES ('tenant', 'session', 'RUNNING')");
             case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', 'ready')");
             default -> {
-                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
                 jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
             }
         }
@@ -652,6 +740,141 @@ class SessionRecoveryServiceTest {
     }
 
     @Test
+    void aCancellationBeforeAdmissionUsesSessionEvidenceAndKeepsItsPublicTurn() {
+        cancelBeforeAdmission();
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("operator_required", "original_input_missing",
+                        "private-prompt", false, false, false));
+        when(harness.inspectRecovery("tenant", "session", null))
+                .thenReturn(new RecoveryStatus("ready", null, "prior-prompt", true, true, true));
+
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.turnId()).isEqualTo("turn");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        assertThat(service.recheck("tenant", "actor", "session", "turn")).isEqualTo(recovery);
+        verify(harness, never()).inspectRecovery("tenant", "session", "private-prompt");
+        verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void cleanupRecheckAfterCancellationBeforeAdmissionUsesTheSettledHarnessPrompt() {
+        cancelBeforeAdmission();
+        var nativeStatus = new AtomicReference<>(new RecoveryStatus("cleanup_pending", "runtime_cleanup_pending",
+                "prior-prompt", true, true, false));
+        when(harness.inspectRecovery("tenant", "session", null)).thenAnswer(call -> nativeStatus.get());
+        when(harness.recheckRecoveryCleanup("tenant", "session", "prior-prompt")).thenAnswer(call -> {
+            nativeStatus.set(new RecoveryStatus("ready", null, "prior-prompt", true, true, true));
+            return true;
+        });
+
+        var pending = service.query("tenant", "actor", "session");
+        assertThat(pending.nextTurnAllowed()).isFalse();
+        assertThat(pending.actions().recheck()).isTrue();
+        assertThatThrownBy(() -> service.recheck("tenant", "actor", "session", "prior-turn"))
+                .isInstanceOf(ManagedAgentException.class)
+                .hasMessage("The Session's recovery Turn has changed.");
+        var result = service.recheck("tenant", "actor", "session", "turn");
+        assertThat(result.turnId()).isEqualTo("turn");
+        assertThat(result.nextTurnAllowed()).isTrue();
+        verify(harness).recheckRecoveryCleanup("tenant", "session", "prior-prompt");
+        verify(harness, never()).recheckRecoveryCleanup("tenant", "session", "private-prompt");
+        verifyNoInteractions(coordinator);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"unavailable", "unsettled", "unready", "no-prompt"})
+    void cancellationBeforeAdmissionDoesNotSupplyMissingRecoveryProof(String cut) {
+        cancelBeforeAdmission();
+        var evidence = switch (cut) {
+            case "unavailable" -> null;
+            case "unsettled" -> new RecoveryStatus("awaiting_evidence", "inputs_unsettled",
+                    "prior-prompt", false, false, false);
+            case "unready" -> new RecoveryStatus("cleanup_pending", "runtime_cleanup_pending",
+                    "prior-prompt", true, false, false);
+            case "no-prompt" -> new RecoveryStatus("cleanup_pending", "runtime_cleanup_pending",
+                    null, true, true, false);
+            default -> throw new IllegalArgumentException(cut);
+        };
+        when(harness.inspectRecovery("tenant", "session", null)).thenReturn(evidence);
+
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.turnId()).isEqualTo("turn");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.actions().recheck()).isFalse();
+        assertThatThrownBy(() -> service.recheck("tenant", "actor", "session", "turn"))
+                .isInstanceOf(ManagedAgentException.class)
+                .hasMessage("This recovery has no existing work to recheck.");
+        verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void aLostAdmissionReplyStillRecoversThroughTheTurnsOwnPrompt() {
+        cancelBeforeAdmission();
+        when(harness.inspectRecovery("tenant", "session", null))
+                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.turnId()).isEqualTo("turn");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        assertThat(service.recheck("tenant", "actor", "session", "turn")).isEqualTo(recovery);
+        verify(harness, never()).inspectRecovery("tenant", "session", "private-prompt");
+    }
+
+    @Test
+    void cleanupRecheckAfterALostAdmissionReplyTargetsTheTurnsOwnPrompt() {
+        cancelBeforeAdmission();
+        var nativeStatus = new AtomicReference<>(new RecoveryStatus("cleanup_pending", "runtime_cleanup_pending",
+                "private-prompt", true, true, false));
+        when(harness.inspectRecovery("tenant", "session", null)).thenAnswer(call -> nativeStatus.get());
+        when(harness.recheckRecoveryCleanup("tenant", "session", "private-prompt")).thenAnswer(call -> {
+            nativeStatus.set(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+            return true;
+        });
+
+        var pending = service.query("tenant", "actor", "session");
+        assertThat(pending.nextTurnAllowed()).isFalse();
+        assertThat(pending.actions().recheck()).isTrue();
+        var result = service.recheck("tenant", "actor", "session", "turn");
+        assertThat(result.turnId()).isEqualTo("turn");
+        assertThat(result.nextTurnAllowed()).isTrue();
+        verify(harness).recheckRecoveryCleanup("tenant", "session", "private-prompt");
+        verifyNoInteractions(coordinator);
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"CANCELLED,true,NONE", "CANCELLED,false,epoch", "FAILED,false,NONE"},
+            nullValues = "NONE")
+    void anyAdmissionMarkerKeepsTheEvidenceTargetedOnTheTurnsOwnPrompt(
+            String status, boolean submissionAttempted, String epoch) {
+        jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'COMPLETED', TRUE, 'epoch')");
+        var turn = new TurnRecord("tenant", "session", "turn", "private-prompt", List.of(),
+                "digest", status, submissionAttempted, epoch, null, null, null, 0, 0, 0, null,
+                null, null, 1, 2, 2L, 1);
+        when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of("session",
+                new TurnSummary("session", "turn", status, 1, 2L, null)));
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(turn));
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+
+        assertThat(service.query("tenant", "actor", "session").nextTurnAllowed()).isTrue();
+        verify(harness).inspectRecovery("tenant", "session", "private-prompt");
+        verify(harness, never()).inspectRecovery("tenant", "session", null);
+    }
+
+    @Test
+    void cancellationAfterAdmissionStillInspectsItsOwnPrompt() {
+        turn("CANCELLED", null);
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+
+        assertThat(service.query("tenant", "actor", "session").nextTurnAllowed()).isTrue();
+        verify(harness).inspectRecovery("tenant", "session", "private-prompt");
+    }
+
+    @Test
     void aColdTerminalRecheckDelegatesOnlyItsOriginalPromptToProofCheckedCleanup() {
         turn("FAILED", "failure");
         when(harness.recheckRecoveryCleanup("tenant", "session", "private-prompt")).thenReturn(true);
@@ -778,6 +1001,16 @@ class SessionRecoveryServiceTest {
                 new TurnSummary("session", "turn", state, 1, turn.completedAt(), code)));
         when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(turn));
         return turn;
+    }
+
+    private void cancelBeforeAdmission() {
+        jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'COMPLETED', TRUE, 'epoch')");
+        var cancelled = new TurnRecord("tenant", "session", "turn", "private-prompt", List.of(),
+                "digest", "CANCELLED", false, null, null, null, null, 0, 0, 0, null,
+                null, null, 1, 2, 2L, 1);
+        when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of("session",
+                new TurnSummary("session", "turn", "CANCELLED", 1, 2L, null)));
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(cancelled));
     }
 
     private static TurnRecord record(String turnId, String state, String code) {

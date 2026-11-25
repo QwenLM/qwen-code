@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceValues;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -16,7 +17,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.security.Principal;
-import java.util.regex.Pattern;
 
 @Component
 public class TenantContextFilter extends OncePerRequestFilter {
@@ -32,8 +32,6 @@ public class TenantContextFilter extends OncePerRequestFilter {
             "/internal/managed-workspaces/v1/";
     private static final String MANAGED_CLIENT_FILES_PREFIX =
             "/internal/managed-client-files/v1/";
-    private static final Pattern TENANT_PATTERN = Pattern.compile(
-            "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
 
     public TenantContextFilter(@Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper) {
@@ -74,12 +72,12 @@ public class TenantContextFilter extends OncePerRequestFilter {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         }
         String tenantId = request.getHeader(HEADER);
-        if (tenantId == null || !TENANT_PATTERN.matcher(tenantId).matches()) {
+        if (!WorkspaceValues.isTenantIdentifier(tenantId)) {
             response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
             objectMapper.writeValue(response.getOutputStream(),
                     ApiExceptionHandler.envelope(request, "invalid_tenant",
-                            HEADER + " is required and must contain 1-128"
+                            HEADER + " is required and must contain 1-36"
                                     + " safe characters."));
             return;
         }
@@ -109,12 +107,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
             return false;
         }
         try {
-            // WorkspaceActor's requireText enforces the Workspace contract's
-            // 512-code-point bound (counting code points, not UTF-16 units),
-            // so a 512-code-point BMP actor (1536 bytes) passes here and a
-            // 512-supplementary-code-point actor (2048 bytes) is the widest
-            // this filter admits. SessionPrincipal's byte bound matches that
-            // ceiling, so a principal is never narrower than this admission.
+            // WorkspaceActor delegates to WorkspaceValues.requireActor
+            // (VARCHAR(36) / 36 UTF-16 units); SessionPrincipal's component
+            // bound (255 chars) is strictly wider, so a principal is never
+            // narrower than this admission.
             new WorkspaceActor(tenantId, actorId);
             return true;
         } catch (IllegalArgumentException

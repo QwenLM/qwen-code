@@ -14,6 +14,14 @@ export function mountReact(node: ReactNode): HTMLElement {
   return container;
 }
 
+export function rerenderReact(container: HTMLElement, node: ReactNode): void {
+  const entry = mounted.find((candidate) => candidate.container === container);
+  if (!entry) throw new Error('rerenderReact: container is not mounted');
+  act(() => {
+    entry.root.render(node);
+  });
+}
+
 export function cleanupReact(): void {
   for (const { root, container } of mounted.splice(0)) {
     act(() => {

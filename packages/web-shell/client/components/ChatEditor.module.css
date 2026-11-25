@@ -681,6 +681,9 @@
 }
 
 .slashDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   min-height: 0;
   max-height: min(
     180px,
@@ -691,20 +694,71 @@
 }
 
 .slashDetailCommand {
-  margin-bottom: 5px;
+  flex-shrink: 0;
   color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
-  font-weight: 400;
-  line-height: 22px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: normal;
+}
+
+.slashDetailExtension {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.slashDetailExtension:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.slashDetailExtensionLabel {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.slashDetailExtensionIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.slashDetailExtensionName {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  overflow-wrap: anywhere;
   white-space: normal;
 }
 
 .slashDetailText {
+  flex-shrink: 0;
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 400;
-  line-height: 20px;
+  line-height: 19px;
   white-space: pre-wrap;
 }
 
@@ -1301,6 +1355,61 @@
   overflow-y: auto;
 }
 
+/* Touch follow-up suggestion bar: tap fills the textarea without submitting
+   (desktop Tab semantics). Rendered only while the input is empty, so it
+   never competes with a draft for room. */
+.mobileFollowup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+}
+
+/* Chip styling so the bar reads as a tappable button on touch (no hover to
+   discover it): the suggestion content is the label, the insert icon and
+   container carry the affordance. */
+.mobileFollowupAccept {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 8px;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: start;
+  cursor: pointer;
+}
+
+.mobileFollowupAccept > svg {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowupText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mobileFollowupAccept:not(:disabled):hover {
+  background: var(--chat-editor-bg-primary);
+  border-color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowup .toolBtn > svg {
+  width: 18px;
+  height: 18px;
+}
+
 .editorArea .cm-scroller {
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
@@ -1479,9 +1588,10 @@
   flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
-/* Compact (icon-only) chip: a single severity dot on the branch icon so the
-   working-tree state is still glanceable without the text + inline indicators. */
+/* Reserve a visible severity dot for icon-only and detail-collapsed branch
+   chips, without duplicating the detailed indicators on wider layouts. */
 .gitBranchBadgeDot {
+  display: none;
   position: absolute;
   top: var(--git-branch-badge-offset, -2px);
   right: var(--git-branch-badge-offset, -3px);
@@ -1490,6 +1600,10 @@
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+}
+
+.gitBranchChipCompact .gitBranchBadgeDot {
+  display: block;
 }
 
 .gitBranchBadgeDot[data-tone='warning'] {
@@ -3144,14 +3258,13 @@
   --chat-editor-max-height: var(--chat-editor-composer-cap);
 }
 
-/* The workspace/Git row lives inside the capped box; without its height added
-   back, a soft keyboard leaves the attachments strip almost no room. The
-   height is measured because the row wraps on narrow viewports, and the 8px
-   is the pull-up the editing row gives up below it. */
+/* Wide and medium touch layouts keep workspace/Git on one inline row. Its
+   measured height and the editing row's 4px inset stay inside the cap so a
+   soft keyboard leaves room for the attachments strip. */
 .editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
   --chat-editor-max-height: calc(
     var(--chat-editor-composer-cap) +
-      var(--chat-editor-context-row-height, 44px) + 8px
+      var(--chat-editor-context-row-height, 36px) + 4px
   );
 }
 
@@ -3172,18 +3285,35 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeading {
+  min-width: 0;
   max-width: 100%;
   margin-left: 0;
 }
 
+.editorShell[data-web-shell-mobile-composer]
+  .dropdownWrapper:not(.dropdownWrapperCompact),
+.editorShell[data-web-shell-mobile-composer] .modelToolBtn:not(.toolBtnCompact),
+.editorShell[data-web-shell-mobile-composer] .modeToolBtn:not(.toolBtnCompact) {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
 .editorShell[data-web-shell-mobile-composer] .toolbarRight {
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   margin-left: auto;
   margin-right: 0;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeft {
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolBtn {
@@ -3202,40 +3332,234 @@
   gap: 4px;
 }
 
+.mobileEditingActions {
+  flex-wrap: nowrap;
+  gap: 2px;
+  min-width: 0;
+  margin-top: -6px;
+}
+
+.mobileEditingActions:has(.mobileContextRow) {
+  gap: 4px;
+  margin-top: -4px;
+}
+
 .mobileContextRow {
-  min-width: 44px;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 44px;
   min-height: 44px;
-  flex: 1;
-  flex-wrap: wrap;
+  padding-right: 1px;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .mobileContextRow > *,
 .mobileContextRow [data-web-shell-git-branch] {
+  min-width: 0;
   max-width: 100%;
 }
 
 .editorShell[data-web-shell-mobile-composer] .mobileContextRow button {
+  height: 44px;
+  min-width: 44px;
   max-width: 100%;
-  flex-shrink: 1;
+  flex: 0 1 auto;
 }
 
-.mobileEditingActions {
-  flex-wrap: wrap;
-  margin-top: -8px;
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > :has([data-web-shell-git-branch]),
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > [data-web-shell-git-branch] {
+  min-width: 44px;
+  flex: 0 1 auto;
 }
 
-.mobileEditingActions:has(.mobileContextRow) {
-  align-items: flex-start;
-  margin-top: 0;
+/* Host Git can shrink, but the built-in wrapper must fit its 44px chip. */
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > :has([data-web-shell-git-branch-label]) {
+  flex: 0 0 auto;
 }
 
-.mobileEditingActions > button > svg {
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  [data-web-shell-git-branch-label],
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  .gitBranchIndicators {
+  display: none;
+}
+
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  .gitBranchBadgeDot {
+  display: block;
+}
+
+/* Keep the 6 editing keys strictly on one row alongside any inline context. */
+.mobileEditingKeys {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 2px;
+}
+
+.mobileEditingActions:has(.mobileContextRow) .mobileEditingKeys {
+  flex: 0 1 auto;
+  min-height: 44px;
+}
+
+.mobileEditingTail {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 2px;
+  margin-inline-start: auto;
+}
+
+.mobileEditingActions:has(.mobileContextRow) .mobileEditingTail {
+  margin-inline-start: 2px;
+}
+
+.mobileKeyboardPlaceholder {
+  visibility: hidden;
+}
+
+.editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn {
+  position: relative;
+  width: 40px;
+  min-width: 34px;
+  flex: 0 1 40px;
+  height: 36px;
+  padding: 0;
+  justify-content: center;
+}
+
+.editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn::before {
+  content: '';
+  position: absolute;
+  inset: -4px -1px;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions[data-mobile-layout='medium']
+  .mobileEditingActionBtn {
+  width: 36px;
+  min-width: 34px;
+  flex: 0 1 36px;
+}
+
+.mobileEditingActions > button > svg,
+:is(.mobileEditingKeys, .mobileEditingTail) > button > svg {
   width: 18px;
   height: 18px;
 }
 
-.mobileEditingSpacer {
-  flex: 1;
+.editorShell[data-web-shell-mobile-composer] .contextRow {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  margin-top: -10px;
+  padding: 12px 6px 2px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow::-webkit-scrollbar {
+  display: none;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow > * {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow button {
+  height: 44px;
+  min-width: 44px;
+  flex: 0 1 auto;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .contextRow
+  .workspaceSelectTrigger:has(+ *) {
+  max-width: 58%;
+}
+
+@supports (container-type: inline-size) {
+  @container (max-width: 320px) {
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      [data-slot='select-value'],
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      [data-web-shell-git-branch-label],
+    .editorShell[data-web-shell-mobile-composer] .contextRow .gitBranchText,
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .workspaceChipText {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .gitBranchIndicators {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .gitBranchBadgeDot {
+      display: block;
+    }
+  }
+
+  @container (max-width: 260px) {
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingActions {
+      gap: 1px;
+      padding-block: 4px;
+      margin-block: -4px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .mobileEditingActions::-webkit-scrollbar {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingKeys {
+      gap: 1px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingTail {
+      flex: 2 1 0;
+      gap: 1px;
+      margin-inline-start: 1px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn {
+      width: auto;
+      min-width: 26px;
+      flex: 1 1 0;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .mobileEditingActionBtn::before {
+      inset: -4px 0;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      :is(.mobileEditingKeys, .mobileEditingTail)
+      > button
+      > svg {
+      width: 15px;
+      height: 15px;
+    }
+  }
 }
 
 .mobileExpandedEditor {
