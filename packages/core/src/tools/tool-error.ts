@@ -9,13 +9,26 @@ import { ToolErrorType } from '../utils/tool-error-type.js';
 
 export { ToolErrorType };
 
-// Shallow copies keep the response object. Serializing or replacing it drops
-// the note, so argument excerpts stay out of transcripts and tool telemetry.
-const modelToolErrorNotes = new WeakMap<object, string>();
+// Keep the insertion offset so the note precedes any appended hook context.
+const modelToolErrorNotes = new WeakMap<
+  object,
+  { text: string; offset: number }
+>();
 
 export function setModelToolErrorNote(part: Part, note: string): void {
   const response = part.functionResponse?.response;
-  if (response) modelToolErrorNotes.set(response, note);
+  const error = response?.['error'];
+  if (response && typeof error === 'string') {
+    modelToolErrorNotes.set(response, { text: note, offset: error.length });
+  }
+}
+
+export function copyModelToolErrorNote(original: Part, updated: Part): void {
+  const source = original.functionResponse?.response;
+  const target = updated.functionResponse?.response;
+  if (!source || !target) return;
+  const note = modelToolErrorNotes.get(source);
+  if (note) modelToolErrorNotes.set(target, note);
 }
 
 export function limitModelToolErrorNotes(
@@ -29,10 +42,10 @@ export function limitModelToolErrorNotes(
     const note = modelToolErrorNotes.get(response);
     if (!note) continue;
     remaining ??= remainingBudget();
-    if (note.length > remaining) {
+    if (note.text.length > remaining) {
       modelToolErrorNotes.delete(response);
     } else {
-      remaining -= note.length;
+      remaining -= note.text.length;
     }
   }
 }
@@ -46,14 +59,21 @@ export function withModelToolErrorNotes(contents: Content[]): Content[] {
     for (const [partIndex, part] of parts.entries()) {
       const functionResponse = part.functionResponse;
       const response = functionResponse?.response;
-      if (!response || typeof response['error'] !== 'string') continue;
+      const error = response?.['error'];
+      if (!response || typeof error !== 'string') continue;
       const note = modelToolErrorNotes.get(response);
       if (!note) continue;
       (updatedParts ??= [...parts])[partIndex] = {
         ...part,
         functionResponse: {
           ...functionResponse,
-          response: { ...response, error: response['error'] + note },
+          response: {
+            ...response,
+            error:
+              error.slice(0, note.offset) +
+              note.text +
+              error.slice(note.offset),
+          },
         },
       };
     }

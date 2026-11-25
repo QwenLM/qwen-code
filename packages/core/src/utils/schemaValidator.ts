@@ -514,25 +514,38 @@ function describeBrokenJsonString(
   errors: ErrorObject[],
   data: Record<string, unknown>,
 ): string {
-  const instancePath = errors.find(
-    (error) => error.keyword === 'type',
-  )?.instancePath;
-  if (instancePath === undefined) return '';
-
-  // Only add a diagnosis when all failed alternatives point to a type
-  // mismatch on this field. A string branch may instead fail a constraint.
+  // Correcting a field cannot change the type of its enclosing container.
+  // Other failures may mean the string is valid for a different branch.
+  let instancePath: string | undefined;
   const types = new Set<string>();
   for (const error of errors) {
-    if (error.keyword === 'anyOf' || error.keyword === 'oneOf') continue;
-    if (error.keyword !== 'type' || error.instancePath !== instancePath)
+    if (
+      error.keyword === 'anyOf' ||
+      (error.keyword === 'oneOf' && error.params['passingSchemas'] === null)
+    ) {
+      continue;
+    }
+    if (error.keyword !== 'type') return '';
+    const path = error.instancePath;
+    if (instancePath === undefined || path.startsWith(`${instancePath}/`)) {
+      instancePath = path;
+      types.clear();
+    } else if (path !== instancePath) {
+      if (instancePath.startsWith(`${path}/`)) continue;
       return '';
+    }
     const expected: unknown = error.params['type'];
     for (const type of Array.isArray(expected) ? expected : [expected]) {
       if (typeof type === 'string') types.add(type);
     }
   }
-  if (types.has('string') || (!types.has('array') && !types.has('object')))
+  if (
+    instancePath === undefined ||
+    types.has('string') ||
+    (!types.has('array') && !types.has('object'))
+  ) {
     return '';
+  }
 
   let value: unknown = data;
   for (const part of instancePath.split('/').slice(1)) {

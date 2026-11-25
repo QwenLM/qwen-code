@@ -8,6 +8,10 @@ import { describe, expect, it } from 'vitest';
 import type { Part } from '@google/genai';
 import { buildTranscriptMarker } from '../tools/agent/transcript-marker.js';
 import {
+  setModelToolErrorNote,
+  withModelToolErrorNotes,
+} from '../tools/tool-error.js';
+import {
   getToolOutputRecovery,
   setToolOutputRecovery,
 } from '../tools/tool-output-recovery.js';
@@ -127,6 +131,21 @@ describe('appendToolHookContextToParts', () => {
       'ctx',
     );
     expect(part.functionResponse!.response).toEqual({ error: 'boom\n\nctx' });
+  });
+
+  it('preserves the model-only error note before the appended hook context', () => {
+    const original = fr('c1', { error: 'params/docs must be array' });
+    setModelToolErrorNote(original, '; invalid near <<HERE>>');
+
+    const parts = appendToolHookContextToParts([original], 'c1', 'ctx');
+    expect(parts[0].functionResponse?.response?.['error']).toBe(
+      'params/docs must be array\n\nctx',
+    );
+    const [model] = withModelToolErrorNotes([{ role: 'user', parts }]);
+    expect(model.parts?.[0].functionResponse?.response?.['error']).toBe(
+      'params/docs must be array; invalid near <<HERE>>\n\nctx',
+    );
+    expect(JSON.stringify(parts)).not.toContain('<<HERE>>');
   });
 
   it('serializes a structured output instead of emitting undefined', () => {

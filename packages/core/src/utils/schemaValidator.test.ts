@@ -272,6 +272,28 @@ describe('SchemaValidator', () => {
       expect(note).toContain('send it as a JSON object, not as a string');
     });
 
+    it.each([
+      ['anyOf', false],
+      ['anyOf', true],
+      ['oneOf', false],
+      ['oneOf', true],
+    ] as const)(
+      'diagnoses an array field inside a nullable %s (null first: %s)',
+      (keyword, nullFirst) => {
+        const alternatives = [obj({ docs: strings() }), { type: 'null' }];
+        if (nullFirst) alternatives.reverse();
+        const { report } = validateWithNote(
+          obj({ outer: { [keyword]: alternatives } }),
+          { outer: { docs: '[{"a":1 "b":2}]' } },
+        );
+        expect(report).toHaveBeenCalledOnce();
+        expect(report.mock.calls[0][1]).toContain(
+          'params/outer/docs arrived as a string whose text is not valid JSON',
+        );
+        expect(report.mock.calls[0][1]).toContain('<<HERE>>');
+      },
+    );
+
     it.each(['hello world', '{"urls":[]}'])(
       'does not add a syntax diagnosis to %s',
       (urls) => {
@@ -308,6 +330,23 @@ describe('SchemaValidator', () => {
         { value: '[example](https://example.com)' },
       );
       expect(message).toContain('must match pattern');
+      expect(report).not.toHaveBeenCalled();
+    });
+
+    it('does not diagnose a syntax error when multiple oneOf branches accept the string', () => {
+      const { message, report } = validateWithNote(
+        obj({
+          value: {
+            oneOf: [
+              { type: 'array' },
+              { type: 'string' },
+              { type: 'string', minLength: 1 },
+            ],
+          },
+        }),
+        { value: '[example](https://example.com)' },
+      );
+      expect(message).toContain('must match exactly one schema');
       expect(report).not.toHaveBeenCalled();
     });
 

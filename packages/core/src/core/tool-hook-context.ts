@@ -5,6 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
+import { copyModelToolErrorNote } from '../tools/tool-error.js';
 import {
   getToolOutputRecovery,
   setToolOutputRecovery,
@@ -108,5 +109,6 @@ export function appendTextToFunctionResponse(part: Part, text: string): Part {
   };
   const recovery = getToolOutputRecovery(part);
   if (recovery) setToolOutputRecovery(updated, recovery);
+  copyModelToolErrorNote(part, updated);
   return updated;
 }
