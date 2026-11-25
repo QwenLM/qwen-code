@@ -25,6 +25,13 @@ describe('managedCommandId', () => {
       surrogateBounded,
     );
 
+    const splitSurrogate = `${'a'.repeat(55)}😀${'b'.repeat(72)}`;
+    const splitBounded = managedCommandId(splitSurrogate);
+    expect(splitBounded).toHaveLength(127);
+    expect(splitBounded).toBe(
+      `${'a'.repeat(55)}:sha256:${splitBounded.slice(-64)}`,
+    );
+
     const shortWake = `wake-recovery:${'z'.repeat(39)}😀${'q'.repeat(39)}`;
     expect(managedCommandId(shortWake)).toBe(shortWake);
   });
