@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -24,6 +25,9 @@ import java.util.Objects;
 import java.util.Optional;
 
 final class AgentTurnExecution {
+    private static final RowMapper<DispatchTarget> DISPATCH_TARGET_MAPPER = (result, row) ->
+            new DispatchTarget(result.getString("tenant_id"), result.getString("session_id"), result.getString("turn_id"));
+
     private final AgentEventJournal eventJournal;
     private final AgentMessageProjection messageProjection;
     private final AgentSessionCommands sessionCommands;
@@ -57,10 +61,7 @@ final class AgentTurnExecution {
         // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) ORDER BY gmt_modified ASC LIMIT ?",
-                (result, row) -> new DispatchTarget(
-                        result.getString("tenant_id"),
-                        result.getString("session_id"),
-                        result.getString("turn_id")), now, now, limit);
+                DISPATCH_TARGET_MAPPER, now, now, limit);
     }
 
     List<DispatchTarget> findRuntimeRecoveryParked(long now, int limit) {
@@ -71,10 +72,7 @@ final class AgentTurnExecution {
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING') AND error_code = '"
                         + AgentStateStore.RUNTIME_RECOVERY_BLOCKED
                         + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
-                (result, row) -> new DispatchTarget(
-                        result.getString("tenant_id"),
-                        result.getString("session_id"),
-                        result.getString("turn_id")), now, now, limit);
+                DISPATCH_TARGET_MAPPER, now, now, limit);
     }
 
     Optional<TurnRecord> claimTurn(String tenantId, String sessionId, String turnId, String owner, Duration leaseDuration) {

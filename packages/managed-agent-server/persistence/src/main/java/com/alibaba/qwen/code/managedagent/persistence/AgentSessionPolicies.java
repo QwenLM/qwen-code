@@ -445,14 +445,6 @@ final class AgentSessionPolicies {
         return hasOpenOperation(tenantId, sessionId, null);
     }
 
-    // Hook owners can outlive their Turn with an immutable worker context.
-    // Only confirmed release permits changing that context's cwd/revision.
-    boolean hasRetainedRuntimeSession(String tenantId, String sessionId) {
-        return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
-                + " WHERE tenant_id = ? AND harness_session_id = ?"
-                + " AND session_state <> 'RELEASED' LIMIT 1", tenantId, sessionId).isEmpty();
-    }
-
     // The bound later-Turn barrier: context-changing operations only —
     // pending command rows, permission-action operations and task cancels
     // (which stop one task and change no Session context) are excluded,
@@ -726,7 +718,7 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval");
         }
         if ((live ? hasOpenExecutionOperation(tenantId, sessionId) : hasOpenOperation(tenantId, sessionId))
-                || !live && hasRetainedRuntimeSession(tenantId, sessionId)
+                || !live && sessionQueries.hasRetainedRuntimeSession(tenantId, sessionId)
                 || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING')"
                         + " AND error_code IN (?, ?, ?)) LIMIT 1", tenantId, sessionId,
