@@ -76,6 +76,11 @@ export class HookAggregator {
     const allOutputs: HookOutput[] = [];
     const errors: Error[] = [];
     let totalDuration = 0;
+    const isToolEvent =
+      eventName === HookEventName.PreToolUse ||
+      eventName === HookEventName.PostToolUse ||
+      eventName === HookEventName.PostToolUseFailure ||
+      eventName === HookEventName.PostToolBatch;
 
     for (const result of results) {
       totalDuration += result.duration;
@@ -86,6 +91,29 @@ export class HookAggregator {
 
       if (result.output) {
         if (
+          isToolEvent &&
+          result.exitCode !== undefined &&
+          result.exitCode !== 0 &&
+          result.exitCode !== 2
+        ) {
+          // Keep diagnostics and context, without letting a failed command
+          // stop the turn or override another hook's decision.
+          const output = { ...result.output };
+          delete output.continue;
+          delete output.stopReason;
+          delete output.decision;
+          delete output.reason;
+          if (
+            eventName === HookEventName.PreToolUse &&
+            output.hookSpecificOutput
+          ) {
+            output.hookSpecificOutput = { ...output.hookSpecificOutput };
+            delete output.hookSpecificOutput['permissionDecision'];
+            delete output.hookSpecificOutput['permissionDecisionReason'];
+            delete output.hookSpecificOutput['updatedInput'];
+          }
+          allOutputs.push(output);
+        } else if (
           !result.success &&
           (eventName === HookEventName.SessionStart ||
             eventName === HookEventName.FileChanged) &&
@@ -109,10 +137,7 @@ export class HookAggregator {
       finalOutput?.continue === false &&
       finalOutput.decision !== 'block' &&
       finalOutput.decision !== 'deny' &&
-      (eventName === HookEventName.PreToolUse ||
-        eventName === HookEventName.PostToolUse ||
-        eventName === HookEventName.PostToolUseFailure ||
-        eventName === HookEventName.PostToolBatch) &&
+      isToolEvent &&
       results.some((result) => result.exitCode === 2)
     ) {
       finalOutput.decision = 'deny';

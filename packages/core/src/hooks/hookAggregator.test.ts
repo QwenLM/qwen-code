@@ -6,7 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { HookAggregator } from './hookAggregator.js';
-import { HookEventName, HookType, createHookOutput } from './types.js';
+import {
+  HookEventName,
+  HookType,
+  createHookOutput,
+  isBlockingHookOutput,
+} from './types.js';
 import type {
   DefaultHookOutput,
   HookExecutionResult,
@@ -62,6 +67,54 @@ describe('HookAggregator', () => {
       HookEventName.PostToolUseFailure,
       HookEventName.PostToolBatch,
     ])(
+      'ignores turn control from a non-blocking command failure on %s',
+      (event) => {
+        const failed = {
+          success: false,
+          exitCode: 1,
+          output: {
+            continue: false,
+            stopReason: 'partial result',
+            systemMessage: 'check failed',
+            suppressOutput: true,
+            hookSpecificOutput: {
+              additionalContext: 'partial diagnostics',
+              artifacts: [{ title: 'log' }],
+            },
+          },
+        };
+        const alone = aggregateAll(event, failed).finalOutput;
+        expect(alone?.continue).toBeUndefined();
+        expect(alone?.systemMessage).toBe('check failed');
+        expect(alone?.suppressOutput).toBe(true);
+        expect(alone?.hookSpecificOutput).toEqual(
+          failed.output.hookSpecificOutput,
+        );
+
+        const stop = { continue: false, stopReason: 'budget spent' };
+        const combined = aggregateAll(
+          event,
+          { output: stop },
+          {
+            ...failed,
+            output: {
+              ...failed.output,
+              decision: 'block',
+              hookSpecificOutput: { permissionDecision: 'deny' },
+            },
+          },
+        ).finalOutput;
+        expect(combined).toMatchObject(stop);
+        expect(isBlockingHookOutput(event, combined ?? {})).toBe(false);
+      },
+    );
+
+    it.each([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolUse,
+      HookEventName.PostToolUseFailure,
+      HookEventName.PostToolBatch,
+    ])(
       'preserves an exit-code-2 block when a %s hook requests a turn stop',
       (event) => {
         const stop = { continue: false, stopReason: 'Budget spent' };
@@ -79,6 +132,26 @@ describe('HookAggregator', () => {
         ).not.toMatchObject({ decision: 'deny' });
       },
     );
+
+    it('keeps the successful PreToolUse input when a failed command also rewrites it', () => {
+      const result = aggregateAll(
+        HookEventName.PreToolUse,
+        {
+          output: {
+            hookSpecificOutput: { updatedInput: { path: 'validated' } },
+          },
+        },
+        {
+          success: false,
+          exitCode: 1,
+          output: { hookSpecificOutput: { updatedInput: { path: 'partial' } } },
+        },
+      );
+
+      expect(result.finalOutput?.hookSpecificOutput?.['updatedInput']).toEqual({
+        path: 'validated',
+      });
+    });
 
     it('does not add a new PostToolUse decision for exit code 2 alone', () => {
       const { finalOutput } = aggregateAll(HookEventName.PostToolUse, {
