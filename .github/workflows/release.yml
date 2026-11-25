@@ -27,12 +27,12 @@ on:
         description: 'Auto apply the nightly release tag, input version is ignored.'
         required: false
         type: 'boolean'
-        default: false
+        default: true
       create_preview_release:
         description: 'Create a preview release. If version is X.Y.Z-preview.N, use it as-is. If version is X.Y.Z, derive X.Y.Z-preview.0.'
         required: false
         type: 'boolean'
-        default: false
+        default: true
       force_skip_tests:
         description: 'Skip the release validation jobs ("quality", "integration_none", and "integration_docker"), allowing publish to proceed without them. Prod releases should run validation.'
         required: false
@@ -48,7 +48,7 @@ jobs:
   # The dedicated hk4 label isolates release validation from regular CI.
   prepare:
     name: 'Prepare Release Metadata'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
@@ -218,7 +218,7 @@ jobs:
 
   quality_static:
     name: 'Quality Checks (Static)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     # Retunable for contention on the dedicated runner; values are minutes.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
     needs: 'prepare'
@@ -277,7 +277,7 @@ jobs:
 
   quality_build:
     name: 'Quality Checks (Build)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     # Same contention knob as quality_static.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
     needs: 'prepare'
@@ -331,7 +331,7 @@ jobs:
 
   quality_typecheck:
     name: 'Quality Checks (Typecheck)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     needs:
       - 'prepare'
@@ -366,7 +366,7 @@ jobs:
 
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     # Retunable for contention on the dedicated runner.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"
     needs:
@@ -410,7 +410,7 @@ jobs:
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     needs:
       - 'prepare'
@@ -454,7 +454,7 @@ jobs:
     # Same pool as the checks it aggregates. On 2026-10-15 this hosted-only
     # gate job queued 53 minutes behind PR automation while every ECS machine
     # it depends on sat idle, and it gates publish.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     needs:
       - 'prepare'
@@ -492,7 +492,7 @@ jobs:
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
@@ -524,7 +524,7 @@ jobs:
 
   integration_docker:
     name: 'Integration Tests (Docker)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
