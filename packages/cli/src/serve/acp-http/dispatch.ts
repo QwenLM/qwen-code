@@ -9,6 +9,10 @@ import {
   isSessionStartupConfigError,
 } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+} from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
+import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
@@ -1303,6 +1307,19 @@ interface AcpSessionRuntimeContext {
   readonly workspaceId?: string;
 }
 
+function parseRequestedApprovalMode(
+  value: unknown,
+): ApprovalMode | null | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string' ||
+    !APPROVAL_MODES.includes(value as ApprovalMode)
+  ) {
+    return null;
+  }
+  return value as ApprovalMode;
+}
+
 /**
  * Routes JSON-RPC messages between the HTTP transport and the
  * `HttpAcpBridge`. Inbound client messages map to bridge calls; the
@@ -2033,6 +2050,34 @@ export class AcpDispatcher {
             params['startupConfig'],
             params,
           );
+          const approvalMode = parseRequestedApprovalMode(
+            params['approvalMode'],
+          );
+          if (approvalMode === null) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                `invalid approvalMode ${JSON.stringify(params['approvalMode'])} (expected one of: ${APPROVAL_MODES.join(', ')})`,
+              ),
+            );
+            return;
+          }
+          const modelServiceId = params['modelServiceId'];
+          if (
+            modelServiceId !== undefined &&
+            (!isValidCronTaskRoutingId(modelServiceId) ||
+              !modelServiceId.trim())
+          ) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                `invalid modelServiceId (expected a non-empty string of 1-${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters)`,
+              ),
+            );
+            return;
+          }
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const parsedSessionId = parseCallerSuppliedSessionId(
             meta?.[REQUESTED_SESSION_ID_META_KEY],
@@ -2138,6 +2183,8 @@ export class AcpDispatcher {
                 clientId: conn.clientId,
                 sessionScope: 'thread',
                 ...(startupConfig ? { startupConfig } : {}),
+                ...(modelServiceId !== undefined ? { modelServiceId } : {}),
+                ...(approvalMode !== undefined ? { approvalMode } : {}),
                 ...source,
                 ...(requestedSessionId
                   ? { sessionId: requestedSessionId }
@@ -2220,6 +2267,14 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  workspaceCwd: session.workspaceCwd,
+                  attached: session.attached,
+                  ...(session.clientId !== undefined
+                    ? { clientId: session.clientId }
+                    : {}),
+                  ...(session.modelApplied !== undefined
+                    ? { modelApplied: session.modelApplied }
+                    : {}),
                   ...withGeneratedUiReceipt(session.generatedUi),
                   ...(session.startupConfigApplied
                     ? {
@@ -2256,6 +2311,19 @@ export class AcpDispatcher {
         case 'session/resume': {
           if (id === undefined) {
             writeStderrLine(`qwen serve: /acp ${method} notification rejected`);
+            return;
+          }
+          const approvalMode = parseRequestedApprovalMode(
+            params['approvalMode'],
+          );
+          if (approvalMode === null) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                `invalid approvalMode ${JSON.stringify(params['approvalMode'])} (expected one of: ${APPROVAL_MODES.join(', ')})`,
+              ),
+            );
             return;
           }
           const sessionId = normalizeSessionIdForLookup(
@@ -2333,6 +2401,7 @@ export class AcpDispatcher {
                       sessionId,
                       {
                         ...(conn.clientId ? { clientId: conn.clientId } : {}),
+                        ...(approvalMode !== undefined ? { approvalMode } : {}),
                       },
                     );
                 } catch (error) {
@@ -2434,12 +2503,14 @@ export class AcpDispatcher {
                         workspaceCwd: cwd,
                         clientId: conn.clientId,
                         historyReplay: 'response',
+                        ...(approvalMode !== undefined ? { approvalMode } : {}),
                         ...restoreMetadata,
                       })
                     : await sessionRuntime.bridge.resumeSession({
                         sessionId,
                         workspaceCwd: cwd,
                         clientId: conn.clientId,
+                        ...(approvalMode !== undefined ? { approvalMode } : {}),
                         ...restoreMetadata,
                       });
                 // Live creation and cold restore reserve this relocation before
@@ -2589,6 +2660,26 @@ export class AcpDispatcher {
                         }
                       : {}),
                   }),
+                  sessionId: restored.sessionId,
+                  workspaceCwd: restored.workspaceCwd,
+                  attached: restored.attached,
+                  ...(restored.clientId !== undefined
+                    ? { clientId: restored.clientId }
+                    : {}),
+                  ...(restored.sourceType !== undefined
+                    ? { sourceType: restored.sourceType }
+                    : {}),
+                  ...(restored.sourceId !== undefined
+                    ? { sourceId: restored.sourceId }
+                    : {}),
+                  ...(restored.sourcePersisted !== undefined
+                    ? { sourcePersisted: restored.sourcePersisted }
+                    : {}),
+                  ...(restored.parentSessionPersisted !== undefined
+                    ? {
+                        parentSessionPersisted: restored.parentSessionPersisted,
+                      }
+                    : {}),
                   ...(loadConfigOptions
                     ? { configOptions: loadConfigOptions }
                     : {}),
