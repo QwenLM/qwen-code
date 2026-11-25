@@ -150,7 +150,7 @@ export const memoryCommand: SlashCommand = {
   name: 'memory',
   argumentHint: '[migrate-team | migrate-worktree <path>]',
   get description() {
-    return t('Manage project memory or migrate a worktree memory library.');
+    return t('Open the memory manager.');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
