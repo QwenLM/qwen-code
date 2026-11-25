@@ -88,7 +88,7 @@ jobs:
           fetch-depth: 1
           # Keep sparse checkout from fetching missing blobs after the
           # action's retryable fetch has already succeeded.
-          filter: ''
+          filter: 'none'
           persist-credentials: false
           sparse-checkout: |-
             /.github/scripts
