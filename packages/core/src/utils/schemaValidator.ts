@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import AjvPkg, { type AnySchema, type Ajv, type ValidateFunction } from 'ajv';
+import AjvPkg, {
+  type AnySchema,
+  type Ajv,
+  type ErrorObject,
+  type ValidateFunction,
+} from 'ajv';
 // Ajv2020 is the documented way to use draft-2020-12: https://ajv.js.org/json-schema.html#draft-2020-12
 // eslint-disable-next-line import/no-internal-modules
 import Ajv2020Pkg from 'ajv/dist/2020.js';
@@ -466,10 +471,69 @@ function validateWithCoercion(
 
     valid = validate(data);
     if (!valid && validate.errors) {
-      return validator.errorsText(validate.errors, { dataVar: 'params' });
+      return (
+        validator.errorsText(validate.errors, { dataVar: 'params' }) +
+        describeBrokenJsonStrings(validate.errors, data)
+      );
     }
   }
   return null;
+}
+
+/**
+ * Explains `type` errors on strings that hold broken JSON. Such a string is
+ * usually an array or object the model wrote with a syntax error, which a
+ * provider passed on as text (DashScope does so for buffered tool
+ * arguments). "must be array" alone does not show that the text is the
+ * problem, and the model resends the same text.
+ */
+function describeBrokenJsonStrings(
+  errors: ErrorObject[],
+  data: Record<string, unknown>,
+): string {
+  let notes = '';
+  const seen = new Set<string>();
+  for (const error of errors) {
+    const expected = String(error.params['type']);
+    if (
+      error.keyword !== 'type' ||
+      (!expected.includes('array') && !expected.includes('object')) ||
+      seen.has(error.instancePath)
+    ) {
+      continue;
+    }
+    seen.add(error.instancePath);
+    let value: unknown = data;
+    for (const part of error.instancePath.split('/').slice(1)) {
+      if (typeof value !== 'object' || value === null) break;
+      value = (value as Record<string, unknown>)[
+        part.replace(/~1/g, '/').replace(/~0/g, '~')
+      ];
+    }
+    if (typeof value !== 'string') continue;
+    const text = value.trim();
+    if (!text.startsWith('[') && !text.startsWith('{')) continue;
+    try {
+      JSON.parse(text);
+    } catch (parseError) {
+      const reason =
+        parseError instanceof Error ? parseError.message : String(parseError);
+      const position = Number(/position (\d+)/.exec(reason)?.[1]);
+      // Marking the exact spot lets the model fix that bracket; given only
+      // the surrounding text, it mostly rewrote the same mistake.
+      const near = Number.isInteger(position)
+        ? ` Text near the error, with <<HERE>> at that position: ${JSON.stringify(
+            text.slice(Math.max(0, position - 80), position) +
+              '<<HERE>>' +
+              text.slice(position, position + 20),
+          )}.`
+        : '';
+      notes +=
+        `; params${error.instancePath} arrived as a string whose text is not valid JSON (${reason}).` +
+        `${near} Fix the text there and send it as a JSON ${expected.includes('array') ? 'array' : 'object'}, not as a string`;
+    }
+  }
+  return notes;
 }
 
 /**
