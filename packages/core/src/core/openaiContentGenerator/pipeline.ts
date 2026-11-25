@@ -1486,6 +1486,10 @@ export class ContentGenerationPipeline {
       baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
         request.config.tools,
         this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+          ...this.contentGeneratorConfig,
+          baseUrl: this.client.baseURL,
+        }),
       );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
@@ -1724,6 +1728,42 @@ export class ContentGenerationPipeline {
         isOpenRouterHostname(this.contentGeneratorConfig)
       ) {
         typed['reasoning'] = { enabled: false };
+      }
+    }
+
+    if (reasoningDisabled && !thinkingMandatory) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      // User `extra_body` can explicitly enable thinking on custom/non-Qwen
+      // gateways (e.g. `enable_thinking: true`). If an earlier branch already
+      // emitted a gateway-native disable switch, drop the contradicting opt-in
+      // instead of sending both; otherwise flip explicit opt-ins to false
+      // without inventing the field on endpoints that never declared it.
+      const hasNativeDisable =
+        typed['reasoning_effort'] === 'none' ||
+        asObject(typed['reasoning'])?.['enabled'] === false ||
+        asObject(typed['thinking'])?.['type'] === 'disabled';
+      if (typed['enable_thinking'] === true) {
+        if (hasNativeDisable) {
+          delete typed['enable_thinking'];
+        } else {
+          typed['enable_thinking'] = false;
+        }
+      }
+      const chatTemplateKwargs = asObject(typed['chat_template_kwargs']);
+      if (chatTemplateKwargs?.['enable_thinking'] === true) {
+        if (hasNativeDisable) {
+          const { enable_thinking: _dropped, ...rest } = chatTemplateKwargs;
+          if (Object.keys(rest).length === 0) {
+            delete typed['chat_template_kwargs'];
+          } else {
+            typed['chat_template_kwargs'] = rest;
+          }
+        } else {
+          typed['chat_template_kwargs'] = {
+            ...chatTemplateKwargs,
+            enable_thinking: false,
+          };
+        }
       }
     }
 

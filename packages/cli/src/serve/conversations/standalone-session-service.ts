@@ -55,6 +55,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   AcpChildCapacityExceededError,
+  SystemOverloadedError,
   type AcpChildCapacity,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -2728,6 +2729,19 @@ export class StandaloneSessionService {
         this.recordCreationFailure(attempt, outcome);
         throw outcome;
       }
+      const loadRefusal =
+        error instanceof SystemOverloadedError
+          ? error
+          : error instanceof StandaloneSessionSpawnError &&
+              error.cause instanceof SystemOverloadedError
+            ? error.cause
+            : undefined;
+      if (loadRefusal) {
+        // Expected backpressure, not a creation defect: answer the retryable
+        // 503 without creation-failure diagnostics operators alert on.
+        attempt.cause ??= loadRefusal;
+        throw loadRefusal;
+      }
       attempt.cause ??= error;
       this.recordCreationFailure(attempt, error);
       throw error;
@@ -2882,6 +2896,11 @@ export class StandaloneSessionService {
           } catch {
             this.beginTerminalQuarantine(runtime);
           }
+        }
+        if (error.cause instanceof SystemOverloadedError) {
+          // Load backpressure is a retryable refusal, not a creation defect:
+          // keep the 503 system_overloaded contract instead of a 500 rollback.
+          throw error.cause;
         }
         const outcome = conflict
           ? serviceError('standalone_session_conflict', sessionId, false, error)

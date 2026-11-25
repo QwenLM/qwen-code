@@ -221,6 +221,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
+import { modsWanted } from './services/display-translation-mod.js';
 import {
   handleUncaughtException,
   isExpectedPtyRaceError,
@@ -1513,7 +1514,7 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
-      if (settings.merged.experimental?.mods) {
+      if (modsWanted(settings)) {
         const { createInteractiveModSession } = await import(
           './services/interactive-mod-session.js'
         );
