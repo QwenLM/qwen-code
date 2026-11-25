@@ -418,6 +418,7 @@ case "${step}" in
         "quality:${QUALITY_RESULT}" \
         "integration_none:${INTEGRATION_NONE_RESULT}" \
         "integration_docker:${INTEGRATION_DOCKER_RESULT}" \
+        "login_e2e_gate:${LOGIN_GATE_RESULT}" \
         "audio_capture_prebuilds:${AUDIO_PREBUILDS_RESULT}" \
         "build_release:${BUILD_RELEASE_RESULT}" \
         "publish:${PUBLISH_RESULT}"; do
