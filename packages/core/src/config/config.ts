@@ -9118,6 +9118,11 @@ export class Config {
           mcpServers[key] = {
             ...server,
             extensionName: extension.config.name,
+            ...(extension.artifactGeneration !== undefined
+              ? {
+                  extensionArtifactRevision: `${extension.id}:${extension.artifactGeneration}`,
+                }
+              : {}),
           };
         },
       );

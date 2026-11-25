@@ -324,6 +324,7 @@ function makeInboundTaskRecord(overrides: Record<string, unknown> = {}) {
     text: 'please fix this',
     isGroup: true,
     isMentioned: true,
+    isExplicitMention: true,
     isReplyToBot: false,
     metadata: 'Trigger: mention.',
   };
@@ -8721,6 +8722,127 @@ describe('GithubChannel', () => {
     });
   });
 
+  describe('machine-authored comments', () => {
+    it('skips an unmentioned machine-authored comment on the aggregate lane', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'author' })])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1001,
+            body: '<!-- qwen-managed-agent-ci-failure:45378558634 -->\n### `Managed Agent gate` failed',
+            user: { id: 20001, login: 'github-actions[bot]', type: 'Bot' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        readChannelEvents().filter((row) => row['reason'] === 'machine_author'),
+      ).toEqual([
+        expect.objectContaining({
+          outcome: 'skipped',
+          messageId: 'C_1001',
+          actor: 'github-actions[bot]',
+        }),
+      ]);
+    });
+
+    it('keeps a machine-authored comment that names the bot', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'comment' })])
+        .mockResolvedValueOnce([
+          makeComment({
+            body: '@test-bot the gate is red, please look',
+            user: { id: 20001, login: 'github-actions[bot]', type: 'Bot' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        senderId: 'github-actions[bot]',
+        isExplicitMention: true,
+      });
+    });
+
+    it('skips an unmentioned machine-authored comment on the pairing lane', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      const store = new PairingStore('test-github', '/tmp/test');
+      const created = store.createGroupRequest(
+        'owner/repo',
+        'owner/repo',
+        'alice',
+        'Alice',
+      );
+      if (!('code' in created)) {
+        throw new Error(`expected a pairing code, got ${created.rejected}`);
+      }
+      store.approve(created.code);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1001,
+            body: '### CI failed',
+            user: { id: 20001, login: 'github-actions[bot]', type: 'Bot' },
+          }),
+          makeComment({ id: 1002, body: 'please take a look' }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        senderId: 'alice',
+        isExplicitMention: false,
+      });
+      expect(
+        readChannelEvents().filter((row) => row['reason'] === 'machine_author'),
+      ).toHaveLength(1);
+    });
+
+    it('drops the CI notice from a mixed batch', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'author' })])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1001,
+            body: '<!-- qwen-managed-agent-ci-failure:45378558634 -->\n### `Managed Agent gate` failed',
+            user: { id: 41898282, login: 'github-actions[bot]', type: 'Bot' },
+          }),
+          makeComment({ id: 1002, body: 'the build broke again' }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).not.toContain(
+        'Managed Agent gate',
+      );
+      expect(channel.inboundEnvelopes[0]!.isExplicitMention).toBe(false);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        readChannelEvents().filter((row) => row['reason'] === 'machine_author'),
+      ).toHaveLength(1);
+    });
+  });
+
   describe('error handling', () => {
     it('attributes the error comment when a named inbound turn fails', async () => {
       channel.handleInboundError = new Error('agent down');
@@ -8739,6 +8861,25 @@ describe('GithubChannel', () => {
           body: '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
         }),
       );
+    });
+
+    it('posts no error comment for an unmentioned batch that keeps failing', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'comment' })])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'the build broke again' }),
+        ]);
+      await pollOnce();
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'failed' }),
+      ]);
     });
 
     it('keeps a failed inbound task recoverable and leaves the notification unread', async () => {
@@ -9808,7 +9949,7 @@ describe('GithubChannel', () => {
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
-    it('posts one error comment per failed dispatch on a new thread', async () => {
+    it('posts an error comment only for a dispatch that names the bot', async () => {
       channel.handleInboundError = new Error('agent down');
       await initWithoutLoop();
       mockOctokit.paginate
@@ -9826,8 +9967,9 @@ describe('GithubChannel', () => {
 
       await pollOnce();
 
-      // The comment and the first-contact body are independent dispatches;
-      // each posts its own error comment exactly once, on its last attempt.
+      // The comment and the first-contact body are independent dispatches,
+      // but only the body names the bot: the unmentioned comment leaves no
+      // receipt, and the body posts exactly one, on its last attempt.
       const errorComments = () =>
         mockOctokit.rest.issues.createComment.mock.calls.filter(
           (call: Array<{ body?: string }>) =>
@@ -9837,9 +9979,9 @@ describe('GithubChannel', () => {
       mockOctokit.paginate.mockResolvedValue([]);
       await pollOnce();
       await pollOnce();
-      expect(errorComments()).toHaveLength(2);
+      expect(errorComments()).toHaveLength(1);
       await pollOnce();
-      expect(errorComments()).toHaveLength(2);
+      expect(errorComments()).toHaveLength(1);
     });
 
     it('continues processing comments after one dispatch failure', async () => {
