@@ -227,4 +227,20 @@
         </developer>
     </developers>
 
+    <profiles>
+        <profile>
+            <id>alibaba-internal</id>
+            <distributionManagement>
+                <repository>
+                    <id>releases</id>
+                    <url>http://mvnrepo.alibaba-inc.com/mvn/releases</url>
+                </repository>
+                <snapshotRepository>
+                    <id>snapshots</id>
+                    <url>http://mvnrepo.alibaba-inc.com/mvn/snapshots</url>
+                </snapshotRepository>
+            </distributionManagement>
+        </profile>
+    </profiles>
+
 </project>

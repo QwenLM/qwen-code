@@ -1,0 +1,58 @@
+name: qwen-managed-agent-maven-snapshot
+
+# Manual debug builds: compile and run static checks, but leave the full test gate to releases.
+params:
+  githubRepository:
+    description: 'GitHub repository fetched only when githubBranch is set'
+    default: 'https://github.com/QwenLM/qwen-code.git'
+  githubBranch:
+    description: 'Optional GitHub feature branch; sync it first, then deploy its exact HEAD'
+    default: ''
+  snapshotVersion:
+    description: 'Optional feature-specific snapshot, e.g. 0.1.0-alpha-my-feature-SNAPSHOT; defaults to the POM versions plus -SNAPSHOT'
+    default: ''
+jobs:
+  publish:
+    runs-on: [aone-hosted]
+    timeout: 60m
+    image: hub.docker.alibaba-inc.com/aone-base-global/data-agent-ci:latest
+    envs:
+      MAVEN_USERNAME: ${{secrets.MAVEN_USERNAME}}
+      MAVEN_PASSWORD: ${{secrets.MAVEN_PASSWORD}}
+      MANAGED_PUBLISH_MODE: snapshot
+      MANAGED_MAVEN_USE_SETUP_SETTINGS: 'true'
+      GITHUB_REPOSITORY: ${{params.githubRepository}}
+      MANAGED_GITHUB_BRANCH: ${{params.githubBranch}}
+      MANAGED_SNAPSHOT_VERSION: ${{params.snapshotVersion}}
+    steps:
+      - uses: checkout
+      - uses: setup-env@2.0.8
+        inputs:
+          java-version: '21'
+          maven-version: '3.9.9'
+          maven-vendor: official
+          maven-cache: true
+          maven-build-cache: false
+          python-version: '3.11'
+      - name: Select the publication source
+        run: |-
+          set -eo pipefail
+          if [[ -n "$MANAGED_GITHUB_BRANCH" ]]; then
+            github_branch="${MANAGED_GITHUB_BRANCH#refs/heads/}"
+            bash .aoneci/scripts/sync-github-feature.sh "$github_branch"
+            source_sha="$(git rev-parse FETCH_HEAD)"
+            source_ref="refs/remotes/origin/sync/github/$github_branch"
+            git fetch --no-tags origin \
+              "refs/heads/sync/github/$github_branch:$source_ref"
+            if [[ "$(git rev-parse "$source_ref")" != "$source_sha" ]]; then
+              echo 'The synchronized internal ref changed before deployment.' >&2
+              exit 2
+            fi
+            git checkout --detach "$source_sha"
+          else
+            echo 'No GitHub branch selected; using the AoneCI checkout.'
+          fi
+      - id: publish-maven
+        run: |-
+          set +x
+          bash .aoneci/scripts/publish-managed-maven.sh
