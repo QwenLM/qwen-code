@@ -8,7 +8,7 @@ jobs:
   hosted:
     name: Hosted process acceptance / Linux / MySQL 8.4 / Java 21
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     services:
       mysql:
         image: mysql:8.4.6
@@ -42,6 +42,22 @@ jobs:
           package-manager-cache: false
       - name: Build packaged CLI
         run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          source = Path("packages/cli/src/serve/hosted-harness-session/session-http.ts")
+          text = source.read_text()
+          old = "  if (store === undefined) return String(cause);"
+          new = """  if (store === undefined) {
+              const chain: string[] = [];
+              for (let current = cause; current instanceof Error && chain.length < 6; current = current.cause) {
+                chain.push(String(current).slice(0, 400));
+                if (typeof current.cause === "string") chain.push(current.cause.slice(0, 400));
+              }
+              return chain.join(" <- ") || String(cause);
+            }"""
+          assert text.count(old) == 1
+          source.write_text(text.replace(old, new))
+          PYTHON
           corepack enable
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
           test -s dist/cli.js
@@ -57,16 +73,29 @@ jobs:
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
           QWEN_MANAGED_HOOK_CGROUP_ROOT: '/sys/fs/cgroup/18353-hosted'
         run: |
+          export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$RUNNER_TEMP/hosted-fixtures"
+          mkdir -p "$RUNNER_TEMP/hosted-fixtures"
           sudo mkdir -p "$QWEN_MANAGED_HOOK_CGROUP_ROOT"
-          sudo chown "$(id -u):$(id -g)" "$QWEN_MANAGED_HOOK_CGROUP_ROOT"
+          sudo chown -R "$(id -u):$(id -g)" "$QWEN_MANAGED_HOOK_CGROUP_ROOT"
           test -f "$QWEN_MANAGED_HOOK_CGROUP_ROOT/cgroup.kill"
           echo $$ | sudo tee "$QWEN_MANAGED_HOOK_CGROUP_ROOT/cgroup.procs"
+          mkdir "$QWEN_MANAGED_HOOK_CGROUP_ROOT/smoke"
+          sleep 600 </dev/null >/dev/null 2>&1 & smoke=$!
+          echo "$smoke" > "$QWEN_MANAGED_HOOK_CGROUP_ROOT/smoke/cgroup.procs"
+          grep -qx "$smoke" "$QWEN_MANAGED_HOOK_CGROUP_ROOT/smoke/cgroup.procs"
+          echo 1 > "$QWEN_MANAGED_HOOK_CGROUP_ROOT/smoke/cgroup.kill"
+          wait "$smoke" || true
+          rmdir "$QWEN_MANAGED_HOOK_CGROUP_ROOT/smoke"
           mvn -B -ntp -Phosted-harness-mysql \
             '-Dit.test=HostedExtensionsIT#hooksAndMcpApprovalResumesOnTheSameOwnerAfterParkingAndHarnessReplacementOnMySql,HostedPublicWorkspaceIT#versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql+publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql' \
             -Dnode.executable="$(command -v node)" \
             -Dqwen.cli.entry="$GITHUB_WORKSPACE/dist/cli.js" \
             -Dmysql.url="jdbc:mysql://127.0.0.1:$MYSQL_PORT/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=hosted-fixture verify
+      - name: Report recovery causes from synthetic fixtures
+        if: always()
+        run: |
+          find "$RUNNER_TEMP/hosted-fixtures" -name harness.log -exec grep -HE "^qwen serve: Hosted Harness recovery remained blocked:" {} + || true
       - name: Confirm every requested case executed
         run: |
           python3 - <<'PY'
