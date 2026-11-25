@@ -1150,6 +1150,8 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
+  'No hooks were loaded.': '未加载任何 Hook。',
+  'skipped (unsupported args)': '已跳过（不支持 args）',
   // Hooks - Dialog
   Hooks: 'Hook',
   'A hook stopped the turn: {{reason}}': 'Hook 已结束本轮对话：{{reason}}',

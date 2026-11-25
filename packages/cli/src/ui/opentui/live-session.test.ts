@@ -2202,7 +2202,12 @@ describe('livePromptEvents', () => {
       const config = createFakeConfig(sendMessageStream, undefined, undefined, {
         recordMidTurnUserMessage,
       });
-      const entry = {
+      const request = vi.fn().mockResolvedValue({
+        output: { hookSpecificOutput: { additionalContext: 'steer context' } },
+      });
+      config.getMessageBus = vi.fn().mockReturnValue({ request });
+      config.hasHooksForEvent = vi.fn((event) => event === 'UserPromptSubmit');
+      const entry: OpenTuiSteeringSubmission = {
         text: 'steered image',
         imagePaths: ['/owned/image.png'],
         submittedPrompt: 'raw steered image',
@@ -2231,6 +2236,8 @@ describe('livePromptEvents', () => {
       ).rejects.toThrow('not delivered');
       expect(restoreSteering).toHaveBeenCalledOnce();
       expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
+      expect(entry.promptHook).toEqual({ additionalContext: 'steer context' });
+      expect(request).toHaveBeenCalledOnce();
       expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
       expect(events.filter((event) => event.type === 'user')).toEqual([]);
     },

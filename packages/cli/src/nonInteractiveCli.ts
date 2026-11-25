@@ -1389,9 +1389,9 @@ export async function runNonInteractive(
             undefined,
             undefined,
             modSession,
-            // Core runs no UserPromptSubmit for a notification batch.
-            (options.sendMessageType ?? SendMessageType.UserQuery) ===
-              SendMessageType.UserQuery
+            !options.fromTool &&
+              (options.sendMessageType ?? SendMessageType.UserQuery) ===
+                SendMessageType.UserQuery
               ? async () => {
                   if (abortController.signal.aborted) await routeAbort();
                   promptAdmission = await llmClient.admitUserPrompt(
@@ -3163,6 +3163,7 @@ export async function runNonInteractive(
         const roundOptions: SendMessageOptions = {
           type: sendType,
           modelOverride,
+          ...(options.fromTool && { skipUserPromptSubmit: true }),
           workflowModeEligible:
             isFirstTurn &&
             sendType === SendMessageType.UserQuery &&
@@ -3687,8 +3688,6 @@ export async function runNonInteractive(
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
-            // A Mod's prompt is a prompt like a typed one: UserPromptSubmit
-            // hears it, and the Mods hear its turn.
             let itemTurn: ModTurn | undefined;
             const firstOptions: SendMessageOptions = modPrompt
               ? {
